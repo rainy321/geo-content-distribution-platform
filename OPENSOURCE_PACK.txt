@@ -1,0 +1,4 @@
+﻿OmniPost 开源打包说明
+已排除 cookies、cookiesFile、conf.py、数据库、logs、videoFile、.venv、node_modules、调试截图等。
+请复制 conf.example.py 为 conf.py 后再运行。
+远程仓库：https://github.com/rehatRobot/omnipost.git
