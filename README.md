@@ -265,6 +265,7 @@ python examples/upload_article_to_baijiahao.py
 - 原项目：[dreammis/social-auto-upload](https://github.com/dreammis/social-auto-upload)
 - B 站上传能力基于 [biliup](https://github.com/biliup/biliup) 的接入与封装
 - 所有提交 Issue、PR 与反馈的贡献者
+- 感谢 [LINUX DO](https://linux.do/) 社区提供的交流氛围与开源推广支持
 
 ## 许可证
 
