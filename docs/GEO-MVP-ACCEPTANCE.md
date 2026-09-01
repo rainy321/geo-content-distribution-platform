@@ -63,7 +63,7 @@ npm run dev
 ## 已执行验证
 
 ```text
-后端：191 tests passed
+后端：195 tests passed
 前端：Vite production build passed（1708 modules）
 浏览器：隔离 Demo 首次启动、Dashboard、发布中心导航、关键 UI、错误层、控制台和失败请求检查均通过；复验端口已关闭
 真实模型：qwen3.8-max 生成 688 字 / GEO 85，优化 952 字 / GEO 100
@@ -79,6 +79,8 @@ npm run dev
 Python 发布物：`uv build` 已成功生成 wheel 与 sdist；逐项扫描确认敏感模式、Cookie/数据库/`.env` 等禁止文件、必需模块缺失均为 0
 Python 安装烟雾：wheel 已用 `--no-deps` 安装到隔离目录，核心模块确认从该目录加载；CLI 在声明依赖已安装的环境中执行 `sau --help` 成功
 部署烟雾：新增 `/api/health` 与容器 HEALTHCHECK；隔离 Demo 数据库实测 health、Dashboard、SPA 根路径和 `/project-management` 深链接均为 HTTP 200，未知 API 保持 JSON 404
+监听安全：源码直接启动默认仅监听 `127.0.0.1:5409`，真实进程 health 返回 200；容器通过环境变量显式监听 `0.0.0.0`，再由 Compose 限制映射到宿主机回环地址
+Windows 演示入口：`start-win.bat` 从自身目录启动、优先使用项目虚拟环境，并仅在未显式配置时启用 Demo 数据与关闭真实发布；前端只绑定回环地址
 部署浏览器：真实 Vite 构建产物加载成功，页面非空、无错误覆盖层、控制台错误、页面异常或失败请求；Dashboard 截图视觉核对通过
 容器编排：新增默认绑定 `127.0.0.1:5409`、关闭真实发布并持久化 SQLite/Cookie/媒体目录的 `compose.yaml`；本机无 Docker，尚未实际执行镜像构建
 工作区：uploader/ 无改动；未发现硬编码 API Key；Cookie、`.tmp/`、本地数据库均被 Git 忽略

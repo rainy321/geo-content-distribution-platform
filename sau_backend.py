@@ -1852,6 +1852,17 @@ def sse_stream(status_queue):
             # 避免 CPU 占满
             time.sleep(0.1)
 
+
+def get_server_bind():
+    host = os.getenv("SERVER_HOST", "127.0.0.1").strip() or "127.0.0.1"
+    try:
+        port = int(os.getenv("SERVER_PORT", "5409"))
+    except ValueError:
+        port = 5409
+    if not 1 <= port <= 65535:
+        port = 5409
+    return host, port
+
 if __name__ == '__main__':
     try:
         scheduler_interval = max(
@@ -1866,6 +1877,7 @@ if __name__ == '__main__':
     )
     publish_scheduler.start()
     try:
-        app.run(host='0.0.0.0', port=5409)
+        server_host, server_port = get_server_bind()
+        app.run(host=server_host, port=server_port)
     finally:
         publish_scheduler.shutdown(wait=False)

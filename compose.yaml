@@ -13,6 +13,8 @@ services:
       ALLOW_REAL_PUBLISHING: "false"
       DATABASE_PATH: "/app/data/database.db"
       LOCAL_CHROME_HEADLESS: "true"
+      SERVER_HOST: "0.0.0.0"
+      SERVER_PORT: "5409"
     volumes:
       - geo_data:/app/data
       - geo_cookies:/app/cookiesFile

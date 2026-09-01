@@ -139,6 +139,8 @@ npm run dev
 # 默认 http://localhost:5173
 ```
 
+Windows 在完成依赖安装后也可双击 `start-win.bat`。脚本会从仓库目录启动并优先使用 `.venv`，只在未显式配置时启用 Demo 数据、关闭真实发布，前后端均只对本机开放。
+
 本地演示建议显式开启 Demo Mode：
 
 ```powershell
@@ -280,6 +282,8 @@ GEO Web 运行环境变量：
 | `ALLOW_REAL_PUBLISHING` | `false` | 真实发布总开关；当前接入知乎与今日头条文章 |
 | `DATABASE_PATH` | `db/database.db` | 可覆盖 SQLite 路径，便于隔离环境 |
 | `PUBLISH_SCHEDULER_INTERVAL_SECONDS` | `15` | 到期任务检查间隔，最少 5 秒 |
+| `SERVER_HOST` | `127.0.0.1` | 后端监听地址；容器内需显式设为 `0.0.0.0` |
+| `SERVER_PORT` | `5409` | 后端监听端口；非法值会回退到 5409 |
 
 定时任务由 APScheduler 在 `python sau_backend.py` 启动时注册。每次 tick 会原子地将到期任务从 `scheduled` 提升为 `queued`；Demo 任务随后自动执行，真实任务只进入队列，等待已配置账号的真实执行器处理。调度任务启用了单实例和合并补跑，避免同一进程内重复领取。
 
