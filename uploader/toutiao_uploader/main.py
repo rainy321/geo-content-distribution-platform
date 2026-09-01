@@ -1860,10 +1860,87 @@ class TouTiaoArticle(object):
         except Exception:
             pass
 
+    async def _is_article_cover_mode_selected(self, page: Page, mode: str) -> bool:
+        """确认图文页的封面单选项已真实选中。"""
+        labels = page.locator("label.byte-radio").filter(
+            has_text=re.compile(rf"^\s*{re.escape(mode)}\s*$")
+        )
+        try:
+            count = await labels.count()
+        except Exception:
+            return False
+        for index in range(count):
+            label = labels.nth(index)
+            try:
+                if not await label.is_visible():
+                    continue
+                radio = label.locator('input[type="radio"]')
+                if await radio.count() and await radio.first.is_checked():
+                    return True
+                if await label.locator(".byte-radio-inner.checked").count():
+                    return True
+            except Exception:
+                continue
+        return False
+
+    async def _select_article_cover_mode(self, page: Page, mode: str) -> bool:
+        """只在「展示封面」区域选择单图/三图/无封面，并核验选中状态。"""
+        if mode not in {"单图", "三图", "无封面"}:
+            raise ValueError(f"不支持的头条封面模式: {mode}")
+        if await self._is_article_cover_mode_selected(page, mode):
+            return True
+
+        try:
+            await page.get_by_text("展示封面", exact=False).first.scroll_into_view_if_needed(timeout=3000)
+        except Exception:
+            try:
+                await page.evaluate("window.scrollTo(0, Math.max(document.body.scrollHeight * 0.45, 600))")
+            except Exception:
+                pass
+        await page.wait_for_timeout(300)
+
+        section = await self._find_cover_section(page)
+        exact_mode = re.compile(rf"^\s*{re.escape(mode)}\s*$")
+        candidates = []
+        if section is not None and hasattr(section, "locator"):
+            candidates.extend(
+                [
+                    section.locator("label.byte-radio").filter(has_text=exact_mode),
+                    section.get_by_text(mode, exact=True),
+                ]
+            )
+        candidates.extend(
+            [
+                page.locator("label.byte-radio").filter(has_text=exact_mode),
+                page.get_by_text(mode, exact=True),
+            ]
+        )
+
+        for locator in candidates:
+            try:
+                count = await locator.count()
+                for index in range(count):
+                    target = locator.nth(index)
+                    if not await target.is_visible():
+                        continue
+                    try:
+                        await target.click(timeout=2000)
+                    except Exception:
+                        await target.click(timeout=2000, force=True)
+                    await page.wait_for_timeout(300)
+                    if await self._is_article_cover_mode_selected(page, mode):
+                        toutiao_logger.info(f"已选择封面模式: {mode}")
+                        return True
+            except Exception:
+                continue
+        return False
+
     async def handle_cover(self, page: Page) -> None:
-        """图文展示封面：优先「单图」本地上传（JPEG/PNG，单张最大 20MB）。"""
+        """图文展示封面：有图片走单图上传，否则显式选择无封面。"""
         if not self.cover_path:
-            toutiao_logger.info("未提供封面，跳过封面设置（页面可走无封面）")
+            if not await self._select_article_cover_mode(page, "无封面"):
+                raise RuntimeError("未提供封面，且未能选择今日头条「无封面」模式")
+            toutiao_logger.info("未提供封面，已选择封面模式: 无封面")
             return
         cover = Path(str(self.cover_path))
         if not cover.exists():
@@ -1886,34 +1963,7 @@ class TouTiaoArticle(object):
 
             section = await self._find_cover_section(page)
 
-            # 选择「单图」
-            single_clicked = False
-            single_candidates = []
-            if section is not None and hasattr(section, "locator"):
-                single_candidates.extend(
-                    [
-                        section.get_by_text("单图", exact=True),
-                        section.locator('label:has-text("单图")'),
-                    ]
-                )
-            single_candidates.extend(
-                [
-                    page.get_by_text("单图", exact=True),
-                    page.locator('label:has-text("单图")'),
-                ]
-            )
-            for loc in single_candidates:
-                try:
-                    target = loc.first
-                    if await target.count() and await target.is_visible():
-                        await target.click(timeout=2000)
-                        single_clicked = True
-                        await page.wait_for_timeout(400)
-                        toutiao_logger.info("已选择封面模式: 单图")
-                        break
-                except Exception:
-                    continue
-            if not single_clicked:
+            if not await self._select_article_cover_mode(page, "单图"):
                 toutiao_logger.warning("未点到「单图」单选，继续尝试上传")
 
             pre_state = await self._cover_state(page)
