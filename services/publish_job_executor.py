@@ -21,6 +21,7 @@ from services.publisher_adapter import (
 
 
 PublisherFactory = Callable[[dict[str, Any]], PublisherAdapter]
+DEFAULT_MEDIA_ROOT = Path(__file__).resolve().parent.parent / "videoFile"
 
 
 class PublisherNotConfiguredError(RuntimeError):
@@ -32,6 +33,7 @@ def execute_publish_job(
     job_id: int,
     *,
     publisher_factory: PublisherFactory | None = None,
+    media_root: str | Path = DEFAULT_MEDIA_ROOT,
 ) -> dict[str, Any]:
     """Claim and execute exactly one queued job.
 
@@ -43,7 +45,7 @@ def execute_publish_job(
     job = claim_publish_job(database_path, job_id)
     try:
         article = get_article(database_path, job["article_id"])
-        content = _build_publish_content(job, article)
+        content = _build_publish_content(job, article, media_root=media_root)
         publisher = _select_publisher(job, publisher_factory)
         result = publisher.publish(content)
         if not isinstance(result, PublishResult):
@@ -89,15 +91,29 @@ def _select_publisher(
 def _build_publish_content(
     job: dict[str, Any],
     article: dict[str, Any],
+    *,
+    media_root: str | Path = DEFAULT_MEDIA_ROOT,
 ) -> PublishContent:
     publish_at = job.get("publish_at")
     if isinstance(publish_at, str) and publish_at.strip():
         publish_at = datetime.fromisoformat(publish_at.strip())
+    resolved_media_root = Path(media_root).expanduser().resolve()
+    image_paths: list[str] = []
+    for filename in job.get("images") or ():
+        image_path = (resolved_media_root / filename).resolve()
+        try:
+            image_path.relative_to(resolved_media_root)
+        except ValueError as exc:
+            raise ValueError("发布图片必须位于素材目录内") from exc
+        if not image_path.is_file():
+            raise FileNotFoundError(f"发布图片不存在：{filename}")
+        image_paths.append(str(image_path))
+
     return PublishContent(
         platform=job["platform"],
         title=article["title"],
         content=article["content"],
-        images=(),
+        images=tuple(image_paths),
         tags=tuple(article.get("tags") or ()),
         publish_at=publish_at,
     )

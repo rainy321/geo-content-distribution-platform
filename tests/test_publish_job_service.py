@@ -67,6 +67,31 @@ class PublishJobServiceTests(unittest.TestCase):
         self.assertTrue(scheduled["demo"])
         self.assertEqual(get_publish_job(self.db_path, scheduled["id"]), scheduled)
 
+    def test_persists_portable_image_filenames_across_reads_and_retries(self):
+        job = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="baijiahao",
+            images=["cover.png", "cover.png", "detail.jpg"],
+        )
+        transition_publish_job(self.db_path, job["id"], "processing")
+        transition_publish_job(self.db_path, job["id"], "failed")
+        retried = retry_publish_job(self.db_path, job["id"])
+
+        self.assertEqual(job["images"], ["cover.png", "detail.jpg"])
+        self.assertEqual(retried["images"], ["cover.png", "detail.jpg"])
+        self.assertEqual(get_publish_job(self.db_path, job["id"])["images"], job["images"])
+
+    def test_rejects_nonportable_or_malformed_image_lists(self):
+        for images in ("cover.png", ["../cover.png"], ["folder/cover.png"], [1]):
+            with self.subTest(images=images), self.assertRaises(ValueError):
+                create_publish_job(
+                    self.db_path,
+                    article_id=self.article_id,
+                    platform="baijiahao",
+                    images=images,
+                )
+
     def test_lists_and_filters_jobs_with_pagination(self):
         first = create_publish_job(
             self.db_path,

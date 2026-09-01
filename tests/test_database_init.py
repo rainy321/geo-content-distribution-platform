@@ -181,7 +181,7 @@ class DatabaseInitializationTests(unittest.TestCase):
                 job = conn.execute(
                     """
                     SELECT article_id, platform, status, message, result_url,
-                           publish_at, demo, created_at, started_at, finished_at
+                           images, publish_at, demo, created_at, started_at, finished_at
                     FROM publish_jobs
                     """
                 ).fetchone()
@@ -195,6 +195,7 @@ class DatabaseInitializationTests(unittest.TestCase):
                     "status",
                     "message",
                     "result_url",
+                    "images",
                     "publish_at",
                     "demo",
                     "created_at",
@@ -202,10 +203,51 @@ class DatabaseInitializationTests(unittest.TestCase):
                     "finished_at",
                 },
             )
-            self.assertEqual(job[:7], (article_id, "zhihu", "queued", "", "", None, 0))
-            self.assertTrue(job[7])
-            self.assertIsNone(job[8])
+            self.assertEqual(
+                job[:8],
+                (article_id, "zhihu", "queued", "", "", "[]", None, 0),
+            )
+            self.assertTrue(job[8])
             self.assertIsNone(job[9])
+            self.assertIsNone(job[10])
+
+    def test_reinitialization_adds_images_to_existing_publish_jobs(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "database.db"
+            with closing(sqlite3.connect(db_path)) as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE publish_jobs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        article_id INTEGER NOT NULL,
+                        platform TEXT NOT NULL,
+                        status TEXT NOT NULL DEFAULT 'queued',
+                        message TEXT NOT NULL DEFAULT '',
+                        result_url TEXT NOT NULL DEFAULT '',
+                        publish_at DATETIME,
+                        demo INTEGER NOT NULL DEFAULT 0,
+                        created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                        started_at DATETIME,
+                        finished_at DATETIME
+                    )
+                    """
+                )
+                conn.execute(
+                    "INSERT INTO publish_jobs (article_id, platform) VALUES (1, 'zhihu')"
+                )
+                conn.commit()
+
+            initialize_database(db_path)
+
+            with closing(sqlite3.connect(db_path)) as conn:
+                columns = {
+                    row[1] for row in conn.execute("PRAGMA table_info(publish_jobs)")
+                }
+                images = conn.execute(
+                    "SELECT images FROM publish_jobs WHERE id = 1"
+                ).fetchone()[0]
+            self.assertIn("images", columns)
+            self.assertEqual(images, "[]")
 
     def test_publish_jobs_reject_unknown_status_and_invalid_demo_flag(self):
         with tempfile.TemporaryDirectory() as temp_dir:

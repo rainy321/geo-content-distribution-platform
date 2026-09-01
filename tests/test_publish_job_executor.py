@@ -65,11 +65,12 @@ class PublishJobExecutorTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def _create_job(self, *, demo=False, publish_at=None):
+    def _create_job(self, *, demo=False, publish_at=None, images=None):
         return create_publish_job(
             self.db_path,
             article_id=self.article_id,
             platform="zhihu",
+            images=images,
             publish_at=publish_at,
             demo=demo,
         )
@@ -132,6 +133,27 @@ class PublishJobExecutorTests(unittest.TestCase):
         self.assertEqual(content.title, "企业 AI Agent 指南")
         self.assertEqual(content.tags, ("AI", "Agent"))
         self.assertEqual(self._article_status(), "published")
+
+    def test_resolves_job_images_from_media_root_before_publishing(self):
+        media_root = Path(self.temp_dir.name) / "videoFile"
+        media_root.mkdir()
+        image_path = media_root / "cover.png"
+        image_path.write_bytes(b"test-image")
+        job = self._create_job(images=["cover.png"])
+        publisher = StubPublisher(
+            "zhihu",
+            PublishResult(True, "zhihu", "success", message="发布成功"),
+        )
+
+        result = execute_publish_job(
+            self.db_path,
+            job["id"],
+            publisher_factory=lambda _job: publisher,
+            media_root=media_root,
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(publisher.calls[0].images, (str(image_path.resolve()),))
 
     def test_persists_need_action_result(self):
         job = self._create_job()

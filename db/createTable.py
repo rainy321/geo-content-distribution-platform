@@ -98,6 +98,7 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                         )),
                     message TEXT NOT NULL DEFAULT '',
                     result_url TEXT NOT NULL DEFAULT '',
+                    images TEXT NOT NULL DEFAULT '[]',
                     publish_at DATETIME,
                     demo INTEGER NOT NULL DEFAULT 0
                         CHECK (demo IN (0, 1)),
@@ -108,6 +109,14 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                 )
                 '''
             )
+            publish_job_columns = {
+                row[1] for row in cursor.execute("PRAGMA table_info(publish_jobs)")
+            }
+            if "images" not in publish_job_columns:
+                cursor.execute(
+                    "ALTER TABLE publish_jobs "
+                    "ADD COLUMN images TEXT NOT NULL DEFAULT '[]'"
+                )
             cursor.execute(
                 '''
                 CREATE INDEX IF NOT EXISTS idx_publish_jobs_article_id

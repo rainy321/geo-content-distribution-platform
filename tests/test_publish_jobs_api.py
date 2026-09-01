@@ -1,3 +1,4 @@
+import io
 import sqlite3
 import tempfile
 import unittest
@@ -13,6 +14,8 @@ class PublishJobsApiTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp_dir.name) / "database.db"
+        self.media_root = Path(self.temp_dir.name) / "videoFile"
+        self.media_root.mkdir()
         initialize_database(self.db_path)
         with closing(sqlite3.connect(self.db_path)) as conn:
             with conn:
@@ -30,15 +33,18 @@ class PublishJobsApiTests(unittest.TestCase):
 
         self.original_database_path = app.config["DATABASE_PATH"]
         self.original_demo_mode = app.config["DEMO_MODE"]
+        self.original_media_root = app.config["MEDIA_ROOT"]
         self.original_testing = app.testing
         app.config["DATABASE_PATH"] = self.db_path
         app.config["DEMO_MODE"] = True
+        app.config["MEDIA_ROOT"] = self.media_root
         app.testing = True
         self.client = app.test_client()
 
     def tearDown(self):
         app.config["DATABASE_PATH"] = self.original_database_path
         app.config["DEMO_MODE"] = self.original_demo_mode
+        app.config["MEDIA_ROOT"] = self.original_media_root
         app.testing = self.original_testing
         self.temp_dir.cleanup()
 
@@ -72,6 +78,83 @@ class PublishJobsApiTests(unittest.TestCase):
         self.assertIn("未访问真实平台", result["message"])
         self.assertTrue(result["started_at"])
         self.assertTrue(result["finished_at"])
+
+    def test_accepts_existing_material_images_and_exposes_them_in_payload(self):
+        (self.media_root / "cover.png").write_bytes(b"test-image")
+
+        response = self.client.post(
+            "/api/publish",
+            json={
+                "article_id": self.article_id,
+                "platform": "baijiahao",
+                "images": ["cover.png"],
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.get_json()["data"]["images"], ["cover.png"])
+
+    def test_uploaded_material_flows_into_image_backed_publish_job(self):
+        upload = self.client.post(
+            "/uploadSave",
+            data={"file": (io.BytesIO(b"test-image"), "geo-cover.png")},
+            content_type="multipart/form-data",
+        )
+        filename = upload.get_json()["data"]["filepath"]
+
+        created = self.client.post(
+            "/api/publish",
+            json={
+                "article_id": self.article_id,
+                "platform": "baijiahao",
+                "images": [filename],
+            },
+        )
+
+        self.assertEqual(upload.status_code, 200)
+        self.assertTrue((self.media_root / filename).is_file())
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(created.get_json()["data"]["images"], [filename])
+        executed = self.client.post(
+            f"/api/publish/jobs/{created.get_json()['data']['job_id']}/execute"
+        )
+        self.assertEqual(executed.status_code, 200)
+        self.assertEqual(executed.get_json()["data"]["status"], "success")
+        self.assertEqual(executed.get_json()["data"]["images"], [filename])
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            stored_path = conn.execute(
+                "SELECT file_path FROM file_records ORDER BY id DESC LIMIT 1"
+            ).fetchone()[0]
+        self.assertEqual(stored_path, filename)
+
+    def test_rejects_missing_unsupported_and_unsafe_publish_images(self):
+        (self.media_root / "cover.gif").write_bytes(b"test-image")
+        payload = {"article_id": self.article_id, "platform": "zhihu"}
+
+        missing = self.client.post(
+            "/api/publish", json={**payload, "images": ["missing.png"]}
+        )
+        unsupported = self.client.post(
+            "/api/publish", json={**payload, "images": ["cover.gif"]}
+        )
+        unsafe = self.client.post(
+            "/api/publish", json={**payload, "images": ["../cover.png"]}
+        )
+
+        self.assertEqual(missing.status_code, 400)
+        self.assertEqual(unsupported.status_code, 400)
+        self.assertEqual(unsafe.status_code, 400)
+
+    def test_real_image_backed_platform_requires_an_image_at_job_creation(self):
+        app.config["DEMO_MODE"] = False
+
+        response = self.client.post(
+            "/api/publish",
+            json={"article_id": self.article_id, "platform": "xiaohongshu"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("至少一张", response.get_json()["msg"])
 
     def test_lists_jobs_with_filters_and_pagination(self):
         zhihu = self._create_job(platform="zhihu")

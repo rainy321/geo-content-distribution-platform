@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import sqlite3
 from contextlib import closing
 from datetime import datetime
@@ -44,10 +45,12 @@ def create_publish_job(
     *,
     article_id: int,
     platform: str,
+    images: list[str] | tuple[str, ...] | None = None,
     publish_at: str | datetime | None = None,
     demo: bool = False,
 ) -> dict[str, Any]:
     normalized_platform = _normalize_platform(platform)
+    normalized_images = normalize_publish_images(images)
     normalized_publish_at = _normalize_publish_at(publish_at)
     initial_status = "scheduled" if normalized_publish_at else "queued"
 
@@ -58,13 +61,14 @@ def create_publish_job(
             cursor = conn.execute(
                 """
                 INSERT INTO publish_jobs (
-                    article_id, platform, status, publish_at, demo
-                ) VALUES (?, ?, ?, ?, ?)
+                    article_id, platform, status, images, publish_at, demo
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
                 (
                     article_id,
                     normalized_platform,
                     initial_status,
+                    json.dumps(normalized_images, ensure_ascii=False),
                     normalized_publish_at,
                     int(bool(demo)),
                 ),
@@ -401,7 +405,40 @@ def _sync_article_status(conn: sqlite3.Connection, article_id: int) -> str | Non
 def _serialize_job(row: sqlite3.Row) -> dict[str, Any]:
     job = dict(row)
     job["demo"] = bool(job["demo"])
+    try:
+        raw_images = json.loads(job.get("images") or "[]")
+        job["images"] = normalize_publish_images(raw_images)
+    except (TypeError, json.JSONDecodeError, ValueError):
+        job["images"] = []
     return job
+
+
+def normalize_publish_images(
+    images: list[str] | tuple[str, ...] | None,
+) -> list[str]:
+    """Normalize portable media filenames stored with a publish job."""
+
+    if images is None:
+        return []
+    if not isinstance(images, (list, tuple)):
+        raise ValueError("images 必须是字符串列表")
+    if len(images) > 9:
+        raise ValueError("单个发布任务最多支持 9 张图片")
+
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for image in images:
+        if not isinstance(image, str):
+            raise ValueError("images 必须是字符串列表")
+        filename = image.strip()
+        if not filename:
+            raise ValueError("图片文件名不能为空")
+        if Path(filename).name != filename or "/" in filename or "\\" in filename:
+            raise ValueError("图片只能引用素材库中的文件名")
+        if filename not in seen:
+            normalized.append(filename)
+            seen.add(filename)
+    return normalized
 
 
 def _normalize_platform(platform: str) -> str:

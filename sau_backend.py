@@ -56,6 +56,7 @@ from services.publish_job_service import (
     create_publish_job,
     get_publish_job,
     list_publish_jobs,
+    normalize_publish_images,
     retry_publish_job,
 )
 from services.publish_scheduler_runtime import create_publish_scheduler
@@ -76,6 +77,7 @@ app.config["DATABASE_PATH"] = (
     if configured_database_path
     else Path(BASE_DIR / "db" / "database.db")
 )
+app.config["MEDIA_ROOT"] = Path(BASE_DIR / "videoFile").resolve()
 app.config["DEMO_MODE"] = str(os.getenv("DEMO_MODE", "false")).strip().lower() in {
     "1",
     "true",
@@ -559,10 +561,29 @@ def create_publish_task():
         return jsonify({"code": 400, "msg": "platform 不能为空", "data": None}), 400
 
     try:
+        images = _validate_publish_images(data.get("images"))
+    except ValueError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+
+    if (
+        platform in {"baijiahao", "xiaohongshu"}
+        and not app.config.get("DEMO_MODE", False)
+        and not images
+    ):
+        return jsonify(
+            {
+                "code": 400,
+                "msg": f"{platform} 图文发布必须提供至少一张素材图片",
+                "data": None,
+            }
+        ), 400
+
+    try:
         job = create_publish_job(
             app.config["DATABASE_PATH"],
             article_id=article_id,
             platform=platform,
+            images=images,
             publish_at=data.get("publish_at"),
             demo=bool(app.config.get("DEMO_MODE", False)),
         )
@@ -653,7 +674,11 @@ def execute_demo_publish_task(job_id):
         ), 409
 
     try:
-        job = execute_publish_job(app.config["DATABASE_PATH"], job_id)
+        job = execute_publish_job(
+            app.config["DATABASE_PATH"],
+            job_id,
+            media_root=app.config["MEDIA_ROOT"],
+        )
     except InvalidPublishJobTransitionError as exc:
         return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
     return jsonify(
@@ -707,6 +732,7 @@ def execute_real_publish_task(job_id):
             app.config["DATABASE_PATH"],
             job_id,
             publisher_factory=publisher_factory,
+            media_root=app.config["MEDIA_ROOT"],
         )
     except InvalidPublishJobTransitionError as exc:
         return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
@@ -730,6 +756,7 @@ def _publish_job_payload(job):
         "status": job["status"],
         "message": job["message"],
         "url": job["result_url"],
+        "images": list(job.get("images") or ()),
         "publish_at": job["publish_at"],
         "demo": bool(job["demo"]),
         "created_at": job["created_at"],
@@ -746,6 +773,23 @@ def _publish_job_payload(job):
     if "article_title" in job:
         payload["article_title"] = job["article_title"]
     return payload
+
+
+def _validate_publish_images(value):
+    images = normalize_publish_images(value)
+    media_root = Path(app.config["MEDIA_ROOT"]).expanduser().resolve()
+    allowed_extensions = {".jpg", ".jpeg", ".png"}
+    for filename in images:
+        if Path(filename).suffix.lower() not in allowed_extensions:
+            raise ValueError("发布图片仅支持 JPG、JPEG、PNG 格式")
+        image_path = (media_root / filename).resolve()
+        try:
+            image_path.relative_to(media_root)
+        except ValueError as exc:
+            raise ValueError("发布图片必须来自素材库") from exc
+        if not image_path.is_file():
+            raise ValueError(f"素材图片不存在：{filename}")
+    return images
 
 
 @app.route('/api/projects', methods=['POST'])
@@ -908,9 +952,22 @@ def upload_save():
     # 获取表单中的自定义文件名（可选）
     custom_filename = request.form.get('filename', None)
     if custom_filename:
-        filename = custom_filename + "." + file.filename.split('.')[-1]
+        filename = custom_filename + "." + file.filename.rsplit('.', 1)[-1]
     else:
         filename = file.filename
+    filename = str(filename or "").strip()
+    if (
+        not filename
+        or Path(filename).name != filename
+        or '/' in filename
+        or '\\' in filename
+        or '..' in filename
+    ):
+        return jsonify({
+            "code": 400,
+            "data": None,
+            "msg": "Invalid filename"
+        }), 400
 
     try:
         # 生成 UUID v1
@@ -919,12 +976,14 @@ def upload_save():
 
         # 构造文件名和路径
         final_filename = f"{uuid_v1}_{filename}"
-        filepath = Path(BASE_DIR / "videoFile" / f"{uuid_v1}_{filename}")
+        media_root = Path(app.config["MEDIA_ROOT"]).expanduser().resolve()
+        media_root.mkdir(parents=True, exist_ok=True)
+        filepath = media_root / final_filename
 
         # 保存文件
         file.save(filepath)
 
-        with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+        with sqlite3.connect(app.config["DATABASE_PATH"]) as conn:
             cursor = conn.cursor()
             cursor.execute('''
                                 INSERT INTO file_records (filename, filesize, file_path)

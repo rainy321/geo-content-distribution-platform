@@ -120,6 +120,7 @@ class RealPublishApiTests(unittest.TestCase):
             self.db_path,
             job["id"],
             publisher_factory=factory,
+            media_root=app.config["MEDIA_ROOT"],
         )
 
     def test_executes_confirmed_toutiao_job_with_explicit_factory(self):
@@ -150,6 +151,7 @@ class RealPublishApiTests(unittest.TestCase):
             self.db_path,
             job["id"],
             publisher_factory=factory,
+            media_root=app.config["MEDIA_ROOT"],
         )
 
     def test_job_payload_exposes_real_action_only_when_all_server_gates_allow_it(self):

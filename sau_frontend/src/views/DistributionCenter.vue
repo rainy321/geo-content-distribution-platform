@@ -93,6 +93,56 @@
           </div>
         </fieldset>
 
+        <section
+          :class="['asset-panel', { required: imageRequired, missing: imageRequired && !selectedImage }]"
+          aria-labelledby="asset-title"
+        >
+          <div class="asset-heading">
+            <span class="asset-code">ASSET / IMG</span>
+            <div>
+              <strong id="asset-title">共享图片资产</strong>
+              <small>百家号取首图作为封面，小红书用作笔记图片；其他渠道可按各自规则使用。</small>
+            </div>
+            <i>{{ imageRequired ? '所选渠道必需' : '可选' }}</i>
+          </div>
+
+          <article v-if="selectedImage" class="asset-record">
+            <img :src="selectedImage.previewUrl" :alt="`${selectedImage.name} 预览`" />
+            <div class="asset-copy">
+              <span>READY / 已入素材库</span>
+              <strong>{{ selectedImage.name }}</strong>
+              <small>{{ selectedImage.filename }}</small>
+              <div v-if="imagePlatforms.length" class="asset-routes">
+                <b v-for="platform in imagePlatforms" :key="platform.key">→ {{ platform.name }}</b>
+              </div>
+            </div>
+            <el-button text @click="clearSelectedImage">移除</el-button>
+          </article>
+
+          <div v-else class="asset-empty">
+            <el-icon><Picture /></el-icon>
+            <div>
+              <strong>{{ imageRequired ? '这条路由还缺一张图片' : '需要图片时在这里上传' }}</strong>
+              <span>JPG / JPEG / PNG，最大 5MB；任务只保存素材文件名，不接收任意本地路径。</span>
+            </div>
+            <el-button
+              plain
+              :icon="Upload"
+              :loading="imageUploading"
+              @click="openImagePicker"
+            >
+              {{ imageUploading ? `${imageUploadProgress}%` : '选择图片' }}
+            </el-button>
+          </div>
+          <input
+            ref="imageInput"
+            class="visually-hidden"
+            type="file"
+            accept="image/jpeg,image/png,.jpg,.jpeg,.png"
+            @change="handleImageSelected"
+          />
+        </section>
+
         <div class="schedule-panel">
           <div>
             <strong>定时发布</strong>
@@ -164,6 +214,10 @@
           <div>
             <span>MODE</span>
             <strong>{{ scheduleEnabled ? 'SCHEDULED' : 'NOW' }}</strong>
+          </div>
+          <div>
+            <span>ASSET</span>
+            <strong>{{ selectedImage ? '01 IMG' : 'NONE' }}</strong>
           </div>
         </div>
 
@@ -239,6 +293,7 @@
             <span>JOB-{{ String(job.job_id).padStart(5, '0') }}</span>
             <strong>{{ platformName(job.platform) }}</strong>
             <small v-if="job.demo" class="demo-mark">DEMO / 演示任务</small>
+            <small v-if="job.images?.length" class="asset-mark">{{ job.images.length }} IMG / 已附素材</small>
           </div>
 
           <div class="job-article">
@@ -313,8 +368,9 @@
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Link, Lock, Promotion, Refresh } from '@element-plus/icons-vue'
+import { Link, Lock, Picture, Promotion, Refresh, Upload } from '@element-plus/icons-vue'
 import { articleApi } from '@/api/article'
+import { materialApi } from '@/api/material'
 import { publishApi } from '@/api/publish'
 
 const route = useRoute()
@@ -345,6 +401,10 @@ const selectedPlatforms = ref(['zhihu'])
 const scheduleEnabled = ref(false)
 const publishAt = ref('')
 const dispatching = ref(false)
+const imageInput = ref(null)
+const selectedImage = ref(null)
+const imageUploading = ref(false)
+const imageUploadProgress = ref(0)
 
 const jobs = ref([])
 const jobsLoading = ref(false)
@@ -364,16 +424,26 @@ const manifestPlatforms = computed(() => (
   platforms.filter(platform => selectedPlatforms.value.includes(platform.key))
 ))
 
+const imagePlatforms = computed(() => (
+  manifestPlatforms.value.filter(platform => ['baijiahao', 'xiaohongshu'].includes(platform.key))
+))
+
+const imageRequired = computed(() => imagePlatforms.value.length > 0)
+
 const canDispatch = computed(() => Boolean(
   selectedArticleId.value
   && selectedPlatforms.value.length
+  && (!imageRequired.value || selectedImage.value)
   && (!scheduleEnabled.value || publishAt.value)
+  && !imageUploading.value
   && !dispatching.value
 ))
 
 const dispatchButtonLabel = computed(() => {
   if (!selectedArticleId.value) return '先选择就绪稿件'
   if (!selectedPlatforms.value.length) return '至少选择一个渠道'
+  if (imageUploading.value) return '图片上传中'
+  if (imageRequired.value && !selectedImage.value) return '先补齐渠道图片'
   if (scheduleEnabled.value && !publishAt.value) return '选择计划发布时间'
   return scheduleEnabled.value
     ? `创建 ${selectedPlatforms.value.length} 个计划任务`
@@ -451,6 +521,60 @@ const togglePlatform = (key) => {
     : [...selectedPlatforms.value, key]
 }
 
+const openImagePicker = () => {
+  if (!imageUploading.value) imageInput.value?.click()
+}
+
+const handleImageSelected = async (event) => {
+  const input = event.target
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+
+  const isSupportedImage = ['image/jpeg', 'image/png'].includes(file.type)
+    || /\.(jpe?g|png)$/i.test(file.name || '')
+  if (!isSupportedImage) {
+    ElMessage.error('图片仅支持 JPG、JPEG、PNG 格式')
+    return
+  }
+  if (file.size > 5 * 1024 * 1024) {
+    ElMessage.error('图片不能超过 5MB')
+    return
+  }
+
+  imageUploading.value = true
+  imageUploadProgress.value = 0
+  try {
+    const formData = new FormData()
+    formData.append('file', file)
+    const response = await materialApi.uploadMaterial(formData, progressEvent => {
+      if (progressEvent.total) {
+        imageUploadProgress.value = Math.round(
+          (progressEvent.loaded * 100) / progressEvent.total
+        )
+      }
+    })
+    const filename = String(response.data?.filepath || '').trim()
+    if (!filename) throw new Error('上传接口没有返回素材文件名')
+    selectedImage.value = {
+      filename,
+      name: file.name,
+      previewUrl: materialApi.getMaterialPreviewUrl(filename)
+    }
+    imageUploadProgress.value = 100
+    ElMessage.success('图片已进入素材库，将随所选渠道任务保存')
+  } catch (error) {
+    console.error('上传分发图片失败:', error)
+  } finally {
+    imageUploading.value = false
+  }
+}
+
+const clearSelectedImage = () => {
+  selectedImage.value = null
+  imageUploadProgress.value = 0
+}
+
 const dispatchArticle = async () => {
   if (!canDispatch.value) return
   dispatching.value = true
@@ -463,6 +587,7 @@ const dispatchArticle = async () => {
       const response = await publishApi.createJob({
         article_id: selectedArticleId.value,
         platform,
+        images: selectedImage.value ? [selectedImage.value.filename] : [],
         publish_at: scheduleEnabled.value ? publishAt.value : null
       })
       let job = response.data
@@ -896,6 +1021,113 @@ onBeforeUnmount(() => {
   .selection-mark { position: absolute; top: 10px; right: 10px; color: #338e89; font-size: 14px; }
 }
 
+.asset-panel {
+  margin-top: 18px;
+  border: 1px solid var(--rule);
+  background: #fbfdfc;
+
+  &.required { border-color: #8bbab7; }
+  &.missing { border-left: 3px solid var(--amber); }
+}
+
+.asset-heading {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 13px;
+  align-items: start;
+  padding: 13px 15px;
+  border-bottom: 1px solid var(--rule);
+
+  .asset-code {
+    padding-top: 3px;
+    color: #3b8e8a;
+    font: 700 9px/1.2 "Cascadia Mono", monospace;
+    letter-spacing: 0.1em;
+    white-space: nowrap;
+  }
+
+  > div { display: flex; flex-direction: column; gap: 4px; }
+  strong { color: #29474f; font-size: 13px; }
+  small { color: var(--muted); font-size: 10px; line-height: 1.5; }
+  i {
+    padding: 4px 6px;
+    background: var(--signal-soft);
+    color: #277b77;
+    font: 700 9px/1 "Cascadia Mono", monospace;
+    font-style: normal;
+    white-space: nowrap;
+  }
+}
+
+.asset-empty,
+.asset-record {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 14px;
+  align-items: center;
+  min-height: 76px;
+  padding: 13px 15px;
+}
+
+.asset-empty {
+  > .el-icon {
+    width: 40px;
+    height: 40px;
+    border: 1px dashed #8bbab7;
+    color: #358d88;
+    font-size: 18px;
+  }
+
+  > div { display: flex; flex-direction: column; gap: 4px; }
+  strong { font-size: 12px; }
+  span { color: var(--muted); font-size: 10px; line-height: 1.5; }
+  :deep(.el-button) { border-radius: 3px; color: #267f7b; border-color: #7fb7b3; }
+}
+
+.asset-record {
+  img {
+    width: 70px;
+    height: 54px;
+    object-fit: cover;
+    border: 1px solid #bfd0cd;
+    background: var(--paper);
+  }
+
+  :deep(.el-button) { color: var(--danger); }
+}
+
+.asset-copy {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+
+  > span { color: #2e8984; font: 700 9px/1 "Cascadia Mono", monospace; letter-spacing: 0.07em; }
+  > strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+  > small { overflow: hidden; color: var(--muted); font: 9px/1.3 "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; }
+}
+
+.asset-routes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 2px;
+
+  b { padding: 3px 5px; background: #edf6f4; color: #437674; font-size: 9px; font-weight: 600; }
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
 .schedule-panel {
   display: grid;
   grid-template-columns: 1fr auto;
@@ -1019,7 +1251,7 @@ onBeforeUnmount(() => {
 
 .manifest-summary {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   margin-top: auto;
   border-top: 1px solid rgba(255, 255, 255, 0.13);
   border-bottom: 1px solid rgba(255, 255, 255, 0.13);
@@ -1112,6 +1344,12 @@ onBeforeUnmount(() => {
   padding: 3px 5px;
   background: var(--signal-soft);
   color: #267d78 !important;
+  font: 700 8px/1 "Cascadia Mono", monospace !important;
+}
+
+.asset-mark {
+  align-self: flex-start;
+  color: #3c827e !important;
   font: 700 8px/1 "Cascadia Mono", monospace !important;
 }
 
@@ -1217,6 +1455,10 @@ onBeforeUnmount(() => {
   .live-indicator { width: 100%; box-sizing: border-box; }
   .dispatch-form, .route-manifest { padding: 20px; }
   .platform-grid { grid-template-columns: repeat(2, 1fr); }
+  .asset-heading { grid-template-columns: 1fr auto; }
+  .asset-heading .asset-code { grid-column: 1 / -1; }
+  .asset-empty, .asset-record { grid-template-columns: auto 1fr; }
+  .asset-empty :deep(.el-button), .asset-record :deep(.el-button) { grid-column: 1 / -1; width: 100%; }
   .dispatch-actions { align-items: stretch; flex-direction: column; }
   .dispatch-actions :deep(.el-button) { width: 100%; }
   .manifest-summary { grid-template-columns: 1fr; }
