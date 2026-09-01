@@ -76,6 +76,8 @@ npm run dev
 今日头条结果边界：仅公开文章链接可标记 success；已提交、等待审核或超时未知保持 processing，不自动重试以避免重复发文
 今日头条登录检测：修复 SPA 跳转依赖 `wait_for_url/load` 导致的误超时，改为轮询创作者后台 URL；修复后人工登录尝试仍停留在登录页并安全超时，未保存账号、Cookie 或发布内容
 交付安全：Docker 构建上下文已排除 Cookie、SQLite、`.tmp` 和根目录 `.env`；前端 lockfile 已纳入版本控制，Python 包声明已包含 `services/` 与 `db/`
+Python 发布物：`uv build` 已成功生成 wheel 与 sdist；逐项扫描确认敏感模式、Cookie/数据库/`.env` 等禁止文件、必需模块缺失均为 0
+Python 安装烟雾：wheel 已用 `--no-deps` 安装到隔离目录，核心模块确认从该目录加载；CLI 在声明依赖已安装的环境中执行 `sau --help` 成功
 部署烟雾：新增 `/api/health` 与容器 HEALTHCHECK；隔离 Demo 数据库实测 health、Dashboard、SPA 根路径和 `/project-management` 深链接均为 HTTP 200，未知 API 保持 JSON 404
 部署浏览器：真实 Vite 构建产物加载成功，页面非空、无错误覆盖层、控制台错误、页面异常或失败请求；Dashboard 截图视觉核对通过
 容器编排：新增默认绑定 `127.0.0.1:5409`、关闭真实发布并持久化 SQLite/Cookie/媒体目录的 `compose.yaml`；本机无 Docker，尚未实际执行镜像构建
@@ -91,8 +93,8 @@ npm run dev
 3. 真实链路的最终成功依据是公开文章 API/链接，而不是自动化脚本是否完成点击；本次知乎验收链接为 `https://zhuanlan.zhihu.com/p/2078070222595035345`。
 4. 当前 API 没有用户认证且 CORS 默认开放，仅适合本地或受控内网；公网部署前需要在反向代理或平台层增加访问控制、TLS，并确认数据库与 Cookie 持久化。
 5. 当前 `origin` 仍指向 OmniPost 上游 `rehatRobot/omnipost`。必须先确认自己的 GitHub 仓库或 fork，再配置目标 remote；不能直接向上游地址推送本次二开。
-6. 当前机器没有 Docker，且离线环境缺 wheel 构建工具；Dockerfile、Compose 安全默认值和源码等价部署链路已静态/运行验证，但 Docker 镜像和 wheel 构建尚未在本机执行。
+6. Python wheel 与 sdist 已在本机构建、审计并完成隔离安装烟雾；当前机器没有 Docker，因此 Dockerfile、Compose 安全默认值和源码等价部署链路虽已静态/运行验证，容器镜像仍未在本机实际构建。
 
 ## Git 状态
 
-已创建第一个本地检查点 `bded6e5`（`feat: complete GEO MVP with verified Zhihu publishing`），尚未 push。确认自己的 GitHub 目标仓库后再一次性推送；不要把当前上游 `origin` 直接当成二开项目的推送目标。
+本地检查点持续保留且尚未 push。确认自己的 GitHub 目标仓库后再一次性推送；不要把当前上游 `origin` 直接当成二开项目的推送目标。

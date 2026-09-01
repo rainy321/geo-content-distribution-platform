@@ -33,7 +33,7 @@ class ZhihuPublicationVerifierAsyncTests(unittest.IsolatedAsyncioTestCase):
     async def test_network_error_is_sanitized(self):
         class LeakyRequestContext:
             async def get(self, *_args, **_kwargs):
-                raise RuntimeError("cookie: z_c0=must-not-appear")
+                raise RuntimeError("cookie: private-session-token-must-not-appear")
 
         with self.assertRaisesRegex(RuntimeError, "网络异常：RuntimeError") as caught:
             await _safe_get(
@@ -42,7 +42,7 @@ class ZhihuPublicationVerifierAsyncTests(unittest.IsolatedAsyncioTestCase):
                 stage="身份接口",
             )
 
-        self.assertNotIn("z_c0", str(caught.exception))
+        self.assertNotIn("private-session-token", str(caught.exception))
 
 
 if __name__ == "__main__":
