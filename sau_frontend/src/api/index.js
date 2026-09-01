@@ -2,6 +2,10 @@
 export * from './user'
 export * from './account'
 export * from './material'
+export * from './project'
+export * from './article'
+export * from './publish'
+export * from './dashboard'
 
 // 可以在这里添加其他API模块的导出
 // export * from './product'

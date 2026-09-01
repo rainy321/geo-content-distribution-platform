@@ -23,18 +23,20 @@ sau = "sau_cli:main"
 [project.optional-dependencies]
 web = [
   "Flask[async]==3.1.1",
+  "apscheduler==3.11.0",
   "flask-cors==6.0.0",
+  "playwright==1.52.0",
 ]
 
 [tool.uv]
 package = true
 
 [tool.setuptools]
-py-modules = ["cli_main", "conf", "sau_cli"]
+py-modules = ["conf", "sau_cli"]
 include-package-data = true
 
 [tool.setuptools.packages.find]
-include = ["uploader*", "utils*", "myUtils*"]
+include = ["uploader*", "utils*", "myUtils*", "services*", "db*"]
 
 [tool.setuptools.package-data]
 utils = ["stealth.min.js"]

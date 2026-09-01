@@ -1,20 +1,23 @@
 <template>
   <div id="app">
     <el-container>
-      <el-aside :width="isCollapse ? '64px' : '200px'">
+      <el-aside :width="sidebarCollapsed ? '68px' : '224px'">
         <div class="sidebar">
           <div class="logo">
-            <img v-show="isCollapse" src="/vite.svg" alt="Logo" class="logo-img">
-            <h2 v-show="!isCollapse">自媒体自动化运营系统</h2>
+            <div class="logo-mark">G</div>
+            <div v-show="!sidebarCollapsed" class="logo-copy">
+              <strong>GEO 内容引擎</strong>
+              <span>CONTENT OPERATIONS</span>
+            </div>
           </div>
           <el-menu
             :router="true"
             :default-active="activeMenu"
-            :collapse="isCollapse"
+            :collapse="sidebarCollapsed"
             class="sidebar-menu"
-            background-color="#001529"
+            background-color="#102b31"
             text-color="#fff"
-            active-text-color="#409EFF"
+            active-text-color="#64d6cf"
           >
             <el-menu-item index="/">
               <el-icon><HomeFilled /></el-icon>
@@ -22,7 +25,23 @@
             </el-menu-item>
             <el-menu-item index="/account-management">
               <el-icon><User /></el-icon>
-              <span>账号管理</span>
+              <span>媒体账号</span>
+            </el-menu-item>
+            <el-menu-item index="/projects">
+              <el-icon><CollectionTag /></el-icon>
+              <span>品牌项目</span>
+            </el-menu-item>
+            <el-menu-item index="/content-create">
+              <el-icon><MagicStick /></el-icon>
+              <span>AI 内容创作</span>
+            </el-menu-item>
+            <el-menu-item index="/content-library">
+              <el-icon><DocumentCopy /></el-icon>
+              <span>内容库</span>
+            </el-menu-item>
+            <el-menu-item index="/geo-optimize">
+              <el-icon><Aim /></el-icon>
+              <span>GEO 优化</span>
             </el-menu-item>
             <el-menu-item index="/material-management">
               <el-icon><Picture /></el-icon>
@@ -44,6 +63,7 @@
           <div class="header-content">
             <div class="header-left">
               <el-icon class="toggle-sidebar" @click="toggleSidebar"><Fold /></el-icon>
+              <span class="workspace-label">内容运营工作区</span>
             </div>
             <div class="header-right">
               <!-- 账号信息已移除 -->
@@ -59,11 +79,11 @@
 </template>
 
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onBeforeUnmount, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   HomeFilled, User, DataAnalysis,
-  Fold, Picture, Upload
+  Fold, Picture, Upload, CollectionTag, MagicStick, DocumentCopy, Aim
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
@@ -75,11 +95,29 @@ const activeMenu = computed(() => {
 
 // 侧边栏折叠状态
 const isCollapse = ref(false)
+const isSmallScreen = ref(false)
+let smallScreenQuery = null
+
+const sidebarCollapsed = computed(() => isCollapse.value || isSmallScreen.value)
+
+const syncSmallScreen = (event) => {
+  isSmallScreen.value = event.matches
+}
 
 // 切换侧边栏折叠状态
 const toggleSidebar = () => {
   isCollapse.value = !isCollapse.value
 }
+
+onMounted(() => {
+  smallScreenQuery = window.matchMedia('(max-width: 760px)')
+  isSmallScreen.value = smallScreenQuery.matches
+  smallScreenQuery.addEventListener('change', syncSmallScreen)
+})
+
+onBeforeUnmount(() => {
+  smallScreenQuery?.removeEventListener('change', syncSmallScreen)
+})
 </script>
 
 <style lang="scss" scoped>
@@ -94,7 +132,7 @@ const toggleSidebar = () => {
 }
 
 .el-aside {
-  background-color: #001529;
+  background-color: #102b31;
   color: #fff;
   height: 100vh;
   overflow: hidden;
@@ -106,25 +144,45 @@ const toggleSidebar = () => {
     height: 100%;
     
     .logo {
-      height: 60px;
-      padding: 0 16px;
+      height: 68px;
+      padding: 0 14px;
       display: flex;
       align-items: center;
-      background-color: #002140;
+      background-color: #0b2429;
+      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
       overflow: hidden;
       
-      .logo-img {
-        width: 32px;
-        height: 32px;
-        margin-right: 12px;
+      .logo-mark {
+        width: 38px;
+        height: 38px;
+        flex: 0 0 38px;
+        display: grid;
+        place-items: center;
+        border: 1px solid rgba(100, 214, 207, 0.65);
+        border-radius: 11px 3px 11px 3px;
+        color: #9de7e2;
+        font: 700 19px/1 "Arial Narrow", "Microsoft YaHei", sans-serif;
+        box-shadow: inset 0 0 0 3px rgba(100, 214, 207, 0.08);
       }
-      
-      h2 {
-        color: #fff;
-        font-size: 16px;
-        font-weight: 600;
+
+      .logo-copy {
+        display: flex;
+        flex-direction: column;
+        margin-left: 11px;
         white-space: nowrap;
-        margin: 0;
+
+        strong {
+          color: #f4fbfa;
+          font-size: 15px;
+          letter-spacing: 0.04em;
+        }
+
+        span {
+          margin-top: 2px;
+          color: rgba(208, 232, 230, 0.55);
+          font: 600 9px/1.2 "Cascadia Mono", monospace;
+          letter-spacing: 0.15em;
+        }
       }
     }
     
@@ -139,6 +197,11 @@ const toggleSidebar = () => {
         .el-icon {
           margin-right: 10px;
           font-size: 18px;
+        }
+
+        &.is-active {
+          background: linear-gradient(90deg, rgba(57, 184, 178, 0.18), transparent);
+          box-shadow: inset 3px 0 #39b8b2;
         }
       }
     }
@@ -159,6 +222,10 @@ const toggleSidebar = () => {
     padding: 0 16px;
     
     .header-left {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+
       .toggle-sidebar {
         font-size: 20px;
         cursor: pointer;
@@ -167,6 +234,12 @@ const toggleSidebar = () => {
         &:hover {
           color: $primary-color;
         }
+      }
+
+      .workspace-label {
+        color: #66757d;
+        font-size: 13px;
+        letter-spacing: 0.04em;
       }
     }
     
@@ -194,5 +267,19 @@ const toggleSidebar = () => {
   background-color: $bg-color-page;
   padding: 20px;
   overflow-y: auto;
+}
+
+@media (max-width: 760px) {
+  .toggle-sidebar {
+    display: none;
+  }
+
+  .workspace-label {
+    font-size: 12px !important;
+  }
+
+  .el-main {
+    padding: 12px;
+  }
 }
 </style>

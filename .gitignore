@@ -168,9 +168,6 @@ douyin_uploader/*.json
 bilibili_uploader/*.json
 tk_uploader/*.json
 
-# 配置文件
-conf.py
-
 # 账号文件
 cookies
 uploader/xhs_uploader/accounts.ini
@@ -180,7 +177,6 @@ uploader/xhs_uploader/*.json
 .vite/
 dist/
 node_modules/
-package-lock.json
 
 # database
 db/database.db
@@ -193,3 +189,6 @@ videoFile
 /uploader/bilibili_uploader/qrcode.png
 
 .worktrees/
+
+# 本地验证产物（隔离数据库、浏览器截图）
+.tmp/

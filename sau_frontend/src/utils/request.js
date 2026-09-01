@@ -1,9 +1,10 @@
 import axios from 'axios'
 import { ElMessage } from 'element-plus'
+import { API_BASE_URL } from '@/config/api'
 
 // 创建axios实例
 const request = axios.create({
-  baseURL: import.meta.env.VITE_API_BASE_URL || 'http://localhost:5409',
+  baseURL: API_BASE_URL,
   headers: {
     'Content-Type': 'application/json'
   }
@@ -31,7 +32,9 @@ request.interceptors.response.use(
     const { data } = response
     
     // 根据后端接口规范处理响应
-    if (data.code === 200 || data.success) {
+    const hasSuccessfulCode = data.code >= 200 && data.code < 300
+    const isRawSuccess = data.code == null && response.status >= 200 && response.status < 300
+    if (hasSuccessfulCode || isRawSuccess || data.success) {
       return data
     } else {
       ElMessage.error(data.msg || data.message || '请求失败')

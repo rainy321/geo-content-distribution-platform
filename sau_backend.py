@@ -1,9 +1,11 @@
 import asyncio
+import json
 import os
 import sqlite3
 import threading
 import time
 import uuid
+from contextlib import closing
 from pathlib import Path
 from queue import Queue
 from flask_cors import CORS
@@ -12,9 +14,90 @@ from flask import Flask, request, jsonify, Response, render_template, send_from_
 from conf import BASE_DIR
 from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen, baijiahao_cookie_gen, bilibili_cookie_gen, toutiao_cookie_gen, sohu_cookie_gen, zhihu_cookie_gen
 from myUtils.postVideo import post_video_tencent, post_video_DouYin, post_video_ks, post_video_xhs, post_video_baijiahao, post_video_bilibili, post_video_toutiao, post_article_toutiao, post_article_baijiahao, post_article_sohu, post_article_zhihu
+from db.createTable import initialize_database
+from services.ai_service import (
+    AIConfigurationError,
+    AIServiceError,
+    generate_geo_content,
+    optimize_geo_content,
+)
+from services.article_service import (
+    ARTICLE_STATUSES,
+    ArticleNotFoundError,
+    create_article,
+    get_article,
+    list_articles,
+    update_article,
+)
+from services.geo_score_service import score_geo_content
+from services.dashboard_service import get_dashboard_overview
+from services.demo_seed_service import seed_demo_data
+from services.media_account_service import (
+    MediaAccountCheckError,
+    MediaAccountNotFoundError,
+    check_media_account,
+    get_media_accounts_overview,
+)
+from services.project_service import (
+    ProjectHasArticlesError,
+    ProjectNotFoundError,
+    create_project,
+    delete_project,
+    get_project,
+    list_projects,
+    update_project,
+)
+from services.publish_job_executor import execute_publish_job
+from services.publish_job_service import (
+    PUBLISH_JOB_STATUSES,
+    InvalidPublishJobTransitionError,
+    PublishJobNotFoundError,
+    UnsupportedPublishPlatformError,
+    create_publish_job,
+    get_publish_job,
+    list_publish_jobs,
+    retry_publish_job,
+)
+from services.publish_scheduler_runtime import create_publish_scheduler
+from services.real_publisher_factory import create_real_publisher_factory
 
 active_queues = {}
 app = Flask(__name__)
+
+# Web 启动时只补齐运行目录和已有表，不删除或覆盖现有数据。
+Path(BASE_DIR / "videoFile").mkdir(parents=True, exist_ok=True)
+Path(BASE_DIR / "cookiesFile").mkdir(parents=True, exist_ok=True)
+configured_database_path = os.getenv("DATABASE_PATH")
+app.config["DATABASE_PATH"] = (
+    Path(configured_database_path).expanduser().resolve()
+    if configured_database_path
+    else Path(BASE_DIR / "db" / "database.db")
+)
+app.config["DEMO_MODE"] = str(os.getenv("DEMO_MODE", "false")).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+app.config["SEED_DEMO_DATA"] = str(
+    os.getenv("SEED_DEMO_DATA", "true")
+).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+app.config["ALLOW_REAL_PUBLISHING"] = str(
+    os.getenv("ALLOW_REAL_PUBLISHING", "false")
+).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+initialize_database(app.config["DATABASE_PATH"])
+if app.config["DEMO_MODE"] and app.config["SEED_DEMO_DATA"]:
+    app.config["DEMO_SEED_RESULT"] = seed_demo_data(app.config["DATABASE_PATH"])
 
 #允许所有来源跨域访问
 CORS(app)
@@ -43,6 +126,661 @@ def vite_svg():
 @app.route('/')
 def index():  # put application's code here
     return send_from_directory(current_dir, 'index.html')
+
+
+ARTICLE_LENGTHS = {600, 1000, 1500}
+ARTICLE_CONTENT_TYPES = {
+    "行业科普",
+    "品牌介绍",
+    "产品介绍",
+    "解决方案",
+    "对比文章",
+    "FAQ",
+    "新闻稿",
+}
+
+
+@app.route('/api/articles/generate', methods=['POST'])
+def generate_article():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
+
+    try:
+        project_id = int(data.get("project_id"))
+    except (TypeError, ValueError):
+        return jsonify({"code": 400, "msg": "project_id 必须是整数", "data": None}), 400
+    if project_id <= 0:
+        return jsonify({"code": 400, "msg": "project_id 必须是正整数", "data": None}), 400
+
+    topic = str(data.get("topic") or "").strip()
+    if not topic:
+        return jsonify({"code": 400, "msg": "文章主题不能为空", "data": None}), 400
+
+    try:
+        length = int(data.get("length", 1000))
+    except (TypeError, ValueError):
+        return jsonify({"code": 400, "msg": "文章长度必须是整数", "data": None}), 400
+    if length not in ARTICLE_LENGTHS:
+        return jsonify({"code": 400, "msg": "文章长度仅支持 600、1000、1500", "data": None}), 400
+
+    content_type = str(data.get("content_type") or "行业科普").strip()
+    if content_type not in ARTICLE_CONTENT_TYPES:
+        return jsonify({"code": 400, "msg": "不支持的内容类型", "data": None}), 400
+
+    project = _get_project(project_id)
+    if project is None:
+        return jsonify({"code": 404, "msg": "品牌项目不存在", "data": None}), 404
+
+    requested_keywords = data.get("keywords", project["keywords"])
+    if not isinstance(requested_keywords, list):
+        return jsonify({"code": 400, "msg": "keywords 必须是字符串数组", "data": None}), 400
+    keywords = _normalize_string_list(requested_keywords)
+    target_platform = str(
+        data.get("target_platform") or data.get("targetPlatform") or ""
+    ).strip()
+
+    try:
+        article = generate_geo_content(
+            project=project,
+            topic=topic,
+            keywords=keywords,
+            length=length,
+            content_type=content_type,
+            target_platform=target_platform,
+        )
+    except AIConfigurationError as exc:
+        return jsonify({"code": 503, "msg": str(exc), "data": None}), 503
+    except AIServiceError as exc:
+        return jsonify({"code": 502, "msg": str(exc), "data": None}), 502
+
+    return jsonify({"code": 200, "msg": "success", "data": article}), 200
+
+
+@app.route('/api/dashboard', methods=['GET'])
+def get_dashboard_data():
+    overview = get_dashboard_overview(app.config["DATABASE_PATH"])
+    return jsonify({"code": 200, "msg": "success", "data": overview}), 200
+
+
+@app.route('/api/media-accounts', methods=['GET'])
+def get_media_accounts():
+    overview = get_media_accounts_overview(
+        app.config["DATABASE_PATH"],
+        cookies_directory=Path(BASE_DIR / "cookiesFile"),
+    )
+    return jsonify({"code": 200, "msg": "success", "data": overview}), 200
+
+
+@app.route('/api/media-accounts/<int:account_id>/check', methods=['POST'])
+async def check_media_account_status(account_id):
+    try:
+        account = await check_media_account(
+            app.config["DATABASE_PATH"],
+            account_id,
+            cookies_directory=Path(BASE_DIR / "cookiesFile"),
+            checker=check_cookie,
+        )
+    except MediaAccountNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except MediaAccountCheckError as exc:
+        return jsonify({"code": 502, "msg": str(exc), "data": None}), 502
+    return jsonify({"code": 200, "msg": "success", "data": account}), 200
+
+
+def _get_project(project_id):
+    with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
+        conn.row_factory = sqlite3.Row
+        row = conn.execute(
+            "SELECT * FROM projects WHERE id = ?",
+            (project_id,),
+        ).fetchone()
+    if row is None:
+        return None
+    project = dict(row)
+    project["keywords"] = _decode_json_list(project.get("keywords"))
+    project["competitors"] = _decode_json_list(project.get("competitors"))
+    return project
+
+
+def _decode_json_list(value):
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return _normalize_string_list(parsed) if isinstance(parsed, list) else []
+
+
+def _normalize_string_list(values):
+    result = []
+    for value in values:
+        item = str(value).strip()
+        if item and item not in result:
+            result.append(item)
+    return result
+
+
+@app.route('/api/geo/score', methods=['POST'])
+def calculate_geo_score():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
+
+    title = str(data.get("title") or "").strip()
+    content = str(data.get("content") or "").strip()
+    brand = str(data.get("brand") or "").strip()
+    keywords = data.get("keywords", [])
+
+    if not title:
+        return jsonify({"code": 400, "msg": "文章标题不能为空", "data": None}), 400
+    if not content:
+        return jsonify({"code": 400, "msg": "文章正文不能为空", "data": None}), 400
+    if not brand:
+        return jsonify({"code": 400, "msg": "品牌名称不能为空", "data": None}), 400
+    if not isinstance(keywords, list):
+        return jsonify({"code": 400, "msg": "keywords 必须是字符串数组", "data": None}), 400
+
+    result = score_geo_content(
+        title=title,
+        content=content,
+        brand=brand,
+        keywords=_normalize_string_list(keywords),
+    )
+    return jsonify(result), 200
+
+
+@app.route('/api/articles', methods=['POST'])
+def save_article():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
+
+    try:
+        project_id = int(data.get("project_id"))
+    except (TypeError, ValueError):
+        return jsonify({"code": 400, "msg": "project_id 必须是整数", "data": None}), 400
+    if project_id <= 0:
+        return jsonify({"code": 400, "msg": "project_id 必须是正整数", "data": None}), 400
+
+    article_data, validation_error = _parse_article_fields(data, partial=False)
+    if validation_error:
+        return jsonify({"code": 400, "msg": validation_error, "data": None}), 400
+
+    try:
+        article = create_article(
+            app.config["DATABASE_PATH"],
+            project_id=project_id,
+            **article_data,
+        )
+    except ProjectNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+
+    return jsonify({"code": 201, "msg": "文章已保存", "data": article}), 201
+
+
+@app.route('/api/articles', methods=['GET'])
+def get_article_list():
+    page, error = _parse_positive_query_integer("page", default=1)
+    if error:
+        return jsonify({"code": 400, "msg": error, "data": None}), 400
+    page_size, error = _parse_positive_query_integer("page_size", default=20)
+    if error:
+        return jsonify({"code": 400, "msg": error, "data": None}), 400
+    if page_size > 100:
+        return jsonify({"code": 400, "msg": "page_size 不能超过 100", "data": None}), 400
+
+    project_id = None
+    if "project_id" in request.args:
+        project_id, error = _parse_positive_query_integer("project_id")
+        if error:
+            return jsonify({"code": 400, "msg": error, "data": None}), 400
+
+    status = request.args.get("status")
+    if status is not None and status not in ARTICLE_STATUSES:
+        return jsonify({"code": 400, "msg": "不支持的文章状态", "data": None}), 400
+
+    result = list_articles(
+        app.config["DATABASE_PATH"],
+        project_id=project_id,
+        status=status,
+        page=page,
+        page_size=page_size,
+    )
+    return jsonify({"code": 200, "msg": "success", "data": result}), 200
+
+
+@app.route('/api/articles/<int:article_id>', methods=['GET'])
+def get_article_detail(article_id):
+    try:
+        article = get_article(app.config["DATABASE_PATH"], article_id)
+    except ArticleNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    return jsonify({"code": 200, "msg": "success", "data": article}), 200
+
+
+@app.route('/api/articles/<int:article_id>', methods=['PUT'])
+def edit_article(article_id):
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
+    if "project_id" in data:
+        return jsonify({"code": 400, "msg": "project_id 不支持修改", "data": None}), 400
+
+    article_data, validation_error = _parse_article_fields(data, partial=True)
+    if validation_error:
+        return jsonify({"code": 400, "msg": validation_error, "data": None}), 400
+    if not article_data:
+        return jsonify({"code": 400, "msg": "没有可更新的文章字段", "data": None}), 400
+
+    try:
+        article = update_article(
+            app.config["DATABASE_PATH"],
+            article_id,
+            article_data,
+        )
+    except ArticleNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except ProjectNotFoundError as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+
+    return jsonify({"code": 200, "msg": "文章已更新", "data": article}), 200
+
+
+@app.route('/api/articles/<int:article_id>/optimize', methods=['POST'])
+def optimize_article(article_id):
+    try:
+        article = get_article(app.config["DATABASE_PATH"], article_id)
+    except ArticleNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+
+    project = _get_project(article["project_id"])
+    if project is None:
+        return jsonify({"code": 409, "msg": "文章关联的品牌项目不存在", "data": None}), 409
+
+    before_score = score_geo_content(
+        title=article["title"],
+        content=article["content"],
+        brand=project["name"],
+        keywords=project["keywords"],
+    )
+    try:
+        optimized = optimize_geo_content(article=article, score=before_score)
+    except AIConfigurationError as exc:
+        return jsonify({"code": 503, "msg": str(exc), "data": None}), 503
+    except AIServiceError as exc:
+        return jsonify({"code": 502, "msg": str(exc), "data": None}), 502
+
+    after_score = score_geo_content(
+        title=optimized["title"],
+        content=optimized["content"],
+        brand=project["name"],
+        keywords=project["keywords"],
+    )
+    return jsonify(
+        {
+            "code": 200,
+            "msg": "优化稿已生成，确认后再保存",
+            "data": {
+                "optimized": optimized,
+                "before": before_score,
+                "after": after_score,
+            },
+        }
+    ), 200
+
+
+def _parse_article_fields(data, *, partial):
+    result = {}
+    defaults = {
+        "title": "",
+        "summary": "",
+        "content": "",
+        "tags": [],
+        "status": "draft",
+    }
+    for field in ("title", "summary", "content"):
+        if partial and field not in data:
+            continue
+        value = data.get(field, defaults[field])
+        if value is None and field == "summary":
+            value = ""
+        if not isinstance(value, str):
+            return None, f"{field} 必须是字符串"
+        value = value.strip()
+        if field in {"title", "content"} and not value:
+            message = "文章标题不能为空" if field == "title" else "文章正文不能为空"
+            return None, message
+        result[field] = value
+
+    if not partial or "tags" in data:
+        tags = data.get("tags", defaults["tags"])
+        if not isinstance(tags, list):
+            return None, "tags 必须是字符串数组"
+        result["tags"] = _normalize_string_list(tags)
+
+    if not partial or "status" in data:
+        status = data.get("status", defaults["status"])
+        if not isinstance(status, str) or status not in ARTICLE_STATUSES:
+            return None, "不支持的文章状态"
+        result["status"] = status
+
+    return result, None
+
+
+def _parse_positive_query_integer(name, *, default=None):
+    raw_value = request.args.get(name)
+    if raw_value is None and default is not None:
+        return default, None
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return None, f"{name} 必须是整数"
+    if value <= 0:
+        return None, f"{name} 必须是正整数"
+    return value, None
+
+
+@app.route('/api/publish', methods=['POST'])
+def create_publish_task():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
+
+    try:
+        article_id = int(data.get("article_id"))
+    except (TypeError, ValueError):
+        return jsonify({"code": 400, "msg": "article_id 必须是整数", "data": None}), 400
+    if article_id <= 0:
+        return jsonify({"code": 400, "msg": "article_id 必须是正整数", "data": None}), 400
+
+    platform = str(data.get("platform") or "").strip().lower()
+    if not platform:
+        return jsonify({"code": 400, "msg": "platform 不能为空", "data": None}), 400
+
+    try:
+        job = create_publish_job(
+            app.config["DATABASE_PATH"],
+            article_id=article_id,
+            platform=platform,
+            publish_at=data.get("publish_at"),
+            demo=bool(app.config.get("DEMO_MODE", False)),
+        )
+    except ArticleNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except (UnsupportedPublishPlatformError, ValueError) as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+
+    return jsonify(
+        {"code": 201, "msg": "发布任务已创建", "data": _publish_job_payload(job)}
+    ), 201
+
+
+@app.route('/api/publish/jobs', methods=['GET'])
+def get_publish_task_list():
+    page, error = _parse_positive_query_integer("page", default=1)
+    if error:
+        return jsonify({"code": 400, "msg": error, "data": None}), 400
+    page_size, error = _parse_positive_query_integer("page_size", default=20)
+    if error:
+        return jsonify({"code": 400, "msg": error, "data": None}), 400
+    if page_size > 100:
+        return jsonify({"code": 400, "msg": "page_size 不能超过 100", "data": None}), 400
+
+    article_id = None
+    if "article_id" in request.args:
+        article_id, error = _parse_positive_query_integer("article_id")
+        if error:
+            return jsonify({"code": 400, "msg": error, "data": None}), 400
+
+    status = request.args.get("status")
+    if status is not None and status not in PUBLISH_JOB_STATUSES:
+        return jsonify({"code": 400, "msg": "不支持的发布任务状态", "data": None}), 400
+
+    try:
+        result = list_publish_jobs(
+            app.config["DATABASE_PATH"],
+            article_id=article_id,
+            platform=request.args.get("platform"),
+            status=status,
+            page=page,
+            page_size=page_size,
+        )
+    except UnsupportedPublishPlatformError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+
+    result["items"] = [_publish_job_payload(job) for job in result["items"]]
+    return jsonify({"code": 200, "msg": "success", "data": result}), 200
+
+
+@app.route('/api/publish/jobs/<int:job_id>', methods=['GET'])
+def get_publish_task_detail(job_id):
+    try:
+        job = get_publish_job(app.config["DATABASE_PATH"], job_id)
+    except PublishJobNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    return jsonify(
+        {"code": 200, "msg": "success", "data": _publish_job_payload(job)}
+    ), 200
+
+
+@app.route('/api/publish/jobs/<int:job_id>/retry', methods=['POST'])
+def retry_publish_task(job_id):
+    try:
+        job = retry_publish_job(app.config["DATABASE_PATH"], job_id)
+    except PublishJobNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except InvalidPublishJobTransitionError as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+    return jsonify(
+        {"code": 200, "msg": "发布任务已重新排队", "data": _publish_job_payload(job)}
+    ), 200
+
+
+@app.route('/api/publish/jobs/<int:job_id>/execute', methods=['POST'])
+def execute_demo_publish_task(job_id):
+    try:
+        current = get_publish_job(app.config["DATABASE_PATH"], job_id)
+    except PublishJobNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    if not current["demo"]:
+        return jsonify(
+            {
+                "code": 409,
+                "msg": "真实平台执行尚未开放；请先配置媒体账号和人工登录",
+                "data": None,
+            }
+        ), 409
+
+    try:
+        job = execute_publish_job(app.config["DATABASE_PATH"], job_id)
+    except InvalidPublishJobTransitionError as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+    return jsonify(
+        {"code": 200, "msg": "演示发布任务执行完成", "data": _publish_job_payload(job)}
+    ), 200
+
+
+@app.route('/api/publish/jobs/<int:job_id>/execute-real', methods=['POST'])
+def execute_real_publish_task(job_id):
+    try:
+        current = get_publish_job(app.config["DATABASE_PATH"], job_id)
+    except PublishJobNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+
+    if current["demo"]:
+        return jsonify(
+            {"code": 409, "msg": "演示任务不能通过真实发布入口执行", "data": None}
+        ), 409
+    if app.config.get("DEMO_MODE", False):
+        return jsonify(
+            {"code": 403, "msg": "Demo Mode 已开启，真实发布被禁用", "data": None}
+        ), 403
+    if not app.config.get("ALLOW_REAL_PUBLISHING", False):
+        return jsonify(
+            {
+                "code": 403,
+                "msg": "真实发布总开关未开启，请设置 ALLOW_REAL_PUBLISHING=true",
+                "data": None,
+            }
+        ), 403
+    data = request.get_json(silent=True) or {}
+    if data.get("confirm") is not True:
+        return jsonify(
+            {"code": 400, "msg": "真实发布需要明确确认", "data": None}
+        ), 400
+    if current["platform"] != "zhihu":
+        return jsonify(
+            {
+                "code": 409,
+                "msg": f"{current['platform']} 尚未接入真实文章发布器",
+                "data": None,
+            }
+        ), 409
+
+    publisher_factory = create_real_publisher_factory(
+        app.config["DATABASE_PATH"],
+        cookies_directory=Path(BASE_DIR / "cookiesFile"),
+    )
+    try:
+        job = execute_publish_job(
+            app.config["DATABASE_PATH"],
+            job_id,
+            publisher_factory=publisher_factory,
+        )
+    except InvalidPublishJobTransitionError as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+    return jsonify(
+        {
+            "code": 200,
+            "msg": "知乎真实发布流程已执行，请以任务状态和平台结果为准",
+            "data": _publish_job_payload(job),
+        }
+    ), 200
+
+
+def _publish_job_payload(job):
+    payload = {
+        "job_id": job["id"],
+        "article_id": job["article_id"],
+        "platform": job["platform"],
+        "status": job["status"],
+        "message": job["message"],
+        "url": job["result_url"],
+        "publish_at": job["publish_at"],
+        "demo": bool(job["demo"]),
+        "created_at": job["created_at"],
+        "started_at": job["started_at"],
+        "finished_at": job["finished_at"],
+        "can_execute_real": bool(
+            not job["demo"]
+            and not app.config.get("DEMO_MODE", False)
+            and app.config.get("ALLOW_REAL_PUBLISHING", False)
+            and job["platform"] == "zhihu"
+            and job["status"] == "queued"
+        ),
+    }
+    if "article_title" in job:
+        payload["article_title"] = job["article_title"]
+    return payload
+
+
+@app.route('/api/projects', methods=['POST'])
+def save_project():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
+
+    project_data, validation_error = _parse_project_fields(data, partial=False)
+    if validation_error:
+        return jsonify({"code": 400, "msg": validation_error, "data": None}), 400
+    project = create_project(app.config["DATABASE_PATH"], **project_data)
+    return jsonify({"code": 201, "msg": "项目已创建", "data": project}), 201
+
+
+@app.route('/api/projects', methods=['GET'])
+def get_project_list():
+    projects = list_projects(app.config["DATABASE_PATH"])
+    return jsonify({"code": 200, "msg": "success", "data": projects}), 200
+
+
+@app.route('/api/projects/<int:project_id>', methods=['GET'])
+def get_project_detail(project_id):
+    try:
+        project = get_project(app.config["DATABASE_PATH"], project_id)
+    except ProjectNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    return jsonify({"code": 200, "msg": "success", "data": project}), 200
+
+
+@app.route('/api/projects/<int:project_id>', methods=['PUT'])
+def edit_project(project_id):
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
+
+    project_data, validation_error = _parse_project_fields(data, partial=True)
+    if validation_error:
+        return jsonify({"code": 400, "msg": validation_error, "data": None}), 400
+    if not project_data:
+        return jsonify({"code": 400, "msg": "没有可更新的项目字段", "data": None}), 400
+
+    try:
+        project = update_project(
+            app.config["DATABASE_PATH"],
+            project_id,
+            project_data,
+        )
+    except ProjectNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    return jsonify({"code": 200, "msg": "项目已更新", "data": project}), 200
+
+
+@app.route('/api/projects/<int:project_id>', methods=['DELETE'])
+def remove_project(project_id):
+    try:
+        delete_project(app.config["DATABASE_PATH"], project_id)
+    except ProjectNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except ProjectHasArticlesError as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+    return jsonify({"code": 200, "msg": "项目已删除", "data": {"id": project_id}}), 200
+
+
+def _parse_project_fields(data, *, partial):
+    result = {}
+    text_fields = (
+        "name",
+        "website",
+        "product",
+        "industry",
+        "description",
+    )
+    for field in text_fields:
+        if partial and field not in data:
+            continue
+        value = data.get(field, "")
+        if value is None and field != "name":
+            value = ""
+        if not isinstance(value, str):
+            return None, f"{field} 必须是字符串"
+        value = value.strip()
+        if field == "name" and not value:
+            return None, "品牌名称不能为空"
+        if field == "name" and len(value) > 100:
+            return None, "品牌名称不能超过 100 个字符"
+        result[field] = value
+
+    for field in ("keywords", "competitors"):
+        if partial and field not in data:
+            continue
+        value = data.get(field, [])
+        if not isinstance(value, list):
+            return None, f"{field} 必须是字符串数组"
+        result[field] = _normalize_string_list(value)
+
+    return result, None
 
 @app.route('/upload', methods=['POST'])
 def upload_file():
@@ -1053,4 +1791,19 @@ def sse_stream(status_queue):
             time.sleep(0.1)
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0' ,port=5409)
+    try:
+        scheduler_interval = max(
+            5,
+            int(os.getenv("PUBLISH_SCHEDULER_INTERVAL_SECONDS", "15")),
+        )
+    except ValueError:
+        scheduler_interval = 15
+    publish_scheduler = create_publish_scheduler(
+        app.config["DATABASE_PATH"],
+        interval_seconds=scheduler_interval,
+    )
+    publish_scheduler.start()
+    try:
+        app.run(host='0.0.0.0', port=5409)
+    finally:
+        publish_scheduler.shutdown(wait=False)

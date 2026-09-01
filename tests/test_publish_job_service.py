@@ -1,0 +1,320 @@
+import sqlite3
+import tempfile
+import unittest
+from contextlib import closing
+from datetime import datetime, timezone
+from pathlib import Path
+
+from db.createTable import initialize_database
+from services.article_service import ArticleNotFoundError
+from services.publish_job_service import (
+    InvalidPublishJobTransitionError,
+    PublishJobNotFoundError,
+    UnsupportedPublishPlatformError,
+    claim_publish_job,
+    create_publish_job,
+    get_publish_job,
+    list_publish_jobs,
+    reconcile_publish_job_success,
+    retry_publish_job,
+    transition_publish_job,
+    update_publish_job_progress,
+)
+
+
+class PublishJobServiceTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.temp_dir.name) / "database.db"
+        initialize_database(self.db_path)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                project_id = conn.execute(
+                    "INSERT INTO projects (name) VALUES (?)",
+                    ("XX科技",),
+                ).lastrowid
+                self.article_id = conn.execute(
+                    """
+                    INSERT INTO articles (project_id, title, content, status)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (project_id, "企业 AI Agent 指南", "正文", "ready"),
+                ).lastrowid
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def test_creates_queued_and_scheduled_jobs(self):
+        queued = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform=" ZHIHU ",
+        )
+        scheduled = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="toutiao",
+            publish_at=datetime(2026, 9, 2, 9, 30, tzinfo=timezone.utc),
+            demo=True,
+        )
+
+        self.assertEqual(queued["status"], "queued")
+        self.assertEqual(queued["platform"], "zhihu")
+        self.assertFalse(queued["demo"])
+        self.assertEqual(queued["article_title"], "企业 AI Agent 指南")
+        self.assertEqual(scheduled["status"], "scheduled")
+        self.assertEqual(scheduled["publish_at"], "2026-09-02 09:30:00+00:00")
+        self.assertTrue(scheduled["demo"])
+        self.assertEqual(get_publish_job(self.db_path, scheduled["id"]), scheduled)
+
+    def test_lists_and_filters_jobs_with_pagination(self):
+        first = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="zhihu",
+        )
+        second = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="toutiao",
+        )
+        transition_publish_job(self.db_path, first["id"], "processing")
+        transition_publish_job(self.db_path, first["id"], "failed", message="网络异常")
+
+        all_jobs = list_publish_jobs(self.db_path, page=1, page_size=1)
+        failed_jobs = list_publish_jobs(
+            self.db_path,
+            platform="zhihu",
+            status="failed",
+        )
+
+        self.assertEqual(all_jobs["pagination"]["total"], 2)
+        self.assertEqual(all_jobs["items"][0]["id"], second["id"])
+        self.assertEqual(failed_jobs["pagination"]["total"], 1)
+        self.assertEqual(failed_jobs["items"][0]["message"], "网络异常")
+
+    def test_transitions_through_processing_to_success(self):
+        job = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="zhihu",
+        )
+
+        processing = transition_publish_job(
+            self.db_path,
+            job["id"],
+            "processing",
+            message="正在打开知乎编辑器",
+        )
+        success = transition_publish_job(
+            self.db_path,
+            job["id"],
+            "success",
+            message="发布成功",
+            result_url="https://www.zhihu.com/p/123",
+        )
+
+        self.assertEqual(processing["status"], "processing")
+        self.assertTrue(processing["started_at"])
+        self.assertIsNone(processing["finished_at"])
+        self.assertEqual(success["status"], "success")
+        self.assertEqual(success["result_url"], "https://www.zhihu.com/p/123")
+        self.assertTrue(success["finished_at"])
+
+    def test_claims_a_queued_job_only_once(self):
+        job = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="zhihu",
+        )
+
+        claimed = claim_publish_job(self.db_path, job["id"])
+
+        self.assertEqual(claimed["status"], "processing")
+        self.assertTrue(claimed["started_at"])
+        with self.assertRaisesRegex(
+            InvalidPublishJobTransitionError,
+            "不能开始执行",
+        ):
+            claim_publish_job(self.db_path, job["id"])
+
+    def test_updates_processing_message_without_finishing_job(self):
+        job = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="zhihu",
+        )
+        claim_publish_job(self.db_path, job["id"])
+
+        updated = update_publish_job_progress(
+            self.db_path,
+            job["id"],
+            message="已点击发布，等待平台确认",
+        )
+
+        self.assertEqual(updated["status"], "processing")
+        self.assertEqual(updated["message"], "已点击发布，等待平台确认")
+        self.assertIsNone(updated["finished_at"])
+
+    def test_retries_failed_and_need_action_jobs(self):
+        failed_job = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="zhihu",
+        )
+        transition_publish_job(self.db_path, failed_job["id"], "processing")
+        transition_publish_job(
+            self.db_path,
+            failed_job["id"],
+            "failed",
+            message="页面结构变化",
+        )
+
+        retried = retry_publish_job(self.db_path, failed_job["id"])
+
+        self.assertEqual(retried["status"], "queued")
+        self.assertEqual(retried["message"], "")
+        self.assertIsNone(retried["started_at"])
+        self.assertIsNone(retried["finished_at"])
+
+        action_job = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="toutiao",
+        )
+        transition_publish_job(
+            self.db_path,
+            action_job["id"],
+            "need_action",
+            message="需要人工确认",
+        )
+        self.assertEqual(
+            retry_publish_job(self.db_path, action_job["id"])["status"],
+            "queued",
+        )
+
+    def test_reconciles_failed_job_with_platform_article_proof(self):
+        job = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="zhihu",
+        )
+        transition_publish_job(self.db_path, job["id"], "processing")
+        transition_publish_job(
+            self.db_path,
+            job["id"],
+            "failed",
+            message="发布后页面导航导致本地状态未知",
+        )
+
+        reconciled = reconcile_publish_job_success(
+            self.db_path,
+            job["id"],
+            result_url="https://zhuanlan.zhihu.com/p/123",
+        )
+
+        self.assertEqual(reconciled["status"], "success")
+        self.assertEqual(
+            reconciled["result_url"],
+            "https://zhuanlan.zhihu.com/p/123",
+        )
+        self.assertTrue(reconciled["finished_at"])
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            article_status = conn.execute(
+                "SELECT status FROM articles WHERE id = ?",
+                (self.article_id,),
+            ).fetchone()[0]
+        self.assertEqual(article_status, "published")
+
+    def test_article_stays_published_when_another_platform_fails(self):
+        zhihu_job = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="zhihu",
+        )
+        toutiao_job = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="toutiao",
+        )
+        transition_publish_job(self.db_path, zhihu_job["id"], "processing")
+        transition_publish_job(self.db_path, toutiao_job["id"], "processing")
+        transition_publish_job(self.db_path, zhihu_job["id"], "success")
+        transition_publish_job(self.db_path, toutiao_job["id"], "failed")
+
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            article_status = conn.execute(
+                "SELECT status FROM articles WHERE id = ?",
+                (self.article_id,),
+            ).fetchone()[0]
+        self.assertEqual(article_status, "published")
+
+    def test_reconciliation_requires_proof_and_ambiguous_status(self):
+        job = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="zhihu",
+        )
+        with self.assertRaisesRegex(ValueError, "文章链接"):
+            reconcile_publish_job_success(self.db_path, job["id"], result_url="")
+        with self.assertRaises(InvalidPublishJobTransitionError):
+            reconcile_publish_job_success(
+                self.db_path,
+                job["id"],
+                result_url="https://zhuanlan.zhihu.com/p/123",
+            )
+
+    def test_rejects_invalid_transitions_and_non_retryable_jobs(self):
+        job = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="zhihu",
+        )
+
+        with self.assertRaisesRegex(
+            InvalidPublishJobTransitionError,
+            "queued.*success",
+        ):
+            transition_publish_job(self.db_path, job["id"], "success")
+        with self.assertRaises(InvalidPublishJobTransitionError):
+            retry_publish_job(self.db_path, job["id"])
+        with self.assertRaises(PublishJobNotFoundError):
+            get_publish_job(self.db_path, 999999)
+
+    def test_rejects_unknown_article_platform_and_publish_time(self):
+        with self.assertRaises(ArticleNotFoundError):
+            create_publish_job(
+                self.db_path,
+                article_id=999999,
+                platform="zhihu",
+            )
+        with self.assertRaises(UnsupportedPublishPlatformError):
+            create_publish_job(
+                self.db_path,
+                article_id=self.article_id,
+                platform="unknown",
+            )
+        with self.assertRaisesRegex(ValueError, "ISO 8601"):
+            create_publish_job(
+                self.db_path,
+                article_id=self.article_id,
+                platform="zhihu",
+                publish_at="tomorrow morning",
+            )
+
+    def test_article_delete_cascades_to_publish_jobs(self):
+        create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="zhihu",
+        )
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.execute("PRAGMA foreign_keys = ON")
+            with conn:
+                conn.execute("DELETE FROM articles WHERE id = ?", (self.article_id,))
+            count = conn.execute("SELECT COUNT(*) FROM publish_jobs").fetchone()[0]
+        self.assertEqual(count, 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -1,6 +1,8 @@
-# OmniPost
+# OmniPost · GEO 智能内容引擎
 
 **OmniPost** 是多平台自媒体内容自动发布工具：支持将 **视频 / 图文** 一键发布到 `抖音`、`Bilibili`、`小红书`、`快手`、`视频号`、`百家号`、`今日头条`、`搜狐号`、`知乎`、`TikTok` 等平台，并提供 **Web 管理台**、**统一 CLI（`sau`）** 与 **示例脚本** 三种使用方式。
+
+当前二开版本在保留原 uploader 与 CLI 的基础上，增加了品牌项目、AI 内容生成、GEO Score、内容库、统一发布任务、Demo Mode 和定时发布链路。新业务模块与原 uploader 解耦，真实平台仍需人工登录并遵守平台验证流程。
 
 > 本仓库基于开源项目 [dreammis/social-auto-upload](https://github.com/dreammis/social-auto-upload) 二开。感谢原作者与社区贡献者。
 
@@ -49,6 +51,9 @@
 - **定时发布**：多数平台支持（以各平台后台能力为准）
 - **统一 CLI**：`sau <platform> <action>`，便于脚本化与 Agent 调用
 - **可扩展 uploader**：每个平台独立模块，便于二开接入新平台
+- **GEO 内容工作流**：品牌底稿 → AI 生成 → GEO 评分/优化 → 内容库 → 多渠道分发
+- **可追踪发布任务**：`queued / processing / success / failed / need_action / scheduled`
+- **安全 Demo Mode**：完整执行任务状态链，但明确标记为演示且不访问真实平台
 
 为什么还需要这种项目：上传是高频、重复、流程固定的工作。与其每次让通用 Browser Agent 临场解析页面，不如把已验证的发布链路固化成脚本 / CLI / Web 任务。
 
@@ -58,6 +63,7 @@
 | --- | --- |
 | `sau_backend.py` | Flask API：账号、素材、发布任务 |
 | `sau_frontend/` | Vue3 + Element Plus 管理台（账号 / 素材 / 发布中心） |
+| `services/` | GEO 评分、AI、项目/文章、发布适配器、执行器与调度服务 |
 | `uploader/*` | 各平台 Playwright / 专用运行时上传实现 |
 | `sau_cli.py` | 统一 CLI 入口（安装后命令为 `sau`） |
 | `examples/` | 单平台登录 / 上传示例脚本 |
@@ -88,6 +94,9 @@ uv venv
 # source .venv/bin/activate
 
 uv pip install -e .
+
+# 使用 Web 管理台时安装 Web 可选依赖
+uv pip install -e ".[web]"
 ```
 
 安装后可直接使用 `sau` 命令（CLI 入口名暂仍为上游的 `sau`，后续可再改为 `omnipost`）。
@@ -111,13 +120,10 @@ playwright install chromium
 ### 3. 配置与数据库
 
 ```bash
-# 复制配置（按需修改本地 Chrome 路径、调试开关等）
-cp conf.example.py conf.py   # Windows 可用 copy
-
 python db/createTable.py
 ```
 
-**不要**把 `conf.py`、`cookies/`、`cookiesFile/`、`database.db` 提交到公开仓库。
+`conf.py` 只包含可公开的默认值；本地 Chrome 路径、无头模式等通过 `LOCAL_CHROME_PATH`、`LOCAL_CHROME_HEADLESS`、`DEBUG_MODE` 环境变量覆盖。**不要**把 `.env`、`cookies/`、`cookiesFile/`、`database.db` 提交到公开仓库。
 
 ### 4. Web 前后端（可选）
 
@@ -133,16 +139,51 @@ npm run dev
 # 默认 http://localhost:5173
 ```
 
+本地演示建议显式开启 Demo Mode：
+
+```powershell
+# PowerShell
+$env:DEMO_MODE="true"
+python sau_backend.py
+```
+
+```bash
+# Linux / macOS
+DEMO_MODE=true python sau_backend.py
+```
+
+Demo Mode 首次连接到**完全空的数据库**时，会在一个事务内准备“XX科技（示例数据）”、6 篇带“示例数据”标签的文章，以及覆盖成功、失败、等待确认和计划中状态的演示发布历史。重复启动不会重复写入；只要数据库里已有任意项目、文章或发布任务，种子服务就会跳过，不会把样例混进用户数据。可通过 `SEED_DEMO_DATA=false` 单独关闭这一行为。
+
 ## 快速开始
 
 ### 方式 A：Web 发布中心
 
-1. 启动后端 + 前端  
-2. 打开「账号管理」添加并登录平台账号  
-3. 在「素材管理」上传视频 / 封面  
-4. 在「发布中心」选择平台、填写标题正文、发布或预览（dry-run）
+1. 启动后端 + 前端
+2. 在「品牌项目」维护品牌事实和核心关键词
+3. 使用「AI 内容创作」生成稿件，在「内容库」标记为就绪
+4. 在「发布中心」选择稿件与多个平台，创建即时或定时任务
+5. Demo Mode 会自动完成演示任务；真实发布需要先在「媒体账号」完成人工登录
 
 适合日常运营与多账号可视化管理。
+
+### GEO Web API
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| `POST` | `/api/articles/generate` | 通过 OpenAI-compatible API 生成 GEO 稿件 |
+| `POST` | `/api/geo/score` | 计算规则型 GEO Score |
+| `POST/GET` | `/api/projects` | 创建或查询品牌项目 |
+| `POST/GET` | `/api/articles` | 保存或查询文章 |
+| `POST` | `/api/publish` | 为一个文章和平台创建发布任务 |
+| `GET` | `/api/publish/jobs` | 查询发布任务与历史 |
+| `GET` | `/api/publish/jobs/:id` | 轮询单个任务状态 |
+| `POST` | `/api/publish/jobs/:id/retry` | 将失败/待人工任务重新排队 |
+| `POST` | `/api/publish/jobs/:id/execute` | 仅执行明确标记的 Demo 任务 |
+| `POST` | `/api/publish/jobs/:id/execute-real` | 三重门控后执行已确认的知乎真实任务 |
+| `GET` | `/api/media-accounts` | 读取媒体账号与平台连接概览，不主动检测平台 |
+| `POST` | `/api/media-accounts/:id/check` | 用户显式触发单账号 Cookie 状态检测 |
+
+多平台分发会为每个平台创建一条独立任务。一个平台失败不会阻塞其他平台，验证码、扫码、Cookie 失效、风控和页面结构变化统一进入 `need_action`，不会尝试绕过平台验证。
 
 ### 方式 B：CLI（当前已接入平台）
 
@@ -209,10 +250,38 @@ python examples/upload_article_to_baijiahao.py
 
 ## 配置说明
 
-- 配置模板：[`conf.example.py`](./conf.example.py) → 复制为 `conf.py`
+- 运行配置：[`conf.py`](./conf.py) 提供安全默认值，使用环境变量覆盖本地差异
 - Cookie 目录：`cookies/`（CLI / 示例）与 `cookiesFile/`（Web 账号）
 - 素材目录：常见为 `videoFile/`（以后端实际配置为准）
 - 日志：`logs/`
+
+GEO Web 运行环境变量：
+
+可从 [`.env.example`](./.env.example) 查看无敏感值模板；当前应用不会自动读取 `.env`，请在启动进程或部署平台中显式设置变量。
+
+| 变量 | 默认值 | 用途 |
+| --- | --- | --- |
+| `AI_BASE_URL` | 无 | OpenAI-compatible API 地址 |
+| `AI_API_KEY` | 无 | 模型 API Key，禁止写入仓库 |
+| `AI_MODEL` | 无 | 内容生成与优化使用的模型 |
+| `DEMO_MODE` | `false` | 为 `true` 时新发布任务使用 DemoPublisher |
+| `SEED_DEMO_DATA` | `true` | Demo Mode 下为空数据库准备幂等、明确标注的演示数据 |
+| `ALLOW_REAL_PUBLISHING` | `false` | 真实发布总开关；当前仅接入知乎文章 |
+| `DATABASE_PATH` | `db/database.db` | 可覆盖 SQLite 路径，便于隔离环境 |
+| `PUBLISH_SCHEDULER_INTERVAL_SECONDS` | `15` | 到期任务检查间隔，最少 5 秒 |
+
+定时任务由 APScheduler 在 `python sau_backend.py` 启动时注册。每次 tick 会原子地将到期任务从 `scheduled` 提升为 `queued`；Demo 任务随后自动执行，真实任务只进入队列，等待已配置账号的真实执行器处理。调度任务启用了单实例和合并补跑，避免同一进程内重复领取。
+
+知乎真实发布默认关闭。只有同时满足 `DEMO_MODE=false`、`ALLOW_REAL_PUBLISHING=true`、任务本身不是 Demo，并且操作者在发布中心二次确认时才会进入真实适配器。适配器仍会先验证登录状态；发布前通过当前账号的公开文章列表精确匹配标题，已存在时直接返回原链接，避免重复发布；发布后最多轮询 3 次公开文章结果并自动对账，但不会自动重复点击“发布”。公开结果查询不可用时会阻止新的真实发布。扫码、验证码、风控或 Cookie 失效会进入“待人工确认”，系统不会绕过平台安全机制。今日头条、百家号、搜狐号和小红书在第一版中仍只支持 Demo 任务，不能伪装成真实发布成功。
+
+> 部署安全边界：当前 MVP 没有用户认证且 Flask CORS 默认开放，仅适合本地或受控内网演示。启用真实发布时，不要把后端端口直接暴露到公网；公网部署前必须在反向代理或平台层增加访问控制、TLS，并保护 SQLite 与 `cookiesFile/` 持久卷。
+
+开发回归：
+
+```bash
+uv run python -m unittest discover -s tests -v
+cd sau_frontend && npm run build
+```
 
 开源或分享仓库前请确认敏感文件已被忽略，可参考 [`.gitignore`](./.gitignore)。
 

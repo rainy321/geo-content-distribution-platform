@@ -4,17 +4,14 @@ WORKDIR /app
 
 RUN npm config set registry https://registry.npmmirror.com
 
-COPY sau_frontend .
+COPY sau_frontend/package.json sau_frontend/package-lock.json ./
 
-RUN npm install
+RUN npm ci
+
+COPY sau_frontend .
 
 ENV NODE_ENV=production
 ENV PATH=/app/node_modules/.bin:$PATH
-
-#   替换前端中的地址
-RUN sed -i 's#\${baseUrl}##g' /app/src/views/AccountManagement.vue
-RUN sed -i "s#\${import\.meta\.env\.VITE_API_BASE_URL || 'http:\/\/localhost:5409'}##g" /app/src/api/material.js
-RUN sed -i 's#localhost:5409##g' /app/.env.production
 
 RUN npm run build
 
@@ -41,22 +38,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends libnss3 \
 
 RUN pip config set global.index-url https://mirrors.tuna.tsinghua.edu.cn/pypi/web/simple
 
-COPY requirements.txt requirements.txt
-
-RUN pip install -r requirements.txt
-
-RUN playwright install chromium-headless-shell
-
 COPY . .
+
+RUN pip install ".[web]"
+
+RUN playwright install chromium
+RUN patchright install chromium
+
+RUN mkdir -p /app/videoFile /app/cookiesFile
 
 COPY --from=builder /app/dist/index.html /app
 COPY --from=builder /app/dist/assets /app/assets
 COPY --from=builder /app/dist/vite.svg /app/assets
-
-RUN cp conf.example.py conf.py
-
-RUN mkdir -p /app/videoFile
-RUN mkdir -p /app/cookiesFile
 
 EXPOSE 5409
 
