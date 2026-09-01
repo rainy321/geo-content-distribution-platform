@@ -65,7 +65,37 @@ class PublishJobServiceTests(unittest.TestCase):
         self.assertEqual(scheduled["status"], "scheduled")
         self.assertEqual(scheduled["publish_at"], "2026-09-02 09:30:00+00:00")
         self.assertTrue(scheduled["demo"])
+        self.assertFalse(scheduled["auto_execute"])
         self.assertEqual(get_publish_job(self.db_path, scheduled["id"]), scheduled)
+
+    def test_persists_real_scheduled_auto_execute_authorization(self):
+        scheduled = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="zhihu",
+            publish_at="2026-09-02T18:00:00+08:00",
+            auto_execute=True,
+        )
+
+        self.assertEqual(scheduled["status"], "scheduled")
+        self.assertTrue(scheduled["auto_execute"])
+        self.assertTrue(get_publish_job(self.db_path, scheduled["id"])["auto_execute"])
+
+        with self.assertRaisesRegex(ValueError, "仅适用于定时"):
+            create_publish_job(
+                self.db_path,
+                article_id=self.article_id,
+                platform="zhihu",
+                auto_execute=True,
+            )
+        with self.assertRaisesRegex(ValueError, "必须是布尔值"):
+            create_publish_job(
+                self.db_path,
+                article_id=self.article_id,
+                platform="zhihu",
+                publish_at="2026-09-02T18:00:00+08:00",
+                auto_execute=1,
+            )
 
     def test_persists_portable_image_filenames_across_reads_and_retries(self):
         job = create_publish_job(

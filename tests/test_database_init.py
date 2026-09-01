@@ -181,7 +181,8 @@ class DatabaseInitializationTests(unittest.TestCase):
                 job = conn.execute(
                     """
                     SELECT article_id, platform, status, message, result_url,
-                           images, publish_at, demo, created_at, started_at, finished_at
+                           images, publish_at, auto_execute, demo,
+                           created_at, started_at, finished_at
                     FROM publish_jobs
                     """
                 ).fetchone()
@@ -197,6 +198,7 @@ class DatabaseInitializationTests(unittest.TestCase):
                     "result_url",
                     "images",
                     "publish_at",
+                    "auto_execute",
                     "demo",
                     "created_at",
                     "started_at",
@@ -204,12 +206,12 @@ class DatabaseInitializationTests(unittest.TestCase):
                 },
             )
             self.assertEqual(
-                job[:8],
-                (article_id, "zhihu", "queued", "", "", "[]", None, 0),
+                job[:9],
+                (article_id, "zhihu", "queued", "", "", "[]", None, 0, 0),
             )
-            self.assertTrue(job[8])
-            self.assertIsNone(job[9])
+            self.assertTrue(job[9])
             self.assertIsNone(job[10])
+            self.assertIsNone(job[11])
 
     def test_reinitialization_adds_images_to_existing_publish_jobs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -247,6 +249,7 @@ class DatabaseInitializationTests(unittest.TestCase):
                     "SELECT images FROM publish_jobs WHERE id = 1"
                 ).fetchone()[0]
             self.assertIn("images", columns)
+            self.assertIn("auto_execute", columns)
             self.assertEqual(images, "[]")
 
     def test_publish_jobs_reject_unknown_status_and_invalid_demo_flag(self):
@@ -279,6 +282,15 @@ class DatabaseInitializationTests(unittest.TestCase):
                         """
                         INSERT INTO publish_jobs (article_id, platform, demo)
                         VALUES (?, ?, ?)
+                        """,
+                        (article_id, "zhihu", 2),
+                    )
+                with self.assertRaises(sqlite3.IntegrityError):
+                    conn.execute(
+                        """
+                        INSERT INTO publish_jobs (
+                            article_id, platform, auto_execute
+                        ) VALUES (?, ?, ?)
                         """,
                         (article_id, "zhihu", 2),
                     )

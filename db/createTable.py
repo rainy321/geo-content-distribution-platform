@@ -100,6 +100,8 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                     result_url TEXT NOT NULL DEFAULT '',
                     images TEXT NOT NULL DEFAULT '[]',
                     publish_at DATETIME,
+                    auto_execute INTEGER NOT NULL DEFAULT 0
+                        CHECK (auto_execute IN (0, 1)),
                     demo INTEGER NOT NULL DEFAULT 0
                         CHECK (demo IN (0, 1)),
                     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -116,6 +118,12 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                 cursor.execute(
                     "ALTER TABLE publish_jobs "
                     "ADD COLUMN images TEXT NOT NULL DEFAULT '[]'"
+                )
+            if "auto_execute" not in publish_job_columns:
+                cursor.execute(
+                    "ALTER TABLE publish_jobs "
+                    "ADD COLUMN auto_execute INTEGER NOT NULL DEFAULT 0 "
+                    "CHECK (auto_execute IN (0, 1))"
                 )
             cursor.execute(
                 '''

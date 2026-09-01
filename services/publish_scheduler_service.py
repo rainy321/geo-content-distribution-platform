@@ -6,8 +6,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from services.publish_job_executor import execute_publish_job
-from services.publish_job_service import get_publish_job
+from services.publish_job_executor import (
+    DEFAULT_MEDIA_ROOT,
+    PublisherFactory,
+    execute_publish_job,
+)
+from services.publish_job_service import get_publish_job, transition_publish_job
 
 
 def queue_due_publish_jobs(
@@ -59,19 +63,45 @@ def run_publish_scheduler_tick(
     *,
     now: datetime | None = None,
     limit: int = 100,
+    publisher_factory: PublisherFactory | None = None,
+    allow_real: bool = False,
+    media_root: str | Path = DEFAULT_MEDIA_ROOT,
 ) -> dict[str, Any]:
-    """Promote due jobs and execute only those explicitly marked as Demo."""
+    """Promote due jobs and execute Demo or pre-authorized real tasks."""
 
     promoted = queue_due_publish_jobs(database_path, now=now, limit=limit)
     results = []
     executed_demo_count = 0
+    attempted_real_count = 0
+    blocked_real_count = 0
     for job in promoted:
-        if not job["demo"]:
+        if not job["demo"] and not job.get("auto_execute"):
             results.append(job)
             continue
+        if not job["demo"] and (not allow_real or publisher_factory is None):
+            result = transition_publish_job(
+                database_path,
+                job["id"],
+                "need_action",
+                message=(
+                    "定时任务已到期，但真实发布总开关或发布器未就绪；"
+                    "未访问平台，请人工确认后重试"
+                ),
+            )
+            blocked_real_count += 1
+            results.append(result)
+            continue
         try:
-            result = execute_publish_job(database_path, job["id"])
-            executed_demo_count += 1
+            result = execute_publish_job(
+                database_path,
+                job["id"],
+                publisher_factory=publisher_factory,
+                media_root=media_root,
+            )
+            if job["demo"]:
+                executed_demo_count += 1
+            else:
+                attempted_real_count += 1
         except Exception:
             # A scheduler tick is best-effort. The atomic queued state remains
             # available for a later worker or manual retry if this process exits.
@@ -81,6 +111,8 @@ def run_publish_scheduler_tick(
     return {
         "promoted_count": len(promoted),
         "executed_demo_count": executed_demo_count,
+        "attempted_real_count": attempted_real_count,
+        "blocked_real_count": blocked_real_count,
         "jobs": results,
     }
 

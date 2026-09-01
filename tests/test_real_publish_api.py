@@ -173,6 +173,42 @@ class RealPublishApiTests(unittest.TestCase):
 
         self.assertTrue(payload["can_execute_real"])
 
+    def test_creates_pre_authorized_real_scheduled_job_only_behind_gate(self):
+        payload = {
+            "article_id": self.article_id,
+            "platform": "zhihu",
+            "publish_at": "2026-09-03T09:30:00+08:00",
+            "auto_execute": True,
+        }
+        app.config["ALLOW_REAL_PUBLISHING"] = False
+        blocked = self.client.post("/api/publish", json=payload)
+        app.config["ALLOW_REAL_PUBLISHING"] = True
+        created = self.client.post("/api/publish", json=payload)
+        immediate = self.client.post(
+            "/api/publish",
+            json={
+                "article_id": self.article_id,
+                "platform": "zhihu",
+                "auto_execute": True,
+            },
+        )
+        malformed = self.client.post(
+            "/api/publish",
+            json={
+                "article_id": self.article_id,
+                "platform": "zhihu",
+                "publish_at": "2026-09-03T09:30:00+08:00",
+                "auto_execute": "yes",
+            },
+        )
+
+        self.assertEqual(blocked.status_code, 403)
+        self.assertEqual(created.status_code, 201)
+        self.assertEqual(created.get_json()["data"]["status"], "scheduled")
+        self.assertTrue(created.get_json()["data"]["auto_execute"])
+        self.assertEqual(immediate.status_code, 400)
+        self.assertEqual(malformed.status_code, 400)
+
     def test_sohu_job_payload_exposes_real_action(self):
         job = self._create_job(platform="sohu")
 

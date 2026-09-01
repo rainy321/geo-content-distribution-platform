@@ -22,6 +22,22 @@ class PublishSchedulerRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "5 秒"):
             create_publish_scheduler("database.db", interval_seconds=1)
 
+    def test_passes_explicit_real_execution_dependencies_to_tick(self):
+        factory = object()
+        scheduler = create_publish_scheduler(
+            "database.db",
+            publisher_factory=factory,
+            allow_real=True,
+            media_root="videoFile",
+        )
+
+        kwargs = scheduler.get_jobs()[0].kwargs
+
+        self.assertEqual(kwargs["database_path"], "database.db")
+        self.assertIs(kwargs["publisher_factory"], factory)
+        self.assertTrue(kwargs["allow_real"])
+        self.assertEqual(kwargs["media_root"], "videoFile")
+
 
 if __name__ == "__main__":
     unittest.main()

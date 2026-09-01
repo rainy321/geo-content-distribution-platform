@@ -578,6 +578,32 @@ def create_publish_task():
             }
         ), 400
 
+    auto_execute = data.get("auto_execute", False)
+    if not isinstance(auto_execute, bool):
+        return jsonify(
+            {"code": 400, "msg": "auto_execute 必须是布尔值", "data": None}
+        ), 400
+    if auto_execute and not data.get("publish_at"):
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "auto_execute 仅适用于定时发布任务",
+                "data": None,
+            }
+        ), 400
+    if (
+        auto_execute
+        and not app.config.get("DEMO_MODE", False)
+        and not app.config.get("ALLOW_REAL_PUBLISHING", False)
+    ):
+        return jsonify(
+            {
+                "code": 403,
+                "msg": "定时真实自动执行需要先开启 ALLOW_REAL_PUBLISHING",
+                "data": None,
+            }
+        ), 403
+
     try:
         job = create_publish_job(
             app.config["DATABASE_PATH"],
@@ -585,6 +611,7 @@ def create_publish_task():
             platform=platform,
             images=images,
             publish_at=data.get("publish_at"),
+            auto_execute=auto_execute,
             demo=bool(app.config.get("DEMO_MODE", False)),
         )
     except ArticleNotFoundError as exc:
@@ -758,6 +785,7 @@ def _publish_job_payload(job):
         "url": job["result_url"],
         "images": list(job.get("images") or ()),
         "publish_at": job["publish_at"],
+        "auto_execute": bool(job.get("auto_execute", False)),
         "demo": bool(job["demo"]),
         "created_at": job["created_at"],
         "started_at": job["started_at"],
@@ -1930,9 +1958,24 @@ if __name__ == '__main__':
         )
     except ValueError:
         scheduler_interval = 15
+    scheduler_allows_real = bool(
+        app.config.get("ALLOW_REAL_PUBLISHING", False)
+        and not app.config.get("DEMO_MODE", False)
+    )
+    scheduler_publisher_factory = (
+        create_real_publisher_factory(
+            app.config["DATABASE_PATH"],
+            cookies_directory=Path(BASE_DIR / "cookiesFile"),
+        )
+        if scheduler_allows_real
+        else None
+    )
     publish_scheduler = create_publish_scheduler(
         app.config["DATABASE_PATH"],
         interval_seconds=scheduler_interval,
+        publisher_factory=scheduler_publisher_factory,
+        allow_real=scheduler_allows_real,
+        media_root=app.config["MEDIA_ROOT"],
     )
     publish_scheduler.start()
     try:

@@ -146,9 +146,13 @@
         <div class="schedule-panel">
           <div>
             <strong>定时发布</strong>
-            <span>只创建计划任务，不会提前执行。</span>
+            <span>先创建计划任务；是否到点自动执行由下方单独授权。</span>
           </div>
-          <el-switch v-model="scheduleEnabled" aria-label="启用定时发布" />
+          <el-switch
+            v-model="scheduleEnabled"
+            aria-label="启用定时发布"
+            @change="handleScheduleToggle"
+          />
           <el-date-picker
             v-if="scheduleEnabled"
             v-model="publishAt"
@@ -157,6 +161,12 @@
             placeholder="选择发布时间"
             :disabled-date="disablePastDate"
           />
+          <div v-if="scheduleEnabled" class="schedule-auto-execute">
+            <el-checkbox v-model="autoExecuteAtDue">到点自动执行</el-checkbox>
+            <p>
+              默认关闭。开启后，创建任务前还会要求一次明确确认；真实执行仍受服务端总开关、账号状态和平台风控保护。
+            </p>
+          </div>
         </div>
 
         <div class="dispatch-actions">
@@ -213,7 +223,7 @@
           </div>
           <div>
             <span>MODE</span>
-            <strong>{{ scheduleEnabled ? 'SCHEDULED' : 'NOW' }}</strong>
+            <strong>{{ scheduleEnabled ? (autoExecuteAtDue ? 'AUTO@TIME' : 'SCHEDULED') : 'NOW' }}</strong>
           </div>
           <div>
             <span>ASSET</span>
@@ -294,6 +304,7 @@
             <strong>{{ platformName(job.platform) }}</strong>
             <small v-if="job.demo" class="demo-mark">DEMO / 演示任务</small>
             <small v-if="job.images?.length" class="asset-mark">{{ job.images.length }} IMG / 已附素材</small>
+            <small v-if="job.auto_execute" class="schedule-mark">AUTO@TIME / 已授权</small>
           </div>
 
           <div class="job-article">
@@ -400,6 +411,7 @@ const selectedArticleId = ref(null)
 const selectedPlatforms = ref(['zhihu'])
 const scheduleEnabled = ref(false)
 const publishAt = ref('')
+const autoExecuteAtDue = ref(false)
 const dispatching = ref(false)
 const imageInput = ref(null)
 const selectedImage = ref(null)
@@ -445,6 +457,9 @@ const dispatchButtonLabel = computed(() => {
   if (imageUploading.value) return '图片上传中'
   if (imageRequired.value && !selectedImage.value) return '先补齐渠道图片'
   if (scheduleEnabled.value && !publishAt.value) return '选择计划发布时间'
+  if (scheduleEnabled.value && autoExecuteAtDue.value) {
+    return `创建 ${selectedPlatforms.value.length} 个自动计划任务`
+  }
   return scheduleEnabled.value
     ? `创建 ${selectedPlatforms.value.length} 个计划任务`
     : `分发到 ${selectedPlatforms.value.length} 个渠道`
@@ -521,6 +536,13 @@ const togglePlatform = (key) => {
     : [...selectedPlatforms.value, key]
 }
 
+const handleScheduleToggle = (enabled) => {
+  if (!enabled) {
+    publishAt.value = ''
+    autoExecuteAtDue.value = false
+  }
+}
+
 const openImagePicker = () => {
   if (!imageUploading.value) imageInput.value?.click()
 }
@@ -577,6 +599,24 @@ const clearSelectedImage = () => {
 
 const dispatchArticle = async () => {
   if (!canDispatch.value) return
+  let confirmedAutoExecute = false
+  if (scheduleEnabled.value && autoExecuteAtDue.value) {
+    try {
+      await ElMessageBox.confirm(
+        `这将授权系统在 ${publishAt.value} 到达后，自动尝试把《${selectedArticle.value?.title || ''}》发布到 ${selectedPlatforms.value.length} 个所选渠道。任务不会提前执行，失败或状态不明时不会自动重试。是否确认？`,
+        '确认定时自动执行',
+        {
+          confirmButtonText: '确认到点自动执行',
+          cancelButtonText: '只创建普通计划',
+          type: 'warning',
+          distinguishCancelAndClose: true
+        }
+      )
+      confirmedAutoExecute = true
+    } catch (action) {
+      if (action !== 'cancel') return
+    }
+  }
   dispatching.value = true
   let createdCount = 0
   let failedCount = 0
@@ -588,7 +628,8 @@ const dispatchArticle = async () => {
         article_id: selectedArticleId.value,
         platform,
         images: selectedImage.value ? [selectedImage.value.filename] : [],
-        publish_at: scheduleEnabled.value ? publishAt.value : null
+        publish_at: scheduleEnabled.value ? publishAt.value : null,
+        auto_execute: confirmedAutoExecute
       })
       let job = response.data
       createdCount += 1
@@ -1144,6 +1185,21 @@ onBeforeUnmount(() => {
   :deep(.el-date-editor) { grid-column: 1 / -1; width: 100%; }
 }
 
+.schedule-auto-execute {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+  align-items: start;
+  padding: 11px 12px;
+  border-left: 3px solid var(--amber);
+  background: #fbf6ee;
+
+  :deep(.el-checkbox) { grid-row: 1 / 3; margin-right: 0; }
+  :deep(.el-checkbox__label) { color: #4c4b3f; font-size: 12px; font-weight: 700; }
+  p { margin: 0; color: #7d7768; font-size: 10px; line-height: 1.55; }
+}
+
 .dispatch-actions {
   display: flex;
   align-items: center;
@@ -1350,6 +1406,12 @@ onBeforeUnmount(() => {
 .asset-mark {
   align-self: flex-start;
   color: #3c827e !important;
+  font: 700 8px/1 "Cascadia Mono", monospace !important;
+}
+
+.schedule-mark {
+  align-self: flex-start;
+  color: #a36724 !important;
   font: 700 8px/1 "Cascadia Mono", monospace !important;
 }
 

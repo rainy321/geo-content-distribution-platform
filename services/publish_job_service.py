@@ -47,11 +47,17 @@ def create_publish_job(
     platform: str,
     images: list[str] | tuple[str, ...] | None = None,
     publish_at: str | datetime | None = None,
+    auto_execute: bool = False,
     demo: bool = False,
 ) -> dict[str, Any]:
+    if not isinstance(auto_execute, bool):
+        raise ValueError("auto_execute 必须是布尔值")
     normalized_platform = _normalize_platform(platform)
     normalized_images = normalize_publish_images(images)
     normalized_publish_at = _normalize_publish_at(publish_at)
+    if auto_execute and normalized_publish_at is None:
+        raise ValueError("auto_execute 仅适用于定时发布任务")
+    normalized_auto_execute = bool(auto_execute and not demo)
     initial_status = "scheduled" if normalized_publish_at else "queued"
 
     with closing(_connect(database_path)) as conn:
@@ -61,8 +67,9 @@ def create_publish_job(
             cursor = conn.execute(
                 """
                 INSERT INTO publish_jobs (
-                    article_id, platform, status, images, publish_at, demo
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    article_id, platform, status, images, publish_at,
+                    auto_execute, demo
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     article_id,
@@ -70,6 +77,7 @@ def create_publish_job(
                     initial_status,
                     json.dumps(normalized_images, ensure_ascii=False),
                     normalized_publish_at,
+                    int(normalized_auto_execute),
                     int(bool(demo)),
                 ),
             )
@@ -405,6 +413,7 @@ def _sync_article_status(conn: sqlite3.Connection, article_id: int) -> str | Non
 def _serialize_job(row: sqlite3.Row) -> dict[str, Any]:
     job = dict(row)
     job["demo"] = bool(job["demo"])
+    job["auto_execute"] = bool(job.get("auto_execute", False))
     try:
         raw_images = json.loads(job.get("images") or "[]")
         job["images"] = normalize_publish_images(raw_images)

@@ -7,10 +7,27 @@ from pathlib import Path
 
 from db.createTable import initialize_database
 from services.publish_job_service import create_publish_job, get_publish_job
+from services.publisher_adapter import PublishContent, PublisherAdapter, PublishResult
 from services.publish_scheduler_service import (
     queue_due_publish_jobs,
     run_publish_scheduler_tick,
 )
+
+
+class SuccessPublisher(PublisherAdapter):
+    platform = "zhihu"
+
+    def login(self):
+        return True
+
+    def check_login(self):
+        return True
+
+    def publish(self, content: PublishContent):
+        return PublishResult(True, self.platform, "success", message="定时发布成功")
+
+    def schedule(self, content, publish_at=None):
+        raise AssertionError("到期任务应调用 publish")
 
 
 class PublishSchedulerServiceTests(unittest.TestCase):
@@ -35,12 +52,20 @@ class PublishSchedulerServiceTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def _scheduled_job(self, publish_at, *, demo=False, platform="zhihu"):
+    def _scheduled_job(
+        self,
+        publish_at,
+        *,
+        demo=False,
+        platform="zhihu",
+        auto_execute=False,
+    ):
         return create_publish_job(
             self.db_path,
             article_id=self.article_id,
             platform=platform,
             publish_at=publish_at,
+            auto_execute=auto_execute,
             demo=demo,
         )
 
@@ -106,6 +131,39 @@ class PublishSchedulerServiceTests(unittest.TestCase):
         self.assertEqual(result["executed_demo_count"], 1)
         self.assertEqual(get_publish_job(self.db_path, demo["id"])["status"], "success")
         self.assertEqual(get_publish_job(self.db_path, real["id"])["status"], "queued")
+
+    def test_tick_executes_pre_authorized_real_job_when_gate_is_enabled(self):
+        now = datetime(2026, 9, 2, 10, 0)
+        real = self._scheduled_job(
+            now - timedelta(seconds=1),
+            auto_execute=True,
+        )
+
+        result = run_publish_scheduler_tick(
+            self.db_path,
+            now=now,
+            allow_real=True,
+            publisher_factory=lambda _job: SuccessPublisher(),
+        )
+
+        self.assertEqual(result["attempted_real_count"], 1)
+        self.assertEqual(result["blocked_real_count"], 0)
+        self.assertEqual(get_publish_job(self.db_path, real["id"])["status"], "success")
+
+    def test_tick_blocks_pre_authorized_real_job_when_gate_is_disabled(self):
+        now = datetime(2026, 9, 2, 10, 0)
+        real = self._scheduled_job(
+            now - timedelta(seconds=1),
+            auto_execute=True,
+        )
+
+        result = run_publish_scheduler_tick(self.db_path, now=now)
+
+        blocked = get_publish_job(self.db_path, real["id"])
+        self.assertEqual(result["attempted_real_count"], 0)
+        self.assertEqual(result["blocked_real_count"], 1)
+        self.assertEqual(blocked["status"], "need_action")
+        self.assertIn("未访问平台", blocked["message"])
 
     def test_rejects_invalid_limit(self):
         with self.assertRaisesRegex(ValueError, "limit"):
