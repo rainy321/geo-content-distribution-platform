@@ -846,6 +846,9 @@ class XiaoHongShuNote(XiaoHongShuBaseUploader):
         publish_strategy: str = XIAOHONGSHU_PUBLISH_STRATEGY_IMMEDIATE,
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
+        dry_run: bool = False,
+        ai_generated: bool = False,
+        publish_callback=None,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -860,6 +863,9 @@ class XiaoHongShuNote(XiaoHongShuBaseUploader):
         self.desc = desc if desc is not None else self.note
         # 标题非必填：有显式 title 用 title；否则不自动从正文截取，允许为空
         self.title = title if title is not None else ""
+        self.dry_run = bool(dry_run)
+        self.ai_generated = bool(ai_generated)
+        self.publish_callback = publish_callback
 
     async def validate_upload_args(self):
         await self.validate_base_args()
@@ -906,9 +912,32 @@ class XiaoHongShuNote(XiaoHongShuBaseUploader):
 
         xiaohongshu_logger.info(_msg("✍️", "小人开始填标题、描述和话题"))
         await self.fill_meta(page)
+        await self.set_ai_content_declaration(page)
 
         if self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
             await self.set_schedule_time_xiaohongshu(page, self.publish_date)
+
+        if self.dry_run:
+            xiaohongshu_logger.warning(_msg("🛑", "【仅预览不发布】已跳过点击发布按钮"))
+            try:
+                await page.screenshot(
+                    full_page=True,
+                    path=str(Path(self.account_file).with_name("xhs_note_dry_run_preview.png")),
+                )
+            except Exception:
+                pass
+            return
+
+        if self.publish_callback is not None:
+            callback_result = self.publish_callback(
+                page,
+                scheduled=(
+                    self.publish_strategy == XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED
+                ),
+            )
+            if inspect.isawaitable(callback_result):
+                await callback_result
+            return
 
         max_publish_retries = 600
         publish_retry_count = 0

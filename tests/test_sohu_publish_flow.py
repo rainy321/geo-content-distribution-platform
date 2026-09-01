@@ -23,6 +23,11 @@ class _DialogList:
         return 0
 
 
+class _EmptyLocator:
+    async def count(self):
+        return 0
+
+
 class _Request:
     method = "POST"
 
@@ -52,17 +57,49 @@ class SohuPublishFlowTests(unittest.IsolatedAsyncioTestCase):
         button.click = AsyncMock()
         return button
 
+    @staticmethod
+    def _sohu_publish_control():
+        control = SohuPublishFlowTests._button()
+        control.inner_text = AsyncMock(return_value="发布")
+        return control
+
     async def test_requires_one_exact_publish_button(self):
         page = Mock()
         page.get_by_role.side_effect = self._role_lookup({})
+        page.locator.return_value = _EmptyLocator()
         page.on = Mock()
         page.remove_listener = Mock()
 
-        with self.assertRaisesRegex(RuntimeError, "精确发布按钮数量异常"):
+        with self.assertRaisesRegex(RuntimeError, "精确发布控件数量异常"):
             await click_exact_publish_and_observe(page)
 
         labels = {call.kwargs["name"] for call in page.get_by_role.call_args_list}
         self.assertEqual(labels, {"发布", "立即发布"})
+
+    async def test_accepts_observed_non_button_publish_control(self):
+        control = self._sohu_publish_control()
+        page = Mock()
+        page.url = "https://mp.sohu.com/mpfe/v4/contentManagement/news/list"
+        page.get_by_role.side_effect = self._role_lookup({})
+
+        def locate(selector):
+            if "content-button-commit" in selector:
+                return _CandidateList([control])
+            return _DialogList()
+
+        page.locator.side_effect = locate
+        page.wait_for_timeout = AsyncMock()
+        page.remove_listener = Mock()
+
+        def register(_event, callback):
+            callback(_Response())
+
+        page.on = Mock(side_effect=register)
+
+        result = await click_exact_publish_and_observe(page)
+
+        control.click.assert_awaited_once()
+        self.assertEqual(result["status"], "processing")
 
     async def test_accepted_submission_without_public_url_is_processing(self):
         button = self._button()

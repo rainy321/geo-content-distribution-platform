@@ -4,14 +4,18 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 from services.publisher_adapter import (
+    BaijiahaoPublisherAdapter,
     DemoPublisher,
     PublishContent,
     PublishResult,
     SohuPublisherAdapter,
     ToutiaoPublisherAdapter,
+    XiaohongshuPublisherAdapter,
     ZhihuPublisherAdapter,
+    _default_baijiahao_publish_runner,
     _default_sohu_publish_runner,
     _default_toutiao_publish_runner,
+    _default_xiaohongshu_publish_runner,
     _default_zhihu_publish_runner,
 )
 
@@ -500,6 +504,141 @@ class SohuPublisherAdapterTests(unittest.TestCase):
         self.assertEqual(kwargs["info_source"], "包含AI创作内容")
         self.assertEqual(kwargs["cover_paths"], ["cover-1.png", "cover-2.png"])
         article.main.assert_awaited_once_with()
+        self.assertEqual(result, observed)
+
+
+class BaijiahaoPublisherAdapterTests(unittest.TestCase):
+    def setUp(self):
+        self.content = PublishContent(
+            platform="baijiahao",
+            title="GEO 内容生成测试说明",
+            content="正文",
+            images=("cover.png",),
+            tags=("GEO",),
+        )
+
+    def _adapter(self, **overrides):
+        options = {
+            "login_checker": lambda _account: True,
+            "login_runner": lambda _account: True,
+            "publish_runner": lambda *_args: None,
+            "timeout_seconds": 0.2,
+            "login_timeout_seconds": 0.2,
+        }
+        options.update(overrides)
+        return BaijiahaoPublisherAdapter("account.json", **options)
+
+    def test_missing_cover_requires_action_before_login(self):
+        calls = []
+        content = PublishContent(
+            platform="baijiahao",
+            title="测试标题",
+            content="正文",
+        )
+        result = self._adapter(
+            login_checker=lambda *_args: calls.append("checked")
+        ).publish(content)
+
+        self.assertEqual(result.status, "need_action")
+        self.assertEqual(calls, [])
+
+    def test_public_url_is_required_for_success(self):
+        result = self._adapter(
+            publish_runner=lambda *_args: {
+                "status": "success",
+                "url": "https://baijiahao.baidu.com/s?id=123456789",
+            }
+        ).publish(self.content)
+
+        self.assertTrue(result.success)
+
+    @patch("uploader.baijiahao_uploader.main.BaiJiaHaoArticle")
+    def test_default_runner_uses_cover_and_ai_declaration(self, article_class):
+        article = article_class.return_value
+        observed = {"status": "processing", "message": "已提交"}
+
+        async def run_main():
+            await article.publish(object())
+
+        article.main = AsyncMock(side_effect=run_main)
+        with patch(
+            "services.baijiahao_publish_flow.click_exact_publish_and_observe",
+            new=AsyncMock(return_value=observed),
+        ):
+            result = asyncio.run(
+                _default_baijiahao_publish_runner(self.content, "account.json")
+            )
+
+        kwargs = article_class.call_args.kwargs
+        self.assertEqual(kwargs["cover_path"], "cover.png")
+        self.assertTrue(kwargs["ai_generated"])
+        self.assertEqual(result, observed)
+
+
+class XiaohongshuPublisherAdapterTests(unittest.TestCase):
+    def setUp(self):
+        self.content = PublishContent(
+            platform="xiaohongshu",
+            title="GEO 内容测试",
+            content="正文",
+            images=("note.png",),
+            tags=("GEO",),
+        )
+
+    def _adapter(self, **overrides):
+        options = {
+            "login_checker": lambda _account: True,
+            "login_runner": lambda _account: True,
+            "publish_runner": lambda *_args: None,
+            "timeout_seconds": 0.2,
+            "login_timeout_seconds": 0.2,
+        }
+        options.update(overrides)
+        return XiaohongshuPublisherAdapter("account.json", **options)
+
+    def test_missing_image_requires_action_before_login(self):
+        calls = []
+        content = PublishContent(
+            platform="xiaohongshu",
+            title="测试标题",
+            content="正文",
+        )
+        result = self._adapter(
+            login_checker=lambda *_args: calls.append("checked")
+        ).publish(content)
+
+        self.assertEqual(result.status, "need_action")
+        self.assertEqual(calls, [])
+
+    def test_internal_success_without_public_url_remains_processing(self):
+        result = self._adapter(
+            publish_runner=lambda *_args: {"status": "success"}
+        ).publish(self.content)
+
+        self.assertEqual(result.status, "processing")
+        self.assertFalse(result.success)
+
+    @patch("uploader.xiaohongshu_uploader.main.XiaoHongShuNote")
+    def test_default_runner_uses_images_ai_declaration_and_callback(self, note_class):
+        note = note_class.return_value
+        observed = {"status": "processing", "message": "已提交"}
+
+        async def run_main():
+            callback = note_class.call_args.kwargs["publish_callback"]
+            await callback(object(), scheduled=False)
+
+        note.main = AsyncMock(side_effect=run_main)
+        with patch(
+            "services.xiaohongshu_publish_flow.click_exact_publish_and_observe",
+            new=AsyncMock(return_value=observed),
+        ):
+            result = asyncio.run(
+                _default_xiaohongshu_publish_runner(self.content, "account.json")
+            )
+
+        kwargs = note_class.call_args.kwargs
+        self.assertEqual(kwargs["image_paths"], ["note.png"])
+        self.assertTrue(kwargs["ai_generated"])
         self.assertEqual(result, observed)
 
 

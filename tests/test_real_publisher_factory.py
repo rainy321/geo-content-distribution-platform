@@ -7,8 +7,10 @@ from pathlib import Path
 from db.createTable import initialize_database
 from services.publish_job_executor import PublisherNotConfiguredError
 from services.publisher_adapter import (
+    BaijiahaoPublisherAdapter,
     SohuPublisherAdapter,
     ToutiaoPublisherAdapter,
+    XiaohongshuPublisherAdapter,
     ZhihuPublisherAdapter,
 )
 from services.real_publisher_factory import RealPublisherFactory
@@ -98,6 +100,28 @@ class RealPublisherFactoryTests(unittest.TestCase):
         self.assertIsInstance(publisher, SohuPublisherAdapter)
         self.assertEqual(Path(publisher.account_file), cookie_file)
 
+    def test_builds_baijiahao_adapter_from_connected_local_cookie(self):
+        cookie_file = self.cookies_dir / "baijiahao.json"
+        cookie_file.write_text("{}", encoding="utf-8")
+        self._insert_account("baijiahao.json", account_type=5)
+        publisher = RealPublisherFactory(
+            self.db_path,
+            cookies_directory=self.cookies_dir,
+        )({"platform": "baijiahao"})
+
+        self.assertIsInstance(publisher, BaijiahaoPublisherAdapter)
+
+    def test_builds_xiaohongshu_adapter_from_connected_local_cookie(self):
+        cookie_file = self.cookies_dir / "xiaohongshu.json"
+        cookie_file.write_text("{}", encoding="utf-8")
+        self._insert_account("xiaohongshu.json", account_type=1)
+        publisher = RealPublisherFactory(
+            self.db_path,
+            cookies_directory=self.cookies_dir,
+        )({"platform": "xiaohongshu"})
+
+        self.assertIsInstance(publisher, XiaohongshuPublisherAdapter)
+
     def test_rejects_unsupported_platform(self):
         factory = RealPublisherFactory(
             self.db_path,
@@ -105,7 +129,7 @@ class RealPublisherFactoryTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(PublisherNotConfiguredError, "尚未接入"):
-            factory({"platform": "xiaohongshu"})
+            factory({"platform": "douyin"})
 
     def test_refuses_missing_expired_and_path_traversal_credentials(self):
         outside = self.root / "outside.json"

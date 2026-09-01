@@ -255,6 +255,23 @@ class XiaohongshuUploaderTests(unittest.TestCase):
         self.assertEqual(app.title, "显式标题")
         self.assertEqual(app.desc, "图文正文")
 
+    def test_note_accepts_guarded_publish_options(self):
+        callback = AsyncMock()
+        app = xhs_main.XiaoHongShuNote(
+            image_paths=["a.png"],
+            note="正文",
+            tags=[],
+            publish_date=0,
+            account_file="account.json",
+            dry_run=True,
+            ai_generated=True,
+            publish_callback=callback,
+        )
+
+        self.assertTrue(app.dry_run)
+        self.assertTrue(app.ai_generated)
+        self.assertIs(app.publish_callback, callback)
+
 
 if __name__ == "__main__":
     unittest.main()

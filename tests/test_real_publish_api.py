@@ -77,22 +77,16 @@ class RealPublishApiTests(unittest.TestCase):
         self.assertEqual(unconfirmed.status_code, 400)
         self.assertEqual(get_publish_job(self.db_path, job["id"])["status"], "queued")
 
-    def test_rejects_demo_and_unsupported_real_jobs_without_execution(self):
+    def test_rejects_demo_real_job_without_execution(self):
         demo_job = self._create_job(demo=True)
-        unsupported_job = self._create_job(platform="xiaohongshu")
 
         with patch("sau_backend.execute_publish_job") as execute:
             demo_response = self.client.post(
                 f"/api/publish/jobs/{demo_job['id']}/execute-real",
                 json={"confirm": True},
             )
-            unsupported = self.client.post(
-                f"/api/publish/jobs/{unsupported_job['id']}/execute-real",
-                json={"confirm": True},
-            )
 
         self.assertEqual(demo_response.status_code, 409)
-        self.assertEqual(unsupported.status_code, 409)
         execute.assert_not_called()
 
     def test_executes_confirmed_zhihu_job_with_explicit_factory(self):
@@ -185,6 +179,15 @@ class RealPublishApiTests(unittest.TestCase):
         ).get_json()["data"]
 
         self.assertTrue(payload["can_execute_real"])
+
+    def test_baijiahao_and_xiaohongshu_payloads_expose_real_action(self):
+        for platform in ("baijiahao", "xiaohongshu"):
+            with self.subTest(platform=platform):
+                job = self._create_job(platform=platform)
+                payload = self.client.get(
+                    f"/api/publish/jobs/{job['id']}"
+                ).get_json()["data"]
+                self.assertTrue(payload["can_execute_real"])
 
 
 if __name__ == "__main__":

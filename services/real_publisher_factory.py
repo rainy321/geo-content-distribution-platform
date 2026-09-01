@@ -7,15 +7,25 @@ from typing import Any
 
 from services.publish_job_executor import PublisherNotConfiguredError
 from services.publisher_adapter import (
+    BaijiahaoPublisherAdapter,
     PublisherAdapter,
     SohuPublisherAdapter,
     ToutiaoPublisherAdapter,
+    XiaohongshuPublisherAdapter,
     ZhihuPublisherAdapter,
 )
 
 
-REAL_PUBLISH_PLATFORMS = frozenset({"zhihu", "toutiao", "sohu"})
-_PLATFORM_ACCOUNT_TYPES = {"zhihu": 9, "toutiao": 7, "sohu": 8}
+REAL_PUBLISH_PLATFORMS = frozenset(
+    {"zhihu", "toutiao", "baijiahao", "sohu", "xiaohongshu"}
+)
+_PLATFORM_ACCOUNT_TYPES = {
+    "zhihu": 9,
+    "toutiao": 7,
+    "baijiahao": 5,
+    "sohu": 8,
+    "xiaohongshu": 1,
+}
 
 
 class RealPublisherFactory:
@@ -59,6 +69,10 @@ class RealPublisherFactory:
                     return ToutiaoPublisherAdapter(account_file)
                 if platform == "sohu":
                     return SohuPublisherAdapter(account_file)
+                if platform == "baijiahao":
+                    return BaijiahaoPublisherAdapter(account_file)
+                if platform == "xiaohongshu":
+                    return XiaohongshuPublisherAdapter(account_file)
 
         raise PublisherNotConfiguredError(
             f"{platform} 没有可用的已连接账号，请先在媒体账号页登录并检测状态"
