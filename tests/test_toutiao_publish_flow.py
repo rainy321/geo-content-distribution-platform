@@ -1,7 +1,10 @@
 import unittest
 from unittest.mock import AsyncMock, Mock
 
-from services.toutiao_publish_flow import click_exact_publish_and_observe
+from services.toutiao_publish_flow import (
+    _summarize_submission_responses,
+    click_exact_publish_and_observe,
+)
 
 
 class _CandidateList:
@@ -31,6 +34,14 @@ class _Response:
 
     async def json(self):
         return {"code": 0, "status": "submitted"}
+
+
+class _PayloadResponse(_Response):
+    def __init__(self, payload):
+        self.payload = payload
+
+    async def json(self):
+        return self.payload
 
 
 class ToutiaoPublishFlowTests(unittest.IsolatedAsyncioTestCase):
@@ -73,6 +84,31 @@ class ToutiaoPublishFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["success"])
         self.assertEqual(result["status"], "processing")
         self.assertIn("等待平台审核", result["message"])
+
+    async def test_draft_save_success_is_not_submission_acceptance(self):
+        evidence = await _summarize_submission_responses(
+            [
+                _PayloadResponse(
+                    {
+                        "code": 0,
+                        "err_no": 0,
+                        "message": "保存成功",
+                        "reason": "保存成功",
+                    }
+                )
+            ]
+        )
+
+        self.assertEqual(evidence["request_count"], 1)
+        self.assertFalse(evidence["accepted"])
+        self.assertEqual(evidence["public_url"], "")
+
+    async def test_explicit_submission_message_is_accepted(self):
+        evidence = await _summarize_submission_responses(
+            [_PayloadResponse({"code": 0, "message": "提交成功，等待审核"})]
+        )
+
+        self.assertTrue(evidence["accepted"])
 
     async def test_navigation_to_public_article_is_success(self):
         button = Mock()

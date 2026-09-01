@@ -11,6 +11,20 @@ _SUBMISSION_METHODS = frozenset({"POST", "PUT", "PATCH"})
 _SUBMISSION_URL_MARKERS = ("publish", "graphic", "article")
 _INITIAL_PUBLISH_LABELS = ("预览并发布", "发布")
 _FINAL_PUBLISH_LABELS = ("确认发布", "确认并发布", "立即发布", "发布")
+_ACCEPTED_SUBMISSION_STATES = frozenset(
+    {"accepted", "auditing", "published", "publishing", "submitted", "success"}
+)
+_ACCEPTED_SUBMISSION_MESSAGES = (
+    "提交成功",
+    "发布成功",
+    "已提交",
+    "提交审核",
+    "审核中",
+    "accepted",
+    "auditing",
+    "published",
+    "submitted",
+)
 
 
 async def click_exact_publish_and_observe(page: Any) -> dict[str, Any]:
@@ -201,25 +215,39 @@ async def _summarize_submission_responses(
             payload = None
         payload_text = str(payload or "")
         public_url = public_url or _extract_public_article_url(payload_text)
-        if "publish" in str(response.url or "").lower():
+        if _payload_indicates_accepted_submission(payload):
             accepted = True
-        if isinstance(payload, dict):
-            state = str(
-                payload.get("status")
-                or payload.get("state")
-                or payload.get("publish_status")
-                or ""
-            ).lower()
-            code = payload.get("code")
-            if state in {"published", "success", "submitted", "auditing"}:
-                accepted = True
-            if code in {0, "0"}:
-                accepted = True
     return {
         "request_count": len(responses),
         "accepted": accepted,
         "public_url": public_url,
     }
+
+
+def _payload_indicates_accepted_submission(payload: Any) -> bool:
+    """Require explicit submission semantics; a successful draft save is not enough."""
+
+    pending = [payload]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            state = str(
+                value.get("status")
+                or value.get("state")
+                or value.get("publish_status")
+                or ""
+            ).strip().lower()
+            if state in _ACCEPTED_SUBMISSION_STATES:
+                return True
+
+            for key in ("message", "msg", "reason", "description", "detail"):
+                message = str(value.get(key) or "").strip().lower()
+                if any(marker in message for marker in _ACCEPTED_SUBMISSION_MESSAGES):
+                    return True
+            pending.extend(value.values())
+        elif isinstance(value, (list, tuple)):
+            pending.extend(value)
+    return False
 
 
 def _extract_public_article_url(value: str) -> str:
