@@ -108,27 +108,83 @@ CORS(app)
 # 限制上传文件大小为160MB
 app.config['MAX_CONTENT_LENGTH'] = 160 * 1024 * 1024
 
-# 获取当前目录（假设 index.html 和 assets 在这里）
-current_dir = os.path.dirname(os.path.abspath(__file__))
+# Docker 将前端产物复制到应用根目录；源码运行则使用 Vite 的 dist。
+current_dir = Path(__file__).resolve().parent
+_frontend_candidates = (
+    current_dir,
+    current_dir / "sau_frontend" / "dist",
+)
+app.config["FRONTEND_BUILD_DIR"] = next(
+    (candidate for candidate in _frontend_candidates if (candidate / "index.html").is_file()),
+    current_dir,
+)
 
-# 处理所有静态资源请求（未来打包用）
+
+def _frontend_build_dir() -> Path:
+    return Path(app.config["FRONTEND_BUILD_DIR"])
+
+# 处理 Vite 构建后的静态资源。
 @app.route('/assets/<filename>')
 def custom_static(filename):
-    return send_from_directory(os.path.join(current_dir, 'assets'), filename)
+    return send_from_directory(_frontend_build_dir() / "assets", filename)
 
 # 处理 favicon.ico 静态资源（未来打包用）
 @app.route('/favicon.ico')
 def favicon():
-    return send_from_directory(os.path.join(current_dir, 'assets'), 'vite.svg')
+    build_dir = _frontend_build_dir()
+    icon_dir = build_dir / "assets" if (build_dir / "assets" / "vite.svg").is_file() else build_dir
+    return send_from_directory(icon_dir, 'vite.svg')
 
 @app.route('/vite.svg')
 def vite_svg():
-    return send_from_directory(os.path.join(current_dir, 'assets'), 'vite.svg')
+    build_dir = _frontend_build_dir()
+    icon_dir = build_dir if (build_dir / "vite.svg").is_file() else build_dir / "assets"
+    return send_from_directory(icon_dir, 'vite.svg')
 
-# （未来打包用）
+
+@app.route('/api/health', methods=['GET'])
+def get_health_status():
+    """Return a dependency-light readiness signal for local/container probes."""
+
+    try:
+        with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
+            conn.execute("SELECT 1").fetchone()
+    except sqlite3.Error:
+        return jsonify(
+            {
+                "code": 503,
+                "msg": "unhealthy",
+                "data": {"status": "unhealthy", "database": "unavailable"},
+            }
+        ), 503
+    return jsonify(
+        {
+            "code": 200,
+            "msg": "ok",
+            "data": {
+                "status": "ok",
+                "database": "ok",
+                "demo_mode": bool(app.config.get("DEMO_MODE", False)),
+            },
+        }
+    ), 200
+
 @app.route('/')
-def index():  # put application's code here
-    return send_from_directory(current_dir, 'index.html')
+def index():
+    return send_from_directory(_frontend_build_dir(), 'index.html')
+
+
+@app.route('/<path:frontend_path>')
+def frontend_history_fallback(frontend_path):
+    """Serve Vite history routes without turning unknown APIs into HTML."""
+
+    if frontend_path == "api" or frontend_path.startswith("api/"):
+        return jsonify({"code": 404, "msg": "API 不存在", "data": None}), 404
+    build_dir = _frontend_build_dir()
+    requested_file = build_dir / frontend_path
+    if requested_file.is_file():
+        return send_from_directory(build_dir, frontend_path)
+    return send_from_directory(build_dir, "index.html")
 
 
 ARTICLE_LENGTHS = {600, 1000, 1500}

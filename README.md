@@ -154,6 +154,17 @@ DEMO_MODE=true python sau_backend.py
 
 Demo Mode 首次连接到**完全空的数据库**时，会在一个事务内准备“XX科技（示例数据）”、6 篇带“示例数据”标签的文章，以及覆盖成功、失败、等待确认和计划中状态的演示发布历史。重复启动不会重复写入；只要数据库里已有任意项目、文章或发布任务，种子服务就会跳过，不会把样例混进用户数据。可通过 `SEED_DEMO_DATA=false` 单独关闭这一行为。
 
+### 5. Docker Compose 本地演示
+
+仓库提供 [`compose.yaml`](./compose.yaml)，默认只绑定本机 `127.0.0.1:5409`、开启 Demo Mode、关闭真实发布，并为 SQLite、Web Cookie 和媒体文件使用独立持久卷：
+
+```bash
+docker compose up --build -d
+docker compose ps
+```
+
+健康检查地址为 `http://127.0.0.1:5409/api/health`。首次构建需要下载 Python、Node 和 Chromium 依赖；当前 Compose 配置用于本机或受控内网演示，不是可直接暴露公网的生产安全配置。停止服务使用 `docker compose down`；不要附加 `-v`，除非确定要删除本地演示数据库、Cookie 和媒体持久卷。
+
 ## 快速开始
 
 ### 方式 A：Web 发布中心

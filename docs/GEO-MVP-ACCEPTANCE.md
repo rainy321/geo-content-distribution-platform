@@ -63,7 +63,7 @@ npm run dev
 ## 已执行验证
 
 ```text
-后端：185 tests passed
+后端：191 tests passed
 前端：Vite production build passed（1708 modules）
 浏览器：隔离 Demo 首次启动、Dashboard、发布中心导航、关键 UI、错误层、控制台和失败请求检查均通过；复验端口已关闭
 真实模型：qwen3.8-max 生成 688 字 / GEO 85，优化 952 字 / GEO 100
@@ -76,6 +76,9 @@ npm run dev
 今日头条结果边界：仅公开文章链接可标记 success；已提交、等待审核或超时未知保持 processing，不自动重试以避免重复发文
 今日头条登录检测：修复 SPA 跳转依赖 `wait_for_url/load` 导致的误超时，改为轮询创作者后台 URL；修复后人工登录尝试仍停留在登录页并安全超时，未保存账号、Cookie 或发布内容
 交付安全：Docker 构建上下文已排除 Cookie、SQLite、`.tmp` 和根目录 `.env`；前端 lockfile 已纳入版本控制，Python 包声明已包含 `services/` 与 `db/`
+部署烟雾：新增 `/api/health` 与容器 HEALTHCHECK；隔离 Demo 数据库实测 health、Dashboard、SPA 根路径和 `/project-management` 深链接均为 HTTP 200，未知 API 保持 JSON 404
+部署浏览器：真实 Vite 构建产物加载成功，页面非空、无错误覆盖层、控制台错误、页面异常或失败请求；Dashboard 截图视觉核对通过
+容器编排：新增默认绑定 `127.0.0.1:5409`、关闭真实发布并持久化 SQLite/Cookie/媒体目录的 `compose.yaml`；本机无 Docker，尚未实际执行镜像构建
 工作区：uploader/ 无改动；未发现硬编码 API Key；Cookie、`.tmp/`、本地数据库均被 Git 忽略
 ```
 
@@ -88,7 +91,7 @@ npm run dev
 3. 真实链路的最终成功依据是公开文章 API/链接，而不是自动化脚本是否完成点击；本次知乎验收链接为 `https://zhuanlan.zhihu.com/p/2078070222595035345`。
 4. 当前 API 没有用户认证且 CORS 默认开放，仅适合本地或受控内网；公网部署前需要在反向代理或平台层增加访问控制、TLS，并确认数据库与 Cookie 持久化。
 5. 当前 `origin` 仍指向 OmniPost 上游 `rehatRobot/omnipost`。必须先确认自己的 GitHub 仓库或 fork，再配置目标 remote；不能直接向上游地址推送本次二开。
-6. 当前机器没有 Docker，且离线环境缺 wheel 构建工具；Docker 镜像和 wheel 构建尚未在本机执行，源码运行、后端测试和前端生产构建已通过。
+6. 当前机器没有 Docker，且离线环境缺 wheel 构建工具；Dockerfile、Compose 安全默认值和源码等价部署链路已静态/运行验证，但 Docker 镜像和 wheel 构建尚未在本机执行。
 
 ## Git 状态
 

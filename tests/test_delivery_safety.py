@@ -31,6 +31,17 @@ class DeliverySafetyTests(unittest.TestCase):
         self.assertNotIn("conf.py", patterns)
         self.assertTrue((ROOT / "sau_frontend" / "package-lock.json").is_file())
 
+    def test_compose_defaults_to_local_demo_with_persistent_runtime_data(self):
+        compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
+        dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+        self.assertIn('"127.0.0.1:5409:5409"', compose)
+        self.assertIn('ALLOW_REAL_PUBLISHING: "false"', compose)
+        self.assertIn('DATABASE_PATH: "/app/data/database.db"', compose)
+        self.assertIn("geo_cookies:/app/cookiesFile", compose)
+        self.assertIn("HEALTHCHECK", dockerfile)
+        self.assertIn("/api/health", dockerfile)
+
 
 if __name__ == "__main__":
     unittest.main()

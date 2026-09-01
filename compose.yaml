@@ -1,0 +1,25 @@
+name: geo-mvp
+
+services:
+  app:
+    build:
+      context: .
+    image: geo-mvp:local
+    ports:
+      - "127.0.0.1:5409:5409"
+    environment:
+      DEMO_MODE: "true"
+      SEED_DEMO_DATA: "true"
+      ALLOW_REAL_PUBLISHING: "false"
+      DATABASE_PATH: "/app/data/database.db"
+      LOCAL_CHROME_HEADLESS: "true"
+    volumes:
+      - geo_data:/app/data
+      - geo_cookies:/app/cookiesFile
+      - geo_media:/app/videoFile
+    restart: unless-stopped
+
+volumes:
+  geo_data:
+  geo_cookies:
+  geo_media:

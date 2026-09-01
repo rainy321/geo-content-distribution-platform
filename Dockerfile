@@ -45,12 +45,15 @@ RUN pip install ".[web]"
 RUN playwright install chromium
 RUN patchright install chromium
 
-RUN mkdir -p /app/videoFile /app/cookiesFile
+RUN mkdir -p /app/videoFile /app/cookiesFile /app/data
 
 COPY --from=builder /app/dist/index.html /app
 COPY --from=builder /app/dist/assets /app/assets
 COPY --from=builder /app/dist/vite.svg /app/assets
 
 EXPOSE 5409
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:5409/api/health', timeout=3).read()" || exit 1
 
 CMD ["python", "sau_backend.py"]
