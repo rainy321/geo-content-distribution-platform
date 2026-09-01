@@ -1103,7 +1103,7 @@ async def _default_baijiahao_publish_runner(
 
     publisher = BaiJiaHaoArticle(
         title=content.title,
-        body=content.content,
+        body=_markdown_to_platform_text(content.content),
         tags=list(content.tags),
         publish_date=0,
         account_file=account_file,
@@ -1149,14 +1149,15 @@ async def _default_xiaohongshu_publish_runner(
             await click_exact_publish_and_observe(page, scheduled=scheduled)
         )
 
+    note_text = _markdown_to_platform_text(content.content, strip_hashes=True)
     publisher = XiaoHongShuNote(
         image_paths=list(content.images),
-        note=content.content,
+        note=note_text,
         tags=list(content.tags),
         publish_date=0,
         account_file=account_file,
         title=content.title,
-        desc=content.content,
+        desc=note_text,
         headless=False,
         dry_run=False,
         ai_generated=True,
@@ -1231,6 +1232,32 @@ def _is_public_xiaohongshu_url(value: str) -> bool:
             normalized,
         )
     )
+
+
+def _markdown_to_platform_text(value: str, *, strip_hashes: bool = False) -> str:
+    """Convert stored Markdown into conservative plain text for browser editors."""
+
+    text = str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
+    text = re.sub(r"^[ \t]{0,3}#{1,6}[ \t]*", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^[ \t]{0,3}>[ \t]?", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^[ \t]{0,3}[-*+][ \t]+", "• ", text, flags=re.MULTILINE)
+    text = re.sub(
+        r"^[ \t]{0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$",
+        "",
+        text,
+        flags=re.MULTILINE,
+    )
+    text = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", text)
+    text = re.sub(r"__([^_\n]+)__", r"\1", text)
+    text = re.sub(r"~~([^~\n]+)~~", r"\1", text)
+    text = re.sub(r"`{1,3}([^`\n]+)`{1,3}", r"\1", text)
+    if strip_hashes:
+        text = text.replace("#", "")
+    text = re.sub(r"[ \t]+\n", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
 
 
 def _normalize_guarded_public_result(

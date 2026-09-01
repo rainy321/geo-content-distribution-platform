@@ -17,6 +17,7 @@ from services.publisher_adapter import (
     _default_toutiao_publish_runner,
     _default_xiaohongshu_publish_runner,
     _default_zhihu_publish_runner,
+    _markdown_to_platform_text,
 )
 
 
@@ -37,6 +38,23 @@ class PublishContentTests(unittest.TestCase):
         self.assertEqual(content.tags, ("AI",))
         with self.assertRaisesRegex(ValueError, "标题"):
             PublishContent(platform="zhihu", title=" ", content="正文")
+
+
+class PublisherTextNormalizationTests(unittest.TestCase):
+    def test_removes_markdown_without_flattening_paragraphs(self):
+        source = "## 测试说明\n\n**重点**与[链接](https://example.com)\n\n- 第一项"
+
+        result = _markdown_to_platform_text(source)
+
+        self.assertEqual(result, "测试说明\n\n重点与链接\n\n• 第一项")
+
+    def test_xiaohongshu_mode_removes_hash_topic_syntax(self):
+        source = "## 标题\n\n正文中的 #测试 标记"
+
+        result = _markdown_to_platform_text(source, strip_hashes=True)
+
+        self.assertNotIn("#", result)
+        self.assertEqual(result, "标题\n\n正文中的 测试 标记")
 
 
 class DemoPublisherTests(unittest.TestCase):
@@ -571,6 +589,7 @@ class BaijiahaoPublisherAdapterTests(unittest.TestCase):
 
         kwargs = article_class.call_args.kwargs
         self.assertEqual(kwargs["cover_path"], "cover.png")
+        self.assertEqual(kwargs["body"], "正文")
         self.assertTrue(kwargs["ai_generated"])
         self.assertEqual(result, observed)
 
@@ -638,6 +657,7 @@ class XiaohongshuPublisherAdapterTests(unittest.TestCase):
 
         kwargs = note_class.call_args.kwargs
         self.assertEqual(kwargs["image_paths"], ["note.png"])
+        self.assertEqual(kwargs["desc"], "正文")
         self.assertTrue(kwargs["ai_generated"])
         self.assertEqual(result, observed)
 

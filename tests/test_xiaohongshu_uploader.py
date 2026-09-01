@@ -272,6 +272,17 @@ class XiaohongshuUploaderTests(unittest.TestCase):
         self.assertTrue(app.ai_generated)
         self.assertIs(app.publish_callback, callback)
 
+    def test_preview_guard_blocks_publish_and_rejects_visible_validation_error(self):
+        page = AsyncMock()
+        page.evaluate.return_value = 1
+        page.inner_text.return_value = "话题内不允许包含特殊符号"
+
+        asyncio.run(xhs_main._install_note_preview_guard(page))
+        with self.assertRaisesRegex(RuntimeError, "话题内不允许包含特殊符号"):
+            asyncio.run(xhs_main._assert_note_preview_ready(page))
+
+        page.evaluate.assert_awaited_once()
+
 
 if __name__ == "__main__":
     unittest.main()

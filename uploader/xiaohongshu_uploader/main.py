@@ -35,6 +35,59 @@ def _msg(emoji: str, text: str) -> str:
     return f"{emoji} {text}"
 
 
+async def _install_note_preview_guard(page: Page) -> None:
+    """Disable exact note publish actions during an authorized dry-run."""
+
+    blocked_count = await page.evaluate(
+        """() => {
+            if (document.getElementById('sau-xhs-dry-run-banner')) return;
+            const banner = document.createElement('div');
+            banner.id = 'sau-xhs-dry-run-banner';
+            banner.textContent = '⚠️ 仅预览模式：脚本不会点击发布，请勿手动发布';
+            banner.style.cssText = [
+                'position:fixed', 'top:0', 'left:0', 'right:0',
+                'z-index:2147483647', 'background:#e6a23c', 'color:#fff',
+                'padding:10px 16px', 'text-align:center', 'font-size:15px',
+                'font-weight:600', 'box-shadow:0 2px 8px rgba(0,0,0,.25)'
+            ].join(';');
+            document.body.appendChild(banner);
+
+            const blockPublish = () => {
+                document.querySelectorAll('button, [role="button"], div, span').forEach((el) => {
+                    const text = (el.innerText || el.textContent || '').trim();
+                    if (text !== '发布' && text !== '定时发布') return;
+                    el.setAttribute('data-sau-dry-run-blocked', '1');
+                    el.setAttribute('aria-disabled', 'true');
+                    el.style.pointerEvents = 'none';
+                    el.style.opacity = '0.45';
+                    if ('disabled' in el) el.disabled = true;
+                });
+            };
+            blockPublish();
+            const observer = new MutationObserver(blockPublish);
+            observer.observe(document.documentElement, { childList:true, subtree:true });
+            window.__sauXhsDryRunObserver = observer;
+            return document.querySelectorAll('[data-sau-dry-run-blocked="1"]').length;
+        }"""
+    )
+    if not isinstance(blocked_count, int) or blocked_count < 1:
+        raise RuntimeError("小红书 dry-run 未能锁定精确发布控件")
+
+
+async def _assert_note_preview_ready(page: Page) -> None:
+    try:
+        body = (await page.inner_text("body")) or ""
+    except Exception:
+        return
+    for marker in (
+        "话题内不允许包含特殊符号",
+        "正文内容不能包含特殊符号",
+        "标题字数超限",
+    ):
+        if marker in body:
+            raise RuntimeError(f"小红书 dry-run 页面校验失败：{marker}")
+
+
 async def _emit_qrcode_callback(qrcode_callback, payload: dict):
     if not qrcode_callback:
         return
@@ -918,6 +971,9 @@ class XiaoHongShuNote(XiaoHongShuBaseUploader):
             await self.set_schedule_time_xiaohongshu(page, self.publish_date)
 
         if self.dry_run:
+            await _install_note_preview_guard(page)
+            await page.wait_for_timeout(300)
+            await _assert_note_preview_ready(page)
             xiaohongshu_logger.warning(_msg("🛑", "【仅预览不发布】已跳过点击发布按钮"))
             try:
                 await page.screenshot(
