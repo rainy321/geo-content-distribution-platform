@@ -9,6 +9,8 @@ _PUBLIC_ARTICLE_URL_PATTERN = re.compile(
 )
 _SUBMISSION_METHODS = frozenset({"POST", "PUT", "PATCH"})
 _SUBMISSION_URL_MARKERS = ("publish", "graphic", "article")
+_INITIAL_PUBLISH_LABELS = ("预览并发布", "发布")
+_FINAL_PUBLISH_LABELS = ("确认发布", "立即发布", "发布")
 
 
 async def click_exact_publish_and_observe(page: Any) -> dict[str, Any]:
@@ -32,21 +34,18 @@ async def click_exact_publish_and_observe(page: Any) -> dict[str, Any]:
 
     page.on("response", record_response)
     try:
-        candidates = page.get_by_role("button", name="发布", exact=True)
-        publish_buttons = []
-        for index in range(await candidates.count()):
-            candidate = candidates.nth(index)
-            if await candidate.is_visible() and await candidate.is_enabled():
-                publish_buttons.append(candidate)
-        if len(publish_buttons) != 1:
-            raise RuntimeError(
-                f"今日头条精确发布按钮数量异常：期望 1 个，实际 {len(publish_buttons)} 个"
-            )
-
-        await publish_buttons[0].click(timeout=5_000)
+        initial_label, initial_button = await _require_single_exact_button(
+            page,
+            _INITIAL_PUBLISH_LABELS,
+            stage="首阶段",
+        )
+        await initial_button.click(timeout=5_000)
         try:
             await page.wait_for_timeout(1_500)
-            await _confirm_publish_dialog_if_present(page)
+            if initial_label == "预览并发布":
+                await _confirm_preview_publish(page)
+            else:
+                await _confirm_publish_dialog_if_present(page)
             await page.wait_for_timeout(6_000)
         except Exception as exc:
             if not _is_navigation_context_error(exc):
@@ -99,15 +98,59 @@ async def _confirm_publish_dialog_if_present(page: Any) -> None:
     if not await dialogs.count():
         return
     dialog = dialogs.last
-    for label in ("确认发布", "发布", "确定"):
-        candidates = dialog.get_by_role("button", name=label, exact=True)
+    _label, candidate = await _require_single_exact_button(
+        dialog,
+        _FINAL_PUBLISH_LABELS,
+        stage="确认弹窗",
+    )
+    await candidate.click(timeout=5_000)
+    await page.wait_for_timeout(1_000)
+
+
+async def _confirm_preview_publish(page: Any) -> None:
+    """Require the second explicit action after the current preview button."""
+
+    for _ in range(20):
+        matches = await _visible_exact_buttons(page, _FINAL_PUBLISH_LABELS)
+        if len(matches) > 1:
+            raise RuntimeError(
+                f"今日头条精确确认发布按钮数量异常：期望 1 个，实际 {len(matches)} 个"
+            )
+        if matches:
+            _label, candidate = matches[0]
+            await candidate.click(timeout=5_000)
+            await page.wait_for_timeout(1_000)
+            return
+        await page.wait_for_timeout(250)
+    raise RuntimeError("今日头条预览已打开，但未找到唯一可用的确认发布按钮")
+
+
+async def _require_single_exact_button(
+    scope: Any,
+    labels: tuple[str, ...],
+    *,
+    stage: str,
+) -> tuple[str, Any]:
+    matches = await _visible_exact_buttons(scope, labels)
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"今日头条精确{stage}发布按钮数量异常：期望 1 个，实际 {len(matches)} 个"
+        )
+    return matches[0]
+
+
+async def _visible_exact_buttons(
+    scope: Any,
+    labels: tuple[str, ...],
+) -> list[tuple[str, Any]]:
+    matches: list[tuple[str, Any]] = []
+    for label in labels:
+        candidates = scope.get_by_role("button", name=label, exact=True)
         for index in range(await candidates.count()):
             candidate = candidates.nth(index)
             if await candidate.is_visible() and await candidate.is_enabled():
-                await candidate.click(timeout=5_000)
-                await page.wait_for_timeout(1_000)
-                return
-    raise RuntimeError("今日头条发布确认弹窗已出现，但未找到可用的确认按钮")
+                matches.append((label, candidate))
+    return matches
 
 
 async def _summarize_submission_responses(

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
@@ -907,15 +908,25 @@ class TouTiaoArticle(object):
         )
         if any(k in t for k in junk):
             return False
-        # 头条话题下拉几乎都带「讨论」
-        if "讨论" in t and "#" in t:
-            return True
-        # 没有「讨论」时，必须是很短的 #话题 形态，且包含目标词
         tag = (tag or "").strip().lstrip("#")
-        if tag and (tag in t) and t.startswith("#") and len(t) <= len(tag) + 4:
-            # 仅 #话题 本身，可能是编辑器内已输入的纯文本，不当作下拉项
+        # 只接受「#精确话题# ...讨论」。包含目标词但名称更长的候选
+        # （例如“功能测试”命中“心脏功能测试”）会污染公开文章，宁可跳过。
+        return bool(
+            tag
+            and "讨论" in t
+            and self._topic_candidate_matches_tag(t, tag)
+        )
+
+    @staticmethod
+    def _normalize_topic_name(value: str) -> str:
+        return re.sub(r"\s+", "", str(value or "").strip().strip("#")).casefold()
+
+    @classmethod
+    def _topic_candidate_matches_tag(cls, text: str, tag: str) -> bool:
+        match = re.search(r"#\s*([^#]+?)\s*#", str(text or ""))
+        if not match:
             return False
-        return False
+        return cls._normalize_topic_name(match.group(1)) == cls._normalize_topic_name(tag)
 
     def _rank_topic_candidates(self, candidates: list[dict], tag: str) -> list[dict]:
         """只保留真正的下拉项，并按相关度排序。"""
@@ -926,7 +937,7 @@ class TouTiaoArticle(object):
             if not self._is_real_topic_dropdown_item(text, tag):
                 continue
             score = int(c.get("score") or 0)
-            if tag and tag in text:
+            if self._topic_candidate_matches_tag(text, tag):
                 score += 30
             if "讨论" in text:
                 score += 20
@@ -993,7 +1004,13 @@ class TouTiaoArticle(object):
                         for (const node of nodes) {
                             const t = (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
                             if (!t || t.length > 50) continue;
-                            if (!(t.includes(needle) || t.includes('#' + needle))) continue;
+                            const normalize = (value) => String(value || '')
+                                .replace(/\s+/g, '')
+                                .replace(/^#+|#+$/g, '')
+                                .toLowerCase();
+                            const match = t.match(/#\s*([^#]+?)\s*#/);
+                            const topicName = match ? match[1] : t;
+                            if (normalize(topicName) !== normalize(needle)) continue;
                             const cls = String(node.className || '');
                             const href = String(node.getAttribute('href') || '');
                             const ce = node.getAttribute('contenteditable');
@@ -1019,13 +1036,8 @@ class TouTiaoArticle(object):
     async def _topic_click_succeeded(self, editor, tag: str, before_nodes: int | None) -> bool:
         if editor is None:
             return False
-        if await self._editor_contains_confirmed_topic(editor, tag):
-            return True
-        if before_nodes is not None:
-            after_nodes = await self._count_topic_nodes_in_editor(editor)
-            if after_nodes > before_nodes:
-                return True
-        return False
+        # 节点数量增加不能证明选中了正确话题；必须核对标签文本本身。
+        return await self._editor_contains_confirmed_topic(editor, tag)
 
     async def _wait_for_topic_dropdown(self, page: Page, tag: str, timeout_ms: int = 3500) -> list[dict]:
         """等待真正的话题下拉项出现；过滤页面杂讯。"""
