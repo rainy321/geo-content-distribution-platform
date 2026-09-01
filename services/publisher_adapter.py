@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
@@ -548,6 +549,157 @@ class ToutiaoPublisherAdapter(PublisherAdapter):
         )
 
 
+class SohuPublisherAdapter(PublisherAdapter):
+    """Timeout-protected adapter around OmniPost's Sohu article uploader."""
+
+    platform = "sohu"
+
+    def __init__(
+        self,
+        account_file: str | Path,
+        *,
+        timeout_seconds: float = 120,
+        login_timeout_seconds: float = 240,
+        login_checker: Callable[..., Any] | None = None,
+        login_runner: Callable[..., Any] | None = None,
+        publish_runner: Callable[..., Any] | None = None,
+    ):
+        if timeout_seconds <= 0 or login_timeout_seconds <= 0:
+            raise ValueError("超时时间必须大于 0")
+        self.account_file = str(account_file)
+        self.timeout_seconds = float(timeout_seconds)
+        self.login_timeout_seconds = float(login_timeout_seconds)
+        self._login_checker = login_checker or _default_sohu_login_checker
+        self._login_runner = login_runner or _default_sohu_login_runner
+        self._publish_runner = publish_runner or _default_sohu_publish_runner
+
+    def login(self) -> bool:
+        return bool(
+            _run_with_timeout(
+                self._login_runner,
+                self.account_file,
+                timeout_seconds=self.login_timeout_seconds,
+            )
+        )
+
+    def check_login(self) -> bool:
+        return bool(
+            _run_with_timeout(
+                self._login_checker,
+                self.account_file,
+                timeout_seconds=self.timeout_seconds,
+            )
+        )
+
+    def publish(self, content: PublishContent) -> PublishResult:
+        _validate_content_platform(content, self.platform)
+        try:
+            logged_in = self.check_login()
+        except (TimeoutError, asyncio.TimeoutError):
+            return self._failed("搜狐号登录状态检查超时，请稍后重试")
+        except Exception as exc:
+            return self._exception_result(exc, prefix="搜狐号登录状态检查失败")
+
+        if not logged_in:
+            return PublishResult(
+                success=False,
+                platform=self.platform,
+                status="need_action",
+                message="搜狐号登录状态无效，需要重新登录后重试",
+            )
+
+        try:
+            raw_result = _run_with_timeout(
+                self._publish_runner,
+                content,
+                self.account_file,
+                timeout_seconds=self.timeout_seconds,
+            )
+        except (TimeoutError, asyncio.TimeoutError):
+            return PublishResult(
+                success=False,
+                platform=self.platform,
+                status="processing",
+                message=(
+                    "搜狐号发布操作超时，平台最终状态未知；"
+                    "请先到平台后台核对，系统不会自动重试"
+                ),
+            )
+        except Exception as exc:
+            return self._exception_result(exc, prefix="搜狐号发布失败")
+        return self._normalize_publish_result(raw_result)
+
+    def schedule(
+        self,
+        content: PublishContent,
+        publish_at: datetime | None = None,
+    ) -> PublishResult:
+        _validate_content_platform(content, self.platform)
+        scheduled_for = publish_at or content.publish_at
+        if scheduled_for is None:
+            raise ValueError("定时发布必须提供 publish_at")
+        return PublishResult(
+            success=True,
+            platform=self.platform,
+            status="scheduled",
+            message=f"任务已排期至 {scheduled_for.isoformat()}，等待系统调度",
+        )
+
+    def _normalize_publish_result(self, raw_result: Any) -> PublishResult:
+        if isinstance(raw_result, PublishResult):
+            if raw_result.platform != self.platform:
+                return self._failed("搜狐号发布器返回了错误的平台标识")
+            if raw_result.status == "success" and not _is_public_sohu_url(
+                raw_result.url
+            ):
+                return PublishResult(
+                    success=False,
+                    platform=self.platform,
+                    status="processing",
+                    message="搜狐号未返回可核验的公开文章链接，请到平台后台确认",
+                )
+            return raw_result
+        if isinstance(raw_result, Mapping):
+            raw_status = str(raw_result.get("status") or "processing").strip().lower()
+            if raw_status not in PUBLISH_RESULT_STATUSES:
+                return self._failed(f"搜狐号发布器返回了未知状态：{raw_status}")
+            url = str(raw_result.get("url") or raw_result.get("result_url") or "").strip()
+            if raw_status == "success" and not _is_public_sohu_url(url):
+                raw_status = "processing"
+            success = raw_status == "success"
+            return PublishResult(
+                success=success,
+                platform=self.platform,
+                status=raw_status,
+                url=url,
+                message=str(raw_result.get("message") or "").strip(),
+                published_at=_utc_now_iso() if success else "",
+            )
+        return PublishResult(
+            success=False,
+            platform=self.platform,
+            status="processing",
+            message="已执行搜狐号发布流程，但未取得可核验的平台结果",
+        )
+
+    def _exception_result(self, exc: Exception, *, prefix: str) -> PublishResult:
+        detail = str(exc).strip() or exc.__class__.__name__
+        return PublishResult(
+            success=False,
+            platform=self.platform,
+            status=classify_publisher_error(detail),
+            message=f"{prefix}：{detail}",
+        )
+
+    def _failed(self, message: str) -> PublishResult:
+        return PublishResult(
+            success=False,
+            platform=self.platform,
+            status="failed",
+            message=message,
+        )
+
+
 async def _default_zhihu_login_checker(account_file: str) -> bool:
     from uploader.zhihu_uploader.main import cookie_auth
 
@@ -646,6 +798,47 @@ async def _default_toutiao_publish_runner(
     return observed_result
 
 
+async def _default_sohu_login_checker(account_file: str) -> bool:
+    from uploader.sohu_uploader.main import cookie_auth
+
+    return await cookie_auth(account_file)
+
+
+async def _default_sohu_login_runner(account_file: str) -> bool:
+    from uploader.sohu_uploader.main import sohu_setup
+
+    return await sohu_setup(account_file, handle=True)
+
+
+async def _default_sohu_publish_runner(
+    content: PublishContent,
+    account_file: str,
+) -> Any:
+    from services.sohu_publish_flow import click_exact_publish_and_observe
+    from uploader.sohu_uploader.main import SoHuArticle
+
+    publisher = SoHuArticle(
+        title=content.title,
+        body=content.content,
+        tags=list(content.tags),
+        publish_date=0,
+        account_file=account_file,
+        dry_run=False,
+        cover_paths=list(content.images),
+        info_source="包含AI创作内容",
+    )
+    observed_result: dict[str, Any] = {}
+
+    async def click_publish(page: Any) -> None:
+        observed_result.update(await click_exact_publish_and_observe(page))
+
+    publisher.publish = click_publish
+    await publisher.main()
+    if not observed_result:
+        raise RuntimeError("搜狐号发布流程结束，但未产生可核验的提交结果")
+    return observed_result
+
+
 def _run_with_timeout(
     runner: Callable[..., Any],
     *args: Any,
@@ -682,6 +875,15 @@ def _is_public_toutiao_url(value: str) -> bool:
     normalized = str(value or "").strip().lower()
     return normalized.startswith(("https://", "http://")) and (
         "toutiao.com/article/" in normalized or "toutiao.com/item/" in normalized
+    )
+
+
+def _is_public_sohu_url(value: str) -> bool:
+    normalized = str(value or "").strip().lower()
+    if not normalized.startswith(("https://", "http://")):
+        return False
+    return bool(
+        re.fullmatch(r"https?://(?:www\.)?sohu\.com/a/\d+_\d+/?", normalized)
     )
 
 

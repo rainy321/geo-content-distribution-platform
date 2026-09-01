@@ -79,7 +79,7 @@ class RealPublishApiTests(unittest.TestCase):
 
     def test_rejects_demo_and_unsupported_real_jobs_without_execution(self):
         demo_job = self._create_job(demo=True)
-        unsupported_job = self._create_job(platform="sohu")
+        unsupported_job = self._create_job(platform="xiaohongshu")
 
         with patch("sau_backend.execute_publish_job") as execute:
             demo_response = self.client.post(
@@ -170,6 +170,15 @@ class RealPublishApiTests(unittest.TestCase):
 
     def test_toutiao_job_payload_exposes_real_action(self):
         job = self._create_job(platform="toutiao")
+
+        payload = self.client.get(
+            f"/api/publish/jobs/{job['id']}"
+        ).get_json()["data"]
+
+        self.assertTrue(payload["can_execute_real"])
+
+    def test_sohu_job_payload_exposes_real_action(self):
+        job = self._create_job(platform="sohu")
 
         payload = self.client.get(
             f"/api/publish/jobs/{job['id']}"

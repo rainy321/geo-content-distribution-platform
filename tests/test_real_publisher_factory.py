@@ -6,7 +6,11 @@ from pathlib import Path
 
 from db.createTable import initialize_database
 from services.publish_job_executor import PublisherNotConfiguredError
-from services.publisher_adapter import ToutiaoPublisherAdapter, ZhihuPublisherAdapter
+from services.publisher_adapter import (
+    SohuPublisherAdapter,
+    ToutiaoPublisherAdapter,
+    ZhihuPublisherAdapter,
+)
 from services.real_publisher_factory import RealPublisherFactory
 
 
@@ -75,6 +79,25 @@ class RealPublisherFactoryTests(unittest.TestCase):
         self.assertIsInstance(publisher, ToutiaoPublisherAdapter)
         self.assertEqual(Path(publisher.account_file), cookie_file)
 
+    def test_builds_sohu_adapter_from_connected_local_cookie(self):
+        cookie_file = self.cookies_dir / "sohu.json"
+        cookie_file.write_text("{}", encoding="utf-8")
+        self._insert_account(
+            "sohu.json",
+            account_type=8,
+            account_name="搜狐账号",
+            checked_at="2026-09-01 11:00:00",
+        )
+        factory = RealPublisherFactory(
+            self.db_path,
+            cookies_directory=self.cookies_dir,
+        )
+
+        publisher = factory({"platform": "sohu"})
+
+        self.assertIsInstance(publisher, SohuPublisherAdapter)
+        self.assertEqual(Path(publisher.account_file), cookie_file)
+
     def test_rejects_unsupported_platform(self):
         factory = RealPublisherFactory(
             self.db_path,
@@ -82,7 +105,7 @@ class RealPublisherFactoryTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(PublisherNotConfiguredError, "尚未接入"):
-            factory({"platform": "sohu"})
+            factory({"platform": "xiaohongshu"})
 
     def test_refuses_missing_expired_and_path_traversal_credentials(self):
         outside = self.root / "outside.json"

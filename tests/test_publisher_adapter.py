@@ -7,8 +7,10 @@ from services.publisher_adapter import (
     DemoPublisher,
     PublishContent,
     PublishResult,
+    SohuPublisherAdapter,
     ToutiaoPublisherAdapter,
     ZhihuPublisherAdapter,
+    _default_sohu_publish_runner,
     _default_toutiao_publish_runner,
     _default_zhihu_publish_runner,
 )
@@ -398,6 +400,105 @@ class ToutiaoPublisherAdapterTests(unittest.TestCase):
 
         self.assertEqual(article_class.call_args.kwargs["work_statements"], ["引用AI"])
         self.assertEqual(article_class.call_args.kwargs["cover_path"], "cover.png")
+        article.main.assert_awaited_once_with()
+        self.assertEqual(result, observed)
+
+
+class SohuPublisherAdapterTests(unittest.TestCase):
+    def setUp(self):
+        self.content = PublishContent(
+            platform="sohu",
+            title="AI Agent 实践指南",
+            content="正文",
+            images=("cover-1.png", "cover-2.png"),
+            tags=("AI", "Agent"),
+        )
+
+    def _adapter(self, **overrides):
+        options = {
+            "login_checker": lambda _account_file: True,
+            "login_runner": lambda _account_file: True,
+            "publish_runner": lambda _content, _account_file: None,
+            "timeout_seconds": 0.2,
+            "login_timeout_seconds": 0.2,
+        }
+        options.update(overrides)
+        return SohuPublisherAdapter("account.json", **options)
+
+    def test_invalid_login_requires_action_without_running_publisher(self):
+        calls = []
+        result = self._adapter(
+            login_checker=lambda _account_file: False,
+            publish_runner=lambda *_args: calls.append("published"),
+        ).publish(self.content)
+
+        self.assertEqual(result.status, "need_action")
+        self.assertEqual(calls, [])
+
+    def test_public_url_is_required_for_success(self):
+        result = self._adapter(
+            publish_runner=lambda *_args: {
+                "status": "success",
+                "url": "https://www.sohu.com/a/812345678_121234567",
+            }
+        ).publish(self.content)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.status, "success")
+
+    def test_success_without_public_url_remains_processing(self):
+        result = self._adapter(
+            publish_runner=lambda *_args: {"status": "success"}
+        ).publish(self.content)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.status, "processing")
+
+    def test_timeout_remains_processing_to_prevent_blind_retry(self):
+        async def slow_publish(*_args):
+            await asyncio.sleep(0.1)
+
+        result = self._adapter(
+            publish_runner=slow_publish,
+            timeout_seconds=0.01,
+        ).publish(self.content)
+
+        self.assertEqual(result.status, "processing")
+        self.assertIn("不会自动重试", result.message)
+
+    def test_manual_intervention_errors_are_classified(self):
+        def blocked(*_args):
+            raise RuntimeError("检测到滑块验证，请人工完成")
+
+        result = self._adapter(publish_runner=blocked).publish(self.content)
+
+        self.assertEqual(result.status, "need_action")
+
+    @patch("uploader.sohu_uploader.main.SoHuArticle")
+    def test_default_runner_declares_ai_content_and_observes_click(self, article_class):
+        article = article_class.return_value
+        observed = {
+            "status": "processing",
+            "success": False,
+            "message": "平台已接受提交",
+        }
+
+        async def run_main():
+            await article.publish(object())
+
+        article.main = AsyncMock(side_effect=run_main)
+
+        with patch(
+            "services.sohu_publish_flow.click_exact_publish_and_observe",
+            new=AsyncMock(return_value=observed),
+        ):
+            result = asyncio.run(
+                _default_sohu_publish_runner(self.content, "account.json")
+            )
+
+        kwargs = article_class.call_args.kwargs
+        self.assertEqual(kwargs["info_source"], "包含AI创作内容")
+        self.assertEqual(kwargs["cover_paths"], ["cover-1.png", "cover-2.png"])
         article.main.assert_awaited_once_with()
         self.assertEqual(result, observed)
 
