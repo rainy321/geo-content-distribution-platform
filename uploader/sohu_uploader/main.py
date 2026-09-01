@@ -866,12 +866,14 @@ class SoHuArticle(object):
     async def _detect_blocking_state(self, page: Page) -> str:
         """返回阻塞原因文案；无阻塞返回空字符串。"""
         try:
-            body = ((await page.inner_text("body")) or "")[:2000]
+            body = ((await page.inner_text("body")) or "")[:6000]
         except Exception:
             body = ""
         if "主体信息已过期" in body:
             return "账号提示「主体信息已过期」，请先在搜狐号后台重新提交主体信息后再发文"
-        # 「实名认证」黄条在很多账号上只是提示，手工发文同样可发，不当作硬阻塞
+        if "未实名暂无法发布文章" in body or "未实名认证无法发布文章" in body:
+            return "账号尚未完成实名认证，搜狐号当前禁止发布文章，请先人工完成实名认证"
+        # 只有普通「实名认证」提示、没有明确禁止发文文案时，不当作硬阻塞。
         if await self._visible_captcha(page):
             return "检测到滑块/安全验证，请在浏览器中完成验证"
         if "加载中" in body and not await self._publish_form_ready(page):
@@ -1051,6 +1053,9 @@ class SoHuArticle(object):
         page = await context.new_page()
 
         await self._open_article_editor(page)
+        blocking_state = await self._detect_blocking_state(page)
+        if "禁止发布文章" in blocking_state:
+            raise RuntimeError(blocking_state)
 
         await self.fill_title(page)
         await page.wait_for_timeout(500)
