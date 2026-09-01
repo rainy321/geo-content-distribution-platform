@@ -63,7 +63,7 @@ npm run dev
 ## 已执行验证
 
 ```text
-后端：182 tests passed
+后端：185 tests passed
 前端：Vite production build passed（1708 modules）
 浏览器：隔离 Demo 首次启动、Dashboard、发布中心导航、关键 UI、错误层、控制台和失败请求检查均通过；复验端口已关闭
 真实模型：qwen3.8-max 生成 688 字 / GEO 85，优化 952 字 / GEO 100
@@ -74,6 +74,7 @@ npm run dev
 知乎防重复：正式适配器在发布前精确查询同标题公开文章，发布后最多轮询 3 次公开结果；查询失败时阻止新发布，不会盲目重复点击
 今日头条第二适配器：复用原 `TouTiaoArticle` 与 Cookie 登录，不修改 `uploader/`；真实执行沿用总开关、非 Demo、二次确认三重门控
 今日头条结果边界：仅公开文章链接可标记 success；已提交、等待审核或超时未知保持 processing，不自动重试以避免重复发文
+今日头条登录检测：修复 SPA 跳转依赖 `wait_for_url/load` 导致的误超时，改为轮询创作者后台 URL；修复后人工登录尝试仍停留在登录页并安全超时，未保存账号、Cookie 或发布内容
 交付安全：Docker 构建上下文已排除 Cookie、SQLite、`.tmp` 和根目录 `.env`；前端 lockfile 已纳入版本控制，Python 包声明已包含 `services/` 与 `db/`
 工作区：uploader/ 无改动；未发现硬编码 API Key；Cookie、`.tmp/`、本地数据库均被 Git 忽略
 ```

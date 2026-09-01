@@ -27,6 +27,30 @@ def get_browser_options():
 
     return options
 
+
+async def wait_for_toutiao_creator_backend(
+    page,
+    *,
+    timeout_seconds=200,
+    poll_interval_seconds=1,
+):
+    """Detect Toutiao's SPA login transition without waiting for page load."""
+
+    if timeout_seconds < 0 or poll_interval_seconds <= 0:
+        raise ValueError("等待时间必须为非负数，轮询间隔必须大于 0")
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    while True:
+        current_url = str(page.url or "")
+        if "/profile_v4" in current_url and "/auth/page/login" not in current_url:
+            return True
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return False
+        await page.wait_for_timeout(
+            max(1, int(min(poll_interval_seconds, remaining) * 1000))
+        )
+
 # 抖音登录
 async def douyin_cookie_gen(id,status_queue):
     url_changed_event = asyncio.Event()
@@ -417,14 +441,9 @@ async def toutiao_cookie_gen(id, status_queue):
             print("🟢 打开今日头条登录页...")
             await page.goto("https://mp.toutiao.com/auth/page/login", timeout=60000, wait_until="domcontentloaded")
             print(f"🟢 登录页已打开: {page.url}")
-            try:
-                # Playwright 的 callable 参数可能是 URL 对象，统一转 str
-                await page.wait_for_url(
-                    lambda url: ("/profile_v4" in str(url)) and ("/auth/page/login" not in str(url)),
-                    timeout=200_000,
-                )
+            if await wait_for_toutiao_creator_backend(page, timeout_seconds=200):
                 print("✅ 今日头条登录成功，检测到进入创作者后台")
-            except asyncio.TimeoutError:
+            else:
                 print("❌ 今日头条登录超时")
                 status_queue.put("500")
                 return None
