@@ -10,7 +10,7 @@ _PUBLIC_ARTICLE_URL_PATTERN = re.compile(
 _SUBMISSION_METHODS = frozenset({"POST", "PUT", "PATCH"})
 _SUBMISSION_URL_MARKERS = ("publish", "graphic", "article")
 _INITIAL_PUBLISH_LABELS = ("预览并发布", "发布")
-_FINAL_PUBLISH_LABELS = ("确认发布", "立即发布", "发布")
+_FINAL_PUBLISH_LABELS = ("确认发布", "确认并发布", "立即发布", "发布")
 
 
 async def click_exact_publish_and_observe(page: Any) -> dict[str, Any]:
@@ -98,9 +98,8 @@ async def _confirm_publish_dialog_if_present(page: Any) -> None:
     if not await dialogs.count():
         return
     dialog = dialogs.last
-    _label, candidate = await _require_single_exact_button(
+    _label, candidate = await _require_single_final_button(
         dialog,
-        _FINAL_PUBLISH_LABELS,
         stage="确认弹窗",
     )
     await candidate.click(timeout=5_000)
@@ -110,8 +109,8 @@ async def _confirm_publish_dialog_if_present(page: Any) -> None:
 async def _confirm_preview_publish(page: Any) -> None:
     """Require the second explicit action after the current preview button."""
 
-    for _ in range(20):
-        matches = await _visible_exact_buttons(page, _FINAL_PUBLISH_LABELS)
+    for _ in range(60):
+        matches = await _visible_final_buttons(page)
         if len(matches) > 1:
             raise RuntimeError(
                 f"今日头条精确确认发布按钮数量异常：期望 1 个，实际 {len(matches)} 个"
@@ -123,6 +122,40 @@ async def _confirm_preview_publish(page: Any) -> None:
             return
         await page.wait_for_timeout(250)
     raise RuntimeError("今日头条预览已打开，但未找到唯一可用的确认发布按钮")
+
+
+async def _require_single_final_button(
+    scope: Any,
+    *,
+    stage: str,
+) -> tuple[str, Any]:
+    matches = await _visible_final_buttons(scope)
+    if len(matches) != 1:
+        raise RuntimeError(
+            f"今日头条精确{stage}发布按钮数量异常：期望 1 个，实际 {len(matches)} 个"
+        )
+    return matches[0]
+
+
+async def _visible_final_buttons(scope: Any) -> list[tuple[str, Any]]:
+    exact_matches = await _visible_exact_buttons(scope, _FINAL_PUBLISH_LABELS)
+    if exact_matches:
+        return exact_matches
+
+    # The current editor reuses this class for both stages, but its final button
+    # may not expose a usable ARIA role/name. Only accept exact known final text;
+    # the still-visible first-stage button is deliberately excluded.
+    candidates = scope.locator("button.publish-btn-last")
+    matches: list[tuple[str, Any]] = []
+    allowed = {label.replace(" ", "") for label in _FINAL_PUBLISH_LABELS}
+    for index in range(await candidates.count()):
+        candidate = candidates.nth(index)
+        if not await candidate.is_visible() or not await candidate.is_enabled():
+            continue
+        label = str(await candidate.inner_text() or "").strip()
+        if label.replace(" ", "") in allowed:
+            matches.append((label, candidate))
+    return matches
 
 
 async def _require_single_exact_button(

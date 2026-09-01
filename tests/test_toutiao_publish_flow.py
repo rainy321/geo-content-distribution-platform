@@ -166,6 +166,65 @@ class ToutiaoPublishFlowTests(unittest.IsolatedAsyncioTestCase):
         for button in confirm_buttons:
             button.click.assert_not_called()
 
+    async def test_two_stage_uses_exact_css_fallback_for_current_editor(self):
+        preview_button = Mock()
+        preview_button.is_visible = AsyncMock(return_value=True)
+        preview_button.is_enabled = AsyncMock(return_value=True)
+        preview_button.click = AsyncMock()
+        confirm_button = Mock()
+        confirm_button.is_visible = AsyncMock(return_value=True)
+        confirm_button.is_enabled = AsyncMock(return_value=True)
+        confirm_button.inner_text = AsyncMock(return_value="确认并发布")
+        confirm_button.click = AsyncMock()
+
+        page = Mock()
+        page.url = "https://mp.toutiao.com/profile_v4/graphic/articles"
+        page.get_by_role.side_effect = self._role_lookup(
+            {"预览并发布": [preview_button]}
+        )
+        page.locator.side_effect = lambda selector: (
+            _CandidateList([confirm_button])
+            if selector == "button.publish-btn-last"
+            else _DialogList()
+        )
+        page.wait_for_timeout = AsyncMock()
+        page.remove_listener = Mock()
+
+        def register(_event, callback):
+            callback(_Response())
+
+        page.on = Mock(side_effect=register)
+
+        result = await click_exact_publish_and_observe(page)
+
+        confirm_button.click.assert_awaited_once()
+        self.assertEqual(result["status"], "processing")
+
+    async def test_css_fallback_rejects_still_visible_preview_button(self):
+        preview_button = Mock()
+        preview_button.is_visible = AsyncMock(return_value=True)
+        preview_button.is_enabled = AsyncMock(return_value=True)
+        preview_button.inner_text = AsyncMock(return_value="预览并发布")
+        preview_button.click = AsyncMock()
+
+        page = Mock()
+        page.get_by_role.side_effect = self._role_lookup(
+            {"预览并发布": [preview_button]}
+        )
+        page.locator.side_effect = lambda selector: (
+            _CandidateList([preview_button])
+            if selector == "button.publish-btn-last"
+            else _DialogList()
+        )
+        page.wait_for_timeout = AsyncMock()
+        page.on = Mock()
+        page.remove_listener = Mock()
+
+        with self.assertRaisesRegex(RuntimeError, "未找到唯一可用"):
+            await click_exact_publish_and_observe(page)
+
+        preview_button.click.assert_awaited_once()
+
 
 if __name__ == "__main__":
     unittest.main()
