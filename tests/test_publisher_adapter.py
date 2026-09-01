@@ -7,7 +7,9 @@ from services.publisher_adapter import (
     DemoPublisher,
     PublishContent,
     PublishResult,
+    ToutiaoPublisherAdapter,
     ZhihuPublisherAdapter,
+    _default_toutiao_publish_runner,
     _default_zhihu_publish_runner,
 )
 
@@ -268,6 +270,135 @@ class ZhihuPublisherAdapterTests(unittest.TestCase):
         )
         article.main.assert_awaited_once_with()
         self.assertTrue(callable(article.click_publish))
+        self.assertEqual(result, observed)
+
+
+class ToutiaoPublisherAdapterTests(unittest.TestCase):
+    def setUp(self):
+        self.content = PublishContent(
+            platform="toutiao",
+            title="AI Agent 指南",
+            content="正文",
+            images=("cover.png",),
+            tags=("AI", "Agent"),
+        )
+
+    def _adapter(self, **overrides):
+        options = {
+            "login_checker": lambda _account_file: True,
+            "login_runner": lambda _account_file: True,
+            "publish_runner": lambda _content, _account_file: None,
+            "timeout_seconds": 0.2,
+            "login_timeout_seconds": 0.2,
+        }
+        options.update(overrides)
+        return ToutiaoPublisherAdapter("account.json", **options)
+
+    def test_invalid_login_requires_action_without_running_publisher(self):
+        calls = []
+        adapter = self._adapter(
+            login_checker=lambda _account_file: False,
+            publish_runner=lambda *_args: calls.append("published"),
+        )
+
+        result = adapter.publish(self.content)
+
+        self.assertEqual(result.status, "need_action")
+        self.assertEqual(calls, [])
+
+    def test_public_url_is_required_for_success(self):
+        result = self._adapter(
+            publish_runner=lambda *_args: {
+                "status": "success",
+                "url": "https://www.toutiao.com/article/123/",
+                "message": "已公开",
+            }
+        ).publish(self.content)
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.status, "success")
+        self.assertEqual(result.url, "https://www.toutiao.com/article/123/")
+
+    def test_success_without_public_url_remains_processing(self):
+        result = self._adapter(
+            publish_runner=lambda *_args: {
+                "status": "success",
+                "message": "点击完成",
+            }
+        ).publish(self.content)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.status, "processing")
+
+    def test_internal_url_is_not_treated_as_public_success(self):
+        result = self._adapter(
+            publish_runner=lambda *_args: {
+                "status": "success",
+                "url": "https://mp.toutiao.com/profile_v4/graphic/articles",
+            }
+        ).publish(self.content)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.status, "processing")
+
+    def test_timeout_remains_processing_to_prevent_blind_retry(self):
+        async def slow_publish(*_args):
+            await asyncio.sleep(0.1)
+
+        result = self._adapter(
+            publish_runner=slow_publish,
+            timeout_seconds=0.01,
+        ).publish(self.content)
+
+        self.assertEqual(result.status, "processing")
+        self.assertIn("不会自动重试", result.message)
+
+    def test_manual_intervention_errors_are_classified(self):
+        def blocked(*_args):
+            raise RuntimeError("出现验证码，需要人工确认")
+
+        result = self._adapter(publish_runner=blocked).publish(self.content)
+
+        self.assertEqual(result.status, "need_action")
+
+    def test_schedule_does_not_contact_platform(self):
+        calls = []
+        publish_at = datetime(2026, 9, 2, 9, 30, tzinfo=timezone.utc)
+        adapter = self._adapter(
+            login_checker=lambda *_args: calls.append("checked"),
+            publish_runner=lambda *_args: calls.append("published"),
+        )
+
+        result = adapter.schedule(self.content, publish_at)
+
+        self.assertEqual(result.status, "scheduled")
+        self.assertEqual(calls, [])
+
+    @patch("uploader.toutiao_uploader.main.TouTiaoArticle")
+    def test_default_runner_declares_ai_assistance_and_observes_click(self, article_class):
+        article = article_class.return_value
+        observed = {
+            "status": "processing",
+            "success": False,
+            "message": "平台已接受提交",
+        }
+
+        async def run_main():
+            await article.publish(object())
+
+        article.main = AsyncMock(side_effect=run_main)
+
+        with patch(
+            "services.toutiao_publish_flow.click_exact_publish_and_observe",
+            new=AsyncMock(return_value=observed),
+        ):
+            result = asyncio.run(
+                _default_toutiao_publish_runner(self.content, "account.json")
+            )
+
+        self.assertEqual(article_class.call_args.kwargs["work_statements"], ["引用AI"])
+        self.assertEqual(article_class.call_args.kwargs["cover_path"], "cover.png")
+        article.main.assert_awaited_once_with()
         self.assertEqual(result, observed)
 
 

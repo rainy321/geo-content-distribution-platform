@@ -59,7 +59,10 @@ from services.publish_job_service import (
     retry_publish_job,
 )
 from services.publish_scheduler_runtime import create_publish_scheduler
-from services.real_publisher_factory import create_real_publisher_factory
+from services.real_publisher_factory import (
+    REAL_PUBLISH_PLATFORMS,
+    create_real_publisher_factory,
+)
 
 active_queues = {}
 app = Flask(__name__)
@@ -630,7 +633,7 @@ def execute_real_publish_task(job_id):
         return jsonify(
             {"code": 400, "msg": "真实发布需要明确确认", "data": None}
         ), 400
-    if current["platform"] != "zhihu":
+    if current["platform"] not in REAL_PUBLISH_PLATFORMS:
         return jsonify(
             {
                 "code": 409,
@@ -654,7 +657,10 @@ def execute_real_publish_task(job_id):
     return jsonify(
         {
             "code": 200,
-            "msg": "知乎真实发布流程已执行，请以任务状态和平台结果为准",
+            "msg": (
+                f"{current['platform']} 真实发布流程已执行，"
+                "请以任务状态和平台结果为准"
+            ),
             "data": _publish_job_payload(job),
         }
     ), 200
@@ -677,7 +683,7 @@ def _publish_job_payload(job):
             not job["demo"]
             and not app.config.get("DEMO_MODE", False)
             and app.config.get("ALLOW_REAL_PUBLISHING", False)
-            and job["platform"] == "zhihu"
+            and job["platform"] in REAL_PUBLISH_PLATFORMS
             and job["status"] == "queued"
         ),
     }

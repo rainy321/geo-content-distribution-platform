@@ -6,7 +6,7 @@ from pathlib import Path
 
 from db.createTable import initialize_database
 from services.publish_job_executor import PublisherNotConfiguredError
-from services.publisher_adapter import ZhihuPublisherAdapter
+from services.publisher_adapter import ToutiaoPublisherAdapter, ZhihuPublisherAdapter
 from services.real_publisher_factory import RealPublisherFactory
 
 
@@ -22,16 +22,24 @@ class RealPublisherFactoryTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def _insert_account(self, file_path, *, status=1, checked_at=None):
+    def _insert_account(
+        self,
+        file_path,
+        *,
+        account_type=9,
+        account_name="知乎账号",
+        status=1,
+        checked_at=None,
+    ):
         with closing(sqlite3.connect(self.db_path)) as conn:
             with conn:
                 conn.execute(
                     """
                     INSERT INTO user_info (
                         type, filePath, userName, status, last_checked_at
-                    ) VALUES (9, ?, '知乎账号', ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?)
                     """,
-                    (file_path, status, checked_at),
+                    (account_type, file_path, account_name, status, checked_at),
                 )
 
     def test_builds_zhihu_adapter_from_connected_local_cookie(self):
@@ -48,6 +56,25 @@ class RealPublisherFactoryTests(unittest.TestCase):
         self.assertIsInstance(publisher, ZhihuPublisherAdapter)
         self.assertEqual(Path(publisher.account_file), cookie_file)
 
+    def test_builds_toutiao_adapter_from_connected_local_cookie(self):
+        cookie_file = self.cookies_dir / "toutiao.json"
+        cookie_file.write_text("{}", encoding="utf-8")
+        self._insert_account(
+            "toutiao.json",
+            account_type=7,
+            account_name="头条账号",
+            checked_at="2026-09-01 10:00:00",
+        )
+        factory = RealPublisherFactory(
+            self.db_path,
+            cookies_directory=self.cookies_dir,
+        )
+
+        publisher = factory({"platform": "toutiao"})
+
+        self.assertIsInstance(publisher, ToutiaoPublisherAdapter)
+        self.assertEqual(Path(publisher.account_file), cookie_file)
+
     def test_rejects_unsupported_platform(self):
         factory = RealPublisherFactory(
             self.db_path,
@@ -55,7 +82,7 @@ class RealPublisherFactoryTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(PublisherNotConfiguredError, "尚未接入"):
-            factory({"platform": "toutiao"})
+            factory({"platform": "sohu"})
 
     def test_refuses_missing_expired_and_path_traversal_credentials(self):
         outside = self.root / "outside.json"

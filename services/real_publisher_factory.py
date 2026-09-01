@@ -6,10 +6,15 @@ from pathlib import Path
 from typing import Any
 
 from services.publish_job_executor import PublisherNotConfiguredError
-from services.publisher_adapter import PublisherAdapter, ZhihuPublisherAdapter
+from services.publisher_adapter import (
+    PublisherAdapter,
+    ToutiaoPublisherAdapter,
+    ZhihuPublisherAdapter,
+)
 
 
-_PLATFORM_ACCOUNT_TYPES = {"zhihu": 9}
+REAL_PUBLISH_PLATFORMS = frozenset({"zhihu", "toutiao"})
+_PLATFORM_ACCOUNT_TYPES = {"zhihu": 9, "toutiao": 7}
 
 
 class RealPublisherFactory:
@@ -49,6 +54,8 @@ class RealPublisherFactory:
             if account_file is not None and account_file.is_file():
                 if platform == "zhihu":
                     return ZhihuPublisherAdapter(account_file)
+                if platform == "toutiao":
+                    return ToutiaoPublisherAdapter(account_file)
 
         raise PublisherNotConfiguredError(
             f"{platform} 没有可用的已连接账号，请先在媒体账号页登录并检测状态"

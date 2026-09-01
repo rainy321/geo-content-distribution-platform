@@ -524,7 +524,7 @@ const executeRealJob = async (job) => {
   try {
     const response = await publishApi.executeRealJob(job.job_id)
     const result = response.data
-    if (result.status === 'success') ElMessage.success('知乎真实发布成功')
+    if (result.status === 'success') ElMessage.success(`${platformName(job.platform)}真实发布成功`)
     else if (result.status === 'need_action') ElMessage.warning(result.message || '需要人工确认后继续')
     else if (result.status === 'processing') ElMessage.info(result.message || '平台状态仍在确认中')
     else ElMessage.error(result.message || '真实发布未完成')

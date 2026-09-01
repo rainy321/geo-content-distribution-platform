@@ -79,7 +79,7 @@ class RealPublishApiTests(unittest.TestCase):
 
     def test_rejects_demo_and_unsupported_real_jobs_without_execution(self):
         demo_job = self._create_job(demo=True)
-        toutiao_job = self._create_job(platform="toutiao")
+        unsupported_job = self._create_job(platform="sohu")
 
         with patch("sau_backend.execute_publish_job") as execute:
             demo_response = self.client.post(
@@ -87,7 +87,7 @@ class RealPublishApiTests(unittest.TestCase):
                 json={"confirm": True},
             )
             unsupported = self.client.post(
-                f"/api/publish/jobs/{toutiao_job['id']}/execute-real",
+                f"/api/publish/jobs/{unsupported_job['id']}/execute-real",
                 json={"confirm": True},
             )
 
@@ -128,6 +128,36 @@ class RealPublishApiTests(unittest.TestCase):
             publisher_factory=factory,
         )
 
+    def test_executes_confirmed_toutiao_job_with_explicit_factory(self):
+        job = self._create_job(platform="toutiao")
+        processing = {
+            **job,
+            "status": "processing",
+            "message": "今日头条已接受文章提交，等待平台审核",
+            "started_at": "2026-09-01 10:00:00",
+        }
+        factory = Mock(name="real_publisher_factory")
+
+        with patch(
+            "sau_backend.create_real_publisher_factory",
+            return_value=factory,
+        ), patch(
+            "sau_backend.execute_publish_job",
+            return_value=processing,
+        ) as execute:
+            response = self.client.post(
+                f"/api/publish/jobs/{job['id']}/execute-real",
+                json={"confirm": True},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["data"]["status"], "processing")
+        execute.assert_called_once_with(
+            self.db_path,
+            job["id"],
+            publisher_factory=factory,
+        )
+
     def test_job_payload_exposes_real_action_only_when_all_server_gates_allow_it(self):
         job = self._create_job()
 
@@ -137,6 +167,15 @@ class RealPublishApiTests(unittest.TestCase):
 
         self.assertTrue(allowed["can_execute_real"])
         self.assertFalse(blocked["can_execute_real"])
+
+    def test_toutiao_job_payload_exposes_real_action(self):
+        job = self._create_job(platform="toutiao")
+
+        payload = self.client.get(
+            f"/api/publish/jobs/{job['id']}"
+        ).get_json()["data"]
+
+        self.assertTrue(payload["can_execute_real"])
 
 
 if __name__ == "__main__":

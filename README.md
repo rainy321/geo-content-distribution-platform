@@ -179,7 +179,7 @@ Demo Mode 首次连接到**完全空的数据库**时，会在一个事务内准
 | `GET` | `/api/publish/jobs/:id` | 轮询单个任务状态 |
 | `POST` | `/api/publish/jobs/:id/retry` | 将失败/待人工任务重新排队 |
 | `POST` | `/api/publish/jobs/:id/execute` | 仅执行明确标记的 Demo 任务 |
-| `POST` | `/api/publish/jobs/:id/execute-real` | 三重门控后执行已确认的知乎真实任务 |
+| `POST` | `/api/publish/jobs/:id/execute-real` | 三重门控后执行已确认的知乎/今日头条真实任务 |
 | `GET` | `/api/media-accounts` | 读取媒体账号与平台连接概览，不主动检测平台 |
 | `POST` | `/api/media-accounts/:id/check` | 用户显式触发单账号 Cookie 状态检测 |
 
@@ -266,13 +266,13 @@ GEO Web 运行环境变量：
 | `AI_MODEL` | 无 | 内容生成与优化使用的模型 |
 | `DEMO_MODE` | `false` | 为 `true` 时新发布任务使用 DemoPublisher |
 | `SEED_DEMO_DATA` | `true` | Demo Mode 下为空数据库准备幂等、明确标注的演示数据 |
-| `ALLOW_REAL_PUBLISHING` | `false` | 真实发布总开关；当前仅接入知乎文章 |
+| `ALLOW_REAL_PUBLISHING` | `false` | 真实发布总开关；当前接入知乎与今日头条文章 |
 | `DATABASE_PATH` | `db/database.db` | 可覆盖 SQLite 路径，便于隔离环境 |
 | `PUBLISH_SCHEDULER_INTERVAL_SECONDS` | `15` | 到期任务检查间隔，最少 5 秒 |
 
 定时任务由 APScheduler 在 `python sau_backend.py` 启动时注册。每次 tick 会原子地将到期任务从 `scheduled` 提升为 `queued`；Demo 任务随后自动执行，真实任务只进入队列，等待已配置账号的真实执行器处理。调度任务启用了单实例和合并补跑，避免同一进程内重复领取。
 
-知乎真实发布默认关闭。只有同时满足 `DEMO_MODE=false`、`ALLOW_REAL_PUBLISHING=true`、任务本身不是 Demo，并且操作者在发布中心二次确认时才会进入真实适配器。适配器仍会先验证登录状态；发布前通过当前账号的公开文章列表精确匹配标题，已存在时直接返回原链接，避免重复发布；发布后最多轮询 3 次公开文章结果并自动对账，但不会自动重复点击“发布”。公开结果查询不可用时会阻止新的真实发布。扫码、验证码、风控或 Cookie 失效会进入“待人工确认”，系统不会绕过平台安全机制。今日头条、百家号、搜狐号和小红书在第一版中仍只支持 Demo 任务，不能伪装成真实发布成功。
+知乎和今日头条真实发布默认关闭。只有同时满足 `DEMO_MODE=false`、`ALLOW_REAL_PUBLISHING=true`、任务本身不是 Demo，并且操作者在发布中心二次确认时才会进入真实适配器。两个适配器都会先验证登录状态。知乎发布前通过当前账号的公开文章列表精确匹配标题，已存在时直接返回原链接；发布后最多轮询 3 次公开文章结果并自动对账，不会自动重复点击“发布”。今日头条只在平台返回公开文章链接时标记成功；只有提交证据或发生超时但最终状态未知时保持 `processing`，要求先到平台后台核对，避免盲目重试造成重复文章。扫码、验证码、风控或 Cookie 失效会进入“待人工确认”，系统不会绕过平台安全机制。百家号、搜狐号和小红书在 GEO 任务流中仍只支持 Demo 任务，不能伪装成真实发布成功。
 
 > 部署安全边界：当前 MVP 没有用户认证且 Flask CORS 默认开放，仅适合本地或受控内网演示。启用真实发布时，不要把后端端口直接暴露到公网；公网部署前必须在反向代理或平台层增加访问控制、TLS，并保护 SQLite 与 `cookiesFile/` 持久卷。
 
