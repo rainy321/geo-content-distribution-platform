@@ -70,14 +70,20 @@ app = Flask(__name__)
 
 # Web 启动时只补齐运行目录和已有表，不删除或覆盖现有数据。
 Path(BASE_DIR / "videoFile").mkdir(parents=True, exist_ok=True)
-Path(BASE_DIR / "cookiesFile").mkdir(parents=True, exist_ok=True)
 configured_database_path = os.getenv("DATABASE_PATH")
+configured_cookies_directory = os.getenv("COOKIES_DIRECTORY")
 app.config["DATABASE_PATH"] = (
     Path(configured_database_path).expanduser().resolve()
     if configured_database_path
     else Path(BASE_DIR / "db" / "database.db")
 )
 app.config["MEDIA_ROOT"] = Path(BASE_DIR / "videoFile").resolve()
+app.config["COOKIES_DIRECTORY"] = (
+    Path(configured_cookies_directory).expanduser().resolve()
+    if configured_cookies_directory
+    else Path(BASE_DIR / "cookiesFile").resolve()
+)
+Path(app.config["COOKIES_DIRECTORY"]).mkdir(parents=True, exist_ok=True)
 app.config["DEMO_MODE"] = str(os.getenv("DEMO_MODE", "false")).strip().lower() in {
     "1",
     "true",
@@ -285,7 +291,7 @@ def get_dashboard_data():
 def get_media_accounts():
     overview = get_media_accounts_overview(
         app.config["DATABASE_PATH"],
-        cookies_directory=Path(BASE_DIR / "cookiesFile"),
+        cookies_directory=app.config["COOKIES_DIRECTORY"],
     )
     return jsonify({"code": 200, "msg": "success", "data": overview}), 200
 
@@ -296,8 +302,12 @@ async def check_media_account_status(account_id):
         account = await check_media_account(
             app.config["DATABASE_PATH"],
             account_id,
-            cookies_directory=Path(BASE_DIR / "cookiesFile"),
-            checker=check_cookie,
+            cookies_directory=app.config["COOKIES_DIRECTORY"],
+            checker=lambda account_type, file_path: check_cookie(
+                account_type,
+                file_path,
+                cookies_directory=app.config["COOKIES_DIRECTORY"],
+            ),
         )
     except MediaAccountNotFoundError as exc:
         return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
@@ -769,7 +779,7 @@ def execute_real_publish_task(job_id):
 
     publisher_factory = create_real_publisher_factory(
         app.config["DATABASE_PATH"],
-        cookies_directory=Path(BASE_DIR / "cookiesFile"),
+        cookies_directory=app.config["COOKIES_DIRECTORY"],
     )
     try:
         job = execute_publish_job(
@@ -1901,52 +1911,74 @@ def download_cookie():
 # 包装函数：在线程中运行异步函数
 def run_async_function(type,id,status_queue):
     print(f"🧵 登录线程启动: type={type}, id={id}", flush=True)
+    login_storage = {
+        "database_path": app.config["DATABASE_PATH"],
+        "cookies_directory": app.config["COOKIES_DIRECTORY"],
+    }
     try:
         match str(type):
             case '1':
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                loop.run_until_complete(xiaohongshu_cookie_gen(id, status_queue))
+                loop.run_until_complete(
+                    xiaohongshu_cookie_gen(id, status_queue, **login_storage)
+                )
                 loop.close()
             case '2':
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                loop.run_until_complete(get_tencent_cookie(id,status_queue))
+                loop.run_until_complete(
+                    get_tencent_cookie(id, status_queue, **login_storage)
+                )
                 loop.close()
             case '3':
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                loop.run_until_complete(douyin_cookie_gen(id,status_queue))
+                loop.run_until_complete(
+                    douyin_cookie_gen(id, status_queue, **login_storage)
+                )
                 loop.close()
             case '4':
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                loop.run_until_complete(get_ks_cookie(id,status_queue))
+                loop.run_until_complete(
+                    get_ks_cookie(id, status_queue, **login_storage)
+                )
                 loop.close()
             case '5':
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                loop.run_until_complete(baijiahao_cookie_gen(id, status_queue))
+                loop.run_until_complete(
+                    baijiahao_cookie_gen(id, status_queue, **login_storage)
+                )
                 loop.close()
             case '6':
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                loop.run_until_complete(bilibili_cookie_gen(id, status_queue))
+                loop.run_until_complete(
+                    bilibili_cookie_gen(id, status_queue, **login_storage)
+                )
                 loop.close()
             case '7':
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                loop.run_until_complete(toutiao_cookie_gen(id, status_queue))
+                loop.run_until_complete(
+                    toutiao_cookie_gen(id, status_queue, **login_storage)
+                )
                 loop.close()
             case '8':
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                loop.run_until_complete(sohu_cookie_gen(id, status_queue))
+                loop.run_until_complete(
+                    sohu_cookie_gen(id, status_queue, **login_storage)
+                )
                 loop.close()
             case '9':
                 loop = asyncio.new_event_loop()
                 asyncio.set_event_loop(loop)
-                loop.run_until_complete(zhihu_cookie_gen(id, status_queue))
+                loop.run_until_complete(
+                    zhihu_cookie_gen(id, status_queue, **login_storage)
+                )
                 loop.close()
             case _:
                 print(f"❌ 不支持的登录平台类型: {type}", flush=True)
@@ -1996,7 +2028,7 @@ if __name__ == '__main__':
     scheduler_publisher_factory = (
         create_real_publisher_factory(
             app.config["DATABASE_PATH"],
-            cookies_directory=Path(BASE_DIR / "cookiesFile"),
+            cookies_directory=app.config["COOKIES_DIRECTORY"],
         )
         if scheduler_allows_real
         else None

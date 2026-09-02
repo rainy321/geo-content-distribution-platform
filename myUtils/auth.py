@@ -145,35 +145,40 @@ async def cookie_auth_zhihu(account_file):
     return await zhihu_cookie_auth(account_file)
 
 
-async def check_cookie(type, file_path):
+async def check_cookie(type, file_path, *, cookies_directory=None):
+    cookies_root = (
+        Path(cookies_directory).expanduser().resolve()
+        if cookies_directory is not None
+        else Path(BASE_DIR / "cookiesFile")
+    )
     match type:
         # 小红书
         case 1:
-            return await cookie_auth_xhs(Path(BASE_DIR / "cookiesFile" / file_path))
+            return await cookie_auth_xhs(cookies_root / file_path)
         # 视频号
         case 2:
-            return await cookie_auth_tencent(Path(BASE_DIR / "cookiesFile" / file_path))
+            return await cookie_auth_tencent(cookies_root / file_path)
         # 抖音
         case 3:
-            return await cookie_auth_douyin(Path(BASE_DIR / "cookiesFile" / file_path))
+            return await cookie_auth_douyin(cookies_root / file_path)
         # 快手
         case 4:
-            return await cookie_auth_ks(Path(BASE_DIR / "cookiesFile" / file_path))
+            return await cookie_auth_ks(cookies_root / file_path)
         # 百家号
         case 5:
-            return await cookie_auth_baijiahao(Path(BASE_DIR / "cookiesFile" / file_path))
+            return await cookie_auth_baijiahao(cookies_root / file_path)
         # Bilibili
         case 6:
-            return await cookie_auth_bilibili(Path(BASE_DIR / "cookiesFile" / file_path))
+            return await cookie_auth_bilibili(cookies_root / file_path)
         # 今日头条
         case 7:
-            return await cookie_auth_toutiao(Path(BASE_DIR / "cookiesFile" / file_path))
+            return await cookie_auth_toutiao(cookies_root / file_path)
         # 搜狐号
         case 8:
-            return await cookie_auth_sohu(Path(BASE_DIR / "cookiesFile" / file_path))
+            return await cookie_auth_sohu(cookies_root / file_path)
         # 知乎
         case 9:
-            return await cookie_auth_zhihu(Path(BASE_DIR / "cookiesFile" / file_path))
+            return await cookie_auth_zhihu(cookies_root / file_path)
         case _:
             return False
 

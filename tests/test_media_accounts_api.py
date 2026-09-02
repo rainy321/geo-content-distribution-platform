@@ -14,15 +14,23 @@ from services.media_account_service import (
 class MediaAccountsApiTests(unittest.TestCase):
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
-        self.db_path = Path(self.temp_dir.name) / "api.db"
+        self.temp_root = Path(self.temp_dir.name)
+        self.db_path = self.temp_root / "api.db"
+        self.cookies_directory = self.temp_root / "cookies"
+        self.cookies_directory.mkdir()
         initialize_database(self.db_path)
         self.original_database_path = app.config["DATABASE_PATH"]
+        self.original_cookies_directory = app.config["COOKIES_DIRECTORY"]
+        self.original_testing = app.testing
         app.config["DATABASE_PATH"] = self.db_path
+        app.config["COOKIES_DIRECTORY"] = self.cookies_directory
         app.config["TESTING"] = True
         self.client = app.test_client()
 
     def tearDown(self):
         app.config["DATABASE_PATH"] = self.original_database_path
+        app.config["COOKIES_DIRECTORY"] = self.original_cookies_directory
+        app.config["TESTING"] = self.original_testing
         self.temp_dir.cleanup()
 
     def test_returns_structured_empty_platform_overview(self):

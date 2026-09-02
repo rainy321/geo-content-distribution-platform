@@ -10,6 +10,22 @@ from pathlib import Path
 from conf import BASE_DIR, LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
 from uploader.bilibili_uploader.runtime import run_biliup_command
 
+
+def _login_database_path(database_path=None):
+    return (
+        Path(database_path).expanduser().resolve()
+        if database_path is not None
+        else Path(BASE_DIR / "db" / "database.db")
+    )
+
+
+def _login_cookies_directory(cookies_directory=None):
+    return (
+        Path(cookies_directory).expanduser().resolve()
+        if cookies_directory is not None
+        else Path(BASE_DIR / "cookiesFile")
+    )
+
 # 统一获取浏览器启动配置（防风控+引入本地浏览器）
 def get_browser_options():
     options = {
@@ -52,7 +68,9 @@ async def wait_for_toutiao_creator_backend(
         )
 
 # 抖音登录
-async def douyin_cookie_gen(id,status_queue):
+async def douyin_cookie_gen(
+    id, status_queue, *, database_path=None, cookies_directory=None
+):
     url_changed_event = asyncio.Event()
     async def on_url_change():
         # 检查是否是主框架的变化
@@ -91,10 +109,12 @@ async def douyin_cookie_gen(id,status_queue):
         uuid_v1 = uuid.uuid1()
         print(f"UUID v1: {uuid_v1}")
         # 确保cookiesFile目录存在
-        cookies_dir = Path(BASE_DIR / "cookiesFile")
-        cookies_dir.mkdir(exist_ok=True)
+        cookies_dir = _login_cookies_directory(cookies_directory)
+        cookies_dir.mkdir(parents=True, exist_ok=True)
         await context.storage_state(path=cookies_dir / f"{uuid_v1}.json")
-        result = await check_cookie(3, f"{uuid_v1}.json")
+        result = await check_cookie(
+            3, f"{uuid_v1}.json", cookies_directory=cookies_dir
+        )
         if not result:
             status_queue.put("500")
             await page.close()
@@ -104,7 +124,7 @@ async def douyin_cookie_gen(id,status_queue):
         await page.close()
         await context.close()
         await browser.close()
-        with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+        with sqlite3.connect(_login_database_path(database_path)) as conn:
             cursor = conn.cursor()
             cursor.execute('''
                                 INSERT INTO user_info (type, filePath, userName, status)
@@ -116,7 +136,9 @@ async def douyin_cookie_gen(id,status_queue):
 
 
 # 视频号登录
-async def get_tencent_cookie(id,status_queue):
+async def get_tencent_cookie(
+    id, status_queue, *, database_path=None, cookies_directory=None
+):
     url_changed_event = asyncio.Event()
     async def on_url_change():
         # 检查是否是主框架的变化
@@ -169,10 +191,12 @@ async def get_tencent_cookie(id,status_queue):
         uuid_v1 = uuid.uuid1()
         print(f"UUID v1: {uuid_v1}")
         # 确保cookiesFile目录存在
-        cookies_dir = Path(BASE_DIR / "cookiesFile")
-        cookies_dir.mkdir(exist_ok=True)
+        cookies_dir = _login_cookies_directory(cookies_directory)
+        cookies_dir.mkdir(parents=True, exist_ok=True)
         await context.storage_state(path=cookies_dir / f"{uuid_v1}.json")
-        result = await check_cookie(2,f"{uuid_v1}.json")
+        result = await check_cookie(
+            2, f"{uuid_v1}.json", cookies_directory=cookies_dir
+        )
         if not result:
             status_queue.put("500")
             await page.close()
@@ -183,7 +207,7 @@ async def get_tencent_cookie(id,status_queue):
         await context.close()
         await browser.close()
 
-        with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+        with sqlite3.connect(_login_database_path(database_path)) as conn:
             cursor = conn.cursor()
             cursor.execute('''
                                 INSERT INTO user_info (type, filePath, userName, status)
@@ -194,7 +218,9 @@ async def get_tencent_cookie(id,status_queue):
         status_queue.put("200")
 
 # 快手登录
-async def get_ks_cookie(id,status_queue):
+async def get_ks_cookie(
+    id, status_queue, *, database_path=None, cookies_directory=None
+):
     url_changed_event = asyncio.Event()
     async def on_url_change():
         # 检查是否是主框架的变化
@@ -243,10 +269,12 @@ async def get_ks_cookie(id,status_queue):
         uuid_v1 = uuid.uuid1()
         print(f"UUID v1: {uuid_v1}")
         # 确保cookiesFile目录存在
-        cookies_dir = Path(BASE_DIR / "cookiesFile")
-        cookies_dir.mkdir(exist_ok=True)
+        cookies_dir = _login_cookies_directory(cookies_directory)
+        cookies_dir.mkdir(parents=True, exist_ok=True)
         await context.storage_state(path=cookies_dir / f"{uuid_v1}.json")
-        result = await check_cookie(4, f"{uuid_v1}.json")
+        result = await check_cookie(
+            4, f"{uuid_v1}.json", cookies_directory=cookies_dir
+        )
         if not result:
             status_queue.put("500")
             await page.close()
@@ -257,7 +285,7 @@ async def get_ks_cookie(id,status_queue):
         await context.close()
         await browser.close()
 
-        with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+        with sqlite3.connect(_login_database_path(database_path)) as conn:
             cursor = conn.cursor()
             cursor.execute('''
                                         INSERT INTO user_info (type, filePath, userName, status)
@@ -268,7 +296,9 @@ async def get_ks_cookie(id,status_queue):
         status_queue.put("200")
 
 # 小红书登录
-async def xiaohongshu_cookie_gen(id, status_queue):
+async def xiaohongshu_cookie_gen(
+    id, status_queue, *, database_path=None, cookies_directory=None
+):
     """Run the maintained Xiaohongshu QR flow and persist the account locally."""
 
     from uploader.xiaohongshu_uploader.main import (
@@ -278,8 +308,8 @@ async def xiaohongshu_cookie_gen(id, status_queue):
     status_queue.put("MANUAL_LOGIN")
     uuid_v1 = uuid.uuid1()
     file_name = f"{uuid_v1}.json"
-    cookies_dir = Path(BASE_DIR / "cookiesFile")
-    cookies_dir.mkdir(exist_ok=True)
+    cookies_dir = _login_cookies_directory(cookies_directory)
+    cookies_dir.mkdir(parents=True, exist_ok=True)
     account_file = cookies_dir / file_name
 
     try:
@@ -292,7 +322,7 @@ async def xiaohongshu_cookie_gen(id, status_queue):
             status_queue.put("500")
             return None
 
-        with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+        with sqlite3.connect(_login_database_path(database_path)) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -311,7 +341,9 @@ async def xiaohongshu_cookie_gen(id, status_queue):
         return None
 
 # 百家号登录（手动登录，非二维码）
-async def baijiahao_cookie_gen(id, status_queue):
+async def baijiahao_cookie_gen(
+    id, status_queue, *, database_path=None, cookies_directory=None
+):
     browser = None
     context = None
     page = None
@@ -344,15 +376,17 @@ async def baijiahao_cookie_gen(id, status_queue):
 
             uuid_v1 = uuid.uuid1()
             print(f"UUID v1: {uuid_v1}")
-            cookies_dir = Path(BASE_DIR / "cookiesFile")
-            cookies_dir.mkdir(exist_ok=True)
+            cookies_dir = _login_cookies_directory(cookies_directory)
+            cookies_dir.mkdir(parents=True, exist_ok=True)
             await context.storage_state(path=cookies_dir / f"{uuid_v1}.json")
 
-            result = await check_cookie(5, f"{uuid_v1}.json")
+            result = await check_cookie(
+                5, f"{uuid_v1}.json", cookies_directory=cookies_dir
+            )
             if not result:
                 print("⚠️ cookie 即时校验未通过，仍保存账号，请稍后刷新验证")
 
-            with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+            with sqlite3.connect(_login_database_path(database_path)) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     INSERT INTO user_info (type, filePath, userName, status)
@@ -390,7 +424,9 @@ async def baijiahao_cookie_gen(id, status_queue):
 
 
 # 今日头条登录（扫码/手动，非二维码 SSE 推送，与百家号类似）
-async def toutiao_cookie_gen(id, status_queue):
+async def toutiao_cookie_gen(
+    id, status_queue, *, database_path=None, cookies_directory=None
+):
     browser = None
     context = None
     page = None
@@ -419,16 +455,18 @@ async def toutiao_cookie_gen(id, status_queue):
 
             uuid_v1 = uuid.uuid1()
             print(f"UUID v1: {uuid_v1}")
-            cookies_dir = Path(BASE_DIR / "cookiesFile")
-            cookies_dir.mkdir(exist_ok=True)
+            cookies_dir = _login_cookies_directory(cookies_directory)
+            cookies_dir.mkdir(parents=True, exist_ok=True)
             await context.storage_state(path=cookies_dir / f"{uuid_v1}.json")
 
             # cookie 校验失败也不要卡死前端；仍写入账号，状态后续可再验证
-            result = await check_cookie(7, f"{uuid_v1}.json")
+            result = await check_cookie(
+                7, f"{uuid_v1}.json", cookies_directory=cookies_dir
+            )
             if not result:
                 print("⚠️ cookie 即时校验未通过，仍保存账号，请稍后刷新验证")
 
-            with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+            with sqlite3.connect(_login_database_path(database_path)) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     INSERT INTO user_info (type, filePath, userName, status)
@@ -465,7 +503,9 @@ async def toutiao_cookie_gen(id, status_queue):
             pass
 
 
-async def sohu_cookie_gen(id, status_queue):
+async def sohu_cookie_gen(
+    id, status_queue, *, database_path=None, cookies_directory=None
+):
     browser = None
     context = None
     page = None
@@ -500,15 +540,17 @@ async def sohu_cookie_gen(id, status_queue):
 
             uuid_v1 = uuid.uuid1()
             print(f"UUID v1: {uuid_v1}")
-            cookies_dir = Path(BASE_DIR / "cookiesFile")
-            cookies_dir.mkdir(exist_ok=True)
+            cookies_dir = _login_cookies_directory(cookies_directory)
+            cookies_dir.mkdir(parents=True, exist_ok=True)
             await context.storage_state(path=cookies_dir / f"{uuid_v1}.json")
 
-            result = await check_cookie(8, f"{uuid_v1}.json")
+            result = await check_cookie(
+                8, f"{uuid_v1}.json", cookies_directory=cookies_dir
+            )
             if not result:
                 print("⚠️ cookie 即时校验未通过，仍保存账号，请稍后刷新验证")
 
-            with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+            with sqlite3.connect(_login_database_path(database_path)) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     INSERT INTO user_info (type, filePath, userName, status)
@@ -545,7 +587,9 @@ async def sohu_cookie_gen(id, status_queue):
             pass
 
 
-async def zhihu_cookie_gen(id, status_queue):
+async def zhihu_cookie_gen(
+    id, status_queue, *, database_path=None, cookies_directory=None
+):
     browser = None
     context = None
     page = None
@@ -574,15 +618,17 @@ async def zhihu_cookie_gen(id, status_queue):
 
             uuid_v1 = uuid.uuid1()
             print(f"UUID v1: {uuid_v1}")
-            cookies_dir = Path(BASE_DIR / "cookiesFile")
-            cookies_dir.mkdir(exist_ok=True)
+            cookies_dir = _login_cookies_directory(cookies_directory)
+            cookies_dir.mkdir(parents=True, exist_ok=True)
             await context.storage_state(path=cookies_dir / f"{uuid_v1}.json")
 
-            result = await check_cookie(9, f"{uuid_v1}.json")
+            result = await check_cookie(
+                9, f"{uuid_v1}.json", cookies_directory=cookies_dir
+            )
             if not result:
                 print("⚠️ cookie 即时校验未通过，仍保存账号，请稍后刷新验证")
 
-            with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+            with sqlite3.connect(_login_database_path(database_path)) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     INSERT INTO user_info (type, filePath, userName, status)
@@ -620,13 +666,15 @@ async def zhihu_cookie_gen(id, status_queue):
 
 
 # Bilibili登录（通过biliup CLI，在新终端窗口中扫码）
-async def bilibili_cookie_gen(id, status_queue):
+async def bilibili_cookie_gen(
+    id, status_queue, *, database_path=None, cookies_directory=None
+):
     import subprocess
     import sys
     from uploader.bilibili_uploader.runtime import ensure_biliup_binary
 
-    account_dir = Path(BASE_DIR / "cookiesFile")
-    account_dir.mkdir(exist_ok=True)
+    account_dir = _login_cookies_directory(cookies_directory)
+    account_dir.mkdir(parents=True, exist_ok=True)
     account_file = account_dir / f"bilibili_{id}.json"
 
     # 获取正确的biliup二进制路径（不是pip安装的Python版）
@@ -659,7 +707,7 @@ async def bilibili_cookie_gen(id, status_queue):
             result = run_biliup_command(["-u", str(account_file), "renew"])
             if result.returncode == 0:
                 print("✅ Bilibili登录成功")
-                with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+                with sqlite3.connect(_login_database_path(database_path)) as conn:
                     conn.cursor().execute(
                         'INSERT INTO user_info (type, filePath, userName, status) VALUES (?, ?, ?, ?)',
                         (6, f"bilibili_{id}.json", id, 1))
