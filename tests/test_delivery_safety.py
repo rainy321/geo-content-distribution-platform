@@ -135,9 +135,8 @@ class DeliverySafetyTests(unittest.TestCase):
         self.assertEqual(
             {"service": "backend"}, config["rewrites"][0]["destination"]
         )
-        self.assertEqual(
-            "/:path*", config["rewrites"][0]["transforms"][0]["args"]
-        )
+        self.assertEqual("/backend/:path*", config["rewrites"][0]["source"])
+        self.assertNotIn("transforms", config["rewrites"][0])
         self.assertEqual("/", config["rewrites"][1]["source"])
         self.assertEqual(
             {"service": "frontend"}, config["rewrites"][1]["destination"]
@@ -161,6 +160,7 @@ class DeliverySafetyTests(unittest.TestCase):
 
         self.assertIn("'NEXT_PUBLIC_'", vite_config)
         self.assertIn("import.meta.env.NEXT_PUBLIC_BACKEND_URL", api_config)
+        self.assertIn("import.meta.env.PROD ? '/backend' : ''", api_config)
 
     def test_server_bind_accepts_explicit_container_values(self):
         with patch.dict(

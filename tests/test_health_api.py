@@ -38,6 +38,13 @@ class HealthApiTests(unittest.TestCase):
         self.assertTrue(payload["data"]["demo_mode"])
         self.assertNotIn(str(self.db_path), response.get_data(as_text=True))
 
+    def test_backend_service_prefix_reaches_the_same_api(self):
+        response = self.client.get("/backend/api/health")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.content_type, "application/json")
+        self.assertEqual(response.get_json()["data"]["status"], "ok")
+
     def test_reports_unhealthy_when_database_cannot_be_opened(self):
         app.config["DATABASE_PATH"] = self.root / "missing" / "database.db"
 

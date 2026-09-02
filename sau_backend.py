@@ -66,6 +66,31 @@ active_queues = {}
 active_queues_lock = threading.Lock()
 app = Flask(__name__)
 
+
+class BackendPrefixMiddleware:
+    """Strip the stable service prefix before Flask performs URL routing."""
+
+    def __init__(self, wrapped_app, prefix="/backend"):
+        self.wrapped_app = wrapped_app
+        self.prefix = prefix.rstrip("/")
+
+    def __call__(self, environ, start_response):
+        path = environ.get("PATH_INFO", "")
+        if path == self.prefix:
+            environ["SCRIPT_NAME"] = (
+                environ.get("SCRIPT_NAME", "") + self.prefix
+            )
+            environ["PATH_INFO"] = "/"
+        elif path.startswith(f"{self.prefix}/"):
+            environ["SCRIPT_NAME"] = (
+                environ.get("SCRIPT_NAME", "") + self.prefix
+            )
+            environ["PATH_INFO"] = path[len(self.prefix):]
+        return self.wrapped_app(environ, start_response)
+
+
+app.wsgi_app = BackendPrefixMiddleware(app.wsgi_app)
+
 # Web 启动时只补齐运行目录和已有表，不删除或覆盖现有数据。
 configured_database_path = os.getenv("DATABASE_PATH")
 configured_cookies_directory = os.getenv("COOKIES_DIRECTORY")
