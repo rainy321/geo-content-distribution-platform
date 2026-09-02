@@ -27,6 +27,32 @@ class DeliverySafetyTests(unittest.TestCase):
             "git clone https://github.com/dreammis/social-auto-upload.git",
             primary_docs,
         )
+        self.assertIn('uv pip install -e ".[web]"', install)
+        self.assertIn("playwright install chromium", install)
+        self.assertIn("npm ci", install)
+
+    def test_readme_matches_real_platform_and_scheduler_gates(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        for platform in ("知乎", "今日头条", "搜狐号", "百家号", "小红书"):
+            self.assertIn(platform, readme)
+        self.assertIn("授权内容指纹到期仍匹配", readme)
+        self.assertIn("失败或状态不明不会自动重试", readme)
+        self.assertNotIn("真实任务只进入队列，等待已配置账号", readme)
+
+    def test_install_docs_preserve_environment_driven_safe_config(self):
+        install = (ROOT / "docs" / "install.md").read_text(encoding="utf-8")
+        example = (ROOT / "conf.example.py").read_text(encoding="utf-8")
+        env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+        self.assertNotIn("cp conf.example.py conf.py", install)
+        self.assertIn("不要用示例文件覆盖", install)
+        self.assertIn('"LOCAL_CHROME_HEADLESS", "true"', example)
+        self.assertIn('os.getenv("DEBUG_MODE", "false")', example)
+        self.assertNotIn("DEBUG_MODE = True", example)
+        self.assertIn("LOCAL_CHROME_HEADLESS=true", env_example)
+        self.assertIn("DEBUG_MODE=false", env_example)
+        self.assertNotIn("AI_API_KEY=sk-", env_example)
 
     def test_docker_context_excludes_local_credentials_and_runtime_data(self):
         patterns = {
@@ -64,6 +90,10 @@ class DeliverySafetyTests(unittest.TestCase):
         self.assertIn("geo_cookies:/app/cookiesFile", compose)
         self.assertIn("HEALTHCHECK", dockerfile)
         self.assertIn("/api/health", dockerfile)
+        self.assertIn(
+            "COPY --from=builder /app/dist/geo-favicon.svg /app/geo-favicon.svg",
+            dockerfile,
+        )
 
     def test_source_server_defaults_to_loopback(self):
         with patch.dict("os.environ", {}, clear=True):

@@ -49,6 +49,7 @@ RUN mkdir -p /app/videoFile /app/cookiesFile /app/data
 
 COPY --from=builder /app/dist/index.html /app
 COPY --from=builder /app/dist/assets /app/assets
+COPY --from=builder /app/dist/geo-favicon.svg /app/geo-favicon.svg
 COPY --from=builder /app/dist/vite.svg /app/assets
 
 EXPOSE 5409

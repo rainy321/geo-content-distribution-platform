@@ -18,6 +18,10 @@ class FrontendDeliveryTests(unittest.TestCase):
             "window.__geoLoaded = true",
             encoding="utf-8",
         )
+        (self.build_dir / "geo-favicon.svg").write_text(
+            '<svg xmlns="http://www.w3.org/2000/svg"><title>GEO</title></svg>',
+            encoding="utf-8",
+        )
         self.original_build_dir = app.config["FRONTEND_BUILD_DIR"]
         self.original_testing = app.testing
         app.config.update(FRONTEND_BUILD_DIR=self.build_dir, TESTING=True)
@@ -47,6 +51,15 @@ class FrontendDeliveryTests(unittest.TestCase):
         try:
             self.assertEqual(response.status_code, 200)
             self.assertIn("__geoLoaded", response.get_data(as_text=True))
+        finally:
+            response.close()
+
+    def test_legacy_favicon_route_serves_geo_brand_icon(self):
+        response = self.client.get("/favicon.ico")
+        try:
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.mimetype, "image/svg+xml")
+            self.assertIn("<title>GEO</title>", response.get_data(as_text=True))
         finally:
             response.close()
 

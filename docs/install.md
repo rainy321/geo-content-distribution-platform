@@ -46,6 +46,24 @@ uv pip install -e .
 
 安装完成后，会注册 `sau` 命令。
 
+如果使用 GEO Web 管理台，安装 Web 可选依赖：
+
+```bash
+uv pip install -e ".[web]"
+playwright install chromium
+```
+
+前端使用已提交的 lockfile 安装并构建：
+
+```bash
+cd sau_frontend
+npm ci
+npm run build
+cd ..
+```
+
+本地 Demo 可直接双击 `start-win.bat`，或设置 `DEMO_MODE=true` 后运行 `python sau_backend.py`。真实发布默认关闭，不能仅因安装完成而自动访问平台。
+
 ### 4. 安装 patchright Chromium
 
 当前主线使用 `patchright` 驱动浏览器。
@@ -64,17 +82,11 @@ Linux / macOS：
 PLAYWRIGHT_DOWNLOAD_HOST="https://npmmirror.com/mirrors/playwright" patchright install chromium
 ```
 
-### 5. 配置 conf.py
+### 5. 配置运行环境
 
-复制一份配置：
+仓库已经包含只提供安全默认值的 `conf.py`，不要用示例文件覆盖它。本地差异通过启动进程的环境变量设置；`.env.example` 仅作为变量清单，应用不会自动读取 `.env`。
 
-```bash
-cp conf.example.py conf.py
-```
-
-Windows 也可以直接手动复制并重命名。
-
-当前通常还会用到这些配置项：
+当前通常会用到这些配置项：
 
 - `LOCAL_CHROME_PATH`
 - `LOCAL_CHROME_HEADLESS`

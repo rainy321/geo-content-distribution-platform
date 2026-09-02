@@ -196,7 +196,7 @@ class PublishJobsApiTests(unittest.TestCase):
         response = self.client.post(f"/api/publish/jobs/{job['job_id']}/execute")
 
         self.assertEqual(response.status_code, 409)
-        self.assertIn("真实平台执行尚未开放", response.get_json()["msg"])
+        self.assertIn("不能通过演示执行入口", response.get_json()["msg"])
         detail = self.client.get(f"/api/publish/jobs/{job['job_id']}").get_json()["data"]
         self.assertEqual(detail["status"], "queued")
         self.assertFalse(detail["demo"])

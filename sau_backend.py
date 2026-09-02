@@ -154,12 +154,14 @@ def _normalize_media_filename(value) -> str:
 def custom_static(filename):
     return send_from_directory(_frontend_build_dir() / "assets", filename)
 
-# 处理 favicon.ico 静态资源（未来打包用）
+# 兼容浏览器和代理直接请求 favicon.ico，优先返回 GEO 品牌图标。
 @app.route('/favicon.ico')
 def favicon():
     build_dir = _frontend_build_dir()
+    if (build_dir / "geo-favicon.svg").is_file():
+        return send_from_directory(build_dir, "geo-favicon.svg")
     icon_dir = build_dir / "assets" if (build_dir / "assets" / "vite.svg").is_file() else build_dir
-    return send_from_directory(icon_dir, 'vite.svg')
+    return send_from_directory(icon_dir, "vite.svg")
 
 @app.route('/vite.svg')
 def vite_svg():
@@ -723,7 +725,7 @@ def execute_demo_publish_task(job_id):
         return jsonify(
             {
                 "code": 409,
-                "msg": "真实平台执行尚未开放；请先配置媒体账号和人工登录",
+                "msg": "真实任务不能通过演示执行入口执行；请使用真实发布确认入口",
                 "data": None,
             }
         ), 409

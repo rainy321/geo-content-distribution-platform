@@ -192,7 +192,7 @@ docker compose ps
 | `GET` | `/api/publish/jobs/:id` | 轮询单个任务状态 |
 | `POST` | `/api/publish/jobs/:id/retry` | 将失败/待人工任务重新排队 |
 | `POST` | `/api/publish/jobs/:id/execute` | 仅执行明确标记的 Demo 任务 |
-| `POST` | `/api/publish/jobs/:id/execute-real` | 三重门控后执行已确认的知乎/今日头条真实任务 |
+| `POST` | `/api/publish/jobs/:id/execute-real` | 三重门控后执行已确认的知乎、今日头条、搜狐号、百家号或小红书真实任务 |
 | `GET` | `/api/media-accounts` | 读取媒体账号与平台连接概览，不主动检测平台 |
 | `POST` | `/api/media-accounts/:id/check` | 用户显式触发单账号 Cookie 状态检测 |
 
@@ -277,6 +277,10 @@ GEO Web 运行环境变量：
 | `AI_BASE_URL` | 无 | OpenAI-compatible API 地址 |
 | `AI_API_KEY` | 无 | 模型 API Key，禁止写入仓库 |
 | `AI_MODEL` | 无 | 内容生成与优化使用的模型 |
+| `LOCAL_CHROME_PATH` | 空 | 可选的本机 Chrome 可执行文件路径 |
+| `LOCAL_CHROME_HEADLESS` | `true` | uploader 默认是否使用无头浏览器；人工登录时会按登录流程打开可见窗口 |
+| `DEBUG_MODE` | `false` | uploader 调试日志开关 |
+| `XHS_SERVER` | `http://127.0.0.1:11901` | 仅供小红书旧流程兼容使用 |
 | `DEMO_MODE` | `false` | 为 `true` 时新发布任务使用 DemoPublisher |
 | `SEED_DEMO_DATA` | `true` | Demo Mode 下为空数据库准备幂等、明确标注的演示数据 |
 | `ALLOW_REAL_PUBLISHING` | `false` | 真实发布总开关；当前接入知乎、今日头条、搜狐号、百家号和小红书 |
@@ -286,7 +290,7 @@ GEO Web 运行环境变量：
 | `SERVER_HOST` | `127.0.0.1` | 后端监听地址；容器内需显式设为 `0.0.0.0` |
 | `SERVER_PORT` | `5409` | 后端监听端口；非法值会回退到 5409 |
 
-定时任务由 APScheduler 在 `python sau_backend.py` 启动时注册。每次 tick 会原子地将到期任务从 `scheduled` 提升为 `queued`；Demo 任务随后自动执行，真实任务只进入队列，等待已配置账号的真实执行器处理。调度任务启用了单实例和合并补跑，避免同一进程内重复领取。
+定时任务由 APScheduler 在 `python sau_backend.py` 启动时注册。每次 tick 会原子地将到期任务从 `scheduled` 提升为 `queued`；Demo 任务随后自动执行。真实任务默认只进入队列；只有创建计划时用户再次明确授权自动执行、授权内容指纹到期仍匹配、真实发布总开关仍开启且账号有效时，才会调用真实适配器一次。失败或状态不明不会自动重试。调度任务启用了单实例和合并补跑，避免同一进程内重复领取。
 
 知乎、今日头条、搜狐号、百家号和小红书的真实发布默认关闭。只有同时满足 `DEMO_MODE=false`、`ALLOW_REAL_PUBLISHING=true`、任务本身不是 Demo，并且操作者在发布中心二次确认时才会进入真实适配器。五个适配器都会先验证登录状态。知乎发布前通过当前账号的公开文章列表精确匹配标题，已存在时直接返回原链接；发布后最多轮询 3 次公开文章结果并自动对账，不会自动重复点击“发布”。其余渠道只有取得平台公开内容链接才标记 `success`；只有提交证据或发生超时但最终状态未知时保持 `processing`，要求先到平台后台核对，避免盲目重试造成重复内容。百家号文章必须由操作者提供一张展示封面，小红书图文笔记必须提供至少一张图片；当前不会自动生成或擅自选择素材。扫码、验证码、实名、风控或 Cookie 失效会进入“待人工确认”，系统不会绕过平台安全机制。
 
