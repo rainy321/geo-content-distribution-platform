@@ -58,6 +58,21 @@ class FrontendDeliveryTests(unittest.TestCase):
         finally:
             response.close()
 
+    def test_distribution_job_polling_is_serial_and_stops_after_unmount(self):
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "sau_frontend"
+            / "src"
+            / "views"
+            / "DistributionCenter.vue"
+        ).read_text(encoding="utf-8")
+
+        self.assertNotIn("window.setInterval", source)
+        self.assertIn("await fetchJobs(true)", source)
+        self.assertIn("scheduleJobPoll()", source)
+        self.assertIn("pollingStopped = true", source)
+        self.assertIn("window.clearTimeout(pollTimer)", source)
+
 
 if __name__ == "__main__":
     unittest.main()

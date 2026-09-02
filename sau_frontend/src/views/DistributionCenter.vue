@@ -427,6 +427,7 @@ const busyJobIds = ref(new Set())
 const jobFilters = reactive({ platform: '', status: '' })
 const jobPagination = reactive({ page: 1, page_size: 20, total: 0, total_pages: 0 })
 let pollTimer = null
+let pollingStopped = false
 
 const selectedArticle = computed(() => (
   articles.value.find(article => article.id === selectedArticleId.value) || null
@@ -796,13 +797,25 @@ const openResult = (url) => {
   if (/^https?:\/\//i.test(url)) window.open(url, '_blank', 'noopener,noreferrer')
 }
 
+const scheduleJobPoll = () => {
+  if (pollingStopped) return
+  pollTimer = window.setTimeout(async () => {
+    pollTimer = null
+    await fetchJobs(true)
+    scheduleJobPoll()
+  }, 5000)
+}
+
 onMounted(async () => {
+  pollingStopped = false
   await Promise.allSettled([fetchArticles(), fetchJobs()])
-  pollTimer = window.setInterval(() => fetchJobs(true), 5000)
+  scheduleJobPoll()
 })
 
 onBeforeUnmount(() => {
-  if (pollTimer) window.clearInterval(pollTimer)
+  pollingStopped = true
+  if (pollTimer) window.clearTimeout(pollTimer)
+  pollTimer = null
 })
 </script>
 
