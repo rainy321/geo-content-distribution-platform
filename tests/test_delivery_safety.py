@@ -146,6 +146,18 @@ class DeliverySafetyTests(unittest.TestCase):
         )
         self.assertEqual("true", config["env"]["DEMO_MODE"])
         self.assertEqual("false", config["env"]["ALLOW_REAL_PUBLISHING"])
+        self.assertEqual("6", config["env"]["AI_RATE_LIMIT_PER_MINUTE"])
+        self.assertEqual("12", config["env"]["APP_SESSION_HOURS"])
+        self.assertNotIn("APP_ACCESS_PASSWORD", config["env"])
+        self.assertNotIn("APP_SESSION_SECRET", config["env"])
+        security_headers = {
+            item["key"]: item["value"]
+            for item in config["headers"][0]["headers"]
+        }
+        self.assertEqual("/(.*)", config["headers"][0]["source"])
+        self.assertEqual("DENY", security_headers["X-Frame-Options"])
+        self.assertEqual("nosniff", security_headers["X-Content-Type-Options"])
+        self.assertEqual("same-origin", security_headers["Referrer-Policy"])
         self.assertTrue(config["env"]["DATABASE_PATH"].startswith("/tmp/"))
         self.assertTrue(config["env"]["COOKIES_DIRECTORY"].startswith("/tmp/"))
         self.assertTrue(config["env"]["MEDIA_ROOT"].startswith("/tmp/"))
@@ -160,7 +172,9 @@ class DeliverySafetyTests(unittest.TestCase):
 
         self.assertIn("'NEXT_PUBLIC_'", vite_config)
         self.assertIn("import.meta.env.NEXT_PUBLIC_BACKEND_URL", api_config)
-        self.assertIn("import.meta.env.PROD ? '/backend' : ''", api_config)
+        self.assertIn("|| '/backend'", api_config)
+        self.assertIn("'/backend':", vite_config)
+        self.assertNotIn("path.replace(/^\\/api/", vite_config)
 
     def test_server_bind_accepts_explicit_container_values(self):
         with patch.dict(

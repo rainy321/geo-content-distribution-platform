@@ -24,10 +24,9 @@ export default defineConfig({
     port: 5173,
     open: true,
     proxy: {
-      '/api': {
+      '/backend': {
         target: 'http://localhost:5409',
-        changeOrigin: true,
-        rewrite: (path) => path.replace(/^\/api/, '')
+        changeOrigin: true
       }
     }
   },

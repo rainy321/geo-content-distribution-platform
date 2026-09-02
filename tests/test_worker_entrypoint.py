@@ -1,0 +1,67 @@
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+from sau_worker import WorkerSettings, run_worker_once
+
+
+class WorkerEntrypointTests(unittest.TestCase):
+    def test_environment_settings_keep_demo_and_real_execution_separate(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            with patch.dict(
+                "os.environ",
+                {
+                    "DATABASE_PATH": str(root / "data" / "database.db"),
+                    "COOKIES_DIRECTORY": str(root / "cookies"),
+                    "MEDIA_ROOT": str(root / "media"),
+                    "PUBLISH_SCHEDULER_INTERVAL_SECONDS": "2",
+                    "DEMO_MODE": "true",
+                    "ALLOW_REAL_PUBLISHING": "true",
+                },
+                clear=True,
+            ):
+                settings = WorkerSettings.from_environment()
+
+        self.assertEqual(settings.interval_seconds, 5)
+        self.assertTrue(settings.demo_mode)
+        self.assertFalse(settings.allows_real_execution)
+
+    @patch("sau_worker.run_publish_scheduler_tick")
+    @patch("sau_worker.create_real_publisher_factory")
+    def test_once_reuses_scheduler_tick_without_real_factory_in_demo(
+        self,
+        mock_factory,
+        mock_tick,
+    ):
+        mock_tick.return_value = {"promoted_count": 0, "jobs": []}
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            settings = WorkerSettings(
+                database_path=root / "data" / "database.db",
+                cookies_directory=root / "cookies",
+                media_root=root / "media",
+                interval_seconds=15,
+                demo_mode=True,
+                allow_real_publishing=False,
+            )
+
+            result = run_worker_once(settings)
+
+            self.assertTrue(settings.database_path.is_file())
+            self.assertTrue(settings.cookies_directory.is_dir())
+            self.assertTrue(settings.media_root.is_dir())
+
+        mock_factory.assert_not_called()
+        mock_tick.assert_called_once_with(
+            settings.database_path,
+            publisher_factory=None,
+            allow_real=False,
+            media_root=settings.media_root,
+        )
+        self.assertEqual(result["promoted_count"], 0)
+
+
+if __name__ == "__main__":
+    unittest.main()

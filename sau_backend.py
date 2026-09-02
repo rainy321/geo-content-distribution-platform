@@ -1,4 +1,5 @@
 import asyncio
+import hmac
 import json
 import os
 import sqlite3
@@ -6,10 +7,19 @@ import threading
 import time
 import uuid
 from contextlib import closing
+from datetime import timedelta
 from pathlib import Path
 from queue import Queue
 from flask_cors import CORS
-from flask import Flask, request, jsonify, Response, render_template, send_from_directory
+from flask import (
+    Flask,
+    Response,
+    jsonify,
+    render_template,
+    request,
+    send_from_directory,
+    session,
+)
 from conf import BASE_DIR
 from db.createTable import initialize_database
 from services.ai_service import (
@@ -62,6 +72,7 @@ from services.real_publisher_factory import (
     REAL_PUBLISH_PLATFORMS,
     create_real_publisher_factory,
 )
+from services.request_guard import FixedWindowRateLimiter
 
 active_queues = {}
 active_queues_lock = threading.Lock()
@@ -91,6 +102,31 @@ class BackendPrefixMiddleware:
 
 
 app.wsgi_app = BackendPrefixMiddleware(app.wsgi_app)
+
+
+def _environment_integer(name, default, *, minimum=0, maximum=1000000):
+    try:
+        value = int(str(os.getenv(name, default)).strip())
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def _environment_flag(name, default=False):
+    fallback = "true" if default else "false"
+    return str(os.getenv(name, fallback)).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def _cors_allowed_origins():
+    configured = str(os.getenv("CORS_ALLOWED_ORIGINS", "")).strip()
+    if configured:
+        return [item.strip() for item in configured.split(",") if item.strip()]
+    return ["http://127.0.0.1:5173", "http://localhost:5173"]
 
 # Web 启动时只补齐运行目录和已有表，不删除或覆盖现有数据。
 configured_database_path = os.getenv("DATABASE_PATH")
@@ -135,12 +171,57 @@ app.config["ALLOW_REAL_PUBLISHING"] = str(
     "yes",
     "on",
 }
+access_password = str(os.getenv("APP_ACCESS_PASSWORD", "")).strip()
+session_secret = str(os.getenv("APP_SESSION_SECRET", "")).strip()
+if access_password and not session_secret:
+    raise RuntimeError(
+        "配置 APP_ACCESS_PASSWORD 时必须同时配置 APP_SESSION_SECRET"
+    )
+app.config.update(
+    ACCESS_CONTROL_ENABLED=bool(access_password),
+    ACCESS_PASSWORD=access_password,
+    SECRET_KEY=session_secret or os.urandom(32),
+    SESSION_COOKIE_NAME="geo_operator_session",
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=_environment_flag(
+        "SESSION_COOKIE_SECURE",
+        default=bool(os.getenv("VERCEL")),
+    ),
+    PERMANENT_SESSION_LIFETIME=timedelta(
+        hours=_environment_integer(
+            "APP_SESSION_HOURS",
+            12,
+            minimum=1,
+            maximum=168,
+        )
+    ),
+    AI_RATE_LIMIT_PER_MINUTE=_environment_integer(
+        "AI_RATE_LIMIT_PER_MINUTE",
+        0,
+        minimum=0,
+        maximum=10000,
+    ),
+    AUTH_LOGIN_ATTEMPTS_PER_MINUTE=_environment_integer(
+        "AUTH_LOGIN_ATTEMPTS_PER_MINUTE",
+        5,
+        minimum=1,
+        maximum=1000,
+    ),
+    TRUST_PROXY_HEADERS=bool(os.getenv("VERCEL")),
+    AI_RATE_LIMITER=FixedWindowRateLimiter(),
+    AUTH_RATE_LIMITER=FixedWindowRateLimiter(),
+)
 initialize_database(app.config["DATABASE_PATH"])
 if app.config["DEMO_MODE"] and app.config["SEED_DEMO_DATA"]:
     app.config["DEMO_SEED_RESULT"] = seed_demo_data(app.config["DATABASE_PATH"])
 
-#允许所有来源跨域访问
-CORS(app)
+# 本地分离开发可通过白名单跨域；生产前后端同源，不向任意站点开放凭据请求。
+CORS(
+    app,
+    origins=_cors_allowed_origins(),
+    supports_credentials=True,
+)
 
 # 限制上传文件大小为160MB
 app.config['MAX_CONTENT_LENGTH'] = 160 * 1024 * 1024
@@ -177,6 +258,66 @@ def _normalize_media_filename(value) -> str:
         raise ValueError("Invalid filename")
     return filename
 
+
+_PUBLIC_ENDPOINTS = {
+    "custom_static",
+    "favicon",
+    "frontend_history_fallback",
+    "get_auth_status",
+    "get_health_status",
+    "index",
+    "login_operator",
+    "logout_operator",
+    "vite_svg",
+}
+
+
+def _client_rate_key():
+    if app.config.get("TRUST_PROXY_HEADERS"):
+        forwarded = (
+            request.headers.get("X-Vercel-Forwarded-For")
+            or request.headers.get("X-Forwarded-For")
+            or ""
+        )
+        if forwarded:
+            return forwarded.split(",", 1)[0].strip()
+    return request.remote_addr or "unknown"
+
+
+def _operator_is_authenticated():
+    if not app.config.get("ACCESS_CONTROL_ENABLED", False):
+        return True
+    return session.get("operator_authenticated") is True
+
+
+@app.before_request
+def require_operator_access():
+    if request.method == "OPTIONS" or request.endpoint in _PUBLIC_ENDPOINTS:
+        return None
+    if _operator_is_authenticated():
+        return None
+    return jsonify(
+        {
+            "code": 401,
+            "msg": "需要输入运营访问口令",
+            "data": {"authentication_required": True},
+        }
+    ), 401
+
+
+@app.after_request
+def apply_security_headers(response):
+    response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    response.headers.setdefault("X-Frame-Options", "DENY")
+    response.headers.setdefault("Referrer-Policy", "same-origin")
+    response.headers.setdefault(
+        "Permissions-Policy",
+        "camera=(), microphone=(), geolocation=()",
+    )
+    if request.path.startswith("/api/auth"):
+        response.headers["Cache-Control"] = "no-store"
+    return response
+
 # 处理 Vite 构建后的静态资源。
 @app.route('/assets/<filename>')
 def custom_static(filename):
@@ -196,6 +337,97 @@ def vite_svg():
     build_dir = _frontend_build_dir()
     icon_dir = build_dir if (build_dir / "vite.svg").is_file() else build_dir / "assets"
     return send_from_directory(icon_dir, 'vite.svg')
+
+
+@app.route('/api/auth/status', methods=['GET'])
+def get_auth_status():
+    required = bool(app.config.get("ACCESS_CONTROL_ENABLED", False))
+    return jsonify(
+        {
+            "code": 200,
+            "msg": "success",
+            "data": {
+                "required": required,
+                "authenticated": bool(
+                    not required or _operator_is_authenticated()
+                ),
+                "session_hours": int(
+                    app.config["PERMANENT_SESSION_LIFETIME"].total_seconds()
+                    // 3600
+                ),
+                "ai_rate_limit_enabled": bool(
+                    app.config.get("AI_RATE_LIMIT_PER_MINUTE", 0) > 0
+                ),
+            },
+        }
+    ), 200
+
+
+@app.route('/api/auth/login', methods=['POST'])
+def login_operator():
+    if not app.config.get("ACCESS_CONTROL_ENABLED", False):
+        return jsonify(
+            {
+                "code": 200,
+                "msg": "访问控制未启用",
+                "data": {"authenticated": True, "required": False},
+            }
+        ), 200
+
+    decision = app.config["AUTH_RATE_LIMITER"].consume(
+        f"login:{_client_rate_key()}",
+        limit=app.config["AUTH_LOGIN_ATTEMPTS_PER_MINUTE"],
+    )
+    if not decision.allowed:
+        response = jsonify(
+            {
+                "code": 429,
+                "msg": "访问口令尝试过于频繁，请稍后再试",
+                "data": None,
+            }
+        )
+        response.headers["Retry-After"] = str(decision.retry_after_seconds)
+        return response, 429
+
+    data = request.get_json(silent=True)
+    password = data.get("password") if isinstance(data, dict) else None
+    candidate = str(password or "")
+    expected = str(app.config.get("ACCESS_PASSWORD", ""))
+    if (
+        not candidate
+        or len(candidate) > 512
+        or not hmac.compare_digest(candidate, expected)
+    ):
+        return jsonify(
+            {
+                "code": 401,
+                "msg": "访问口令不正确",
+                "data": {"authenticated": False, "required": True},
+            }
+        ), 401
+
+    session.clear()
+    session.permanent = True
+    session["operator_authenticated"] = True
+    return jsonify(
+        {
+            "code": 200,
+            "msg": "success",
+            "data": {"authenticated": True, "required": True},
+        }
+    ), 200
+
+
+@app.route('/api/auth/logout', methods=['POST'])
+def logout_operator():
+    session.clear()
+    return jsonify(
+        {
+            "code": 200,
+            "msg": "success",
+            "data": {"authenticated": False},
+        }
+    ), 200
 
 
 @app.route('/api/health', methods=['GET'])
@@ -255,6 +487,29 @@ ARTICLE_CONTENT_TYPES = {
 }
 
 
+def _enforce_ai_rate_limit():
+    limit = int(app.config.get("AI_RATE_LIMIT_PER_MINUTE", 0))
+    if limit <= 0:
+        return None
+    decision = app.config["AI_RATE_LIMITER"].consume(
+        f"ai:{_client_rate_key()}",
+        limit=limit,
+    )
+    if decision.allowed:
+        return None
+    response = jsonify(
+        {
+            "code": 429,
+            "msg": "AI 请求过于频繁，请稍后再试",
+            "data": None,
+        }
+    )
+    response.headers["Retry-After"] = str(decision.retry_after_seconds)
+    response.headers["X-RateLimit-Limit"] = str(limit)
+    response.headers["X-RateLimit-Remaining"] = "0"
+    return response, 429
+
+
 @app.route('/api/articles/generate', methods=['POST'])
 def generate_article():
     data = request.get_json(silent=True)
@@ -299,6 +554,10 @@ def generate_article():
         ai_settings = _request_ai_settings(data)
     except AIConfigurationError as exc:
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+
+    rate_limit_response = _enforce_ai_rate_limit()
+    if rate_limit_response is not None:
+        return rate_limit_response
 
     try:
         article = generate_geo_content(
@@ -559,6 +818,9 @@ def optimize_article(article_id):
         ai_settings = _request_ai_settings(data)
     except AIConfigurationError as exc:
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    rate_limit_response = _enforce_ai_rate_limit()
+    if rate_limit_response is not None:
+        return rate_limit_response
     try:
         optimized = optimize_geo_content(
             article=article,
@@ -2172,35 +2434,38 @@ def get_server_bind():
     return host, port
 
 if __name__ == '__main__':
-    try:
-        scheduler_interval = max(
-            5,
-            int(os.getenv("PUBLISH_SCHEDULER_INTERVAL_SECONDS", "15")),
+    publish_scheduler = None
+    if _environment_flag("RUN_PUBLISH_SCHEDULER", default=True):
+        try:
+            scheduler_interval = max(
+                5,
+                int(os.getenv("PUBLISH_SCHEDULER_INTERVAL_SECONDS", "15")),
+            )
+        except ValueError:
+            scheduler_interval = 15
+        scheduler_allows_real = bool(
+            app.config.get("ALLOW_REAL_PUBLISHING", False)
+            and not app.config.get("DEMO_MODE", False)
         )
-    except ValueError:
-        scheduler_interval = 15
-    scheduler_allows_real = bool(
-        app.config.get("ALLOW_REAL_PUBLISHING", False)
-        and not app.config.get("DEMO_MODE", False)
-    )
-    scheduler_publisher_factory = (
-        create_real_publisher_factory(
+        scheduler_publisher_factory = (
+            create_real_publisher_factory(
+                app.config["DATABASE_PATH"],
+                cookies_directory=app.config["COOKIES_DIRECTORY"],
+            )
+            if scheduler_allows_real
+            else None
+        )
+        publish_scheduler = create_publish_scheduler(
             app.config["DATABASE_PATH"],
-            cookies_directory=app.config["COOKIES_DIRECTORY"],
+            interval_seconds=scheduler_interval,
+            publisher_factory=scheduler_publisher_factory,
+            allow_real=scheduler_allows_real,
+            media_root=app.config["MEDIA_ROOT"],
         )
-        if scheduler_allows_real
-        else None
-    )
-    publish_scheduler = create_publish_scheduler(
-        app.config["DATABASE_PATH"],
-        interval_seconds=scheduler_interval,
-        publisher_factory=scheduler_publisher_factory,
-        allow_real=scheduler_allows_real,
-        media_root=app.config["MEDIA_ROOT"],
-    )
-    publish_scheduler.start()
+        publish_scheduler.start()
     try:
         server_host, server_port = get_server_bind()
         app.run(host=server_host, port=server_port)
     finally:
-        publish_scheduler.shutdown(wait=False)
+        if publish_scheduler is not None:
+            publish_scheduler.shutdown(wait=False)

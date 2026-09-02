@@ -20,6 +20,7 @@ dependencies = [
 
 [project.scripts]
 sau = "sau_cli:main"
+sau-worker = "sau_worker:main"
 
 [project.optional-dependencies]
 # Browser/media dependencies are required by the local publishing worker, but are
@@ -34,7 +35,7 @@ web = [
 package = true
 
 [tool.setuptools]
-py-modules = ["conf", "sau_cli"]
+py-modules = ["conf", "sau_cli", "sau_worker"]
 include-package-data = true
 
 [tool.setuptools.packages.find]

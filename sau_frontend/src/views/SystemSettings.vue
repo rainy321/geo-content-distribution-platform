@@ -132,8 +132,16 @@
           <el-icon><Lock /></el-icon>
           <div>
             <span>SECURITY BOUNDARY</span>
-            <h3>密钥不会显示在状态接口里</h3>
-            <p>自定义地址只允许 HTTPS，并拒绝本机、私网、保留地址以及 URL 内嵌凭据。</p>
+            <h3>{{ accessControlEnabled ? '运营访问保护已启用' : '密钥不会显示在状态接口里' }}</h3>
+            <p>
+              {{ accessControlEnabled
+                ? '模型调用、数据修改和媒体控制均要求有效的 HttpOnly 会话。'
+                : '自定义地址只允许 HTTPS，并拒绝本机、私网、保留地址以及 URL 内嵌凭据。' }}
+            </p>
+            <el-button v-if="accessControlEnabled" text @click="logoutSession">
+              <el-icon><SwitchButton /></el-icon>
+              退出运营会话
+            </el-button>
           </div>
         </section>
       </aside>
@@ -153,9 +161,11 @@ import {
   Lock,
   Monitor,
   Promotion,
+  SwitchButton,
   Timer
 } from '@element-plus/icons-vue'
 import { articleApi } from '@/api/article'
+import { authApi } from '@/api/auth'
 import {
   clearCustomAIConfig,
   getAIConfigDraft,
@@ -167,6 +177,7 @@ const router = useRouter()
 const formRef = ref(null)
 const saving = ref(false)
 const serverConfigured = ref(false)
+const accessControlEnabled = ref(false)
 const activeCustomModel = ref(getCustomAIConfig()?.model || '')
 const form = reactive({
   baseUrl: '',
@@ -248,6 +259,15 @@ const loadServerStatus = async () => {
   }
 }
 
+const loadSecurityStatus = async () => {
+  try {
+    const response = await authApi.getStatus()
+    accessControlEnabled.value = Boolean(response.data?.required)
+  } catch (error) {
+    console.error('读取访问控制状态失败:', error)
+  }
+}
+
 const saveConfig = async () => {
   const valid = await formRef.value?.validate().catch(() => false)
   if (!valid) return
@@ -288,9 +308,15 @@ const clearConfig = async () => {
 
 const goToCreation = () => router.push('/content-create')
 
+const logoutSession = async () => {
+  await authApi.logout()
+  window.dispatchEvent(new CustomEvent('geo-auth-required'))
+}
+
 onMounted(() => {
   loadDraft()
   loadServerStatus()
+  loadSecurityStatus()
 })
 </script>
 
@@ -574,6 +600,12 @@ onMounted(() => {
     color: #718087;
     font-size: 11px;
     line-height: 1.65;
+  }
+
+  :deep(.el-button) {
+    margin-top: 9px;
+    padding-left: 0;
+    color: var(--teal);
   }
 }
 

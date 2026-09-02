@@ -9,6 +9,7 @@ from unittest.mock import patch
 from db.createTable import initialize_database
 from sau_backend import app
 from services.ai_service import AIConfigurationError, AIServiceError, AISettings
+from services.request_guard import FixedWindowRateLimiter
 
 
 class ArticleGenerationApiTests(unittest.TestCase):
@@ -234,6 +235,45 @@ class ArticleGenerationApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 502)
         self.assertEqual(response.get_json()["code"], 502)
+
+    @patch("sau_backend.generate_geo_content")
+    def test_ai_generation_has_configurable_per_client_rate_limit(
+        self,
+        mock_generate,
+    ):
+        mock_generate.return_value = {
+            "title": "标题",
+            "summary": "",
+            "content": "正文",
+            "tags": [],
+            "faq": [],
+        }
+        original_limit = app.config.get("AI_RATE_LIMIT_PER_MINUTE")
+        original_limiter = app.config.get("AI_RATE_LIMITER")
+        app.config.update(
+            AI_RATE_LIMIT_PER_MINUTE=1,
+            AI_RATE_LIMITER=FixedWindowRateLimiter(),
+        )
+        try:
+            first = self.client.post(
+                "/api/articles/generate",
+                json={"project_id": self.project_id, "topic": "第一次请求"},
+            )
+            second = self.client.post(
+                "/api/articles/generate",
+                json={"project_id": self.project_id, "topic": "第二次请求"},
+            )
+        finally:
+            app.config.update(
+                AI_RATE_LIMIT_PER_MINUTE=original_limit,
+                AI_RATE_LIMITER=original_limiter,
+            )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 429)
+        self.assertEqual(second.get_json()["code"], 429)
+        self.assertEqual(second.headers["X-RateLimit-Limit"], "1")
+        self.assertEqual(mock_generate.call_count, 1)
 
 
 if __name__ == "__main__":

@@ -64,6 +64,10 @@ cd ..
 
 本地 Demo 可直接双击 `start-win.bat`，或设置 `DEMO_MODE=true` 后运行 `python sau_backend.py`。真实发布默认关闭，不能仅因安装完成而自动访问平台。
 
+公网部署应同时设置独立随机值的 `APP_ACCESS_PASSWORD` 与 `APP_SESSION_SECRET`，并显式配置 `AI_RATE_LIMIT_PER_MINUTE`。只设置访问口令却遗漏会话密钥时，后端会拒绝启动。真实值只放在部署平台 Secret 或本机进程环境中，不写入 `.env.example`、源码或前端变量。
+
+需要把到期任务从 Web 进程拆出时，Web 设置 `RUN_PUBLISH_SCHEDULER=false`，在能够长期运行并与 Web 共享数据库、素材和 Cookie 目录的主机上执行 `sau-worker`。`sau-worker --once` 可供外部 Cron 每次处理一批任务；Vercel Serverless 函数不适合运行浏览器发布 Worker。
+
 ### 4. 安装 patchright Chromium
 
 当前主线使用 `patchright` 驱动浏览器。

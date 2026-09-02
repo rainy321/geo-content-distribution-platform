@@ -318,7 +318,7 @@ const startLogin = () => {
   loginStage.value = 'connecting'
   qrCodeData.value = ''
   const url = apiUrl(`/login?type=${loginForm.platformType}&id=${encodeURIComponent(loginForm.accountName.trim())}`)
-  eventSource = new EventSource(url)
+  eventSource = new EventSource(url, { withCredentials: true })
   eventSource.onmessage = event => {
     const data = event.data
     if (data === 'MANUAL_LOGIN') {

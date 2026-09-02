@@ -1,6 +1,20 @@
 <template>
   <div id="app">
-    <el-container>
+    <div v-if="authState.loading" class="auth-bootstrap" aria-live="polite">
+      <span class="bootstrap-mark">G</span>
+      <strong>正在确认工作区访问状态</strong>
+    </div>
+    <div v-else-if="authState.error" class="auth-bootstrap auth-bootstrap-error" role="alert">
+      <span class="bootstrap-mark">!</span>
+      <strong>无法连接运营工作区</strong>
+      <small>{{ authState.error }}</small>
+      <el-button type="primary" @click="loadAuthStatus">重新连接</el-button>
+    </div>
+    <AccessGate
+      v-else-if="authState.required && !authState.authenticated"
+      @authenticated="handleAuthenticated"
+    />
+    <el-container v-else>
       <el-aside :width="sidebarCollapsed ? '68px' : '224px'">
         <div class="sidebar">
           <div class="logo">
@@ -83,14 +97,22 @@
 </template>
 
 <script setup>
-import { ref, computed, onBeforeUnmount, onMounted } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
+import AccessGate from '@/components/AccessGate.vue'
+import { authApi } from '@/api/auth'
 import {
   HomeFilled, User, DataAnalysis,
   Fold, Picture, Upload, CollectionTag, MagicStick, DocumentCopy, Aim, Setting
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
+const authState = reactive({
+  loading: true,
+  required: false,
+  authenticated: false,
+  error: ''
+})
 
 // 当前激活的菜单项
 const activeMenu = computed(() => {
@@ -113,13 +135,42 @@ const toggleSidebar = () => {
   isCollapse.value = !isCollapse.value
 }
 
+const loadAuthStatus = async () => {
+  authState.loading = true
+  authState.error = ''
+  try {
+    const response = await authApi.getStatus()
+    authState.required = Boolean(response.data?.required)
+    authState.authenticated = Boolean(response.data?.authenticated)
+  } catch (error) {
+    authState.error = error?.response?.data?.msg || error?.message || '检查后端服务后重试'
+  } finally {
+    authState.loading = false
+  }
+}
+
+const handleAuthenticated = () => {
+  authState.required = true
+  authState.authenticated = true
+  authState.error = ''
+}
+
+const handleAuthRequired = () => {
+  authState.loading = false
+  authState.required = true
+  authState.authenticated = false
+}
+
 onMounted(() => {
+  window.addEventListener('geo-auth-required', handleAuthRequired)
   smallScreenQuery = window.matchMedia('(max-width: 760px)')
   isSmallScreen.value = smallScreenQuery.matches
   smallScreenQuery.addEventListener('change', syncSmallScreen)
+  loadAuthStatus()
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('geo-auth-required', handleAuthRequired)
   smallScreenQuery?.removeEventListener('change', syncSmallScreen)
 })
 </script>
@@ -129,6 +180,35 @@ onBeforeUnmount(() => {
 
 #app {
   min-height: 100vh;
+}
+
+.auth-bootstrap {
+  display: grid;
+  min-height: 100vh;
+  place-content: center;
+  justify-items: center;
+  gap: 13px;
+  background: #f3f6f6;
+  color: #17222b;
+
+  .bootstrap-mark {
+    display: grid;
+    width: 46px;
+    height: 46px;
+    place-items: center;
+    border: 1px solid #39b8b2;
+    border-radius: 11px 3px 11px 3px;
+    color: #0d5c63;
+    font: 800 22px/1 "Arial Narrow", sans-serif;
+  }
+
+  strong { font-size: 14px; }
+  small { max-width: 420px; color: #718087; text-align: center; }
+}
+
+.auth-bootstrap-error .bootstrap-mark {
+  border-color: #e8a33a;
+  color: #b76c00;
 }
 
 .el-container {

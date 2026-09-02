@@ -166,10 +166,13 @@ def _request_chat_completion(
                 "temperature": temperature,
             },
             timeout=settings.timeout_seconds,
+            allow_redirects=False,
         )
     except requests.RequestException as exc:
         raise AIServiceError(f"AI 服务请求失败: {exc}") from exc
 
+    if 300 <= response.status_code < 400:
+        raise AIServiceError("AI 服务地址发生重定向，已为安全起见停止请求")
     if response.status_code >= 400:
         detail = (response.text or "").strip()[:300]
         message = f"AI 服务返回 HTTP {response.status_code}"

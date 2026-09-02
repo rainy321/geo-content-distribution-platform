@@ -81,6 +81,7 @@ class AIServiceTests(unittest.TestCase):
         self.assertEqual(captured["headers"]["Authorization"], "Bearer test-key")
         self.assertEqual(captured["json"]["model"], "test-model")
         self.assertEqual(captured["timeout"], 15)
+        self.assertFalse(captured["allow_redirects"])
         prompt = captured["json"]["messages"][1]["content"]
         self.assertIn("XX科技", prompt)
         self.assertIn("企业 AI Agent 落地", prompt)
@@ -182,6 +183,22 @@ class AIServiceTests(unittest.TestCase):
             return FakeResponse({"choices": ["invalid"]})
 
         with self.assertRaisesRegex(AIServiceError, "返回格式无效"):
+            generate_geo_content(
+                project=self.project,
+                topic="测试",
+                keywords=[],
+                length=600,
+                content_type="行业科普",
+                settings=self.settings,
+                http_post=fake_post,
+            )
+
+    def test_does_not_follow_provider_redirects(self):
+        def fake_post(*args, **kwargs):
+            self.assertFalse(kwargs["allow_redirects"])
+            return FakeResponse({}, status_code=302, text="redirect")
+
+        with self.assertRaisesRegex(AIServiceError, "重定向"):
             generate_geo_content(
                 project=self.project,
                 topic="测试",

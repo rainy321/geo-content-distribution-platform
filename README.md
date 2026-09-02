@@ -163,7 +163,22 @@ Vercel 生产地址：[https://geo-content-distribution-platform.vercel.app](htt
 
 这是真实可访问的 GEO 管理台与 Demo API 部署，但不是云端媒体发布 Worker。线上固定使用 `DEMO_MODE=true`、`ALLOW_REAL_PUBLISHING=false`，不保存本地账号 Cookie，也不打包 Playwright、Patchright 和 OpenCV。SQLite、素材和示例数据位于 Vercel 函数的临时目录，实例重建后可能重置；默认 AI 连接已通过 Vercel Production 环境变量配置，密钥类型为 Secret。真实媒体登录和发布继续由本地浏览器 Worker 执行。
 
-当前在线演示没有应用级登录，只包含可重建的示例数据，TLS 由 Vercel 入口提供。由于默认 AI 已启用，公开访问者可能产生模型调用费用；持续公开运行前应增加用户认证与调用限流。接入真实业务数据前，还必须增加持久数据库/对象存储和独立 Worker，且不得把媒体 Cookie 或模型密钥写进仓库或前端变量。
+当前在线演示启用了单运营者访问口令：口令只在部署环境中保存，验证成功后由后端签发 HttpOnly、SameSite=Lax 的短期会话 Cookie。AI 生成与优化另有每客户端、每实例的应用内限流；登录尝试也会限速。Vercel Hobby 当前没有可用的完整 WAF 限流，因此这层限流是安全兜底，不等价于跨区域共享计数器。接入真实业务数据前，仍必须增加持久数据库/对象存储；云端真实媒体发布还需要独立长驻 Worker，且不得把媒体 Cookie 或模型密钥写进仓库或前端变量。
+
+### 生产访问控制与独立 Worker
+
+同时配置 `APP_ACCESS_PASSWORD` 和 `APP_SESSION_SECRET` 即可启用轻量访问门；只配置口令但缺少会话密钥时，后端会拒绝启动，避免误以为站点已受保护。该机制面向单一运营者和 MVP 演示，不是多用户权限系统。
+
+如果 Web 与调度器运行在同一台受控机器，保持 `RUN_PUBLISH_SCHEDULER=true` 即可。拆成独立进程时，Web 设置为 `RUN_PUBLISH_SCHEDULER=false`，再启动：
+
+```bash
+sau-worker
+
+# 只处理一批到期任务，适合外部 Cron 或烟雾检查
+sau-worker --once
+```
+
+Worker 继续复用同一套 SQLite、素材目录、Cookie 目录、授权指纹和 PublisherAdapter。Web 与 Worker 必须挂载同一份持久数据；在没有持久存储的 Vercel 函数中不要启动媒体 Worker。
 
 ### 6. Docker Compose 本地演示
 
@@ -193,6 +208,8 @@ docker compose ps
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `POST` | `/api/articles/generate` | 通过 OpenAI-compatible API 生成 GEO 稿件 |
+| `GET/POST` | `/api/auth/status`、`/api/auth/login` | 查询访问门状态、建立 HttpOnly 运营会话 |
+| `POST` | `/api/auth/logout` | 退出当前运营会话 |
 | `POST` | `/api/geo/score` | 计算规则型 GEO Score |
 | `POST/GET` | `/api/projects` | 创建或查询品牌项目 |
 | `POST/GET` | `/api/articles` | 保存或查询文章 |
@@ -286,6 +303,13 @@ GEO Web 运行环境变量：
 | `AI_BASE_URL` | 无 | OpenAI-compatible API 地址 |
 | `AI_API_KEY` | 无 | 模型 API Key，禁止写入仓库 |
 | `AI_MODEL` | 无 | 内容生成与优化使用的模型 |
+| `APP_ACCESS_PASSWORD` | 空 | 运营访问口令；与 `APP_SESSION_SECRET` 同时配置时启用访问门 |
+| `APP_SESSION_SECRET` | 空 | Flask 会话签名密钥；必须是独立随机 Secret |
+| `APP_SESSION_HOURS` | `12` | 运营会话有效小时数，范围 1–168 |
+| `AUTH_LOGIN_ATTEMPTS_PER_MINUTE` | `5` | 单客户端每分钟口令尝试上限 |
+| `AI_RATE_LIMIT_PER_MINUTE` | `0` | 单客户端每分钟 AI 请求上限；0 表示应用内限流关闭，生产建议显式配置 |
+| `CORS_ALLOWED_ORIGINS` | 本地 5173 两个回环地址 | 分离部署时允许携带会话凭据的前端来源，逗号分隔 |
+| `SESSION_COOKIE_SECURE` | Vercel 自动开启 | 是否只通过 HTTPS 发送运营会话 Cookie |
 | `LOCAL_CHROME_PATH` | 空 | 可选的本机 Chrome 可执行文件路径 |
 | `LOCAL_CHROME_HEADLESS` | `true` | uploader 默认是否使用无头浏览器；人工登录时会按登录流程打开可见窗口 |
 | `DEBUG_MODE` | `false` | uploader 调试日志开关 |
@@ -297,6 +321,7 @@ GEO Web 运行环境变量：
 | `COOKIES_DIRECTORY` | `cookiesFile` | Web 登录、账号检测和真实发布共用的 Cookie 目录 |
 | `MEDIA_ROOT` | `videoFile` | 上传素材与发布图片的运行目录 |
 | `PUBLISH_SCHEDULER_INTERVAL_SECONDS` | `15` | 到期任务检查间隔，最少 5 秒 |
+| `RUN_PUBLISH_SCHEDULER` | `true` | Web 进程是否内置调度器；使用独立 `sau-worker` 时设为 `false` |
 | `SERVER_HOST` | `127.0.0.1` | 后端监听地址；容器内需显式设为 `0.0.0.0` |
 | `SERVER_PORT` | `5409` | 后端监听端口；非法值会回退到 5409 |
 
@@ -306,7 +331,7 @@ Web 管理台的“系统设置”支持为当前浏览器填写自定义 OpenAI
 
 知乎、今日头条、搜狐号、百家号和小红书的真实发布默认关闭。只有同时满足 `DEMO_MODE=false`、`ALLOW_REAL_PUBLISHING=true`、任务本身不是 Demo，并且操作者在发布中心二次确认时才会进入真实适配器。五个适配器都会先验证登录状态。知乎发布前通过当前账号的公开文章列表精确匹配标题，已存在时直接返回原链接；发布后最多轮询 3 次公开文章结果并自动对账，不会自动重复点击“发布”。其余渠道只有取得平台公开内容链接才标记 `success`；只有提交证据或发生超时但最终状态未知时保持 `processing`，要求先到平台后台核对，避免盲目重试造成重复内容。百家号文章必须由操作者提供一张展示封面，小红书图文笔记必须提供至少一张图片；当前不会自动生成或擅自选择素材。扫码、验证码、实名、风控或 Cookie 失效会进入“待人工确认”，系统不会绕过平台安全机制。
 
-> 部署安全边界：当前 Vercel 公网站运行无媒体 Cookie、关闭真实发布的可重建 Demo，但已经配置服务器端 AI Secret。应用仍没有用户认证且 Flask CORS 默认开放，因此存在公开调用模型产生费用的风险；应尽快增加应用级访问控制和限流。接入真实业务数据或启用真实发布前，还必须增加持久存储，并把媒体浏览器 Worker 隔离在受控环境，不能把本地后端和 `cookiesFile/` 直接暴露到公网。
+> 部署安全边界：当前 Vercel 公网站运行无媒体 Cookie、关闭真实发布的可重建 Demo，并配置服务器端 AI Secret、运营访问门和应用内 AI 限流；跨域凭据请求仅允许显式白名单来源。Vercel Serverless 实例之间不共享内存限流和 SQLite，因此持续对外服务仍应接入 Upstash/Vercel WAF 等共享限流、持久数据库与对象存储，并把媒体浏览器 Worker 隔离在受控环境，不能把本地后端和 `cookiesFile/` 直接暴露到公网。
 
 开发回归：
 

@@ -29,10 +29,36 @@
       }
     }
   ],
+  "headers": [
+    {
+      "source": "/(.*)",
+      "headers": [
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        },
+        {
+          "key": "X-Frame-Options",
+          "value": "DENY"
+        },
+        {
+          "key": "Referrer-Policy",
+          "value": "same-origin"
+        },
+        {
+          "key": "Permissions-Policy",
+          "value": "camera=(), microphone=(), geolocation=()"
+        }
+      ]
+    }
+  ],
   "env": {
     "DEMO_MODE": "true",
     "SEED_DEMO_DATA": "true",
     "ALLOW_REAL_PUBLISHING": "false",
+    "AI_RATE_LIMIT_PER_MINUTE": "6",
+    "APP_SESSION_HOURS": "12",
+    "AUTH_LOGIN_ATTEMPTS_PER_MINUTE": "5",
     "DATABASE_PATH": "/tmp/geo-mvp/database.db",
     "COOKIES_DIRECTORY": "/tmp/geo-mvp/cookies",
     "MEDIA_ROOT": "/tmp/geo-mvp/media"

@@ -5,6 +5,7 @@ import { API_BASE_URL } from '@/config/api'
 // 创建axios实例
 const request = axios.create({
   baseURL: API_BASE_URL,
+  withCredentials: true,
   headers: {
     'Content-Type': 'application/json'
   }
@@ -42,7 +43,14 @@ request.interceptors.response.use(
     }
   },
   (error) => {
-    console.error('响应错误:', error)
+    if (error.config?.suppressGlobalError) {
+      return Promise.reject(error)
+    }
+    if (error.response?.status >= 500) {
+      console.error('响应错误:', error)
+    } else {
+      console.warn('请求未完成:', error.response?.status || error.message)
+    }
     
     // 处理HTTP错误状态码
     if (error.response) {
@@ -54,7 +62,7 @@ request.interceptors.response.use(
           break
         case 401:
           ElMessage.error(backendMsg || '未授权，请重新登录')
-          // 可以在这里处理登录跳转
+          window.dispatchEvent(new CustomEvent('geo-auth-required'))
           break
         case 403:
           ElMessage.error(backendMsg || '拒绝访问')
@@ -64,6 +72,9 @@ request.interceptors.response.use(
           break
         case 500:
           ElMessage.error(backendMsg || '服务器内部错误')
+          break
+        case 429:
+          ElMessage.error(backendMsg || '请求过于频繁，请稍后再试')
           break
         default:
           ElMessage.error(backendMsg || '网络错误')

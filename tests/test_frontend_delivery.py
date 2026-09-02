@@ -114,6 +114,32 @@ class FrontendDeliveryTests(unittest.TestCase):
         self.assertIn("window.sessionStorage.setItem(SESSION_SECRET_KEY", config)
         self.assertNotIn("localStorage.setItem(SESSION_SECRET_KEY", config)
 
+    def test_frontend_has_operator_access_gate_and_credentialed_requests(self):
+        frontend_root = Path(__file__).resolve().parents[1] / "sau_frontend"
+        app = (frontend_root / "src" / "App.vue").read_text(encoding="utf-8")
+        gate = (frontend_root / "src" / "components" / "AccessGate.vue").read_text(
+            encoding="utf-8"
+        )
+        request = (frontend_root / "src" / "utils" / "request.js").read_text(
+            encoding="utf-8"
+        )
+        api_config = (frontend_root / "src" / "config" / "api.js").read_text(
+            encoding="utf-8"
+        )
+        vite_config = (frontend_root / "vite.config.js").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("<AccessGate", app)
+        self.assertIn("运营访问口令", gate)
+        self.assertIn('autocomplete="current-password"', gate)
+        self.assertNotIn("localStorage", gate)
+        self.assertIn("withCredentials: true", request)
+        self.assertIn("geo-auth-required", request)
+        self.assertIn("|| '/backend'", api_config)
+        self.assertIn("'/backend':", vite_config)
+        self.assertNotIn("path.replace(/^\\/api/", vite_config)
+
 
 if __name__ == "__main__":
     unittest.main()
