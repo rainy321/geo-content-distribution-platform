@@ -363,6 +363,7 @@ def retry_publish_job(
                 """
                 UPDATE publish_jobs
                 SET status = 'queued', message = '', result_url = '',
+                    authorization_fingerprint = '', auto_execute = 0,
                     started_at = NULL, finished_at = NULL
                 WHERE id = ?
                 """,

@@ -263,6 +263,29 @@ class PublishJobServiceTests(unittest.TestCase):
             "queued",
         )
 
+    def test_manual_retry_revokes_prior_scheduled_auto_execute_authorization(self):
+        job = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="zhihu",
+            publish_at="2026-09-02T18:00:00+08:00",
+            auto_execute=True,
+        )
+        transition_publish_job(self.db_path, job["id"], "queued")
+        transition_publish_job(
+            self.db_path,
+            job["id"],
+            "need_action",
+            message="平台状态未知",
+        )
+
+        retried = retry_publish_job(self.db_path, job["id"])
+
+        self.assertEqual(retried["status"], "queued")
+        self.assertFalse(retried["auto_execute"])
+        self.assertFalse(retried["authorization_bound"])
+        self.assertEqual(retried["authorization_fingerprint"], "")
+
     def test_reconciles_failed_job_with_platform_article_proof(self):
         job = create_publish_job(
             self.db_path,

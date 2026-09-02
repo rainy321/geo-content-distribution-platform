@@ -712,7 +712,7 @@ const retryJob = async (job) => {
       await publishApi.executeDemoJob(retried.job_id)
       ElMessage.success('演示任务已重新执行')
     } else {
-      ElMessage.success('任务已重新排队')
+      ElMessage.success('任务已重新排队；真实发布仍需再次确认')
     }
     await fetchJobs(true)
   } catch (error) {
