@@ -1,4 +1,4 @@
-# GEO MVP 本地验收与交付状态
+# GEO MVP 验收、交付与部署状态
 
 更新时间：2026-09-02
 
@@ -7,6 +7,8 @@
 ## 当前结论
 
 第一版已经达到“本地可运行、Demo 可完整演示、真实模型已验收、知乎、今日头条、搜狐号、百家号和小红书五条真实内容链路均已跑通”的状态。知乎通过公开文章 API 取得唯一匹配链接。今日头条前三次授权暴露了两阶段按钮、默认空单图封面和草稿保存响应语义问题；本地逐项修复后，第四次一次性授权成功完成“预览并发布”和“确认发布”。创作者后台“已发布”页出现精确标题并返回公开 `toutiao.com/item` 链接，本地任务已通过平台证据从 `processing` 对账为 `success`。全过程没有自动重试，原有 4 份自动保存草稿未删除。搜狐号首轮真实提交因平台把旧版“信息来源/包含AI创作内容”改为“创作声明/含有AI生成内容”，同标题内容只形成草稿；在项目所有者重新授权后，本地完成兼容修复，复用唯一草稿，核验标题、正文及 AI 声明后只提交一次。后台先显示“审核中”，随后返回文章 ID `1070776112`、作者 ID `122997873` 及公开链接 `https://www.sohu.com/a/1070776112_122997873`；未登录公网请求为 HTTP 200 且标题精确匹配，任务 `5` 已对账为 `success`。百家号任务 `6/8` 已按六状态无记录的证据结案；第三次授权任务 `9` 首次被平台要求完成人机验证，自动化保持同一任务并在账号本人只完成人机验证后恢复。平台随即自动提交，“已发布”列表与接口均返回精确标题、`status=publish`、文章 ID `1875188881859292891` 和公开链接 `https://baijiahao.baidu.com/s?id=1875188881859292891`；未登录请求为 HTTP 200 且标题匹配，任务 `9` 已通过平台证据从 `need_action` 对账为 `success`，没有创建新任务或重复发布。小红书首轮已成功，创作中心“已发布”筛选与 `/creator/note/user/posted` 接口返回 note ID `6a977888000000001103bb96` 和标准 URL `https://www.xiaohongshu.com/explore/6a977888000000001103bb96`；最新三平台授权未被滥用为重复发布。游客直连仍被平台以“当前笔记暂时无法浏览 / IP 存在风险”拦截，验收记录保留这一可见性限制。发布中心已补齐共享图片上传、任务图片持久化及执行器透传，百家号/小红书不再因业务任务丢失图片而必然进入 `need_action`。真实定时自动执行现在还会把用户确认时的文章、标签、渠道、图片文件名和执行时间固化为授权指纹；到期前任何一项变化都会在选择发布器和访问平台之前转为 `need_action`。
+
+代码已推送至项目所有者的 GitHub 仓库，`main` 已连接 Vercel 并完成公开生产部署：[https://geo-content-distribution-platform.vercel.app](https://geo-content-distribution-platform.vercel.app)。线上管理台、健康检查、Dashboard、项目和素材读取接口均已通过公网与无头浏览器复核。该部署固定为安全 Demo 控制面；真实媒体登录与发布仍只在本地浏览器 Worker 中执行。
 
 ## 未完成项账本
 
@@ -17,9 +19,10 @@
 | 搜狐号真实发布验收 | 已完成 | — | 任务 `5` 复用唯一草稿完成修复后提交；后台文章 ID、已发布记录、标准公开 URL 及公网 HTTP 200/精确标题均已核验 |
 | 百家号真实发布验收 | 已完成 | — | 任务 `9` 复用原授权流程；账号本人只完成人机验证，平台随后自动提交。已发布记录、文章 ID、标准公开 URL 及未登录 HTTP 200/精确标题均已核验 |
 | 小红书真实发布验收 | 已完成 | — | 任务 `7` 仅提交一次；“已发布”页、posted API、note ID 与标准公开 URL 均已取得。游客直连受平台 IP 风险限制，但不影响创作中心发布证据 |
-| GitHub 推送 | 主动暂缓 | 按项目所有者要求采用本地集中开发，避免频繁 push | 本地完成度达到交付点后一次性推送 `origin` |
-| Docker 镜像实机构建 | 环境阻塞 | 当前机器未安装 Docker；静态配置与等价部署链路已验证 | 有 Docker 环境后执行镜像与 Compose 验收 |
-| 公网访问控制与 TLS | 上线前待办 | 当前目标是本地/受控内网 MVP，API 尚无用户认证且 CORS 默认开放 | 决定公网部署架构后补反向代理、认证与 TLS |
+| GitHub 推送 | 已完成 | — | `origin/main` 已推送并连接 Vercel 自动部署 |
+| Vercel 生产部署 | 已完成（Demo 控制面） | — | 公开生产 URL、TLS、主页、JSON API、看板渲染和错误日志均已复核 |
+| Docker 镜像实机构建 | 按项目所有者决定跳过 | 本轮改用 Vercel，不再以 Docker 作为交付阻塞项 | 只有后续明确需要自托管镜像时再执行 |
+| 持久数据与应用级认证 | 尚未完成 | Vercel 版仅含可重建示例数据，临时 SQLite/素材会随实例重建；当前没有应用级登录 | 接入真实业务前增加持久数据库、对象存储、认证和独立发布 Worker |
 | 真实定时任务到点自动执行 | 已完成 | — | 默认只创建普通计划；用户针对文章、时间、渠道及图片再次确认后才持久化自动执行授权和内容指纹。到期时指纹不一致会在访问平台前阻断；执行仍受真实发布总开关保护，失败或状态不明不自动重试 |
 
 ## P0 验收矩阵
@@ -77,8 +80,10 @@ npm run dev
 ## 已执行验证
 
 ```text
-后端：282 tests passed
+后端：286 tests passed
 前端：Vite production build passed（1708 modules）
+Vercel：Production Ready；Flask 函数 15.66 MB；主页和 `/backend/api/health`、Dashboard、项目、素材接口均为 HTTP 200
+公网浏览器：Dashboard 中文界面与示例数据正常；控制台错误、页面异常、失败请求和 4xx/5xx 响应均为 0
 浏览器：隔离 Demo 首次启动、Dashboard、发布中心导航、关键 UI、错误层、控制台和失败请求检查均通过；复验端口已关闭
 真实模型：qwen3.8-max 生成 688 字 / GEO 85，优化 952 字 / GEO 100
 安全边界：真实发布确认弹窗取消后 /execute-real 请求数为 0
@@ -137,11 +142,11 @@ npm run dev
 素材接口配置隔离：上传、列表、预览、下载和删除均统一使用运行时 `DATABASE_PATH` / `MEDIA_ROOT`；补齐前端既有下载按钮对应的后端路由，并拒绝不安全文件名。隔离数据库与临时素材目录内已验证完整生命周期，不读取或删除默认目录数据
 账号登录存储隔离：Web 登录线程向九个平台登录函数显式传递运行时 `DATABASE_PATH` / `COOKIES_DIRECTORY`；账号总览、Cookie 检测、即时真实发布和定时发布器工厂使用同一 Cookie 根目录。假登录回归确认 Cookie 与 `user_info` 均写入配置目录，不再落到 OmniPost 默认数据库
 登录 SSE 生命周期：`/login` 在启动线程前校验平台与账号名，以“平台+账号”作为会话键并拒绝同一会话重复启动；SSE 在 `200/500` 终态后结束，在正常结束或客户端断开时幂等清理全局队列，空闲期间发送心跳以便断开可被感知
-本轮完整验证：282 项后端测试、Vite 1708 modules 生产构建及 Python wheel/sdist 构建均通过
+本轮完整验证：286 项后端测试、Vite 1708 modules 生产构建及 Python wheel/sdist 构建均通过
 交付安全：Docker 构建上下文已排除 Cookie、SQLite、`.tmp` 和根目录 `.env`；前端 lockfile 已纳入版本控制，Python 包声明已包含 `services/` 与 `db/`
 Python 发布物：最新源码已重新执行 `uv build`；wheel SHA-256 为 `025823db915d42e2016265075327b520bba41a17258ef85cc1895e89dedec135`，sdist SHA-256 为 `7ddc8cbdb01f6dbbd815d378cbc1636e024485724c082c8ec538a696caa3317b`。逐项扫描确认敏感模式、Cookie/数据库/`.env` 等禁止文件、必需模块缺失均为 0
 Python 安装烟雾：wheel 已用 `--no-deps` 安装到隔离目录，核心模块确认从该目录加载；CLI 在声明依赖已安装的环境中执行 `sau --help` 成功
-部署烟雾：新增 `/api/health` 与容器 HEALTHCHECK；隔离 Demo 数据库实测 health、Dashboard、SPA 根路径和 `/project-management` 深链接均为 HTTP 200，未知 API 保持 JSON 404
+部署烟雾：新增 `/api/health` 与容器 HEALTHCHECK；隔离 Demo 数据库实测 health、Dashboard、SPA 根路径和 `/project-management` 深链接均为 HTTP 200，未知 API 保持 JSON 404。Vercel 生产环境通过稳定 `/backend` 前缀连接前后端，公网健康、看板、项目和素材读取接口均返回 JSON 200
 监听安全：源码直接启动默认仅监听 `127.0.0.1:5409`，真实进程 health 返回 200；容器通过环境变量显式监听 `0.0.0.0`，再由 Compose 限制映射到宿主机回环地址
 Windows 演示入口：`start-win.bat` 从自身目录启动、优先使用项目虚拟环境，并仅在未显式配置时启用 Demo 数据与关闭真实发布；前端只绑定回环地址
 产品品牌壳：清除上游 SAU/Vite 浏览器元数据残留；页面语言为 `zh-CN`，标签标题为“GEO 智能内容分发平台”，深青绿 `G` favicon 与侧栏标识一致，并有源码回归断言
@@ -149,8 +154,8 @@ Windows 演示入口：`start-win.bat` 从自身目录启动、优先使用项�
 安装配置安全：主安装文档不再要求用旧 `conf.example.py` 覆盖环境变量驱动的 `conf.py`；示例配置与 `.env.example` 均使用 `LOCAL_CHROME_HEADLESS=true`、`DEBUG_MODE=false` 等安全默认值，不含密钥。GEO Web 安装明确包含 `.[web]`、Playwright Chromium 和前端 lockfile 构建步骤
 真实执行文档与提示：README 的五平台真实执行入口和定时授权指纹语义已与实现对齐；真实任务误用 Demo 执行入口时返回明确的入口错误，不再误报“真实平台尚未开放”
 容器品牌资源：Docker 构建阶段显式把 `geo-favicon.svg` 复制到最终镜像；`/favicon.ico` 兼容入口也优先返回同一 GEO SVG，避免容器或旧浏览器回退到 Vite 图标
-部署浏览器：真实 Vite 构建产物加载成功，页面非空、无错误覆盖层、控制台错误、页面异常或失败请求；Dashboard 截图视觉核对通过。品牌修复后再次以隔离 Demo 数据库复验，首页、health、Dashboard 与 favicon 均为 HTTP 200，标题、语言和 SVG Content-Type 均符合预期
-容器编排：新增默认绑定 `127.0.0.1:5409`、关闭真实发布并持久化 SQLite/Cookie/媒体目录的 `compose.yaml`；本机无 Docker，尚未实际执行镜像构建
+部署浏览器：Vercel 公开生产站真实 Vite 构建产物加载成功，页面非空、示例看板正常，无错误覆盖层、控制台错误、页面异常、失败请求或 4xx/5xx 响应；Dashboard 截图视觉核对通过。首页、health、Dashboard、项目、素材和 favicon 均为 HTTP 200，标题、语言和 SVG Content-Type 均符合预期
+容器编排：仍保留默认绑定 `127.0.0.1:5409`、关闭真实发布并持久化 SQLite/Cookie/媒体目录的 `compose.yaml`；项目所有者本轮明确选择 Vercel，Docker 实机构建不再作为本次交付阻塞项
 工作区：为修复真实预演发现的话题污染风险，对 `uploader/toutiao_uploader/main.py` 做了单点精确匹配修复并新增回归测试；未发现硬编码 API Key；Cookie、`.tmp/`、本地数据库均被 Git 忽略
 ```
 
@@ -163,10 +168,10 @@ Windows 演示入口：`start-win.bat` 从自身目录启动、优先使用项�
 3. 真实链路的最终成功依据是平台公开文章链接，而不是自动化脚本是否完成点击；本次知乎链接为 `https://zhuanlan.zhihu.com/p/2078070222595035345`，今日头条链接为 `https://www.toutiao.com/item/7680497457658135090/`。
 4. 搜狐号任务 `5` 在项目所有者重新授权后，已复用首轮唯一草稿完成一次修复后的真实提交；公开链接 `https://www.sohu.com/a/1070776112_122997873`、后台记录及公网 HTTP 200/精确标题均已核验，任务已对账为 `success`。
 5. 百家号任务 `6/8` 已按六状态无记录的证据结案为 `failed`；第三次授权任务 `9` 在账号本人只完成人机验证后由平台自动继续提交，已发布记录、文章 ID `1875188881859292891`、标准公开 URL 和未登录 HTTP 200/精确标题均已核验，本地任务已对账为 `success`，没有创建新任务或重复发布。小红书任务 `7` 已有 note ID、标准公开 URL 并对账为 `success`，没有重复发布。
-6. 当前 API 没有用户认证且 CORS 默认开放，仅适合本地或受控内网；公网部署前需要在反向代理或平台层增加访问控制、TLS，并确认数据库与 Cookie 持久化。
-7. 当前 `origin` 指向项目所有者的私有仓库 `rainy321/geo-content-distribution-platform`，`upstream` 保留 OmniPost 的 `rehatRobot/omnipost`，后续提交只推送到 `origin`。
-8. Python wheel 与 sdist 已在本机构建、审计并完成隔离安装烟雾；当前机器没有 Docker，因此 Dockerfile、Compose 安全默认值和源码等价部署链路虽已静态/运行验证，容器镜像仍未在本机实际构建。
+6. Vercel 已提供公开 HTTPS 生产入口，但应用自身没有用户认证且 CORS 默认开放，因此线上固定为无密钥、无 Cookie、无真实发布能力的 Demo。接入真实数据前必须增加认证、持久数据库/对象存储和独立发布 Worker。
+7. 当前 `origin` 指向项目所有者仓库 `rainy321/geo-content-distribution-platform`，`main` 已推送并连接 Vercel；`upstream` 保留 OmniPost 的 `rehatRobot/omnipost`，后续提交只推送到 `origin`。
+8. Python wheel 与 sdist 已在本机构建、审计并完成隔离安装烟雾；Dockerfile 和 Compose 仍保留，但项目所有者本轮明确改用 Vercel，未执行 Docker 实机构建。
 
 ## Git 状态
 
-`main` 跟踪项目所有者的私有仓库 `rainy321/geo-content-distribution-platform`；当前今日头条修复与搜狐号第三适配器先保留在本地提交中，尚未 push。原 OmniPost 仓库仅作为 `upstream` 保留。
+`main` 跟踪项目所有者仓库 `rainy321/geo-content-distribution-platform`，当前功能与 Vercel 部署修复均已推送到 `origin/main`；原 OmniPost 仓库仅作为 `upstream` 保留。
