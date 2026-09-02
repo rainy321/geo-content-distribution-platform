@@ -125,6 +125,23 @@ app.config["FRONTEND_BUILD_DIR"] = next(
 def _frontend_build_dir() -> Path:
     return Path(app.config["FRONTEND_BUILD_DIR"])
 
+
+def _media_root() -> Path:
+    return Path(app.config["MEDIA_ROOT"]).expanduser().resolve()
+
+
+def _normalize_media_filename(value) -> str:
+    filename = str(value or "").strip()
+    if (
+        not filename
+        or Path(filename).name != filename
+        or "/" in filename
+        or "\\" in filename
+        or ".." in filename
+    ):
+        raise ValueError("Invalid filename")
+    return filename
+
 # 处理 Vite 构建后的静态资源。
 @app.route('/assets/<filename>')
 def custom_static(filename):
@@ -945,20 +962,25 @@ def upload_file():
 @app.route('/getFile', methods=['GET'])
 def get_file():
     # 获取 filename 参数
-    filename = request.args.get('filename')
+    try:
+        filename = _normalize_media_filename(request.args.get('filename'))
+    except ValueError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
 
-    if not filename:
-        return jsonify({"code": 400, "msg": "filename is required", "data": None}), 400
+    return send_from_directory(_media_root(), filename)
 
-    # 防止路径穿越攻击
-    if '..' in filename or filename.startswith('/'):
-        return jsonify({"code": 400, "msg": "Invalid filename", "data": None}), 400
 
-    # 拼接完整路径
-    file_path = str(Path(BASE_DIR / "videoFile"))
-
-    # 返回文件
-    return send_from_directory(file_path,filename)
+@app.route('/download/<path:filename>', methods=['GET'])
+def download_file(filename):
+    try:
+        normalized_filename = _normalize_media_filename(filename)
+    except ValueError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    return send_from_directory(
+        _media_root(),
+        normalized_filename,
+        as_attachment=True,
+    )
 
 
 @app.route('/uploadSave', methods=['POST'])
@@ -1042,7 +1064,7 @@ def upload_save():
 def get_all_files():
     try:
         # 使用 with 自动管理数据库连接
-        with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+        with sqlite3.connect(app.config["DATABASE_PATH"]) as conn:
             conn.row_factory = sqlite3.Row  # 允许通过列名访问结果
             cursor = conn.cursor()
 
@@ -1153,7 +1175,7 @@ def delete_file():
 
     try:
         # 获取数据库连接
-        with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+        with sqlite3.connect(app.config["DATABASE_PATH"]) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
@@ -1171,7 +1193,15 @@ def delete_file():
             record = dict(record)
 
             # 获取文件路径并删除实际文件
-            file_path = Path(BASE_DIR / "videoFile" / record['file_path'])
+            try:
+                stored_filename = _normalize_media_filename(record['file_path'])
+            except ValueError:
+                return jsonify({
+                    "code": 409,
+                    "msg": "Stored file path is invalid",
+                    "data": None
+                }), 409
+            file_path = _media_root() / stored_filename
             if file_path.exists():
                 try:
                     file_path.unlink()  # 删除文件
