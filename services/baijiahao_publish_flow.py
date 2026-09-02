@@ -23,6 +23,34 @@ _ACCEPTED_MESSAGES = (
     "published",
     "submitted",
 )
+_REJECTED_STATES = frozenset(
+    {"blocked", "denied", "error", "failed", "failure", "invalid", "rejected"}
+)
+_REJECTED_MESSAGES = (
+    "失败",
+    "错误",
+    "未通过",
+    "不符合",
+    "不能为空",
+    "请填写",
+    "请上传",
+    "无权限",
+    "被拒绝",
+    "blocked",
+    "denied",
+    "failed",
+    "invalid",
+    "rejected",
+)
+_MANUAL_ACTION_MESSAGES = (
+    "验证",
+    "登录",
+    "扫码",
+    "人机",
+    "风控",
+    "captcha",
+    "risk",
+)
 
 
 async def click_exact_publish_and_observe(page: Any) -> dict[str, Any]:
@@ -82,6 +110,18 @@ async def click_exact_publish_and_observe(page: Any) -> dict[str, Any]:
             "success": False,
             "message": "百家号已接受文章提交，正在等待平台审核或公开链接",
         }
+    if evidence["rejected_message"]:
+        detail = evidence["rejected_message"]
+        status = (
+            "need_action"
+            if any(marker in detail.lower() for marker in _MANUAL_ACTION_MESSAGES)
+            else "failed"
+        )
+        return {
+            "status": status,
+            "success": False,
+            "message": f"百家号明确拒绝文章提交：{detail}",
+        }
     if evidence["request_count"]:
         return {
             "status": "processing",
@@ -128,20 +168,27 @@ async def _confirm_dialog_if_present(page: Any) -> None:
 async def _summarize_responses(responses: list[Any]) -> dict[str, Any]:
     public_url = ""
     accepted = False
+    rejected_message = ""
     for response in responses:
-        if not 200 <= int(response.status) < 300:
-            continue
+        response_status = int(response.status)
         try:
             payload = await response.json()
         except Exception:
             payload = None
+        if not 200 <= response_status < 300:
+            rejected_message = rejected_message or (
+                _payload_rejection_message(payload) or f"HTTP {response_status}"
+            )
+            continue
         public_url = public_url or _extract_public_article_url(str(payload or ""))
         if _payload_indicates_accepted(payload):
             accepted = True
+        rejected_message = rejected_message or _payload_rejection_message(payload)
     return {
         "request_count": len(responses),
         "accepted": accepted,
         "public_url": public_url,
+        "rejected_message": rejected_message,
     }
 
 
@@ -166,6 +213,54 @@ def _payload_indicates_accepted(payload: Any) -> bool:
         elif isinstance(value, (list, tuple)):
             pending.extend(value)
     return False
+
+
+def _payload_rejection_message(payload: Any) -> str:
+    pending = [payload]
+    while pending:
+        value = pending.pop()
+        if isinstance(value, dict):
+            state = str(
+                value.get("status")
+                or value.get("state")
+                or value.get("publish_status")
+                or ""
+            ).strip().lower()
+            messages = [
+                str(value.get(key) or "").strip()
+                for key in (
+                    "message",
+                    "msg",
+                    "errmsg",
+                    "error",
+                    "reason",
+                    "description",
+                    "detail",
+                )
+            ]
+            message = next((item for item in messages if item), "")
+            failed_code = any(
+                key in value
+                and value.get(key) not in (None, "", 0, "0", 200, "200", True)
+                for key in ("code", "errno", "error_code")
+            )
+            explicitly_failed = (
+                state in _REJECTED_STATES
+                or value.get("success") is False
+                or value.get("accepted") is False
+                or failed_code
+            )
+            message_is_rejection = any(
+                marker in message.lower() for marker in _REJECTED_MESSAGES
+            )
+            if explicitly_failed and (message or state):
+                return (message or state)[:300]
+            if message_is_rejection:
+                return message[:300]
+            pending.extend(value.values())
+        elif isinstance(value, (list, tuple)):
+            pending.extend(value)
+    return ""
 
 
 def _extract_public_article_url(value: str) -> str:

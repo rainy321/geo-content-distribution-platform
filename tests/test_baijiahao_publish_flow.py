@@ -82,6 +82,45 @@ class BaijiahaoPublishFlowTests(unittest.IsolatedAsyncioTestCase):
             "https://baijiahao.baidu.com/s?id=123456789",
         )
 
+    async def test_explicit_rejection_is_not_left_processing(self):
+        button = self._button()
+        page = Mock()
+        page.url = "https://baijiahao.baidu.com/builder/rc/edit?type=news"
+        page.get_by_role.return_value = _Candidates([button])
+        page.locator.return_value = _NoDialog()
+        page.wait_for_timeout = AsyncMock()
+        page.remove_listener = Mock()
+        page.on = Mock(
+            side_effect=lambda _event, callback: callback(
+                _Response({"errno": 1001, "errmsg": "封面不能为空"})
+            )
+        )
+
+        result = await click_exact_publish_and_observe(page)
+
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("封面不能为空", result["message"])
+        button.click.assert_awaited_once()
+
+    async def test_security_rejection_requires_manual_action(self):
+        button = self._button()
+        page = Mock()
+        page.url = "https://baijiahao.baidu.com/builder/rc/edit?type=news"
+        page.get_by_role.return_value = _Candidates([button])
+        page.locator.return_value = _NoDialog()
+        page.wait_for_timeout = AsyncMock()
+        page.remove_listener = Mock()
+        page.on = Mock(
+            side_effect=lambda _event, callback: callback(
+                _Response({"success": False, "message": "请完成人机验证"})
+            )
+        )
+
+        result = await click_exact_publish_and_observe(page)
+
+        self.assertEqual(result["status"], "need_action")
+        self.assertIn("人机验证", result["message"])
+
 
 if __name__ == "__main__":
     unittest.main()
