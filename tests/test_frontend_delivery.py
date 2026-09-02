@@ -73,6 +73,16 @@ class FrontendDeliveryTests(unittest.TestCase):
         self.assertIn("pollingStopped = true", source)
         self.assertIn("window.clearTimeout(pollTimer)", source)
 
+    def test_frontend_shell_uses_geo_brand_metadata(self):
+        frontend_root = Path(__file__).resolve().parents[1] / "sau_frontend"
+        index = (frontend_root / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn('<html lang="zh-CN">', index)
+        self.assertIn("<title>GEO 智能内容分发平台</title>", index)
+        self.assertIn('href="/geo-favicon.svg"', index)
+        self.assertTrue((frontend_root / "public" / "geo-favicon.svg").is_file())
+        self.assertNotIn("SAU自媒体自动化运营系统", index)
+
 
 if __name__ == "__main__":
     unittest.main()

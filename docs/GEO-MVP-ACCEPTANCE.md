@@ -77,7 +77,7 @@ npm run dev
 ## 已执行验证
 
 ```text
-后端：277 tests passed
+后端：278 tests passed
 前端：Vite production build passed（1708 modules）
 浏览器：隔离 Demo 首次启动、Dashboard、发布中心导航、关键 UI、错误层、控制台和失败请求检查均通过；复验端口已关闭
 真实模型：qwen3.8-max 生成 688 字 / GEO 85，优化 952 字 / GEO 100
@@ -137,14 +137,15 @@ npm run dev
 素材接口配置隔离：上传、列表、预览、下载和删除均统一使用运行时 `DATABASE_PATH` / `MEDIA_ROOT`；补齐前端既有下载按钮对应的后端路由，并拒绝不安全文件名。隔离数据库与临时素材目录内已验证完整生命周期，不读取或删除默认目录数据
 账号登录存储隔离：Web 登录线程向九个平台登录函数显式传递运行时 `DATABASE_PATH` / `COOKIES_DIRECTORY`；账号总览、Cookie 检测、即时真实发布和定时发布器工厂使用同一 Cookie 根目录。假登录回归确认 Cookie 与 `user_info` 均写入配置目录，不再落到 OmniPost 默认数据库
 登录 SSE 生命周期：`/login` 在启动线程前校验平台与账号名，以“平台+账号”作为会话键并拒绝同一会话重复启动；SSE 在 `200/500` 终态后结束，在正常结束或客户端断开时幂等清理全局队列，空闲期间发送心跳以便断开可被感知
-本轮完整验证：277 项后端测试、Vite 1708 modules 生产构建及 Python wheel/sdist 构建均通过
+本轮完整验证：278 项后端测试、Vite 1708 modules 生产构建及 Python wheel/sdist 构建均通过
 交付安全：Docker 构建上下文已排除 Cookie、SQLite、`.tmp` 和根目录 `.env`；前端 lockfile 已纳入版本控制，Python 包声明已包含 `services/` 与 `db/`
-Python 发布物：`uv build` 已成功生成 wheel 与 sdist；逐项扫描确认敏感模式、Cookie/数据库/`.env` 等禁止文件、必需模块缺失均为 0
+Python 发布物：最新源码已重新执行 `uv build`；wheel SHA-256 为 `848fd4f60ead3120d0cba177af6133cb3ea5395a69a58229c2a28d61ef453136`，sdist SHA-256 为 `ba097dd1ed7e520577ae8ed96a1829f9e897cd55884d591ce2f5a05958ffd5dc`。逐项扫描确认敏感模式、Cookie/数据库/`.env` 等禁止文件、必需模块缺失均为 0
 Python 安装烟雾：wheel 已用 `--no-deps` 安装到隔离目录，核心模块确认从该目录加载；CLI 在声明依赖已安装的环境中执行 `sau --help` 成功
 部署烟雾：新增 `/api/health` 与容器 HEALTHCHECK；隔离 Demo 数据库实测 health、Dashboard、SPA 根路径和 `/project-management` 深链接均为 HTTP 200，未知 API 保持 JSON 404
 监听安全：源码直接启动默认仅监听 `127.0.0.1:5409`，真实进程 health 返回 200；容器通过环境变量显式监听 `0.0.0.0`，再由 Compose 限制映射到宿主机回环地址
 Windows 演示入口：`start-win.bat` 从自身目录启动、优先使用项目虚拟环境，并仅在未显式配置时启用 Demo 数据与关闭真实发布；前端只绑定回环地址
-部署浏览器：真实 Vite 构建产物加载成功，页面非空、无错误覆盖层、控制台错误、页面异常或失败请求；Dashboard 截图视觉核对通过
+产品品牌壳：清除上游 SAU/Vite 浏览器元数据残留；页面语言为 `zh-CN`，标签标题为“GEO 智能内容分发平台”，深青绿 `G` favicon 与侧栏标识一致，并有源码回归断言
+部署浏览器：真实 Vite 构建产物加载成功，页面非空、无错误覆盖层、控制台错误、页面异常或失败请求；Dashboard 截图视觉核对通过。品牌修复后再次以隔离 Demo 数据库复验，首页、health、Dashboard 与 favicon 均为 HTTP 200，标题、语言和 SVG Content-Type 均符合预期
 容器编排：新增默认绑定 `127.0.0.1:5409`、关闭真实发布并持久化 SQLite/Cookie/媒体目录的 `compose.yaml`；本机无 Docker，尚未实际执行镜像构建
 工作区：为修复真实预演发现的话题污染风险，对 `uploader/toutiao_uploader/main.py` 做了单点精确匹配修复并新增回归测试；未发现硬编码 API Key；Cookie、`.tmp/`、本地数据库均被 Git 忽略
 ```
