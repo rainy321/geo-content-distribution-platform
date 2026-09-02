@@ -192,3 +192,5 @@ videoFile
 
 # 本地验证产物（隔离数据库、浏览器截图）
 .tmp/
+.vercel/
+.env.local

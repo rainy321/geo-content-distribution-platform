@@ -1,4 +1,5 @@
 import unittest
+import json
 from unittest.mock import patch
 from pathlib import Path
 
@@ -52,6 +53,7 @@ class DeliverySafetyTests(unittest.TestCase):
         self.assertNotIn("DEBUG_MODE = True", example)
         self.assertIn("LOCAL_CHROME_HEADLESS=true", env_example)
         self.assertIn("DEBUG_MODE=false", env_example)
+        self.assertIn("MEDIA_ROOT=videoFile", env_example)
         self.assertNotIn("AI_API_KEY=sk-", env_example)
 
     def test_docker_context_excludes_local_credentials_and_runtime_data(self):
@@ -74,7 +76,9 @@ class DeliverySafetyTests(unittest.TestCase):
             if line.strip() and not line.lstrip().startswith("#")
         }
 
-        self.assertTrue({"cookiesFile", ".tmp/", "db/database.db"}.issubset(patterns))
+        self.assertTrue(
+            {"cookiesFile", ".tmp/", ".vercel/", "db/database.db"}.issubset(patterns)
+        )
         self.assertNotIn("package-lock.json", patterns)
         self.assertNotIn("conf.py", patterns)
         self.assertTrue((ROOT / "sau_frontend" / "package-lock.json").is_file())
@@ -98,6 +102,41 @@ class DeliverySafetyTests(unittest.TestCase):
     def test_source_server_defaults_to_loopback(self):
         with patch.dict("os.environ", {}, clear=True):
             self.assertEqual(("127.0.0.1", 5409), get_server_bind())
+
+    def test_vercel_services_keep_cloud_execution_in_explicit_demo_mode(self):
+        config = json.loads((ROOT / "vercel.json").read_text(encoding="utf-8"))
+        services = config["services"]
+
+        self.assertEqual("3.12", (ROOT / ".python-version").read_text().strip())
+        self.assertEqual("sau_frontend", services["frontend"]["root"])
+        self.assertEqual(".", services["backend"]["root"])
+        self.assertEqual("sau_backend:app", services["backend"]["entrypoint"])
+        self.assertNotIn("runtime", services["backend"])
+        self.assertEqual(
+            {"service": "backend"}, config["rewrites"][0]["destination"]
+        )
+        self.assertEqual(
+            "/:path*", config["rewrites"][0]["transforms"][0]["args"]
+        )
+        self.assertEqual(
+            {"service": "frontend"}, config["rewrites"][-1]["destination"]
+        )
+        self.assertEqual("true", config["env"]["DEMO_MODE"])
+        self.assertEqual("false", config["env"]["ALLOW_REAL_PUBLISHING"])
+        self.assertTrue(config["env"]["DATABASE_PATH"].startswith("/tmp/"))
+        self.assertTrue(config["env"]["COOKIES_DIRECTORY"].startswith("/tmp/"))
+        self.assertTrue(config["env"]["MEDIA_ROOT"].startswith("/tmp/"))
+
+    def test_vercel_frontend_uses_the_generated_backend_service_url(self):
+        vite_config = (ROOT / "sau_frontend" / "vite.config.js").read_text(
+            encoding="utf-8"
+        )
+        api_config = (
+            ROOT / "sau_frontend" / "src" / "config" / "api.js"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("'NEXT_PUBLIC_'", vite_config)
+        self.assertIn("import.meta.env.NEXT_PUBLIC_BACKEND_URL", api_config)
 
     def test_server_bind_accepts_explicit_container_values(self):
         with patch.dict(

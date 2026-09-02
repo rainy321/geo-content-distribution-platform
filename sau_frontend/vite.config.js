@@ -5,6 +5,9 @@ import { resolve } from 'path'
 // https://vite.dev/config/
 export default defineConfig({
   plugins: [vue()],
+  // Vercel Services injects NEXT_PUBLIC_BACKEND_URL for the backend service.
+  // Keep VITE_* support so standalone/local deployments can still override it.
+  envPrefix: ['VITE_', 'NEXT_PUBLIC_'],
   resolve: {
     alias: {
       '@': resolve(__dirname, 'src'),

@@ -70,21 +70,26 @@ active_queues_lock = threading.Lock()
 app = Flask(__name__)
 
 # Web 启动时只补齐运行目录和已有表，不删除或覆盖现有数据。
-Path(BASE_DIR / "videoFile").mkdir(parents=True, exist_ok=True)
 configured_database_path = os.getenv("DATABASE_PATH")
 configured_cookies_directory = os.getenv("COOKIES_DIRECTORY")
+configured_media_root = os.getenv("MEDIA_ROOT")
 app.config["DATABASE_PATH"] = (
     Path(configured_database_path).expanduser().resolve()
     if configured_database_path
     else Path(BASE_DIR / "db" / "database.db")
 )
-app.config["MEDIA_ROOT"] = Path(BASE_DIR / "videoFile").resolve()
+app.config["MEDIA_ROOT"] = (
+    Path(configured_media_root).expanduser().resolve()
+    if configured_media_root
+    else Path(BASE_DIR / "videoFile").resolve()
+)
 app.config["COOKIES_DIRECTORY"] = (
     Path(configured_cookies_directory).expanduser().resolve()
     if configured_cookies_directory
     else Path(BASE_DIR / "cookiesFile").resolve()
 )
 Path(app.config["COOKIES_DIRECTORY"]).mkdir(parents=True, exist_ok=True)
+Path(app.config["MEDIA_ROOT"]).mkdir(parents=True, exist_ok=True)
 app.config["DEMO_MODE"] = str(os.getenv("DEMO_MODE", "false")).strip().lower() in {
     "1",
     "true",

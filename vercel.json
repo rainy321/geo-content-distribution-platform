@@ -1,0 +1,41 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "services": {
+    "frontend": {
+      "root": "sau_frontend"
+    },
+    "backend": {
+      "root": ".",
+      "entrypoint": "sau_backend:app"
+    }
+  },
+  "rewrites": [
+    {
+      "source": "/backend/:path*",
+      "destination": {
+        "service": "backend"
+      },
+      "transforms": [
+        {
+          "type": "request.path",
+          "op": "set",
+          "args": "/:path*"
+        }
+      ]
+    },
+    {
+      "source": "/:path*",
+      "destination": {
+        "service": "frontend"
+      }
+    }
+  ],
+  "env": {
+    "DEMO_MODE": "true",
+    "SEED_DEMO_DATA": "true",
+    "ALLOW_REAL_PUBLISHING": "false",
+    "DATABASE_PATH": "/tmp/geo-mvp/database.db",
+    "COOKIES_DIRECTORY": "/tmp/geo-mvp/cookies",
+    "MEDIA_ROOT": "/tmp/geo-mvp/media"
+  }
+}

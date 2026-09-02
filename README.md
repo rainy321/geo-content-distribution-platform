@@ -286,6 +286,7 @@ GEO Web 运行环境变量：
 | `ALLOW_REAL_PUBLISHING` | `false` | 真实发布总开关；当前接入知乎、今日头条、搜狐号、百家号和小红书 |
 | `DATABASE_PATH` | `db/database.db` | 可覆盖 SQLite 路径，便于隔离环境 |
 | `COOKIES_DIRECTORY` | `cookiesFile` | Web 登录、账号检测和真实发布共用的 Cookie 目录 |
+| `MEDIA_ROOT` | `videoFile` | 上传素材与发布图片的运行目录 |
 | `PUBLISH_SCHEDULER_INTERVAL_SECONDS` | `15` | 到期任务检查间隔，最少 5 秒 |
 | `SERVER_HOST` | `127.0.0.1` | 后端监听地址；容器内需显式设为 `0.0.0.0` |
 | `SERVER_PORT` | `5409` | 后端监听端口；非法值会回退到 5409 |
