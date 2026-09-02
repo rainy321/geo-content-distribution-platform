@@ -77,7 +77,7 @@ npm run dev
 ## 已执行验证
 
 ```text
-后端：266 tests passed
+后端：271 tests passed
 前端：Vite production build passed（1708 modules）
 浏览器：隔离 Demo 首次启动、Dashboard、发布中心导航、关键 UI、错误层、控制台和失败请求检查均通过；复验端口已关闭
 真实模型：qwen3.8-max 生成 688 字 / GEO 85，优化 952 字 / GEO 100
@@ -129,7 +129,8 @@ npm run dev
 手动重试授权撤销：`failed/need_action` 任务重新排队时会同时清空旧授权指纹并关闭 `auto_execute`；任务不会继续显示“已授权”，真实任务必须再次点击“确认真实发布”，从数据层落实“失败或状态不明不自动重试”
 素材接口配置隔离：上传、列表、预览、下载和删除均统一使用运行时 `DATABASE_PATH` / `MEDIA_ROOT`；补齐前端既有下载按钮对应的后端路由，并拒绝不安全文件名。隔离数据库与临时素材目录内已验证完整生命周期，不读取或删除默认目录数据
 账号登录存储隔离：Web 登录线程向九个平台登录函数显式传递运行时 `DATABASE_PATH` / `COOKIES_DIRECTORY`；账号总览、Cookie 检测、即时真实发布和定时发布器工厂使用同一 Cookie 根目录。假登录回归确认 Cookie 与 `user_info` 均写入配置目录，不再落到 OmniPost 默认数据库
-本轮完整验证：266 项后端测试、Vite 1708 modules 生产构建及 Python wheel/sdist 构建均通过
+登录 SSE 生命周期：`/login` 在启动线程前校验平台与账号名，以“平台+账号”作为会话键并拒绝同一会话重复启动；SSE 在 `200/500` 终态后结束，在正常结束或客户端断开时幂等清理全局队列，空闲期间发送心跳以便断开可被感知
+本轮完整验证：271 项后端测试、Vite 1708 modules 生产构建及 Python wheel/sdist 构建均通过
 交付安全：Docker 构建上下文已排除 Cookie、SQLite、`.tmp` 和根目录 `.env`；前端 lockfile 已纳入版本控制，Python 包声明已包含 `services/` 与 `db/`
 Python 发布物：`uv build` 已成功生成 wheel 与 sdist；逐项扫描确认敏感模式、Cookie/数据库/`.env` 等禁止文件、必需模块缺失均为 0
 Python 安装烟雾：wheel 已用 `--no-deps` 安装到隔离目录，核心模块确认从该目录加载；CLI 在声明依赖已安装的环境中执行 `sau --help` 成功

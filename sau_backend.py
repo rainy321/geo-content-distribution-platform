@@ -66,6 +66,7 @@ from services.real_publisher_factory import (
 )
 
 active_queues = {}
+active_queues_lock = threading.Lock()
 app = Flask(__name__)
 
 # Web 启动时只补齐运行目录和已有表，不删除或覆盖现有数据。
@@ -1306,22 +1307,47 @@ def delete_account():
 @app.route('/login')
 def login():
     # 1 小红书 2 视频号 3 抖音 4 快手 5 百家号 6 B站 7 今日头条
-    type = request.args.get('type')
+    login_type = str(request.args.get('type') or '').strip()
     # 账号名
-    id = request.args.get('id')
-    print(f"登录请求: type={type}, id={id}")
+    account_id = str(request.args.get('id') or '').strip()
+    if login_type not in {str(value) for value in range(1, 10)}:
+        return jsonify({"code": 400, "msg": "不支持的平台类型", "data": None}), 400
+    if not account_id:
+        return jsonify({"code": 400, "msg": "账号名不能为空", "data": None}), 400
+    if len(account_id) > 100:
+        return jsonify({"code": 400, "msg": "账号名不能超过 100 个字符", "data": None}), 400
+    print(f"登录请求: type={login_type}, id={account_id}")
 
     # 模拟一个用于异步通信的队列
     status_queue = Queue()
-    active_queues[id] = status_queue
+    session_key = (login_type, account_id)
+    with active_queues_lock:
+        if session_key in active_queues:
+            return jsonify(
+                {"code": 409, "msg": "该账号已有登录会话进行中", "data": None}
+            ), 409
+        active_queues[session_key] = status_queue
 
     def on_close():
-        print(f"清理队列: {id}")
-        del active_queues[id]
+        with active_queues_lock:
+            if active_queues.get(session_key) is status_queue:
+                active_queues.pop(session_key, None)
+        print(f"清理登录会话: type={login_type}, id={account_id}")
     # 启动异步任务线程
-    thread = threading.Thread(target=run_async_function, args=(type,id,status_queue), daemon=True)
-    thread.start()
-    response = Response(sse_stream(status_queue,), mimetype='text/event-stream')
+    try:
+        thread = threading.Thread(
+            target=run_async_function,
+            args=(login_type, account_id, status_queue),
+            daemon=True,
+        )
+        thread.start()
+    except Exception:
+        on_close()
+        raise
+    response = Response(
+        sse_stream(status_queue, on_close=on_close),
+        mimetype='text/event-stream',
+    )
     response.headers['Cache-Control'] = 'no-cache'
     response.headers['X-Accel-Buffering'] = 'no'  # 关键：禁用 Nginx 缓冲
     response.headers['Content-Type'] = 'text/event-stream'
@@ -1993,14 +2019,25 @@ def run_async_function(type,id,status_queue):
             pass
 
 # SSE 流生成器函数
-def sse_stream(status_queue):
-    while True:
-        if not status_queue.empty():
-            msg = status_queue.get()
-            yield f"data: {msg}\n\n"
-        else:
-            # 避免 CPU 占满
-            time.sleep(0.1)
+def sse_stream(status_queue, *, on_close=None):
+    last_heartbeat = time.monotonic()
+    try:
+        while True:
+            if not status_queue.empty():
+                msg = status_queue.get()
+                yield f"data: {msg}\n\n"
+                if str(msg) in {"200", "500"}:
+                    break
+            else:
+                now = time.monotonic()
+                if now - last_heartbeat >= 15:
+                    yield ": keep-alive\n\n"
+                    last_heartbeat = now
+                # 避免 CPU 占满
+                time.sleep(0.1)
+    finally:
+        if on_close is not None:
+            on_close()
 
 
 def get_server_bind():
