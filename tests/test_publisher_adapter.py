@@ -641,15 +641,17 @@ class XiaohongshuPublisherAdapterTests(unittest.TestCase):
     def test_default_runner_uses_images_ai_declaration_and_callback(self, note_class):
         note = note_class.return_value
         observed = {"status": "processing", "message": "已提交"}
+        page = object()
 
         async def run_main():
             callback = note_class.call_args.kwargs["publish_callback"]
-            await callback(object(), scheduled=False)
+            await callback(page, scheduled=False)
 
         note.main = AsyncMock(side_effect=run_main)
+        observer = AsyncMock(return_value=observed)
         with patch(
             "services.xiaohongshu_publish_flow.click_exact_publish_and_observe",
-            new=AsyncMock(return_value=observed),
+            new=observer,
         ):
             result = asyncio.run(
                 _default_xiaohongshu_publish_runner(self.content, "account.json")
@@ -660,6 +662,11 @@ class XiaohongshuPublisherAdapterTests(unittest.TestCase):
         self.assertEqual(kwargs["desc"], "正文")
         self.assertTrue(kwargs["ai_generated"])
         self.assertEqual(result, observed)
+        observer.assert_awaited_once_with(
+            page,
+            scheduled=False,
+            title="GEO 内容测试",
+        )
 
 
 if __name__ == "__main__":

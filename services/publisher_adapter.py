@@ -1146,7 +1146,11 @@ async def _default_xiaohongshu_publish_runner(
 
     async def observe_publish(page: Any, *, scheduled: bool = False) -> None:
         observed_result.update(
-            await click_exact_publish_and_observe(page, scheduled=scheduled)
+            await click_exact_publish_and_observe(
+                page,
+                scheduled=scheduled,
+                title=content.title,
+            )
         )
 
     note_text = _markdown_to_platform_text(content.content, strip_hashes=True)
