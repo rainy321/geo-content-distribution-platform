@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import sqlite3
 from contextlib import closing
@@ -26,6 +28,9 @@ _ALLOWED_TRANSITIONS = {
     "success": frozenset(),
 }
 _RETRYABLE_STATUSES = frozenset({"failed", "need_action"})
+PUBLISH_AUTHORIZATION_MISMATCH_MESSAGE = (
+    "定时自动执行授权后，文章内容或分发参数已变化；未访问平台，请重新确认"
+)
 
 
 class PublishJobNotFoundError(LookupError):
@@ -62,14 +67,25 @@ def create_publish_job(
 
     with closing(_connect(database_path)) as conn:
         with conn:
-            if not _article_exists(conn, article_id):
+            article_row = _fetch_authorization_article(conn, article_id)
+            if article_row is None:
                 raise ArticleNotFoundError("文章不存在")
+            authorization_fingerprint = (
+                build_publish_authorization_fingerprint(
+                    article=dict(article_row),
+                    platform=normalized_platform,
+                    images=normalized_images,
+                    publish_at=normalized_publish_at,
+                )
+                if normalized_auto_execute
+                else ""
+            )
             cursor = conn.execute(
                 """
                 INSERT INTO publish_jobs (
                     article_id, platform, status, images, publish_at,
-                    auto_execute, demo
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    authorization_fingerprint, auto_execute, demo
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     article_id,
@@ -77,12 +93,57 @@ def create_publish_job(
                     initial_status,
                     json.dumps(normalized_images, ensure_ascii=False),
                     normalized_publish_at,
+                    authorization_fingerprint,
                     int(normalized_auto_execute),
                     int(bool(demo)),
                 ),
             )
             row = _fetch_job(conn, cursor.lastrowid)
     return _serialize_job(row)
+
+
+def build_publish_authorization_fingerprint(
+    *,
+    article: dict[str, Any],
+    platform: str,
+    images: list[str] | tuple[str, ...] | None,
+    publish_at: str | datetime | None,
+) -> str:
+    """Bind automatic execution to the exact publishable payload."""
+
+    canonical_payload = {
+        "schema": 1,
+        "article_id": int(article["id"]),
+        "title": str(article.get("title") or "").strip(),
+        "content": str(article.get("content") or "").strip(),
+        "tags": _normalize_authorization_tags(article.get("tags")),
+        "platform": _normalize_platform(platform),
+        "images": normalize_publish_images(images),
+        "publish_at": _normalize_publish_at(publish_at),
+    }
+    encoded = json.dumps(
+        canonical_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def publish_authorization_matches(
+    job: dict[str, Any],
+    article: dict[str, Any],
+) -> bool:
+    expected = str(job.get("authorization_fingerprint") or "").strip().lower()
+    if not expected:
+        return False
+    actual = build_publish_authorization_fingerprint(
+        article=article,
+        platform=job["platform"],
+        images=job.get("images"),
+        publish_at=job.get("publish_at"),
+    )
+    return hmac.compare_digest(expected, actual)
 
 
 def get_publish_job(
@@ -356,11 +417,26 @@ def _connect(database_path: str | Path) -> sqlite3.Connection:
     return conn
 
 
-def _article_exists(conn: sqlite3.Connection, article_id: int) -> bool:
+def _fetch_authorization_article(conn: sqlite3.Connection, article_id: int):
     return conn.execute(
-        "SELECT 1 FROM articles WHERE id = ?",
+        "SELECT id, title, content, tags FROM articles WHERE id = ?",
         (article_id,),
-    ).fetchone() is not None
+    ).fetchone()
+
+
+def _normalize_authorization_tags(value: Any) -> list[str]:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            value = []
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [
+        normalized
+        for item in value
+        if (normalized := str(item or "").strip())
+    ]
 
 
 def _fetch_job(conn: sqlite3.Connection, job_id: int):
@@ -414,6 +490,9 @@ def _serialize_job(row: sqlite3.Row) -> dict[str, Any]:
     job = dict(row)
     job["demo"] = bool(job["demo"])
     job["auto_execute"] = bool(job.get("auto_execute", False))
+    job["authorization_bound"] = bool(
+        str(job.get("authorization_fingerprint") or "").strip()
+    )
     try:
         raw_images = json.loads(job.get("images") or "[]")
         job["images"] = normalize_publish_images(raw_images)

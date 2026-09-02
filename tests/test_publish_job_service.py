@@ -15,6 +15,7 @@ from services.publish_job_service import (
     create_publish_job,
     get_publish_job,
     list_publish_jobs,
+    publish_authorization_matches,
     reconcile_publish_job_success,
     retry_publish_job,
     transition_publish_job,
@@ -66,6 +67,7 @@ class PublishJobServiceTests(unittest.TestCase):
         self.assertEqual(scheduled["publish_at"], "2026-09-02 09:30:00+00:00")
         self.assertTrue(scheduled["demo"])
         self.assertFalse(scheduled["auto_execute"])
+        self.assertFalse(scheduled["authorization_bound"])
         self.assertEqual(get_publish_job(self.db_path, scheduled["id"]), scheduled)
 
     def test_persists_real_scheduled_auto_execute_authorization(self):
@@ -79,7 +81,20 @@ class PublishJobServiceTests(unittest.TestCase):
 
         self.assertEqual(scheduled["status"], "scheduled")
         self.assertTrue(scheduled["auto_execute"])
+        self.assertTrue(scheduled["authorization_bound"])
+        self.assertEqual(len(scheduled["authorization_fingerprint"]), 64)
         self.assertTrue(get_publish_job(self.db_path, scheduled["id"])["auto_execute"])
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            article = dict(
+                conn.execute(
+                    "SELECT id, title, content, tags FROM articles WHERE id = ?",
+                    (self.article_id,),
+                ).fetchone()
+            )
+        self.assertTrue(publish_authorization_matches(scheduled, article))
+        article["content"] = f"{article['content']}（授权后修改）"
+        self.assertFalse(publish_authorization_matches(scheduled, article))
 
         with self.assertRaisesRegex(ValueError, "仅适用于定时"):
             create_publish_job(

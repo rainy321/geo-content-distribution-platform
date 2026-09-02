@@ -786,6 +786,7 @@ def _publish_job_payload(job):
         "images": list(job.get("images") or ()),
         "publish_at": job["publish_at"],
         "auto_execute": bool(job.get("auto_execute", False)),
+        "authorization_bound": bool(job.get("authorization_bound", False)),
         "demo": bool(job["demo"]),
         "created_at": job["created_at"],
         "started_at": job["started_at"],

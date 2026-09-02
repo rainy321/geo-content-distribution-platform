@@ -219,6 +219,7 @@ class PublishJobsApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(job["status"], "scheduled")
         self.assertFalse(job["auto_execute"])
+        self.assertFalse(job["authorization_bound"])
         self.assertEqual(execute_response.status_code, 409)
 
     def test_validates_create_and_list_inputs(self):

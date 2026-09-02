@@ -11,7 +11,11 @@ from services.publish_job_executor import (
     PublisherFactory,
     execute_publish_job,
 )
-from services.publish_job_service import get_publish_job, transition_publish_job
+from services.publish_job_service import (
+    PUBLISH_AUTHORIZATION_MISMATCH_MESSAGE,
+    get_publish_job,
+    transition_publish_job,
+)
 
 
 def queue_due_publish_jobs(
@@ -74,6 +78,7 @@ def run_publish_scheduler_tick(
     executed_demo_count = 0
     attempted_real_count = 0
     blocked_real_count = 0
+    blocked_authorization_count = 0
     for job in promoted:
         if not job["demo"] and not job.get("auto_execute"):
             results.append(job)
@@ -97,9 +102,12 @@ def run_publish_scheduler_tick(
                 job["id"],
                 publisher_factory=publisher_factory,
                 media_root=media_root,
+                require_authorization_match=not job["demo"],
             )
             if job["demo"]:
                 executed_demo_count += 1
+            elif result.get("message") == PUBLISH_AUTHORIZATION_MISMATCH_MESSAGE:
+                blocked_authorization_count += 1
             else:
                 attempted_real_count += 1
         except Exception:
@@ -113,6 +121,7 @@ def run_publish_scheduler_tick(
         "executed_demo_count": executed_demo_count,
         "attempted_real_count": attempted_real_count,
         "blocked_real_count": blocked_real_count,
+        "blocked_authorization_count": blocked_authorization_count,
         "jobs": results,
     }
 

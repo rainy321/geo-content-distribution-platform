@@ -206,6 +206,8 @@ class RealPublishApiTests(unittest.TestCase):
         self.assertEqual(created.status_code, 201)
         self.assertEqual(created.get_json()["data"]["status"], "scheduled")
         self.assertTrue(created.get_json()["data"]["auto_execute"])
+        self.assertTrue(created.get_json()["data"]["authorization_bound"])
+        self.assertNotIn("authorization_fingerprint", created.get_json()["data"])
         self.assertEqual(immediate.status_code, 400)
         self.assertEqual(malformed.status_code, 400)
 

@@ -100,6 +100,7 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                     result_url TEXT NOT NULL DEFAULT '',
                     images TEXT NOT NULL DEFAULT '[]',
                     publish_at DATETIME,
+                    authorization_fingerprint TEXT NOT NULL DEFAULT '',
                     auto_execute INTEGER NOT NULL DEFAULT 0
                         CHECK (auto_execute IN (0, 1)),
                     demo INTEGER NOT NULL DEFAULT 0
@@ -124,6 +125,11 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                     "ALTER TABLE publish_jobs "
                     "ADD COLUMN auto_execute INTEGER NOT NULL DEFAULT 0 "
                     "CHECK (auto_execute IN (0, 1))"
+                )
+            if "authorization_fingerprint" not in publish_job_columns:
+                cursor.execute(
+                    "ALTER TABLE publish_jobs "
+                    "ADD COLUMN authorization_fingerprint TEXT NOT NULL DEFAULT ''"
                 )
             cursor.execute(
                 '''

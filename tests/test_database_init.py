@@ -181,7 +181,8 @@ class DatabaseInitializationTests(unittest.TestCase):
                 job = conn.execute(
                     """
                     SELECT article_id, platform, status, message, result_url,
-                           images, publish_at, auto_execute, demo,
+                           images, publish_at, authorization_fingerprint,
+                           auto_execute, demo,
                            created_at, started_at, finished_at
                     FROM publish_jobs
                     """
@@ -198,6 +199,7 @@ class DatabaseInitializationTests(unittest.TestCase):
                     "result_url",
                     "images",
                     "publish_at",
+                    "authorization_fingerprint",
                     "auto_execute",
                     "demo",
                     "created_at",
@@ -206,12 +208,12 @@ class DatabaseInitializationTests(unittest.TestCase):
                 },
             )
             self.assertEqual(
-                job[:9],
-                (article_id, "zhihu", "queued", "", "", "[]", None, 0, 0),
+                job[:10],
+                (article_id, "zhihu", "queued", "", "", "[]", None, "", 0, 0),
             )
-            self.assertTrue(job[9])
-            self.assertIsNone(job[10])
+            self.assertTrue(job[10])
             self.assertIsNone(job[11])
+            self.assertIsNone(job[12])
 
     def test_reinitialization_adds_images_to_existing_publish_jobs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -245,12 +247,18 @@ class DatabaseInitializationTests(unittest.TestCase):
                 columns = {
                     row[1] for row in conn.execute("PRAGMA table_info(publish_jobs)")
                 }
-                images = conn.execute(
-                    "SELECT images FROM publish_jobs WHERE id = 1"
-                ).fetchone()[0]
+                images, fingerprint = conn.execute(
+                    """
+                    SELECT images, authorization_fingerprint
+                    FROM publish_jobs
+                    WHERE id = 1
+                    """
+                ).fetchone()
             self.assertIn("images", columns)
             self.assertIn("auto_execute", columns)
+            self.assertIn("authorization_fingerprint", columns)
             self.assertEqual(images, "[]")
+            self.assertEqual(fingerprint, "")
 
     def test_publish_jobs_reject_unknown_status_and_invalid_demo_flag(self):
         with tempfile.TemporaryDirectory() as temp_dir:

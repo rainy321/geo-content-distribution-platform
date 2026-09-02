@@ -7,7 +7,9 @@ from typing import Any
 
 from services.article_service import get_article
 from services.publish_job_service import (
+    PUBLISH_AUTHORIZATION_MISMATCH_MESSAGE,
     claim_publish_job,
+    publish_authorization_matches,
     transition_publish_job,
     update_publish_job_progress,
 )
@@ -34,6 +36,7 @@ def execute_publish_job(
     *,
     publisher_factory: PublisherFactory | None = None,
     media_root: str | Path = DEFAULT_MEDIA_ROOT,
+    require_authorization_match: bool = False,
 ) -> dict[str, Any]:
     """Claim and execute exactly one queued job.
 
@@ -45,6 +48,16 @@ def execute_publish_job(
     job = claim_publish_job(database_path, job_id)
     try:
         article = get_article(database_path, job["article_id"])
+        if require_authorization_match and not publish_authorization_matches(
+            job,
+            article,
+        ):
+            return transition_publish_job(
+                database_path,
+                job_id,
+                "need_action",
+                message=PUBLISH_AUTHORIZATION_MISMATCH_MESSAGE,
+            )
         content = _build_publish_content(job, article, media_root=media_root)
         publisher = _select_publisher(job, publisher_factory)
         result = publisher.publish(content)

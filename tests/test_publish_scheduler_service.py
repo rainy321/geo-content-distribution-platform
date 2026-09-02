@@ -165,6 +165,37 @@ class PublishSchedulerServiceTests(unittest.TestCase):
         self.assertEqual(blocked["status"], "need_action")
         self.assertIn("未访问平台", blocked["message"])
 
+    def test_tick_blocks_changed_article_before_publisher_is_selected(self):
+        now = datetime(2026, 9, 2, 10, 0)
+        real = self._scheduled_job(
+            now - timedelta(seconds=1),
+            auto_execute=True,
+        )
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE articles SET content = ? WHERE id = ?",
+                    ("授权后被修改的正文", self.article_id),
+                )
+        factory_calls = []
+
+        result = run_publish_scheduler_tick(
+            self.db_path,
+            now=now,
+            allow_real=True,
+            publisher_factory=lambda _job: (
+                factory_calls.append(_job) or SuccessPublisher()
+            ),
+        )
+
+        blocked = get_publish_job(self.db_path, real["id"])
+        self.assertEqual(result["attempted_real_count"], 0)
+        self.assertEqual(result["blocked_authorization_count"], 1)
+        self.assertEqual(blocked["status"], "need_action")
+        self.assertIn("文章内容或分发参数已变化", blocked["message"])
+        self.assertIn("未访问平台", blocked["message"])
+        self.assertEqual(factory_calls, [])
+
     def test_rejects_invalid_limit(self):
         with self.assertRaisesRegex(ValueError, "limit"):
             queue_due_publish_jobs(self.db_path, limit=0)
