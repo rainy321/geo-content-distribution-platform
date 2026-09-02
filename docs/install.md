@@ -14,8 +14,8 @@
 ### 1. 克隆项目
 
 ```bash
-git clone https://github.com/dreammis/social-auto-upload.git
-cd social-auto-upload
+git clone https://github.com/rainy321/geo-content-distribution-platform.git
+cd geo-content-distribution-platform
 ```
 
 ### 2. 创建虚拟环境

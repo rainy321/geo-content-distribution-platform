@@ -1,10 +1,10 @@
-# OmniPost · GEO 智能内容引擎
+# GEO 智能内容分发平台
 
-**OmniPost** 是多平台自媒体内容自动发布工具：支持将 **视频 / 图文** 一键发布到 `抖音`、`Bilibili`、`小红书`、`快手`、`视频号`、`百家号`、`今日头条`、`搜狐号`、`知乎`、`TikTok` 等平台，并提供 **Web 管理台**、**统一 CLI（`sau`）** 与 **示例脚本** 三种使用方式。
+这是一个基于 **OmniPost** uploader 能力构建的 GEO 内容生产与自动分发平台：品牌资料进入系统后，可完成 AI 内容生成、规则型 GEO Score、AI 优化、多平台即时/定时发布和结果追踪。原项目的视频、图文 uploader、Web 账号管理和统一 CLI（`sau`）继续保留。
 
 当前二开版本在保留原 uploader 与 CLI 的基础上，增加了品牌项目、AI 内容生成、GEO Score、内容库、统一发布任务、Demo Mode 和定时发布链路。新业务模块与原 uploader 解耦，真实平台仍需人工登录并遵守平台验证流程。
 
-> 本仓库基于开源项目 [dreammis/social-auto-upload](https://github.com/dreammis/social-auto-upload) 二开。感谢原作者与社区贡献者。
+> 本仓库基于 [rehatRobot/omnipost](https://github.com/rehatRobot/omnipost) 二开；该项目源自 [dreammis/social-auto-upload](https://github.com/dreammis/social-auto-upload)。感谢原作者与社区贡献者。
 
 <img src="media/show/tkupload.gif" alt="demo" width="800"/>
 
@@ -84,8 +84,8 @@
 ### 1. 克隆与 Python 依赖
 
 ```bash
-git clone https://github.com/rehatRobot/omnipost.git
-cd omnipost
+git clone https://github.com/rainy321/geo-content-distribution-platform.git
+cd geo-content-distribution-platform
 
 uv venv
 # Windows
@@ -99,7 +99,7 @@ uv pip install -e .
 uv pip install -e ".[web]"
 ```
 
-安装后可直接使用 `sau` 命令（CLI 入口名暂仍为上游的 `sau`，后续可再改为 `omnipost`）。
+安装后可直接使用 `sau` 命令；为兼容原 uploader 与脚本生态，CLI 入口名保持不变。
 
 ### 2. 浏览器驱动
 
@@ -134,7 +134,7 @@ python sau_backend.py
 
 # 前端
 cd sau_frontend
-npm install
+npm ci
 npm run dev
 # 默认 http://localhost:5173
 ```

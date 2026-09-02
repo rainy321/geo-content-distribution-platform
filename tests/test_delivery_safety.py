@@ -9,6 +9,25 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class DeliverySafetyTests(unittest.TestCase):
+    def test_primary_install_docs_clone_the_geo_repository(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        install = (ROOT / "docs" / "install.md").read_text(encoding="utf-8")
+        primary_docs = readme + install
+
+        self.assertIn(
+            "git clone https://github.com/rainy321/geo-content-distribution-platform.git",
+            readme,
+        )
+        self.assertIn(
+            "git clone https://github.com/rainy321/geo-content-distribution-platform.git",
+            install,
+        )
+        self.assertNotIn("git clone https://github.com/rehatRobot/omnipost.git", primary_docs)
+        self.assertNotIn(
+            "git clone https://github.com/dreammis/social-auto-upload.git",
+            primary_docs,
+        )
+
     def test_docker_context_excludes_local_credentials_and_runtime_data(self):
         patterns = {
             line.strip()
