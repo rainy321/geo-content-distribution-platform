@@ -393,7 +393,7 @@ def reconcile_publish_job_success(
                 raise PublishJobNotFoundError("发布任务不存在")
             if current_row["status"] == "success":
                 return _serialize_job(current_row)
-            if current_row["status"] not in {"processing", "failed"}:
+            if current_row["status"] not in {"processing", "failed", "need_action"}:
                 raise InvalidPublishJobTransitionError(
                     f"状态为 {current_row['status']} 的发布任务不能通过平台证据对账"
                 )

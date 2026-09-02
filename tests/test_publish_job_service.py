@@ -319,6 +319,33 @@ class PublishJobServiceTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(article_status, "published")
 
+    def test_reconciles_need_action_after_human_verification(self):
+        job = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="baijiahao",
+        )
+        transition_publish_job(
+            self.db_path,
+            job["id"],
+            "need_action",
+            message="平台要求账号本人完成人机验证",
+        )
+
+        reconciled = reconcile_publish_job_success(
+            self.db_path,
+            job["id"],
+            result_url="https://baijiahao.baidu.com/s?id=123456789",
+            message="人工验证后，平台已发布列表与公开链接均已核验",
+        )
+
+        self.assertEqual(reconciled["status"], "success")
+        self.assertEqual(
+            reconciled["result_url"],
+            "https://baijiahao.baidu.com/s?id=123456789",
+        )
+        self.assertTrue(reconciled["finished_at"])
+
     def test_article_stays_published_when_another_platform_fails(self):
         zhihu_job = create_publish_job(
             self.db_path,
