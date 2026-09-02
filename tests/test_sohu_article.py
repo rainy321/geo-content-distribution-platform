@@ -33,6 +33,42 @@ class SohuArticleBlockingStateTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result, "")
 
+    def test_legacy_ai_declaration_maps_to_current_sohu_label(self):
+        article = SoHuArticle(
+            title="GEO 内容生成测试说明",
+            body="正文",
+            tags=[],
+            publish_date=0,
+            account_file="account.json",
+            info_source="包含AI创作内容",
+        )
+
+        self.assertEqual(article.info_source, "含有AI生成内容")
+
+    def test_legacy_no_declaration_maps_to_current_sohu_label(self):
+        article = SoHuArticle(
+            title="GEO 内容生成测试说明",
+            body="正文",
+            tags=[],
+            publish_date=0,
+            account_file="account.json",
+            info_source="无特别声明",
+        )
+
+        self.assertEqual(article.info_source, "无需声明")
+
+    def test_legacy_citation_maps_to_current_required_declaration(self):
+        article = SoHuArticle(
+            title="GEO 内容生成测试说明",
+            body="正文",
+            tags=[],
+            publish_date=0,
+            account_file="account.json",
+            info_source="引用声明",
+        )
+
+        self.assertEqual(article.info_source, "内容为转载")
+
 
 if __name__ == "__main__":
     unittest.main()

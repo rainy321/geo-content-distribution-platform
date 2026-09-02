@@ -41,9 +41,9 @@ AccountManagement
 
 - 登录：有头浏览器打开 `mp.sohu.com/mpfe/v4/login`，人工登录后保存 storage_state
 - 发文 URL 候选：`mpfe/v4/contentManagement/news/addarticle` 等，失败则从内容管理点「写文章」
-- 支持：标题（必填，5-72 字）、正文、标签（独立输入或写入正文）、可选封面（单图；尺寸大于 450×300；jpg/jpeg/png，单张最大 10MB）、信息来源（无特别声明/引用声明/包含AI创作内容/包含虚构创作）、dry_run、可选定时
+- 支持：标题（必填，5-72 字）、正文、标签（独立输入或写入正文）、可选封面（单图；尺寸大于 450×300；jpg/jpeg/png，单张最大 10MB）、创作声明（无需声明/含有虚构演绎内容/含有AI生成内容/含有营销信息/内容为转载/内容为个人观点）、dry_run、可选定时；旧版“信息来源”参数通过别名兼容
 - 搜狐强制 `contentType=article`；前端隐藏视频选项
-- 信息来源默认「无特别声明」；前端通过 `workStatement` 字段回传，后端映射为 `info_source`
+- 创作声明默认「无需声明」；旧版 `workStatement/info_source` 的“无特别声明”“包含AI创作内容”“包含虚构创作”会映射到当前平台标签
 
 ## 验收
 

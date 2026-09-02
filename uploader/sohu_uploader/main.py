@@ -44,14 +44,17 @@ TITLE_INPUT_SELECTOR = (
     'input[name="title"], .publish-title input, input[class*="title"]'
 )
 
-# 搜狐号发文页「信息来源」单选选项
+# 搜狐号发文页当前「创作声明」单选选项。
+# 旧版曾使用「信息来源 / 包含AI创作内容」等文案，规范化函数仍兼容旧调用。
 SOHU_INFO_SOURCE_OPTIONS = (
-    "无特别声明",
-    "引用声明",
-    "包含AI创作内容",
-    "包含虚构创作",
+    "无需声明",
+    "含有虚构演绎内容",
+    "含有AI生成内容",
+    "含有营销信息",
+    "内容为转载",
+    "内容为个人观点",
 )
-SOHU_INFO_SOURCE_DEFAULT = "无特别声明"
+SOHU_INFO_SOURCE_DEFAULT = "无需声明"
 
 
 def _build_launch_kwargs(headless: bool) -> dict:
@@ -249,15 +252,22 @@ class SoHuArticle(object):
             return SOHU_INFO_SOURCE_DEFAULT
 
         aliases = {
-            "无": "无特别声明",
-            "无特别": "无特别声明",
-            "引用": "引用声明",
-            "ai": "包含AI创作内容",
-            "AI": "包含AI创作内容",
-            "包含ai": "包含AI创作内容",
-            "包含AI": "包含AI创作内容",
-            "虚构": "包含虚构创作",
-            "虚构创作": "包含虚构创作",
+            "无": "无需声明",
+            "无特别": "无需声明",
+            "无特别声明": "无需声明",
+            "不声明": "无需声明",
+            # 当前页面把「引用声明」拆成补充声明，单字段旧接口只能
+            # 安全映射到语义最接近的必选项「内容为转载」。
+            "引用": "内容为转载",
+            "引用声明": "内容为转载",
+            "ai": "含有AI生成内容",
+            "AI": "含有AI生成内容",
+            "包含ai": "含有AI生成内容",
+            "包含AI": "含有AI生成内容",
+            "包含AI创作内容": "含有AI生成内容",
+            "虚构": "含有虚构演绎内容",
+            "虚构创作": "含有虚构演绎内容",
+            "包含虚构创作": "含有虚构演绎内容",
         }
         text = aliases.get(raw, aliases.get(raw.lower(), raw))
         if text in SOHU_INFO_SOURCE_OPTIONS:
@@ -594,12 +604,12 @@ class SoHuArticle(object):
         return None
 
     async def apply_info_source(self, page: Page) -> None:
-        """选择发文页「信息来源」单选项。"""
+        """选择发文页「创作声明」单选项，兼容旧版信息来源参数。"""
         label = self.info_source or SOHU_INFO_SOURCE_DEFAULT
         sohu_logger.info(f"设置信息来源: {label}")
         try:
             try:
-                section = page.get_by_text("信息来源", exact=False).first
+                section = page.get_by_text("创作声明", exact=False).first
                 if await section.count():
                     await section.scroll_into_view_if_needed(timeout=3000)
             except Exception:
@@ -608,13 +618,13 @@ class SoHuArticle(object):
                 )
             await page.wait_for_timeout(300)
 
-            # 优先在「信息来源」附近查找选项，避免误点其它区域
+            # 优先在「创作声明」附近查找选项，避免误点其它区域
             scopes = []
             for sel in (
-                'div:has-text("信息来源"):has-text("无特别声明")',
-                'div:has-text("信息来源"):has-text("引用声明")',
-                'section:has-text("信息来源")',
-                'div:has-text("信息来源")',
+                'section#info-source-signature:has-text("创作声明")',
+                'div:has-text("创作声明"):has-text("无需声明")',
+                'section:has-text("创作声明")',
+                'div:has-text("创作声明")',
             ):
                 try:
                     loc = page.locator(sel)
