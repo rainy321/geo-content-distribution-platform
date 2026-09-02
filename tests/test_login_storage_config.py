@@ -90,7 +90,7 @@ class LoginThreadStorageConfigTests(unittest.TestCase):
 
     def test_web_login_thread_forwards_runtime_storage(self):
         with patch(
-            "sau_backend.xiaohongshu_cookie_gen",
+            "myUtils.login.xiaohongshu_cookie_gen",
             new=AsyncMock(return_value=True),
         ) as login_runner:
             run_async_function("1", "account", Queue())

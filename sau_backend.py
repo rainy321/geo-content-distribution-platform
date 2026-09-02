@@ -9,11 +9,8 @@ from contextlib import closing
 from pathlib import Path
 from queue import Queue
 from flask_cors import CORS
-from myUtils.auth import check_cookie
 from flask import Flask, request, jsonify, Response, render_template, send_from_directory
 from conf import BASE_DIR
-from myUtils.login import get_tencent_cookie, douyin_cookie_gen, get_ks_cookie, xiaohongshu_cookie_gen, baijiahao_cookie_gen, bilibili_cookie_gen, toutiao_cookie_gen, sohu_cookie_gen, zhihu_cookie_gen
-from myUtils.postVideo import post_video_tencent, post_video_DouYin, post_video_ks, post_video_xhs, post_video_baijiahao, post_video_bilibili, post_video_toutiao, post_article_toutiao, post_article_baijiahao, post_article_sohu, post_article_zhihu
 from db.createTable import initialize_database
 from services.ai_service import (
     AIConfigurationError,
@@ -306,6 +303,10 @@ def get_media_accounts():
 
 @app.route('/api/media-accounts/<int:account_id>/check', methods=['POST'])
 async def check_media_account_status(account_id):
+    # The checker loads Playwright, so keep it out of the serverless cold-start
+    # path. Account/browser operations are only supported by the local worker.
+    from myUtils.auth import check_cookie
+
     try:
         account = await check_media_account(
             app.config["DATABASE_PATH"],
@@ -1151,6 +1152,8 @@ def getAccounts():
 
 @app.route("/getValidAccounts",methods=['GET'])
 async def getValidAccounts():
+    from myUtils.auth import check_cookie
+
     with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
         cursor = conn.cursor()
         cursor.execute('''
@@ -1492,6 +1495,22 @@ def postVideo():
     # 前端拿到的 200 只表示“任务已提交”，不代表平台已经发布成功。
     def run_publish_task():
         try:
+            # Import the browser uploaders only after a local publish request is
+            # accepted. This keeps the Vercel demo API lightweight and bootable.
+            from myUtils.postVideo import (
+                post_article_baijiahao,
+                post_article_sohu,
+                post_article_toutiao,
+                post_article_zhihu,
+                post_video_DouYin,
+                post_video_baijiahao,
+                post_video_bilibili,
+                post_video_ks,
+                post_video_tencent,
+                post_video_toutiao,
+                post_video_xhs,
+            )
+
             print(
                 f"🧵 后台发布线程启动: type={type}, title={title}, dryRun={dry_run}, contentType={content_type}",
                 flush=True,
@@ -1661,6 +1680,21 @@ def postVideoBatch():
 
     if not isinstance(data_list, list):
         return jsonify({"code": 400, "msg": "Expected a JSON array", "data": None}), 400
+
+    from myUtils.postVideo import (
+        post_article_baijiahao,
+        post_article_sohu,
+        post_article_toutiao,
+        post_article_zhihu,
+        post_video_DouYin,
+        post_video_baijiahao,
+        post_video_bilibili,
+        post_video_ks,
+        post_video_tencent,
+        post_video_toutiao,
+        post_video_xhs,
+    )
+
     for data in data_list:
         # 从JSON数据中提取fileList和accountList
         file_list = data.get('fileList', [])
@@ -1943,6 +1977,19 @@ def download_cookie():
 
 # 包装函数：在线程中运行异步函数
 def run_async_function(type,id,status_queue):
+    # Login helpers launch real browsers and belong to the local worker runtime.
+    from myUtils.login import (
+        baijiahao_cookie_gen,
+        bilibili_cookie_gen,
+        douyin_cookie_gen,
+        get_ks_cookie,
+        get_tencent_cookie,
+        sohu_cookie_gen,
+        toutiao_cookie_gen,
+        xiaohongshu_cookie_gen,
+        zhihu_cookie_gen,
+    )
+
     print(f"🧵 登录线程启动: type={type}, id={id}", flush=True)
     login_storage = {
         "database_path": app.config["DATABASE_PATH"],

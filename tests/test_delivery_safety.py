@@ -56,7 +56,7 @@ class DeliverySafetyTests(unittest.TestCase):
         self.assertIn("MEDIA_ROOT=videoFile", env_example)
         self.assertNotIn("AI_API_KEY=sk-", env_example)
 
-    def test_vercel_backend_dependencies_are_not_optional(self):
+    def test_vercel_runtime_is_split_from_local_browser_worker(self):
         pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
         required, optional = pyproject.split("[project.optional-dependencies]", 1)
 
@@ -64,10 +64,17 @@ class DeliverySafetyTests(unittest.TestCase):
             '"Flask[async]==3.1.1"',
             '"apscheduler==3.11.0"',
             '"flask-cors==6.0.0"',
-            '"playwright==1.52.0"',
         ):
             self.assertIn(dependency, required)
             self.assertNotIn(dependency, optional)
+
+        for dependency in (
+            '"opencv-python>=4.13.0.92"',
+            '"patchright==1.58.2"',
+            '"playwright==1.52.0"',
+        ):
+            self.assertNotIn(dependency, required)
+            self.assertIn(dependency, optional)
 
     def test_docker_context_excludes_local_credentials_and_runtime_data(self):
         patterns = {
