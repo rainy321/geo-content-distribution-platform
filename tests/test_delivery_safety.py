@@ -56,6 +56,19 @@ class DeliverySafetyTests(unittest.TestCase):
         self.assertIn("MEDIA_ROOT=videoFile", env_example)
         self.assertNotIn("AI_API_KEY=sk-", env_example)
 
+    def test_vercel_backend_dependencies_are_not_optional(self):
+        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        required, optional = pyproject.split("[project.optional-dependencies]", 1)
+
+        for dependency in (
+            '"Flask[async]==3.1.1"',
+            '"apscheduler==3.11.0"',
+            '"flask-cors==6.0.0"',
+            '"playwright==1.52.0"',
+        ):
+            self.assertIn(dependency, required)
+            self.assertNotIn(dependency, optional)
+
     def test_docker_context_excludes_local_credentials_and_runtime_data(self):
         patterns = {
             line.strip()
@@ -117,6 +130,10 @@ class DeliverySafetyTests(unittest.TestCase):
         )
         self.assertEqual(
             "/:path*", config["rewrites"][0]["transforms"][0]["args"]
+        )
+        self.assertEqual("/", config["rewrites"][1]["source"])
+        self.assertEqual(
+            {"service": "frontend"}, config["rewrites"][1]["destination"]
         )
         self.assertEqual(
             {"service": "frontend"}, config["rewrites"][-1]["destination"]

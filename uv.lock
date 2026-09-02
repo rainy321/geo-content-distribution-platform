@@ -474,31 +474,27 @@ name = "social-auto-upload"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
+    { name = "apscheduler" },
+    { name = "flask", extra = ["async"] },
+    { name = "flask-cors" },
     { name = "loguru" },
     { name = "opencv-python" },
     { name = "patchright" },
+    { name = "playwright" },
     { name = "qrcode" },
     { name = "requests" },
     { name = "segno" },
 ]
 
-[package.optional-dependencies]
-web = [
-    { name = "apscheduler" },
-    { name = "flask", extra = ["async"] },
-    { name = "flask-cors" },
-    { name = "playwright" },
-]
-
 [package.metadata]
 requires-dist = [
-    { name = "apscheduler", marker = "extra == 'web'", specifier = "==3.11.0" },
-    { name = "flask", extras = ["async"], marker = "extra == 'web'", specifier = "==3.1.1" },
-    { name = "flask-cors", marker = "extra == 'web'", specifier = "==6.0.0" },
+    { name = "apscheduler", specifier = "==3.11.0" },
+    { name = "flask", extras = ["async"], specifier = "==3.1.1" },
+    { name = "flask-cors", specifier = "==6.0.0" },
     { name = "loguru", specifier = "==0.7.3" },
     { name = "opencv-python", specifier = ">=4.13.0.92" },
     { name = "patchright", specifier = "==1.58.2" },
-    { name = "playwright", marker = "extra == 'web'", specifier = "==1.52.0" },
+    { name = "playwright", specifier = "==1.52.0" },
     { name = "qrcode", specifier = "==8.2" },
     { name = "requests", specifier = "==2.32.3" },
     { name = "segno", specifier = ">=1.6.6" },

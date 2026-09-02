@@ -24,6 +24,12 @@
       ]
     },
     {
+      "source": "/",
+      "destination": {
+        "service": "frontend"
+      }
+    },
+    {
       "source": "/:path*",
       "destination": {
         "service": "frontend"
