@@ -51,6 +51,10 @@
               <el-icon><Upload /></el-icon>
               <span>发布中心</span>
             </el-menu-item>
+            <el-menu-item index="/settings">
+              <el-icon><Setting /></el-icon>
+              <span>系统设置</span>
+            </el-menu-item>
             <el-menu-item index="/about">
               <el-icon><DataAnalysis /></el-icon>
               <span>关于</span>
@@ -83,7 +87,7 @@ import { ref, computed, onBeforeUnmount, onMounted } from 'vue'
 import { useRoute } from 'vue-router'
 import {
   HomeFilled, User, DataAnalysis,
-  Fold, Picture, Upload, CollectionTag, MagicStick, DocumentCopy, Aim
+  Fold, Picture, Upload, CollectionTag, MagicStick, DocumentCopy, Aim, Setting
 } from '@element-plus/icons-vue'
 
 const route = useRoute()

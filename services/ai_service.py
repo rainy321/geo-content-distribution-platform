@@ -3,9 +3,11 @@ from __future__ import annotations
 import json
 import os
 import re
+from ipaddress import ip_address
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
+from urllib.parse import urlsplit
 
 import requests
 
@@ -41,6 +43,43 @@ class AISettings:
             base_url=values["AI_BASE_URL"],
             api_key=values["AI_API_KEY"],
             model=values["AI_MODEL"],
+        )
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "AISettings":
+        """Build a request-scoped OpenAI-compatible configuration safely."""
+
+        if not isinstance(value, Mapping):
+            raise AIConfigurationError("ai_config 必须是对象")
+
+        values = {
+            "base_url": str(value.get("base_url") or "").strip(),
+            "api_key": str(value.get("api_key") or "").strip(),
+            "model": str(value.get("model") or "").strip(),
+        }
+        missing = [name for name, item in values.items() if not item]
+        if missing:
+            raise AIConfigurationError(
+                f"自定义 AI 配置缺少: {', '.join(missing)}"
+            )
+
+        _validate_custom_base_url(values["base_url"])
+        if len(values["api_key"]) > 8192 or any(
+            marker in values["api_key"] for marker in ("\r", "\n")
+        ):
+            raise AIConfigurationError("自定义 AI API Key 格式无效")
+        if len(values["model"]) > 200 or any(
+            marker in values["model"] for marker in ("\r", "\n")
+        ):
+            raise AIConfigurationError("自定义 AI 模型名称格式无效")
+
+        return cls(**values)
+
+    @classmethod
+    def environment_is_configured(cls) -> bool:
+        return all(
+            str(os.getenv(name, "")).strip()
+            for name in ("AI_BASE_URL", "AI_API_KEY", "AI_MODEL")
         )
 
 
@@ -154,6 +193,36 @@ def _chat_completions_url(base_url: str) -> str:
     if normalized.endswith("/v1"):
         return f"{normalized}/chat/completions"
     return f"{normalized}/v1/chat/completions"
+
+
+def _validate_custom_base_url(base_url: str) -> None:
+    if len(base_url) > 2048:
+        raise AIConfigurationError("自定义 AI 服务地址过长")
+
+    try:
+        parsed = urlsplit(base_url)
+        hostname = (parsed.hostname or "").rstrip(".").lower()
+    except ValueError as exc:
+        raise AIConfigurationError(
+            "自定义 AI 服务地址必须是有效的 HTTPS URL"
+        ) from exc
+    if parsed.scheme != "https" or not hostname:
+        raise AIConfigurationError("自定义 AI 服务地址必须是有效的 HTTPS URL")
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        raise AIConfigurationError("自定义 AI 服务地址不能包含凭据、查询参数或锚点")
+    if (
+        hostname == "localhost"
+        or hostname.endswith((".localhost", ".local", ".internal"))
+        or "." not in hostname
+    ):
+        raise AIConfigurationError("自定义 AI 服务地址不能指向本机或内部网络")
+
+    try:
+        address = ip_address(hostname)
+    except ValueError:
+        return
+    if not address.is_global:
+        raise AIConfigurationError("自定义 AI 服务地址不能指向私网或保留地址")
 
 
 def _build_prompt(

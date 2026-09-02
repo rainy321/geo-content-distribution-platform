@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from db.createTable import initialize_database
 from sau_backend import app
-from services.ai_service import AIConfigurationError, AIServiceError
+from services.ai_service import AIConfigurationError, AIServiceError, AISettings
 
 
 class ArticleOptimizationApiTests(unittest.TestCase):
@@ -91,6 +91,32 @@ class ArticleOptimizationApiTests(unittest.TestCase):
     def test_returns_not_found_for_unknown_article(self):
         response = self.client.post("/api/articles/999999/optimize")
         self.assertEqual(response.status_code, 404)
+
+    @patch("sau_backend.optimize_geo_content")
+    def test_optimization_accepts_request_scoped_ai_config(self, mock_optimize):
+        mock_optimize.return_value = {
+            "title": "优化标题",
+            "summary": "优化摘要",
+            "content": "XX科技提供企业智能体服务。",
+            "tags": ["企业智能体"],
+            "faq": [],
+        }
+
+        response = self.client.post(
+            f"/api/articles/{self.article_id}/optimize",
+            json={
+                "ai_config": {
+                    "base_url": "https://api.example.com/v1",
+                    "api_key": "browser-session-secret",
+                    "model": "custom-model",
+                }
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        settings = mock_optimize.call_args.kwargs["settings"]
+        self.assertIsInstance(settings, AISettings)
+        self.assertEqual(settings.model, "custom-model")
 
     @patch("sau_backend.optimize_geo_content")
     def test_maps_missing_ai_configuration(self, mock_optimize):

@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 from db.createTable import initialize_database
 from sau_backend import app
-from services.ai_service import AIConfigurationError, AIServiceError
+from services.ai_service import AIConfigurationError, AIServiceError, AISettings
 
 
 class ArticleGenerationApiTests(unittest.TestCase):
@@ -103,6 +103,80 @@ class ArticleGenerationApiTests(unittest.TestCase):
             mock_generate.call_args.kwargs["keywords"],
             ["大模型应用"],
         )
+
+    @patch("sau_backend.generate_geo_content")
+    def test_request_scoped_ai_config_overrides_server_defaults(self, mock_generate):
+        mock_generate.return_value = {
+            "title": "自定义模型标题",
+            "summary": "",
+            "content": "正文",
+            "tags": [],
+            "faq": [],
+        }
+        custom_key = "browser-session-secret"
+
+        response = self.client.post(
+            "/api/articles/generate",
+            json={
+                "project_id": self.project_id,
+                "topic": "测试自定义模型",
+                "ai_config": {
+                    "base_url": "https://api.example.com/v1",
+                    "api_key": custom_key,
+                    "model": "custom-model",
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        settings = mock_generate.call_args.kwargs["settings"]
+        self.assertIsInstance(settings, AISettings)
+        self.assertEqual(settings.base_url, "https://api.example.com/v1")
+        self.assertEqual(settings.api_key, custom_key)
+        self.assertEqual(settings.model, "custom-model")
+        self.assertNotIn(custom_key, response.get_data(as_text=True))
+
+    @patch("sau_backend.generate_geo_content")
+    def test_rejects_incomplete_custom_ai_config_before_provider_call(
+        self,
+        mock_generate,
+    ):
+        response = self.client.post(
+            "/api/articles/generate",
+            json={
+                "project_id": self.project_id,
+                "topic": "测试自定义模型",
+                "ai_config": {
+                    "base_url": "https://api.example.com/v1",
+                    "api_key": "",
+                    "model": "custom-model",
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("api_key", response.get_json()["msg"])
+        mock_generate.assert_not_called()
+
+    def test_ai_config_status_only_reports_capabilities(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "AI_BASE_URL": "https://api.example.com/v1",
+                "AI_API_KEY": "server-secret",
+                "AI_MODEL": "server-model",
+            },
+            clear=True,
+        ):
+            response = self.client.get("/api/ai/config-status")
+
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertTrue(body["data"]["server_configured"])
+        self.assertEqual(body["data"]["custom_key_storage"], "browser_session")
+        serialized = response.get_data(as_text=True)
+        self.assertNotIn("server-secret", serialized)
+        self.assertNotIn("api.example.com", serialized)
 
     def test_rejects_missing_topic_before_calling_ai(self):
         response = self.client.post(

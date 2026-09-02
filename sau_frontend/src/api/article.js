@@ -1,4 +1,5 @@
 import { http } from '@/utils/request'
+import { withCustomAIConfig } from '@/utils/aiConfig'
 
 export const articleApi = {
   getArticles(params = {}) {
@@ -10,11 +11,15 @@ export const articleApi = {
   },
 
   optimizeArticle(id) {
-    return http.post(`/api/articles/${id}/optimize`)
+    return http.post(`/api/articles/${id}/optimize`, withCustomAIConfig())
   },
 
   generateArticle(data) {
-    return http.post('/api/articles/generate', data)
+    return http.post('/api/articles/generate', withCustomAIConfig(data))
+  },
+
+  getAIConfigStatus() {
+    return http.get('/api/ai/config-status')
   },
 
   scoreArticle(data) {

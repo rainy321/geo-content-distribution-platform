@@ -130,6 +130,53 @@ class AIServiceTests(unittest.TestCase):
             ):
                 AISettings.from_environment()
 
+    def test_builds_safe_request_scoped_settings(self):
+        settings = AISettings.from_mapping(
+            {
+                "base_url": "https://api.example.com/compatible-mode/v1",
+                "api_key": "secret-value",
+                "model": "custom-model",
+            }
+        )
+
+        self.assertEqual(
+            settings.base_url,
+            "https://api.example.com/compatible-mode/v1",
+        )
+        self.assertEqual(settings.api_key, "secret-value")
+        self.assertEqual(settings.model, "custom-model")
+
+    def test_rejects_unsafe_custom_provider_urls(self):
+        for base_url in (
+            "http://api.example.com/v1",
+            "https://localhost/v1",
+            "https://127.0.0.1/v1",
+            "https://10.0.0.8/v1",
+            "https://metadata.internal/v1",
+            "https://user:password@example.com/v1",
+        ):
+            with self.subTest(base_url=base_url):
+                with self.assertRaises(AIConfigurationError):
+                    AISettings.from_mapping(
+                        {
+                            "base_url": base_url,
+                            "api_key": "secret-value",
+                            "model": "custom-model",
+                        }
+                    )
+
+    def test_reports_environment_configuration_without_exposing_values(self):
+        with patch.dict(
+            os.environ,
+            {
+                "AI_BASE_URL": "https://api.example.com/v1",
+                "AI_API_KEY": "secret-value",
+                "AI_MODEL": "custom-model",
+            },
+            clear=True,
+        ):
+            self.assertTrue(AISettings.environment_is_configured())
+
     def test_rejects_invalid_provider_payload(self):
         def fake_post(*args, **kwargs):
             return FakeResponse({"choices": ["invalid"]})

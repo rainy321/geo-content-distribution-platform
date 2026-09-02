@@ -637,7 +637,7 @@ const formatGenerationError = (error) => {
   if (status === 503) {
     return {
       title: 'AI 服务尚未配置',
-      message: '请在后端设置 AI_BASE_URL、AI_API_KEY 和 AI_MODEL 后重试。'
+      message: '请到“系统设置”填写自定义 AI API，或配置服务器默认模型后重试。'
     }
   }
   if (status === 502) {

@@ -8,6 +8,7 @@ import ProjectManagement from '../views/ProjectManagement.vue'
 import ContentCreation from '../views/ContentCreation.vue'
 import ContentLibrary from '../views/ContentLibrary.vue'
 import GeoOptimization from '../views/GeoOptimization.vue'
+import SystemSettings from '../views/SystemSettings.vue'
 
 const routes = [
   {
@@ -49,6 +50,11 @@ const routes = [
     path: '/publish-center',
     name: 'PublishCenter',
     component: DistributionCenter
+  },
+  {
+    path: '/settings',
+    name: 'SystemSettings',
+    component: SystemSettings
   },
   {
     path: '/about',

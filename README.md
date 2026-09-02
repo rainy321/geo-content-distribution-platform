@@ -161,9 +161,9 @@ Demo Mode 首次连接到**完全空的数据库**时，会在一个事务内准
 
 Vercel 生产地址：[https://geo-content-distribution-platform.vercel.app](https://geo-content-distribution-platform.vercel.app)
 
-这是真实可访问的 GEO 管理台与 Demo API 部署，但不是云端媒体发布 Worker。线上固定使用 `DEMO_MODE=true`、`ALLOW_REAL_PUBLISHING=false`，不保存本地账号 Cookie，也不打包 Playwright、Patchright 和 OpenCV。SQLite、素材和示例数据位于 Vercel 函数的临时目录，实例重建后可能重置；线上 AI 生成也需要后续单独配置服务端环境变量。真实媒体登录和发布继续由本地浏览器 Worker 执行。
+这是真实可访问的 GEO 管理台与 Demo API 部署，但不是云端媒体发布 Worker。线上固定使用 `DEMO_MODE=true`、`ALLOW_REAL_PUBLISHING=false`，不保存本地账号 Cookie，也不打包 Playwright、Patchright 和 OpenCV。SQLite、素材和示例数据位于 Vercel 函数的临时目录，实例重建后可能重置；默认 AI 连接已通过 Vercel Production 环境变量配置，密钥类型为 Secret。真实媒体登录和发布继续由本地浏览器 Worker 执行。
 
-当前在线演示没有应用级登录，只包含可重建的示例数据，TLS 由 Vercel 入口提供。接入真实业务数据前，必须增加用户认证、持久数据库/对象存储和独立 Worker，且不得把媒体 Cookie 或模型密钥写进仓库或前端变量。
+当前在线演示没有应用级登录，只包含可重建的示例数据，TLS 由 Vercel 入口提供。由于默认 AI 已启用，公开访问者可能产生模型调用费用；持续公开运行前应增加用户认证与调用限流。接入真实业务数据前，还必须增加持久数据库/对象存储和独立 Worker，且不得把媒体 Cookie 或模型密钥写进仓库或前端变量。
 
 ### 6. Docker Compose 本地演示
 
@@ -300,11 +300,13 @@ GEO Web 运行环境变量：
 | `SERVER_HOST` | `127.0.0.1` | 后端监听地址；容器内需显式设为 `0.0.0.0` |
 | `SERVER_PORT` | `5409` | 后端监听端口；非法值会回退到 5409 |
 
+Web 管理台的“系统设置”支持为当前浏览器填写自定义 OpenAI-compatible API。三项填写完整时，自定义配置优先于服务器默认值；服务地址和模型名保存在浏览器本地，API Key 只放在当前标签页的 `sessionStorage`，关闭标签页后清除。自定义配置只随生成和优化请求发送，服务器状态接口不会返回密钥、地址或模型值。服务地址必须使用公开 HTTPS URL，后端拒绝本机、私网、保留地址和 URL 内嵌凭据。
+
 定时任务由 APScheduler 在 `python sau_backend.py` 启动时注册。每次 tick 会原子地将到期任务从 `scheduled` 提升为 `queued`；Demo 任务随后自动执行。真实任务默认只进入队列；只有创建计划时用户再次明确授权自动执行、授权内容指纹到期仍匹配、真实发布总开关仍开启且账号有效时，才会调用真实适配器一次。失败或状态不明不会自动重试。调度任务启用了单实例和合并补跑，避免同一进程内重复领取。
 
 知乎、今日头条、搜狐号、百家号和小红书的真实发布默认关闭。只有同时满足 `DEMO_MODE=false`、`ALLOW_REAL_PUBLISHING=true`、任务本身不是 Demo，并且操作者在发布中心二次确认时才会进入真实适配器。五个适配器都会先验证登录状态。知乎发布前通过当前账号的公开文章列表精确匹配标题，已存在时直接返回原链接；发布后最多轮询 3 次公开文章结果并自动对账，不会自动重复点击“发布”。其余渠道只有取得平台公开内容链接才标记 `success`；只有提交证据或发生超时但最终状态未知时保持 `processing`，要求先到平台后台核对，避免盲目重试造成重复内容。百家号文章必须由操作者提供一张展示封面，小红书图文笔记必须提供至少一张图片；当前不会自动生成或擅自选择素材。扫码、验证码、实名、风控或 Cookie 失效会进入“待人工确认”，系统不会绕过平台安全机制。
 
-> 部署安全边界：当前 Vercel 公网站只运行无密钥、无 Cookie、关闭真实发布的可重建 Demo。应用仍没有用户认证且 Flask CORS 默认开放；一旦要接入真实业务数据或启用真实发布，必须先增加应用级访问控制和持久存储，并把媒体浏览器 Worker 隔离在受控环境，不能把本地后端和 `cookiesFile/` 直接暴露到公网。
+> 部署安全边界：当前 Vercel 公网站运行无媒体 Cookie、关闭真实发布的可重建 Demo，但已经配置服务器端 AI Secret。应用仍没有用户认证且 Flask CORS 默认开放，因此存在公开调用模型产生费用的风险；应尽快增加应用级访问控制和限流。接入真实业务数据或启用真实发布前，还必须增加持久存储，并把媒体浏览器 Worker 隔离在受控环境，不能把本地后端和 `cookiesFile/` 直接暴露到公网。
 
 开发回归：
 

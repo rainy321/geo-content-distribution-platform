@@ -15,6 +15,7 @@ from db.createTable import initialize_database
 from services.ai_service import (
     AIConfigurationError,
     AIServiceError,
+    AISettings,
     generate_geo_content,
     optimize_geo_content,
 )
@@ -295,6 +296,11 @@ def generate_article():
     ).strip()
 
     try:
+        ai_settings = _request_ai_settings(data)
+    except AIConfigurationError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+
+    try:
         article = generate_geo_content(
             project=project,
             topic=topic,
@@ -302,6 +308,7 @@ def generate_article():
             length=length,
             content_type=content_type,
             target_platform=target_platform,
+            settings=ai_settings,
         )
     except AIConfigurationError as exc:
         return jsonify({"code": 503, "msg": str(exc), "data": None}), 503
@@ -309,6 +316,21 @@ def generate_article():
         return jsonify({"code": 502, "msg": str(exc), "data": None}), 502
 
     return jsonify({"code": 200, "msg": "success", "data": article}), 200
+
+
+@app.route('/api/ai/config-status', methods=['GET'])
+def get_ai_config_status():
+    return jsonify(
+        {
+            "code": 200,
+            "msg": "success",
+            "data": {
+                "server_configured": AISettings.environment_is_configured(),
+                "custom_config_supported": True,
+                "custom_key_storage": "browser_session",
+            },
+        }
+    ), 200
 
 
 @app.route('/api/dashboard', methods=['GET'])
@@ -512,6 +534,12 @@ def edit_article(article_id):
 
 @app.route('/api/articles/<int:article_id>/optimize', methods=['POST'])
 def optimize_article(article_id):
+    data = request.get_json(silent=True)
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求数据必须是对象", "data": None}), 400
+
     try:
         article = get_article(app.config["DATABASE_PATH"], article_id)
     except ArticleNotFoundError as exc:
@@ -528,7 +556,15 @@ def optimize_article(article_id):
         keywords=project["keywords"],
     )
     try:
-        optimized = optimize_geo_content(article=article, score=before_score)
+        ai_settings = _request_ai_settings(data)
+    except AIConfigurationError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    try:
+        optimized = optimize_geo_content(
+            article=article,
+            score=before_score,
+            settings=ai_settings,
+        )
     except AIConfigurationError as exc:
         return jsonify({"code": 503, "msg": str(exc), "data": None}), 503
     except AIServiceError as exc:
@@ -551,6 +587,12 @@ def optimize_article(article_id):
             },
         }
     ), 200
+
+
+def _request_ai_settings(data):
+    if "ai_config" not in data or data["ai_config"] is None:
+        return None
+    return AISettings.from_mapping(data["ai_config"])
 
 
 def _parse_article_fields(data, *, partial):
