@@ -248,6 +248,8 @@ async def _douyin_publish_runner(content: PublishContent, account_file: str) -> 
         publish_date=0,
         account_file=account_file,
         title=content.title,
+        headless=False,
+        ai_generated=True,
     )
     await publisher.douyin_upload_note()
 
@@ -268,6 +270,8 @@ async def _kuaishou_publish_runner(content: PublishContent, account_file: str) -
         publish_date=0,
         account_file=account_file,
         title=content.title,
+        headless=False,
+        ai_generated=True,
     )
     await publisher.main()
 
@@ -297,6 +301,9 @@ def _bilibili_publish_runner(content: PublishContent, account_file: str) -> None
     ]
     if content.tags:
         arguments.extend(["--tag", ",".join(content.tags)])
+    arguments.extend(
+        ["--extra-fields", '{"creation_statement":{"id":1}}']
+    )
     result = run_biliup_command(arguments)
     if result.returncode != 0:
         raise RuntimeError((result.stderr or result.stdout or "Bilibili 上传失败").strip())
@@ -319,6 +326,7 @@ async def _channels_publish_runner(content: PublishContent, account_file: str) -
         account_file=account_file,
         desc=content.content,
         thumbnail_path=content.images[0] if content.images else None,
+        headless=False,
     )
     await publisher.main()
 
@@ -339,6 +347,7 @@ async def _tiktok_publish_runner(content: PublishContent, account_file: str) -> 
         publish_date=0,
         account_file=account_file,
         thumbnail_path=content.images[0] if content.images else None,
+        headless=False,
     )
     await publisher.main()
 

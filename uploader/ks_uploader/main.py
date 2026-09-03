@@ -519,7 +519,7 @@ class KSBaseUploader(BaseVideoUploader):
 
         return False
 
-    async def _click_confirm_publish_if_any(self, page: Page) -> None:
+    async def _click_confirm_publish_if_any(self, page: Page) -> bool:
         """若出现二次确认弹窗，点击「确认发布」。"""
         await page.wait_for_timeout(500)
         confirm_candidates = [
@@ -532,9 +532,10 @@ class KSBaseUploader(BaseVideoUploader):
                 if await btn.count() and await btn.first.is_visible():
                     await btn.first.click(timeout=3000)
                     kuaishou_logger.info(_msg("🖱️", "已点击「确认发布」"))
-                    return
+                    return True
             except Exception:
                 continue
+        return False
 
 
 class KSVideo(KSBaseUploader):
@@ -812,7 +813,9 @@ class KSVideo(KSBaseUploader):
             await self.set_thumbnail(page)
 
             # 作者声明：内容为AI生成（下拉，无弹窗）
-            await self.set_ai_generated_declaration(page)
+            declaration_set = await self.set_ai_generated_declaration(page)
+            if self.ai_generated and not declaration_set:
+                raise RuntimeError("快手未能确认「内容为AI生成」声明，已在发布前停止")
 
             if self.publish_strategy == KUAISHOU_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
                 await self.set_schedule_time(page, self.publish_date)
@@ -820,6 +823,8 @@ class KSVideo(KSBaseUploader):
             max_publish_retries = 600
             publish_retry_count = 0
             verification_waited = False
+            publish_clicked = False
+            confirm_clicked = False
 
             if self.dry_run:
                 kuaishou_logger.warning(_msg("🛑", "【仅预览不发布】已跳过点击发布按钮"))
@@ -873,13 +878,15 @@ class KSVideo(KSBaseUploader):
                                 else:
                                     verification_waited = True
 
-                        clicked = await self._click_publish_button(page)
-                        if not clicked and publish_retry_count % 20 == 0:
-                            kuaishou_logger.warning(
-                                _msg("⚠️", f"未找到可点击的「发布」按钮（第{publish_retry_count}次）")
-                            )
+                        if not publish_clicked:
+                            publish_clicked = await self._click_publish_button(page)
+                            if not publish_clicked and publish_retry_count % 20 == 0:
+                                kuaishou_logger.warning(
+                                    _msg("⚠️", f"未找到可点击的「发布」按钮（第{publish_retry_count}次）")
+                                )
 
-                        await self._click_confirm_publish_if_any(page)
+                        if publish_clicked and not confirm_clicked:
+                            confirm_clicked = await self._click_confirm_publish_if_any(page)
 
                         await page.wait_for_url(KUAISHOU_MANAGE_URL_PATTERN, timeout=5000)
                         kuaishou_logger.success(_msg("🥳", "视频发布成功，小人开心收工"))
@@ -892,6 +899,7 @@ class KSVideo(KSBaseUploader):
                         await asyncio.sleep(1)
                 else:
                     kuaishou_logger.error(_msg("❌", f"发布超时：{max_publish_retries}次尝试后仍未成功"))
+                    raise RuntimeError("快手已点击发布一次但最终状态未知；为避免重复发布，未自动重试")
 
                 upload_success = True
         finally:
@@ -908,6 +916,10 @@ class KSVideo(KSBaseUploader):
 
 
 class KSNote(KSBaseUploader):
+    # The author-declaration control is shared by video and image-note pages.
+    _locate_author_declaration_select = KSVideo._locate_author_declaration_select
+    set_ai_generated_declaration = KSVideo.set_ai_generated_declaration
+
     def __init__(
         self,
         image_paths,
@@ -919,6 +931,8 @@ class KSNote(KSBaseUploader):
         publish_strategy: str | None = None,
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
+        dry_run: bool = False,
+        ai_generated: bool = False,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -931,6 +945,8 @@ class KSNote(KSBaseUploader):
         self.note = note or ""
         self.title = title or (self.note[:20] if self.note else "")
         self.tags = tags or []
+        self.dry_run = bool(dry_run)
+        self.ai_generated = bool(ai_generated)
 
     async def validate_upload_args(self):
         await self.validate_base_args()
@@ -983,6 +999,9 @@ class KSNote(KSBaseUploader):
             await page.wait_for_timeout(400)
 
         await self.fill_tags(page)
+        declaration_set = await self.set_ai_generated_declaration(page)
+        if self.ai_generated and not declaration_set:
+            raise RuntimeError("快手图文未能确认「内容为AI生成」声明，已在发布前停止")
 
         max_retries = 60
         retry_count = 0
@@ -1012,9 +1031,20 @@ class KSNote(KSBaseUploader):
         if self.publish_strategy == KUAISHOU_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
             await self.set_schedule_time(page, self.publish_date)
 
+        if self.dry_run:
+            kuaishou_logger.warning(_msg("🛑", "【仅预览不发布】已跳过点击发布按钮"))
+            await page.screenshot(
+                full_page=True,
+                path=str(Path(self.account_file).with_name("kuaishou_note_dry_run_preview.png")),
+            )
+            await page.wait_for_timeout(120_000)
+            return
+
         max_publish_retries = 600
         publish_retry_count = 0
         verification_waited = False
+        publish_clicked = False
+        confirm_clicked = False
         while publish_retry_count < max_publish_retries:
             publish_retry_count += 1
             try:
@@ -1052,13 +1082,15 @@ class KSNote(KSBaseUploader):
                         else:
                             verification_waited = True
 
-                clicked = await self._click_publish_button(page)
-                if not clicked and publish_retry_count % 20 == 0:
-                    kuaishou_logger.warning(
-                        _msg("⚠️", f"未找到可点击的「发布」按钮（第{publish_retry_count}次）")
-                    )
+                if not publish_clicked:
+                    publish_clicked = await self._click_publish_button(page)
+                    if not publish_clicked and publish_retry_count % 20 == 0:
+                        kuaishou_logger.warning(
+                            _msg("⚠️", f"未找到可点击的「发布」按钮（第{publish_retry_count}次）")
+                        )
 
-                await self._click_confirm_publish_if_any(page)
+                if publish_clicked and not confirm_clicked:
+                    confirm_clicked = await self._click_confirm_publish_if_any(page)
 
                 await page.wait_for_url(KUAISHOU_MANAGE_URL_PATTERN, timeout=5000)
                 kuaishou_logger.success(_msg("🥳", "图文发布成功，小人开心收工"))
@@ -1071,6 +1103,7 @@ class KSNote(KSBaseUploader):
                 await asyncio.sleep(1)
         else:
             kuaishou_logger.error(_msg("❌", f"发布超时：{max_publish_retries}次尝试后仍未成功"))
+            raise RuntimeError("快手图文已点击发布一次但最终状态未知；为避免重复发布，未自动重试")
 
     async def upload(self, playwright: Playwright) -> None:
         kuaishou_logger.info(_msg("🧍", "小人先检查 cookie、图片和发布时间"))

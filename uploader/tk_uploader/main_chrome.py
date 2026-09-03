@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 import re
 from datetime import datetime
+from pathlib import Path
 
 from playwright.async_api import Playwright, async_playwright
 import os
@@ -18,25 +19,58 @@ async def cookie_auth(account_file):
         browser = await playwright.chromium.launch(headless=LOCAL_CHROME_HEADLESS)
         context = await browser.new_context(storage_state=account_file)
         context = await set_init_script(context)
-        # 创建一个新的页面
-        page = await context.new_page()
-        # 访问指定的 URL
-        await page.goto("https://www.tiktok.com/tiktokstudio/upload?lang=en")
-        await page.wait_for_load_state('networkidle')
         try:
-            # 选择所有的 select 元素
-            select_elements = await page.query_selector_all('select')
-            for element in select_elements:
-                class_name = await element.get_attribute('class')
-                # 使用正则表达式匹配特定模式的 class 名称
-                if re.match(r'tiktok-.*-SelectFormContainer.*', class_name):
-                    tiktok_logger.error("[+] cookie expired")
-                    return False
-            tiktok_logger.success("[+] cookie valid")
-            return True
-        except:
-            tiktok_logger.success("[+] cookie valid")
-            return True
+            page = await context.new_page()
+            navigation_error = None
+            for attempt in range(1, 4):
+                try:
+                    await page.goto(
+                        "https://www.tiktok.com/tiktokstudio/upload?lang=en",
+                        wait_until="domcontentloaded",
+                        timeout=60_000,
+                    )
+                    navigation_error = None
+                    break
+                except Exception as exc:
+                    navigation_error = exc
+                    tiktok_logger.warning(
+                        f"[+] TikTok credential check connection retry {attempt}/3"
+                    )
+                    await page.wait_for_timeout(2000)
+            if navigation_error is not None:
+                raise RuntimeError(
+                    "TikTok credential check could not reach the official site after 3 attempts"
+                ) from navigation_error
+            # TikTok continuously emits telemetry requests, so `networkidle`
+            # is not a valid login signal. Use the authenticated session cookie
+            # plus the final route/form instead.
+            await page.wait_for_timeout(3000)
+            cookie_names = {
+                str(item.get("name") or "") for item in await context.cookies()
+            }
+            has_session = bool(
+                cookie_names.intersection({"sessionid", "sessionid_ss", "sid_tt"})
+            )
+            current_url = str(page.url or "").lower()
+            returned_to_login = "/login" in current_url
+            upload_form_visible = bool(
+                await page.locator(
+                    'button:has-text("Select video"), '
+                    'button[aria-label="Select file"], '
+                    'input[type="file"]'
+                ).count()
+            )
+            valid = has_session and not returned_to_login and (
+                "/tiktokstudio" in current_url or upload_form_visible
+            )
+            if valid:
+                tiktok_logger.success("[+] cookie valid")
+                return True
+            tiktok_logger.error("[+] cookie expired")
+            return False
+        finally:
+            await context.close()
+            await browser.close()
 
 
 async def tiktok_setup(account_file, handle=False):
@@ -71,7 +105,18 @@ async def get_tiktok_cookie(account_file):
 
 
 class TiktokVideo(object):
-    def __init__(self, title, file_path, tags, publish_date, account_file, thumbnail_path=None):
+    def __init__(
+        self,
+        title,
+        file_path,
+        tags,
+        publish_date,
+        account_file,
+        thumbnail_path=None,
+        dry_run=False,
+        headless=None,
+        preview_seconds=120,
+    ):
         self.title = title
         self.file_path = file_path
         self.tags = tags
@@ -79,7 +124,9 @@ class TiktokVideo(object):
         self.thumbnail_path = thumbnail_path
         self.account_file = account_file
         self.local_executable_path = LOCAL_CHROME_PATH
-        self.headless = LOCAL_CHROME_HEADLESS
+        self.dry_run = bool(dry_run)
+        self.headless = LOCAL_CHROME_HEADLESS if headless is None else bool(headless)
+        self.preview_seconds = max(0, int(preview_seconds))
         self.locator_base = None
 
     async def set_schedule_time(self, page, publish_date):
@@ -147,14 +194,37 @@ class TiktokVideo(object):
         await file_chooser.set_files(self.file_path)
 
     async def upload(self, playwright: Playwright) -> None:
-        browser = await playwright.chromium.launch(headless=self.headless, executable_path=self.local_executable_path)
+        launch_kwargs = {"headless": self.headless}
+        executable_value = str(self.local_executable_path or "").strip()
+        if executable_value not in {"", "."}:
+            launch_kwargs["executable_path"] = executable_value
+        browser = await playwright.chromium.launch(**launch_kwargs)
         context = await browser.new_context(storage_state=f"{self.account_file}")
         # context = await set_init_script(context)
         page = await context.new_page()
 
         # change language to eng first
         await self.change_language(page)
-        await page.goto("https://www.tiktok.com/tiktokstudio/upload")
+        navigation_error = None
+        for attempt in range(1, 4):
+            try:
+                await page.goto(
+                    "https://www.tiktok.com/tiktokstudio/upload",
+                    wait_until="domcontentloaded",
+                    timeout=60_000,
+                )
+                navigation_error = None
+                break
+            except Exception as exc:
+                navigation_error = exc
+                tiktok_logger.warning(
+                    f"[+] TikTok upload page connection retry {attempt}/3"
+                )
+                await page.wait_for_timeout(2000)
+        if navigation_error is not None:
+            raise RuntimeError(
+                "TikTok upload page could not be reached after 3 attempts"
+            ) from navigation_error
         tiktok_logger.info(f'[+]Uploading-------{self.title}.mp4')
 
         await page.wait_for_url("https://www.tiktok.com/tiktokstudio/upload", timeout=10000)
@@ -185,6 +255,21 @@ class TiktokVideo(object):
 
         if self.publish_date != 0:
             await self.set_schedule_time(page, self.publish_date)
+
+        if self.dry_run:
+            tiktok_logger.warning("[dry-run] Form is ready; skipped the Post button")
+            preview_path = str(Path(self.account_file).with_name("tiktok_dry_run_preview.png"))
+            try:
+                await page.screenshot(full_page=True, path=preview_path)
+                tiktok_logger.info(f"[dry-run] Preview saved: {preview_path}")
+            except Exception as exc:
+                tiktok_logger.warning(f"[dry-run] Preview capture failed: {exc}")
+            if self.preview_seconds:
+                await page.wait_for_timeout(self.preview_seconds * 1000)
+            await context.storage_state(path=f"{self.account_file}")
+            await context.close()
+            await browser.close()
+            return
 
         await self.click_publish(page)
         tiktok_logger.success(f"video_id: {await self.get_last_video_id(page)}")
@@ -242,7 +327,26 @@ class TiktokVideo(object):
 
     async def change_language(self, page):
         # set the language to english
-        await page.goto("https://www.tiktok.com")
+        navigation_error = None
+        for attempt in range(1, 4):
+            try:
+                await page.goto(
+                    "https://www.tiktok.com",
+                    wait_until="domcontentloaded",
+                    timeout=60_000,
+                )
+                navigation_error = None
+                break
+            except Exception as exc:
+                navigation_error = exc
+                tiktok_logger.warning(
+                    f"[+] TikTok home connection retry {attempt}/3"
+                )
+                await page.wait_for_timeout(2000)
+        if navigation_error is not None:
+            raise RuntimeError(
+                "TikTok home could not be reached after 3 attempts"
+            ) from navigation_error
         await page.wait_for_load_state('domcontentloaded')
         await page.wait_for_selector('[data-e2e="nav-more-menu"]')
         # 已经设置为英文, 省略这个步骤
@@ -254,20 +358,20 @@ class TiktokVideo(object):
         await page.locator('#creator-tools-selection-menu-header >> text=English (US)').click()
 
     async def click_publish(self, page):
-        success_flag_div = 'div.common-modal-confirm-modal'
-        while True:
-            try:
-                publish_button = self.locator_base.locator('div.button-group button').nth(0)
-                if await publish_button.count():
-                    await publish_button.click()
-
-                await page.wait_for_url("https://www.tiktok.com/tiktokstudio/content",  timeout=3000)
-                tiktok_logger.success("  [-] video published success")
-                break
-            except Exception as e:
-                tiktok_logger.exception(f"  [-] Exception: {e}")
-                tiktok_logger.info("  [-] video publishing")
-                await asyncio.sleep(0.5)
+        publish_button = self.locator_base.locator('div.button-group button').nth(0)
+        await publish_button.wait_for(state="visible", timeout=10000)
+        await publish_button.click()
+        tiktok_logger.info("  [-] Post clicked once; waiting for a definitive result")
+        try:
+            await page.wait_for_url(
+                "https://www.tiktok.com/tiktokstudio/content",
+                timeout=30000,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "TikTok final state is unknown after one Post click; automatic retry was disabled"
+            ) from exc
+        tiktok_logger.success("  [-] video published success")
 
     async def get_last_video_id(self, page):
         await page.wait_for_selector('div[data-tt="components_PostTable_Container"]')

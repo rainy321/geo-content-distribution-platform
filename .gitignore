@@ -187,6 +187,7 @@ uploadFile
 videoFile
 
 /uploader/bilibili_uploader/qrcode.png
+/qrcode.png
 
 .worktrees/
 

@@ -842,7 +842,9 @@ class DouYinVideo(DouYinBaseUploader):
         await self.set_thumbnail(page)
 
         # 自主声明：内容由AI生成
-        await self.set_ai_generated_declaration(page)
+        declaration_set = await self.set_ai_generated_declaration(page)
+        if self.ai_generated and not declaration_set:
+            raise RuntimeError("抖音未能确认「内容由AI生成」声明，已在发布前停止")
 
         third_part_element = '[class^="info"] > [class^="first-part"] div div.semi-switch'
         if await page.locator(third_part_element).count():
@@ -881,6 +883,7 @@ class DouYinVideo(DouYinBaseUploader):
         max_retries = 600  # 最多重试 600 次（约 300 秒，预留手动验证码时间）
         retry_count = 0
         verification_waited = False
+        publish_clicked = False
         while retry_count < max_retries:
             retry_count += 1
             try:
@@ -931,21 +934,24 @@ class DouYinVideo(DouYinBaseUploader):
                     except Exception:
                         verification_waited = True
 
-                publish_button = page.get_by_role("button", name="发布", exact=True)
-                if await publish_button.count():
-                    await publish_button.click()
-                    douyin_logger.info(_msg("🖱️", f"已点击发布按钮（第{retry_count}次尝试）"))
-                else:
-                    # 尝试其他可能的发布按钮选择器
-                    alt_button = page.locator('button:has-text("发布")').first
-                    if await alt_button.count():
-                        await alt_button.click()
-                        douyin_logger.info(_msg("🖱️", f"已点击备选发布按钮（第{retry_count}次尝试）"))
+                if not publish_clicked:
+                    publish_button = page.get_by_role("button", name="发布", exact=True)
+                    if await publish_button.count():
+                        await publish_button.click()
+                        publish_clicked = True
+                        douyin_logger.info(_msg("🖱️", "已点击发布按钮一次，等待明确结果"))
                     else:
-                        if retry_count % 20 == 0:
-                            douyin_logger.warning(_msg("⚠️", f"未找到发布按钮（第{retry_count}次尝试），页面标题: {await page.title()}"))
-                        if self.debug and retry_count <= 3:
-                            await page.screenshot(full_page=True)
+                        # 尝试其他可能的发布按钮选择器
+                        alt_button = page.locator('button:has-text("发布")').first
+                        if await alt_button.count():
+                            await alt_button.click()
+                            publish_clicked = True
+                            douyin_logger.info(_msg("🖱️", "已点击备选发布按钮一次，等待明确结果"))
+                        else:
+                            if retry_count % 20 == 0:
+                                douyin_logger.warning(_msg("⚠️", f"未找到发布按钮（第{retry_count}次尝试），页面标题: {await page.title()}"))
+                            if self.debug and retry_count <= 3:
+                                await page.screenshot(full_page=True)
                 await page.wait_for_url(
                     "https://creator.douyin.com/creator-micro/content/manage**",
                     timeout=3000,
@@ -953,7 +959,8 @@ class DouYinVideo(DouYinBaseUploader):
                 douyin_logger.success(_msg("🥳", "视频发布成功，小人开心收工"))
                 break
             except Exception as e:
-                await self.handle_auto_video_cover(page)
+                if not publish_clicked:
+                    await self.handle_auto_video_cover(page)
                 if retry_count % 10 == 0:
                     douyin_logger.info(_msg("🏃", f"小人正在冲刺发布视频（第{retry_count}次）"))
                 if self.debug and retry_count <= 5:
@@ -963,6 +970,7 @@ class DouYinVideo(DouYinBaseUploader):
             douyin_logger.error(_msg("❌", f"发布超时：{max_retries}次尝试后仍未成功，请检查抖音页面是否有弹窗或变更"))
             if self.debug:
                 await page.screenshot(full_page=True)
+            raise RuntimeError("抖音已点击发布一次但最终状态未知；为避免重复发布，未自动重试")
 
         await context.storage_state(path=self.account_file)
         douyin_logger.success(_msg("🥳", "cookie 更新完毕"))
@@ -979,6 +987,14 @@ class DouYinVideo(DouYinBaseUploader):
 
 
 class DouYinNote(DouYinBaseUploader):
+    # The declaration UI is shared by video and image-note pages. Reuse the
+    # maintained locator helpers without duplicating a second divergent copy.
+    set_ai_generated_declaration = DouYinVideo.set_ai_generated_declaration
+    _is_ai_declaration_dialog_open = DouYinVideo._is_ai_declaration_dialog_open
+    _wait_ai_declaration_dialog = DouYinVideo._wait_ai_declaration_dialog
+    _select_ai_generated_radio = DouYinVideo._select_ai_generated_radio
+    _click_ai_declaration_confirm = DouYinVideo._click_ai_declaration_confirm
+
     def __init__(
         self,
         image_paths,
@@ -990,6 +1006,8 @@ class DouYinNote(DouYinBaseUploader):
         publish_strategy: str = DOUYIN_PUBLISH_STRATEGY_IMMEDIATE,
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
+        dry_run: bool = False,
+        ai_generated: bool = False,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -1002,6 +1020,8 @@ class DouYinNote(DouYinBaseUploader):
         self.note = note or ""
         self.title = title or (self.note[:30] if self.note else "")
         self.tags = tags or []
+        self.dry_run = bool(dry_run)
+        self.ai_generated = bool(ai_generated)
 
     async def validate_upload_args(self):
         await self.validate_base_args()
@@ -1046,24 +1066,36 @@ class DouYinNote(DouYinBaseUploader):
         douyin_logger.info(_msg("✍️", "小人开始填标题、描述和话题"))
         await self.fill_title_and_description(page, self.title, self.note, self.tags)
         douyin_logger.info(_msg("🏷️", f"小人一共贴了 {len(self.tags)} 个话题"))
+        declaration_set = await self.set_ai_generated_declaration(page)
+        if self.ai_generated and not declaration_set:
+            raise RuntimeError("抖音图文未能确认「内容由AI生成」声明，已在发布前停止")
 
         if self.publish_strategy == DOUYIN_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
             await self.set_schedule_time_douyin(page, self.publish_date)
 
-        while True:
-            try:
-                publish_button = page.get_by_role("button", name="发布", exact=True)
-                if await publish_button.count():
-                    await publish_button.click()
-                await page.wait_for_url(
-                    "**/creator-micro/content/manage?enter_from=publish**",
-                    timeout=3000,
-                )
-                douyin_logger.success(_msg("🥳", "图文发布成功，小人开心收工"))
-                break
-            except Exception:
-                douyin_logger.info(_msg("🏃", "小人正在冲刺发布图文"))
-                await asyncio.sleep(0.5)
+        if self.dry_run:
+            douyin_logger.warning(_msg("🛑", "【仅预览不发布】已跳过点击发布按钮"))
+            await page.screenshot(
+                full_page=True,
+                path=str(Path(self.account_file).with_name("douyin_note_dry_run_preview.png")),
+            )
+            await page.wait_for_timeout(120_000)
+            return
+
+        publish_button = page.get_by_role("button", name="发布", exact=True)
+        await publish_button.wait_for(state="visible", timeout=10_000)
+        await publish_button.click()
+        douyin_logger.info(_msg("🖱️", "已点击图文发布按钮一次，等待明确结果"))
+        try:
+            await page.wait_for_url(
+                "**/creator-micro/content/manage?enter_from=publish**",
+                timeout=300_000,
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "抖音图文已点击发布一次但最终状态未知；为避免重复发布，未自动重试"
+            ) from exc
+        douyin_logger.success(_msg("🥳", "图文发布成功，小人开心收工"))
 
     async def upload(self, playwright: Playwright) -> None:
         douyin_logger.info(_msg("🧍", "小人先检查 cookie、图片和发布时间"))

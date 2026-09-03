@@ -666,6 +666,7 @@ class TencentBaseUploader(BaseVideoUploader):
         max_publish_retries = 600
         publish_retry_count = 0
         verification_waited = False
+        submit_clicked = False
         while publish_retry_count < max_publish_retries:
             publish_retry_count += 1
             try:
@@ -705,14 +706,16 @@ class TencentBaseUploader(BaseVideoUploader):
 
                 if getattr(self, "is_draft", False):
                     draft_button = page.get_by_role("button", name="保存草稿")
-                    if await draft_button.count():
+                    if not submit_clicked and await draft_button.count():
                         await draft_button.click()
+                        submit_clicked = True
                     await page.wait_for_url("**/post/list**", timeout=5000)
                     tencent_logger.success(_msg("🥳", "视频草稿保存成功"))
                 else:
                     publish_button = page.get_by_role("button", name="发表")
-                    if await publish_button.count():
+                    if not submit_clicked and await publish_button.count():
                         await publish_button.click()
+                        submit_clicked = True
                     await page.wait_for_url(TENCENT_MANAGE_URL, timeout=5000)
                     tencent_logger.success(_msg("🥳", "视频发布成功"))
                 break
@@ -733,6 +736,10 @@ class TencentBaseUploader(BaseVideoUploader):
                 await asyncio.sleep(0.5)
         else:
             tencent_logger.error(_msg("❌", f"发布超时：{max_publish_retries}次尝试后仍未成功"))
+            action = "保存草稿" if getattr(self, "is_draft", False) else "发表"
+            raise RuntimeError(
+                f"视频号已点击{action}一次但最终状态未知；为避免重复提交，未自动重试"
+            )
 
 
 class TencentVideo(TencentBaseUploader):

@@ -67,18 +67,49 @@ async def wait_for_toutiao_creator_backend(
             max(1, int(min(poll_interval_seconds, remaining) * 1000))
         )
 
+
+async def _wait_for_interactive_login(
+    page,
+    context,
+    *,
+    original_url,
+    authenticated_cookie_names=(),
+    authenticated_url_fragments=(),
+    timeout_seconds=600,
+):
+    """Wait for a headed login without relying on a single navigation event."""
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(30, int(timeout_seconds))
+    cookie_markers = {str(name) for name in authenticated_cookie_names}
+    while loop.time() < deadline:
+        current_url = str(page.url or "")
+        if any(fragment in current_url for fragment in authenticated_url_fragments):
+            return True
+        cookie_names = {
+            str(item.get("name") or "") for item in await context.cookies()
+        }
+        if cookie_markers.intersection(cookie_names):
+            return True
+        # Some creator centers complete login via an SPA route that does not emit
+        # the main-frame event used by the previous implementation.
+        if current_url != original_url and not any(
+            marker in current_url.lower()
+            for marker in ("/login", "/passport", "/auth/")
+        ):
+            return True
+        await page.wait_for_timeout(1000)
+    return False
+
 # 抖音登录
 async def douyin_cookie_gen(
-    id, status_queue, *, database_path=None, cookies_directory=None
+    id, status_queue, *, database_path=None, cookies_directory=None,
+    timeout_seconds=600,
 ):
-    url_changed_event = asyncio.Event()
-    async def on_url_change():
-        # 检查是否是主框架的变化
-        if page.url != original_url:
-            url_changed_event.set()
     async with async_playwright() as playwright:
         options = get_browser_options()
-        # Make sure to run headed.
+        options["headless"] = False
+        # Login must stay visible so the account owner can complete QR/security checks.
         browser = await playwright.chromium.launch(**options)
         # Setup context however you like.
         context = await browser.new_context()  # Pass any options
@@ -90,17 +121,18 @@ async def douyin_cookie_gen(
         img_locator = page.get_by_role("img", name="二维码")
         # 获取 src 属性值
         src = await img_locator.get_attribute("src")
-        print("✅ 图片地址:", src)
+        print("✅ 抖音登录二维码已加载")
         status_queue.put(src)
-        # 监听页面的 'framenavigated' 事件，只关注主框架的变化
-        page.on('framenavigated',
-                lambda frame: asyncio.create_task(on_url_change()) if frame == page.main_frame else None)
-        try:
-            # 等待 URL 变化或超时
-            await asyncio.wait_for(url_changed_event.wait(), timeout=200)  # 最多等待 200 秒
-            print("监听页面跳转成功")
-        except asyncio.TimeoutError:
-            print("监听页面跳转超时")
+        authenticated = await _wait_for_interactive_login(
+            page,
+            context,
+            original_url=original_url,
+            authenticated_cookie_names=("sessionid", "sessionid_ss", "sid_guard"),
+            authenticated_url_fragments=("/creator-micro/",),
+            timeout_seconds=timeout_seconds,
+        )
+        if not authenticated:
+            print("等待抖音登录超时")
             await page.close()
             await context.close()
             await browser.close()
@@ -137,20 +169,15 @@ async def douyin_cookie_gen(
 
 # 视频号登录
 async def get_tencent_cookie(
-    id, status_queue, *, database_path=None, cookies_directory=None
+    id, status_queue, *, database_path=None, cookies_directory=None,
+    timeout_seconds=600,
 ):
-    url_changed_event = asyncio.Event()
-    async def on_url_change():
-        # 检查是否是主框架的变化
-        if page.url != original_url:
-            url_changed_event.set()
-
     async with async_playwright() as playwright:
         options = {
             'args': [
                 '--lang en-GB'
             ],
-            'headless': LOCAL_CHROME_HEADLESS,  # Set headless option here
+            'headless': False,
         }
         # Make sure to run headed.
         browser = await playwright.chromium.launch(**options)
@@ -162,10 +189,6 @@ async def get_tencent_cookie(
         await page.goto("https://channels.weixin.qq.com")
         original_url = page.url
 
-        # 监听页面的 'framenavigated' 事件，只关注主框架的变化
-        page.on('framenavigated',
-                lambda frame: asyncio.create_task(on_url_change()) if frame == page.main_frame else None)
-
         # 等待 iframe 出现（最多等 60 秒）
         iframe_locator = page.frame_locator("iframe").first
 
@@ -174,16 +197,20 @@ async def get_tencent_cookie(
 
         # 获取 src 属性值
         src = await img_locator.get_attribute("src")
-        print("✅ 图片地址:", src)
+        print("✅ 视频号登录二维码已加载")
         status_queue.put(src)
 
-        try:
-            # 等待 URL 变化或超时
-            await asyncio.wait_for(url_changed_event.wait(), timeout=200)  # 最多等待 200 秒
-            print("监听页面跳转成功")
-        except asyncio.TimeoutError:
+        authenticated = await _wait_for_interactive_login(
+            page,
+            context,
+            original_url=original_url,
+            authenticated_cookie_names=("wxuin", "data_ticket", "ticket"),
+            authenticated_url_fragments=("/platform/",),
+            timeout_seconds=timeout_seconds,
+        )
+        if not authenticated:
             status_queue.put("500")
-            print("监听页面跳转超时")
+            print("等待视频号登录超时")
             await page.close()
             await context.close()
             await browser.close()
@@ -219,19 +246,15 @@ async def get_tencent_cookie(
 
 # 快手登录
 async def get_ks_cookie(
-    id, status_queue, *, database_path=None, cookies_directory=None
+    id, status_queue, *, database_path=None, cookies_directory=None,
+    timeout_seconds=600,
 ):
-    url_changed_event = asyncio.Event()
-    async def on_url_change():
-        # 检查是否是主框架的变化
-        if page.url != original_url:
-            url_changed_event.set()
     async with async_playwright() as playwright:
         options = {
             'args': [
                 '--lang en-GB'
             ],
-            'headless': LOCAL_CHROME_HEADLESS,  # Set headless option here
+            'headless': False,
         }
         # Make sure to run headed.
         browser = await playwright.chromium.launch(**options)
@@ -249,19 +272,19 @@ async def get_ks_cookie(
         # 获取 src 属性值
         src = await img_locator.get_attribute("src")
         original_url = page.url
-        print("✅ 图片地址:", src)
+        print("✅ 快手登录二维码已加载")
         status_queue.put(src)
-        # 监听页面的 'framenavigated' 事件，只关注主框架的变化
-        page.on('framenavigated',
-                lambda frame: asyncio.create_task(on_url_change()) if frame == page.main_frame else None)
-
-        try:
-            # 等待 URL 变化或超时
-            await asyncio.wait_for(url_changed_event.wait(), timeout=200)  # 最多等待 200 秒
-            print("监听页面跳转成功")
-        except asyncio.TimeoutError:
+        authenticated = await _wait_for_interactive_login(
+            page,
+            context,
+            original_url=original_url,
+            authenticated_cookie_names=("userId", "kuaishou.server.web_st"),
+            authenticated_url_fragments=("/profile", "/article/", "/dashboard"),
+            timeout_seconds=timeout_seconds,
+        )
+        if not authenticated:
             status_queue.put("500")
-            print("监听页面跳转超时")
+            print("等待快手登录超时")
             await page.close()
             await context.close()
             await browser.close()
@@ -667,7 +690,8 @@ async def zhihu_cookie_gen(
 
 # Bilibili登录（通过biliup CLI，在新终端窗口中扫码）
 async def bilibili_cookie_gen(
-    id, status_queue, *, database_path=None, cookies_directory=None
+    id, status_queue, *, database_path=None, cookies_directory=None,
+    timeout_seconds=600,
 ):
     import subprocess
     import sys
@@ -701,7 +725,7 @@ async def bilibili_cookie_gen(
         return
 
     # 轮询等待cookie文件生成（用户在终端完成扫码后biliup会创建文件）
-    for _ in range(100):  # 最多等200秒
+    for _ in range(max(15, int(timeout_seconds / 2))):
         await asyncio.sleep(2)
         if account_file.exists():
             result = run_biliup_command(["-u", str(account_file), "renew"])
@@ -720,7 +744,8 @@ async def bilibili_cookie_gen(
 
 
 async def tiktok_cookie_gen(
-    id, status_queue, *, database_path=None, cookies_directory=None
+    id, status_queue, *, database_path=None, cookies_directory=None,
+    timeout_seconds=600,
 ):
     """Open a headed TikTok login and persist the browser session for Web use."""
 
@@ -739,13 +764,24 @@ async def tiktok_cookie_gen(
             context = await set_init_script(context)
             page = await context.new_page()
             try:
-                await page.goto(
-                    "https://www.tiktok.com/login?lang=en",
-                    timeout=60_000,
-                    wait_until="domcontentloaded",
-                )
+                navigation_error = None
+                for attempt in range(1, 4):
+                    try:
+                        await page.goto(
+                            "https://www.tiktok.com/login?lang=en",
+                            timeout=60_000,
+                            wait_until="domcontentloaded",
+                        )
+                        navigation_error = None
+                        break
+                    except Exception as exc:
+                        navigation_error = exc
+                        print(f"TikTok 登录页连接失败，正在重试（{attempt}/3）")
+                        await page.wait_for_timeout(2000)
+                if navigation_error is not None:
+                    raise RuntimeError("TikTok 登录页连续三次连接失败") from navigation_error
                 authenticated = False
-                for _ in range(200):
+                for _ in range(max(30, int(timeout_seconds))):
                     cookies = await context.cookies()
                     cookie_names = {str(item.get("name") or "") for item in cookies}
                     if cookie_names.intersection({"sessionid", "sessionid_ss", "sid_tt"}):
@@ -770,8 +806,8 @@ async def tiktok_cookie_gen(
                 (10, file_name, id, 1 if result else 0),
             )
             conn.commit()
-        status_queue.put("200")
-        return True
+        status_queue.put("200" if result else "500")
+        return bool(result)
     except Exception as exc:
         print(f"❌ TikTok登录异常: {exc}")
         status_queue.put("500")
