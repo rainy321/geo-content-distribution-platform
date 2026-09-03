@@ -89,6 +89,26 @@ class DeliverySafetyTests(unittest.TestCase):
             )
         )
 
+    def test_vercel_context_excludes_local_runtime_and_browser_dependencies(self):
+        patterns = {
+            line.strip()
+            for line in (ROOT / ".vercelignore").read_text(
+                encoding="utf-8"
+            ).splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+
+        self.assertTrue(
+            {
+                ".venv",
+                ".tmp",
+                "/.env",
+                "cookiesFile",
+                "db/database.db",
+                "sau_frontend/node_modules",
+            }.issubset(patterns)
+        )
+
     def test_git_excludes_local_credentials_but_keeps_frontend_lockfile(self):
         patterns = {
             line.strip()

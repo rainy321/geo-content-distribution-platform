@@ -164,6 +164,10 @@ Windows 演示入口：`start-win.bat` 从自身目录启动、优先使用项�
 部署浏览器：Vercel 公开生产站真实 Vite 构建产物加载成功，页面非空、示例看板正常，无错误覆盖层、控制台错误、页面异常、失败请求或 4xx/5xx 响应；Dashboard 截图视觉核对通过。首页、health、Dashboard、项目、素材和 favicon 均为 HTTP 200，标题、语言和 SVG Content-Type 均符合预期
 自定义 AI 配置浏览器验收：从侧栏进入系统设置，填写测试地址、测试模型和测试 Key 后状态即时切换；桌面和 390px 移动端横向溢出均为 0，保存没有调用模型服务，测试 Key 仅出现在 `sessionStorage` 而未进入 `localStorage`，控制台错误、页面异常、失败请求和 4xx/5xx 响应均为 0
 运营访问门浏览器验收：未登录业务 API 返回 401，错误口令保持在访问门，正确口令后 Dashboard 与系统设置可用，退出后业务 API 再次返回 401；会话 Cookie 为 HttpOnly，口令未进入 localStorage/sessionStorage，桌面与 390px 横向溢出均为 0，页面异常与失败请求为 0
+
+千问生产超时修复：Vercel 日志确认 `qwen3.8-max` 首次线上生成在约 121 秒后返回 502；阿里云官方资料确认该混合思考模型默认开启思考。阿里云托管的 Qwen 3.8 Chat Completions 现显式使用非思考模式并限制最多 4096 输出 Token，其他自定义 OpenAI-compatible 服务不注入阿里云专用参数；外部调用补充了不含 Prompt、密钥的主机、模型、耗时和错误类型日志。
+
+Vercel CLI 部署上下文：新增 `.vercelignore`，显式排除本地 `.venv`、浏览器依赖、Cookie、SQLite、素材、临时验证产物和本地环境文件，防止本地完整 Worker 环境被误打包进轻量云端控制面。
 请求安全：AI 请求可按客户端配置每分钟上限，达到阈值返回 429/Retry-After；自定义模型地址禁止 HTTP、本机/私网/保留地址、内嵌凭据及 3xx 重定向；认证端点禁止缓存，业务响应带 nosniff、DENY frame、same-origin referrer 与权限策略安全头
 独立 Worker：新增 `sau-worker` 和 `sau-worker --once`，继续复用原子领取、真实发布总开关、授权指纹和 PublisherAdapter；Demo/真实执行隔离回归通过，Web 可用 `RUN_PUBLISH_SCHEDULER=false` 关闭内置调度器
 容器编排：仍保留默认绑定 `127.0.0.1:5409`、关闭真实发布并持久化 SQLite/Cookie/媒体目录的 `compose.yaml`；项目所有者本轮明确选择 Vercel，Docker 实机构建不再作为本次交付阻塞项

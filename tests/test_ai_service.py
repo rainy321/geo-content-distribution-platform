@@ -2,6 +2,8 @@ import os
 import unittest
 from unittest.mock import patch
 
+import requests
+
 from services.ai_service import (
     AIConfigurationError,
     AIServiceError,
@@ -80,6 +82,8 @@ class AIServiceTests(unittest.TestCase):
         )
         self.assertEqual(captured["headers"]["Authorization"], "Bearer test-key")
         self.assertEqual(captured["json"]["model"], "test-model")
+        self.assertEqual(captured["json"]["max_tokens"], 4096)
+        self.assertNotIn("enable_thinking", captured["json"])
         self.assertEqual(captured["timeout"], 15)
         self.assertFalse(captured["allow_redirects"])
         prompt = captured["json"]["messages"][1]["content"]
@@ -122,6 +126,61 @@ class AIServiceTests(unittest.TestCase):
         self.assertEqual(result["content"], "# 企业智能体指南\n\n这是一篇普通文本正文。")
         self.assertEqual(result["tags"], ["AI Agent", "企业智能体"])
         self.assertEqual(result["faq"], [])
+
+    def test_disables_default_thinking_for_alibaba_qwen_38(self):
+        captured = {}
+
+        def fake_post(url, **kwargs):
+            captured.update(kwargs)
+            return FakeResponse(
+                {
+                    "choices": [
+                        {"message": {"content": '{"content":"正文"}'}}
+                    ]
+                }
+            )
+
+        settings = AISettings(
+            base_url=(
+                "https://workspace.cn-beijing.maas.aliyuncs.com/"
+                "compatible-mode/v1"
+            ),
+            api_key="test-key",
+            model="qwen3.8-max",
+            timeout_seconds=15,
+        )
+        generate_geo_content(
+            project=self.project,
+            topic="测试",
+            keywords=[],
+            length=600,
+            content_type="行业科普",
+            settings=settings,
+            http_post=fake_post,
+        )
+
+        self.assertFalse(captured["json"]["enable_thinking"])
+        self.assertEqual(captured["json"]["max_tokens"], 4096)
+
+    def test_reports_provider_timeout_without_raw_request_details(self):
+        def fake_post(*args, **kwargs):
+            raise requests.ReadTimeout("sensitive-provider-detail")
+
+        with self.assertRaisesRegex(
+            AIServiceError,
+            "AI 服务在 15 秒内未返回",
+        ) as raised:
+            generate_geo_content(
+                project=self.project,
+                topic="测试",
+                keywords=[],
+                length=600,
+                content_type="行业科普",
+                settings=self.settings,
+                http_post=fake_post,
+            )
+
+        self.assertNotIn("sensitive-provider-detail", str(raised.exception))
 
     def test_requires_all_environment_settings(self):
         with patch.dict(os.environ, {}, clear=True):

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
+import time
 from ipaddress import ip_address
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -10,6 +12,15 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import requests
+
+
+logger = logging.getLogger(__name__)
+if not logger.handlers:
+    log_handler = logging.StreamHandler()
+    log_handler.setFormatter(logging.Formatter("%(message)s"))
+    logger.addHandler(log_handler)
+logger.setLevel(logging.INFO)
+logger.propagate = False
 
 
 class AIServiceError(RuntimeError):
@@ -26,6 +37,7 @@ class AISettings:
     api_key: str
     model: str
     timeout_seconds: float = 120.0
+    max_tokens: int = 4096
 
     @classmethod
     def from_environment(cls) -> "AISettings":
@@ -147,29 +159,80 @@ def _request_chat_completion(
 ) -> str:
     """Call the shared OpenAI-compatible chat completion endpoint."""
 
+    endpoint = _chat_completions_url(settings.base_url)
+    provider_host = (urlsplit(endpoint).hostname or "unknown").lower()
+    request_body = {
+        "model": settings.model,
+        "messages": [
+            {
+                "role": "system",
+                "content": "你是一名 GEO / AEO 内容优化专家。",
+            },
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": temperature,
+        "max_tokens": settings.max_tokens,
+    }
+    if _should_disable_dashscope_thinking(settings):
+        # Qwen 3.8 enables hybrid thinking by default. For synchronous content
+        # generation this can delay the first response beyond serverless limits.
+        request_body["enable_thinking"] = False
+
+    started_at = time.perf_counter()
+    _log_ai_provider_event(
+        "request_started",
+        host=provider_host,
+        model=settings.model,
+        timeout_seconds=settings.timeout_seconds,
+        max_tokens=settings.max_tokens,
+        thinking_disabled=request_body.get("enable_thinking") is False,
+    )
+
     try:
         response = http_post(
-            _chat_completions_url(settings.base_url),
+            endpoint,
             headers={
                 "Authorization": f"Bearer {settings.api_key}",
                 "Content-Type": "application/json",
             },
-            json={
-                "model": settings.model,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": "你是一名 GEO / AEO 内容优化专家。",
-                    },
-                    {"role": "user", "content": prompt},
-                ],
-                "temperature": temperature,
-            },
+            json=request_body,
             timeout=settings.timeout_seconds,
             allow_redirects=False,
         )
+    except requests.Timeout as exc:
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000)
+        _log_ai_provider_event(
+            "request_timed_out",
+            level=logging.ERROR,
+            host=provider_host,
+            model=settings.model,
+            elapsed_ms=elapsed_ms,
+            timeout_seconds=settings.timeout_seconds,
+        )
+        raise AIServiceError(
+            f"AI 服务在 {settings.timeout_seconds:g} 秒内未返回，"
+            "请稍后重试或改用低延迟模型"
+        ) from exc
     except requests.RequestException as exc:
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000)
+        _log_ai_provider_event(
+            "request_failed",
+            level=logging.ERROR,
+            host=provider_host,
+            model=settings.model,
+            elapsed_ms=elapsed_ms,
+            error_type=type(exc).__name__,
+        )
         raise AIServiceError(f"AI 服务请求失败: {exc}") from exc
+
+    elapsed_ms = round((time.perf_counter() - started_at) * 1000)
+    _log_ai_provider_event(
+        "response_received",
+        host=provider_host,
+        model=settings.model,
+        elapsed_ms=elapsed_ms,
+        status_code=response.status_code,
+    )
 
     if 300 <= response.status_code < 400:
         raise AIServiceError("AI 服务地址发生重定向，已为安全起见停止请求")
@@ -196,6 +259,35 @@ def _chat_completions_url(base_url: str) -> str:
     if normalized.endswith("/v1"):
         return f"{normalized}/chat/completions"
     return f"{normalized}/v1/chat/completions"
+
+
+def _log_ai_provider_event(
+    event: str,
+    *,
+    level: int = logging.INFO,
+    **fields: Any,
+) -> None:
+    """Write one machine-readable event without prompts or credentials."""
+
+    logger.log(
+        level,
+        json.dumps(
+            {"event": f"ai_provider.{event}", **fields},
+            ensure_ascii=False,
+            sort_keys=True,
+        ),
+    )
+
+
+def _should_disable_dashscope_thinking(settings: AISettings) -> bool:
+    """Use low-latency mode only for Alibaba-hosted Qwen 3.8 endpoints."""
+
+    try:
+        hostname = (urlsplit(settings.base_url).hostname or "").lower()
+    except ValueError:
+        return False
+    model = settings.model.strip().lower()
+    return hostname.endswith(".aliyuncs.com") and model.startswith("qwen3.8")
 
 
 def _validate_custom_base_url(base_url: str) -> None:
