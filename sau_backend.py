@@ -72,7 +72,7 @@ from services.real_publisher_factory import (
     REAL_PUBLISH_PLATFORMS,
     create_real_publisher_factory,
 )
-from services.request_guard import FixedWindowRateLimiter
+from services.request_guard import create_rate_limiter_from_environment
 
 active_queues = {}
 active_queues_lock = threading.Lock()
@@ -177,6 +177,7 @@ if access_password and not session_secret:
     raise RuntimeError(
         "配置 APP_ACCESS_PASSWORD 时必须同时配置 APP_SESSION_SECRET"
     )
+rate_limiter = create_rate_limiter_from_environment()
 app.config.update(
     ACCESS_CONTROL_ENABLED=bool(access_password),
     ACCESS_PASSWORD=access_password,
@@ -209,8 +210,9 @@ app.config.update(
         maximum=1000,
     ),
     TRUST_PROXY_HEADERS=bool(os.getenv("VERCEL")),
-    AI_RATE_LIMITER=FixedWindowRateLimiter(),
-    AUTH_RATE_LIMITER=FixedWindowRateLimiter(),
+    STORAGE_SCOPE=("ephemeral" if os.getenv("VERCEL") else "filesystem"),
+    AI_RATE_LIMITER=rate_limiter,
+    AUTH_RATE_LIMITER=rate_limiter,
 )
 initialize_database(app.config["DATABASE_PATH"])
 if app.config["DEMO_MODE"] and app.config["SEED_DEMO_DATA"]:
@@ -358,6 +360,11 @@ def get_auth_status():
                 "ai_rate_limit_enabled": bool(
                     app.config.get("AI_RATE_LIMIT_PER_MINUTE", 0) > 0
                 ),
+                "rate_limit_scope": getattr(
+                    app.config.get("AI_RATE_LIMITER"),
+                    "scope",
+                    "instance",
+                ),
             },
         }
     ), 200
@@ -453,6 +460,18 @@ def get_health_status():
                 "status": "ok",
                 "database": "ok",
                 "demo_mode": bool(app.config.get("DEMO_MODE", False)),
+                "storage_scope": app.config.get(
+                    "STORAGE_SCOPE",
+                    "filesystem",
+                ),
+                "rate_limit_scope": getattr(
+                    app.config.get("AI_RATE_LIMITER"),
+                    "scope",
+                    "instance",
+                ),
+                "real_publishing_enabled": bool(
+                    app.config.get("ALLOW_REAL_PUBLISHING", False)
+                ),
             },
         }
     ), 200

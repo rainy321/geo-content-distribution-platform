@@ -163,7 +163,7 @@ Vercel 生产地址：[https://geo-content-distribution-platform.vercel.app](htt
 
 这是真实可访问的 GEO 管理台与 Demo API 部署，但不是云端媒体发布 Worker。线上固定使用 `DEMO_MODE=true`、`ALLOW_REAL_PUBLISHING=false`，不保存本地账号 Cookie，也不打包 Playwright、Patchright 和 OpenCV。SQLite、素材和示例数据位于 Vercel 函数的临时目录，实例重建后可能重置；默认 AI 连接已通过 Vercel Production 环境变量配置，密钥类型为 Secret。真实媒体登录和发布继续由本地浏览器 Worker 执行。
 
-当前在线演示启用了单运营者访问口令：口令只在部署环境中保存，验证成功后由后端签发 HttpOnly、SameSite=Lax 的短期会话 Cookie。AI 生成与优化另有每客户端、每实例的应用内限流；登录尝试也会限速。Vercel Hobby 当前没有可用的完整 WAF 限流，因此这层限流是安全兜底，不等价于跨区域共享计数器。接入真实业务数据前，仍必须增加持久数据库/对象存储；云端真实媒体发布还需要独立长驻 Worker，且不得把媒体 Cookie 或模型密钥写进仓库或前端变量。
+当前在线演示启用了单运营者访问口令：口令只在部署环境中保存，验证成功后由后端签发 HttpOnly、SameSite=Lax 的短期会话 Cookie。AI 生成、优化和登录尝试默认使用进程内限流；配置 Upstash Redis 的两个 REST Secret 后会自动切换为跨实例原子计数，供应商暂时不可用时退回已预热的本地安全网。接入真实业务数据前，仍必须增加持久数据库/对象存储；云端真实媒体发布还需要独立长驻 Worker，且不得把媒体 Cookie 或模型密钥写进仓库或前端变量。
 
 ### 生产访问控制与独立 Worker
 
@@ -172,13 +172,16 @@ Vercel 生产地址：[https://geo-content-distribution-platform.vercel.app](htt
 如果 Web 与调度器运行在同一台受控机器，保持 `RUN_PUBLISH_SCHEDULER=true` 即可。拆成独立进程时，Web 设置为 `RUN_PUBLISH_SCHEDULER=false`，再启动：
 
 ```bash
+# 启动前自检；不会打开或访问任何发布平台
+sau-worker --check
+
 sau-worker
 
-# 只处理一批到期任务，适合外部 Cron 或烟雾检查
+# 只处理一批到期任务，适合外部 Cron
 sau-worker --once
 ```
 
-Worker 继续复用同一套 SQLite、素材目录、Cookie 目录、授权指纹和 PublisherAdapter。Web 与 Worker 必须挂载同一份持久数据；在没有持久存储的 Vercel 函数中不要启动媒体 Worker。
+`--check` 会验证数据库、Cookie/素材目录、已连接账号数量，以及真实模式所需的浏览器运行时；它只做本地准备与检查，不会访问知乎等发布平台。Worker 继续复用同一套 SQLite、素材目录、Cookie 目录、授权指纹和 PublisherAdapter。Web 与 Worker 必须挂载同一份持久数据；在没有持久存储的 Vercel 函数中不要启动媒体 Worker。
 
 ### 6. Docker Compose 本地演示
 
@@ -308,6 +311,8 @@ GEO Web 运行环境变量：
 | `APP_SESSION_HOURS` | `12` | 运营会话有效小时数，范围 1–168 |
 | `AUTH_LOGIN_ATTEMPTS_PER_MINUTE` | `5` | 单客户端每分钟口令尝试上限 |
 | `AI_RATE_LIMIT_PER_MINUTE` | `0` | 单客户端每分钟 AI 请求上限；0 表示应用内限流关闭，生产建议显式配置 |
+| `UPSTASH_REDIS_REST_URL` | 空 | 可选的 Upstash Redis REST 地址；与 Token 同时配置后启用跨实例限流 |
+| `UPSTASH_REDIS_REST_TOKEN` | 空 | 可选的 Upstash 标准 REST Token，只允许放在服务端 Secret 中 |
 | `CORS_ALLOWED_ORIGINS` | 本地 5173 两个回环地址 | 分离部署时允许携带会话凭据的前端来源，逗号分隔 |
 | `SESSION_COOKIE_SECURE` | Vercel 自动开启 | 是否只通过 HTTPS 发送运营会话 Cookie |
 | `LOCAL_CHROME_PATH` | 空 | 可选的本机 Chrome 可执行文件路径 |

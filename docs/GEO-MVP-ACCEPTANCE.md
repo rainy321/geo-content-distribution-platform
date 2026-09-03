@@ -12,7 +12,7 @@
 
 Vercel Production 已增加默认模型服务地址、模型名和 Secret 类型 API Key，并重新部署至生产别名。Web 管理台新增“系统设置 → 自定义 AI API”：地址和模型名保存在浏览器本地，密钥只在当前标签页会话内保存；生成和优化请求会优先使用完整的浏览器配置，否则回退服务器默认值。后端只接受公开 HTTPS 服务地址并拒绝明显的本机、私网、保留地址和 URL 内嵌凭据，不跟随模型服务重定向，配置状态接口不返回任何具体值。
 
-生产管理台现已增加单运营者访问门：Vercel 分别保存运营口令和会话签名 Secret，后端签发 HttpOnly、SameSite=Lax、HTTPS-only 会话 Cookie；除健康检查和认证入口外，业务 API 与旧版媒体控制路由均受保护。登录尝试和 AI 请求具有进程内固定窗口限流，跨域凭据请求不再对任意来源开放。独立 `sau-worker` 入口已复用现有调度器、授权指纹和 PublisherAdapter，可与 Web 进程分离运行。
+生产管理台现已增加单运营者访问门：Vercel 分别保存运营口令和会话签名 Secret，后端签发 HttpOnly、SameSite=Lax、HTTPS-only 会话 Cookie；除健康检查和认证入口外，业务 API 与旧版媒体控制路由均受保护。登录尝试和 AI 请求具有固定窗口限流，未配置 Upstash 时为进程内安全网，配置两个服务端 REST Secret 后自动使用跨实例原子计数。跨域凭据请求不再对任意来源开放。独立 `sau-worker` 入口已复用现有调度器、授权指纹和 PublisherAdapter，可与 Web 进程分离运行。
 
 ## 未完成项账本
 
@@ -23,13 +23,14 @@ Vercel Production 已增加默认模型服务地址、模型名和 Secret 类型
 | 搜狐号真实发布验收 | 已完成 | — | 任务 `5` 复用唯一草稿完成修复后提交；后台文章 ID、已发布记录、标准公开 URL 及公网 HTTP 200/精确标题均已核验 |
 | 百家号真实发布验收 | 已完成 | — | 任务 `9` 复用原授权流程；账号本人只完成人机验证，平台随后自动提交。已发布记录、文章 ID、标准公开 URL 及未登录 HTTP 200/精确标题均已核验 |
 | 小红书真实发布验收 | 已完成 | — | 任务 `7` 仅提交一次；“已发布”页、posted API、note ID 与标准公开 URL 均已取得。游客直连受平台 IP 风险限制，但不影响创作中心发布证据 |
-| GitHub 推送 | 已完成 | — | `origin/main` 已推送并连接 Vercel 自动部署 |
+| GitHub 推送 | 待同步最新本地提交 | 当前环境连接 `github.com:443` 多次被重置；生产已由 Vercel CLI 部署最新提交，不影响当前线上修复 | GitHub 网络恢复后将本地 `main` 一次性推送到 `origin/main` |
 | Vercel 生产部署 | 已完成（Demo 控制面） | — | 公开生产 URL、TLS、主页、JSON API、看板渲染和错误日志均已复核 |
 | Docker 镜像实机构建 | 按项目所有者决定跳过 | 本轮改用 Vercel，不再以 Docker 作为交付阻塞项 | 只有后续明确需要自托管镜像时再执行 |
 | 应用级认证 | 已完成 | — | 单运营者口令、HttpOnly 会话、登录限速、退出入口和前端访问门均已完成；不扩展为第一期禁止的复杂权限系统 |
 | 持久数据库与对象存储 | 暂待项目所有者选择 | Neon/Turso、Vercel Blob 等均需要开通第三方资源并确认套餐/计费；当前 Vercel SQLite 与素材仍为临时数据 | 确认存储供应商与费用后执行数据库迁移、Blob 接入和数据迁移验收 |
-| 跨实例共享 AI 限流 | 部分完成 | 应用内每实例限流已启用；当前 Vercel 套餐不提供可直接使用的完整 WAF 限流，且尚未开通 Upstash | 确认升级套餐或开通 Upstash 后，将计数器迁移为跨区域共享限流 |
-| 独立发布 Worker | 代码已完成，托管待选择 | `sau-worker` 与 `--once` 已可运行；Vercel Serverless 不能长驻浏览器且没有持久 Cookie/素材 | 选择受控长驻主机并挂载与 Web 共用的持久数据库、Cookie 和素材目录 |
+| 跨实例共享 AI/登录限流 | 适配器已完成，资源未启用 | Upstash REST 原子计数、服务端配置校验和本地故障降级均已实现；尚未开通第三方 Redis 资源 | 项目所有者选择套餐并提供 Vercel Marketplace/Upstash 资源后，只需配置两个 Secret 并验收 `rate_limit_scope=shared` |
+| 独立发布 Worker | 代码与部署自检已完成，托管待选择 | `sau-worker`、`--once`、`--check` 已可运行；Vercel Serverless 不能长驻浏览器且没有持久 Cookie/素材 | 选择受控长驻主机并挂载与 Web 共用的持久数据库、Cookie 和素材目录；先运行 `sau-worker --check` |
+| 千问超时修复后的真实生成复验 | 待单次外部调用授权 | 非思考模式、Token 上限和安全日志已部署；真实调用会向阿里云发送测试主题并消耗模型额度，因此未擅自执行 | 明确授权发送一篇 600 字、不保存不发布的模型连接验收稿后执行一次 |
 | 真实定时任务到点自动执行 | 已完成 | — | 默认只创建普通计划；用户针对文章、时间、渠道及图片再次确认后才持久化自动执行授权和内容指纹。到期时指纹不一致会在访问平台前阻断；执行仍受真实发布总开关保护，失败或状态不明不自动重试 |
 
 ## P0 验收矩阵
@@ -169,7 +170,8 @@ Windows 演示入口：`start-win.bat` 从自身目录启动、优先使用项�
 
 Vercel CLI 部署上下文：新增 `.vercelignore`，显式排除本地 `.venv`、浏览器依赖、Cookie、SQLite、素材、临时验证产物和本地环境文件，防止本地完整 Worker 环境被误打包进轻量云端控制面。
 请求安全：AI 请求可按客户端配置每分钟上限，达到阈值返回 429/Retry-After；自定义模型地址禁止 HTTP、本机/私网/保留地址、内嵌凭据及 3xx 重定向；认证端点禁止缓存，业务响应带 nosniff、DENY frame、same-origin referrer 与权限策略安全头
-独立 Worker：新增 `sau-worker` 和 `sau-worker --once`，继续复用原子领取、真实发布总开关、授权指纹和 PublisherAdapter；Demo/真实执行隔离回归通过，Web 可用 `RUN_PUBLISH_SCHEDULER=false` 关闭内置调度器
+共享限流：新增可选 Upstash REST 适配器，以 Lua 在服务端原子完成计数、上限判断和窗口过期；客户端标识只以 SHA-256 摘要作为 Redis Key。Upstash 不可用时回退到同步预热的本地计数器；健康与认证状态接口只公开 `instance/shared` 范围，不暴露地址或 Token
+独立 Worker：新增 `sau-worker`、`sau-worker --once` 和不访问平台的 `sau-worker --check`，继续复用原子领取、真实发布总开关、授权指纹和 PublisherAdapter；Demo/真实执行隔离回归通过，Web 可用 `RUN_PUBLISH_SCHEDULER=false` 关闭内置调度器
 容器编排：仍保留默认绑定 `127.0.0.1:5409`、关闭真实发布并持久化 SQLite/Cookie/媒体目录的 `compose.yaml`；项目所有者本轮明确选择 Vercel，Docker 实机构建不再作为本次交付阻塞项
 工作区：为修复真实预演发现的话题污染风险，对 `uploader/toutiao_uploader/main.py` 做了单点精确匹配修复并新增回归测试；未发现硬编码 API Key；Cookie、`.tmp/`、本地数据库均被 Git 忽略
 ```

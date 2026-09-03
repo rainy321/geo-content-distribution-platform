@@ -15,11 +15,13 @@ class HealthApiTests(unittest.TestCase):
         self.original_config = {
             "DATABASE_PATH": app.config["DATABASE_PATH"],
             "DEMO_MODE": app.config.get("DEMO_MODE"),
+            "STORAGE_SCOPE": app.config.get("STORAGE_SCOPE"),
             "TESTING": app.config.get("TESTING"),
         }
         app.config.update(
             DATABASE_PATH=self.db_path,
             DEMO_MODE=True,
+            STORAGE_SCOPE="filesystem",
             TESTING=True,
         )
         self.client = app.test_client()
@@ -36,6 +38,9 @@ class HealthApiTests(unittest.TestCase):
         self.assertEqual(payload["data"]["status"], "ok")
         self.assertEqual(payload["data"]["database"], "ok")
         self.assertTrue(payload["data"]["demo_mode"])
+        self.assertEqual(payload["data"]["storage_scope"], "filesystem")
+        self.assertIn(payload["data"]["rate_limit_scope"], {"instance", "shared"})
+        self.assertFalse(payload["data"]["real_publishing_enabled"])
         self.assertNotIn(str(self.db_path), response.get_data(as_text=True))
 
     def test_backend_service_prefix_reaches_the_same_api(self):

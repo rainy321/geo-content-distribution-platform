@@ -3,7 +3,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from sau_worker import WorkerSettings, run_worker_once
+from sau_worker import (
+    WorkerSettings,
+    check_worker_readiness,
+    main,
+    run_worker_once,
+)
 
 
 class WorkerEntrypointTests(unittest.TestCase):
@@ -61,6 +66,71 @@ class WorkerEntrypointTests(unittest.TestCase):
             media_root=settings.media_root,
         )
         self.assertEqual(result["promoted_count"], 0)
+
+    def test_check_reports_safe_worker_without_browser_requirement(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            settings = WorkerSettings(
+                database_path=root / "data" / "database.db",
+                cookies_directory=root / "cookies",
+                media_root=root / "media",
+                interval_seconds=15,
+                demo_mode=True,
+                allow_real_publishing=False,
+            )
+
+            result = check_worker_readiness(settings)
+
+        self.assertEqual(result["status"], "ready")
+        self.assertEqual(result["mode"], "safe")
+        self.assertEqual(result["checks"]["database"], "ok")
+        self.assertEqual(
+            result["checks"]["browser_runtime"],
+            "not_required",
+        )
+
+    @patch("sau_worker._browser_runtime_status", return_value="unavailable")
+    def test_check_blocks_real_worker_when_browser_is_missing(
+        self,
+        _mock_browser_status,
+    ):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            settings = WorkerSettings(
+                database_path=root / "data" / "database.db",
+                cookies_directory=root / "cookies",
+                media_root=root / "media",
+                interval_seconds=15,
+                demo_mode=False,
+                allow_real_publishing=True,
+            )
+
+            result = check_worker_readiness(settings)
+
+        self.assertEqual(result["status"], "blocked")
+        self.assertIn("browser_runtime:unavailable", result["issues"])
+        self.assertIn("accounts:none_connected", result["issues"])
+
+    @patch("sau_worker.WorkerSettings.from_environment")
+    @patch("sau_worker.check_worker_readiness")
+    def test_check_cli_returns_nonzero_when_blocked(
+        self,
+        mock_check,
+        mock_settings,
+    ):
+        mock_settings.return_value = object()
+        mock_check.return_value = {
+            "status": "blocked",
+            "mode": "real",
+            "checks": {},
+            "issues": ["browser_runtime:unavailable"],
+        }
+
+        with patch("builtins.print") as mock_print:
+            exit_code = main(["--check"])
+
+        self.assertEqual(exit_code, 1)
+        mock_print.assert_called_once()
 
 
 if __name__ == "__main__":
