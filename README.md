@@ -214,6 +214,12 @@ docker compose ps
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `POST` | `/api/articles/generate` | 通过 OpenAI-compatible API 生成 GEO 稿件 |
+| `POST` | `/api/articles/generate-batch` | 最多按 5 个主题生成并保存独立草稿 |
+| `GET/POST` | `/api/content-templates` | 查询或创建内容模板 |
+| `PUT/DELETE` | `/api/content-templates/:id` | 更新或删除自定义内容模板 |
+| `GET` | `/api/articles/import-template.xlsx` | 下载标准文章导入模板 |
+| `POST` | `/api/articles/import` | 从 Excel/CSV 批量导入文章 |
+| `GET/POST` | `/api/articles/:id/images/recommend`、`/images/generate` | 推荐素材或生成文章封面 |
 | `GET/POST` | `/api/auth/status`、`/api/auth/login` | 查询访问门状态、建立 HttpOnly 运营会话 |
 | `POST` | `/api/auth/logout` | 退出当前运营会话 |
 | `POST` | `/api/geo/score` | 计算规则型 GEO Score |
@@ -224,7 +230,8 @@ docker compose ps
 | `GET` | `/api/publish/jobs/:id` | 轮询单个任务状态 |
 | `POST` | `/api/publish/jobs/:id/retry` | 将失败/待人工任务重新排队 |
 | `POST` | `/api/publish/jobs/:id/execute` | 仅执行明确标记的 Demo 任务 |
-| `POST` | `/api/publish/jobs/:id/execute-real` | 三重门控后执行已确认的知乎、今日头条、搜狐号、百家号或小红书真实任务 |
+| `POST` | `/api/publish/jobs/:id/execute-real` | 三重门控后执行已确认的 10 渠道真实任务 |
+| `GET` | `/api/publish/platforms` | 读取统一渠道能力与素材要求 |
 | `GET` | `/api/media-accounts` | 读取媒体账号与平台连接概览，不主动检测平台 |
 | `POST` | `/api/media-accounts/:id/check` | 用户显式触发单账号 Cookie 状态检测 |
 
@@ -336,10 +343,10 @@ GEO Web 运行环境变量：
 | `XHS_SERVER` | `http://127.0.0.1:11901` | 仅供小红书旧流程兼容使用 |
 | `DEMO_MODE` | `false` | 为 `true` 时新发布任务使用 DemoPublisher |
 | `SEED_DEMO_DATA` | `true` | Demo Mode 下为空数据库准备幂等、明确标注的演示数据 |
-| `ALLOW_REAL_PUBLISHING` | `false` | 真实发布总开关；当前接入知乎、今日头条、搜狐号、百家号和小红书 |
+| `ALLOW_REAL_PUBLISHING` | `false` | 真实发布总开关；统一适配层已覆盖 10 个渠道 |
 | `DATABASE_PATH` | `db/database.db` | 可覆盖 SQLite 路径，便于隔离环境 |
 | `COOKIES_DIRECTORY` | `cookiesFile` | Web 登录、账号检测和真实发布共用的 Cookie 目录 |
-| `MEDIA_ROOT` | `videoFile` | 上传素材与发布图片的运行目录 |
+| `MEDIA_ROOT` | `videoFile` | 上传图片/视频、生成封面和发布素材的运行目录 |
 | `PUBLISH_SCHEDULER_INTERVAL_SECONDS` | `15` | 到期任务检查间隔，最少 5 秒 |
 | `RUN_PUBLISH_SCHEDULER` | `true` | Web 进程是否内置调度器；使用独立 `sau-worker` 时设为 `false` |
 | `SERVER_HOST` | `127.0.0.1` | 后端监听地址；容器内需显式设为 `0.0.0.0` |
@@ -349,7 +356,7 @@ Web 管理台的“系统设置”支持为当前浏览器填写自定义 OpenAI
 
 定时任务由 APScheduler 在 `python sau_backend.py` 启动时注册。每次 tick 会原子地将到期任务从 `scheduled` 提升为 `queued`；Demo 任务随后自动执行。真实任务默认只进入队列；只有创建计划时用户再次明确授权自动执行、授权内容指纹到期仍匹配、真实发布总开关仍开启且账号有效时，才会调用真实适配器一次。失败或状态不明不会自动重试。调度任务启用了单实例和合并补跑，避免同一进程内重复领取。
 
-知乎、今日头条、搜狐号、百家号和小红书的真实发布默认关闭。只有同时满足 `DEMO_MODE=false`、`ALLOW_REAL_PUBLISHING=true`、任务本身不是 Demo，并且操作者在发布中心二次确认时才会进入真实适配器。五个适配器都会先验证登录状态。知乎发布前通过当前账号的公开文章列表精确匹配标题，已存在时直接返回原链接；发布后最多轮询 3 次公开文章结果并自动对账，不会自动重复点击“发布”。其余渠道只有取得平台公开内容链接才标记 `success`；只有提交证据或发生超时但最终状态未知时保持 `processing`，要求先到平台后台核对，避免盲目重试造成重复内容。百家号文章必须由操作者提供一张展示封面，小红书图文笔记必须提供至少一张图片；当前不会自动生成或擅自选择素材。扫码、验证码、实名、风控或 Cookie 失效会进入“待人工确认”，系统不会绕过平台安全机制。
+10 个渠道的真实发布默认关闭。只有同时满足 `DEMO_MODE=false`、`ALLOW_REAL_PUBLISHING=true`、任务本身不是 Demo，并且操作者在发布中心二次确认时才会进入真实适配器。所有适配器都会先验证登录状态。知乎发布前通过当前账号的公开文章列表精确匹配标题，已存在时直接返回原链接；发布后最多轮询 3 次公开文章结果并自动对账，不会自动重复点击“发布”。其余渠道只有取得平台公开内容链接才标记 `success`；只有提交证据或发生超时但最终状态未知时保持 `processing`，要求先到平台后台核对，避免盲目重试造成重复内容。百家号、小红书、抖音和快手要求图片，可由操作者选择素材，也可启用受控自动配图；Bilibili、视频号和 TikTok 要求视频。扫码、验证码、实名、风控或 Cookie 失效会进入“待人工确认”，系统不会绕过平台安全机制。五个 P2 渠道的代码适配已完成，但真实账号验收状态以 [`docs/p2-web-integration.md`](./docs/p2-web-integration.md) 为准。
 
 > 部署安全边界：当前 Vercel 公网站运行无媒体 Cookie、关闭真实发布的可重建 Demo，并配置服务器端 AI Secret、运营访问门和应用内 AI 限流；跨域凭据请求仅允许显式白名单来源。Vercel Serverless 实例之间不共享内存限流和 SQLite，因此持续对外服务仍应接入 Upstash/Vercel WAF 等共享限流、持久数据库与对象存储，并把媒体浏览器 Worker 隔离在受控环境，不能把本地后端和 `cookiesFile/` 直接暴露到公网。
 
