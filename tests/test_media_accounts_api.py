@@ -39,7 +39,7 @@ class MediaAccountsApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         data = response.get_json()["data"]
         self.assertEqual(data["summary"]["total"], 0)
-        self.assertEqual(len(data["platforms"]), 9)
+        self.assertEqual(len(data["platforms"]), 10)
         self.assertEqual(data["platforms"][0]["key"], "zhihu")
 
     def test_check_returns_service_result(self):

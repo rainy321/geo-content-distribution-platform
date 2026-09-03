@@ -56,6 +56,50 @@ def create_article(
     return _serialize_article(row)
 
 
+def create_articles_bulk(
+    database_path: str | Path,
+    *,
+    project_id: int,
+    articles: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Insert validated articles in one transaction."""
+
+    created: list[dict[str, Any]] = []
+    with closing(_connect(database_path)) as conn:
+        with conn:
+            project = _fetch_project(conn, project_id)
+            if project is None:
+                raise ProjectNotFoundError("品牌项目不存在")
+            for article in articles:
+                score_result = _score_article(
+                    project,
+                    article["title"],
+                    article["content"],
+                )
+                cursor = conn.execute(
+                    """
+                    INSERT INTO articles (
+                        project_id, title, summary, content, tags,
+                        geo_score, geo_analysis, status
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        project_id,
+                        article["title"],
+                        article.get("summary", ""),
+                        article["content"],
+                        _encode_json(article.get("tags", [])),
+                        score_result["score"],
+                        _encode_geo_analysis(score_result),
+                        article.get("status", "draft"),
+                    ),
+                )
+                created.append(
+                    _serialize_article(_fetch_article(conn, cursor.lastrowid))
+                )
+    return created
+
+
 def get_article(database_path: str | Path, article_id: int) -> dict[str, Any]:
     with closing(_connect(database_path)) as conn:
         row = _fetch_article(conn, article_id)

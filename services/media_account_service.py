@@ -7,17 +7,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from services.platform_capability_service import PLATFORM_CAPABILITIES
 
-PLATFORM_DEFINITIONS = (
-    {"type": 9, "key": "zhihu", "name": "知乎", "priority": "P0"},
-    {"type": 7, "key": "toutiao", "name": "今日头条", "priority": "P0"},
-    {"type": 5, "key": "baijiahao", "name": "百家号", "priority": "P0"},
-    {"type": 8, "key": "sohu", "name": "搜狐号", "priority": "P0"},
-    {"type": 1, "key": "xiaohongshu", "name": "小红书", "priority": "P1"},
-    {"type": 3, "key": "douyin", "name": "抖音", "priority": "VIDEO"},
-    {"type": 4, "key": "kuaishou", "name": "快手", "priority": "VIDEO"},
-    {"type": 2, "key": "channels", "name": "视频号", "priority": "VIDEO"},
-    {"type": 6, "key": "bilibili", "name": "Bilibili", "priority": "VIDEO"},
+
+PLATFORM_DEFINITIONS = tuple(
+    {
+        "type": item["account_type"],
+        "key": item["key"],
+        "name": item["name"],
+        "priority": item["priority"],
+    }
+    for item in PLATFORM_CAPABILITIES
 )
 _PLATFORM_BY_TYPE = {item["type"]: item for item in PLATFORM_DEFINITIONS}
 

@@ -5,6 +5,9 @@
         <p class="eyebrow">GEO WRITING DESK</p>
         <h1>AI 内容创作</h1>
         <p>从品牌事实出发生成内容，在同一张写作台上完成编辑、规则评分与保存。</p>
+        <el-button class="batch-entry" plain :icon="Files" @click="batchDialogVisible = true">
+          批量生成草稿
+        </el-button>
       </div>
 
       <ol class="flow-track" aria-label="内容生产进度">
@@ -100,6 +103,29 @@
               <el-icon><EditPen /></el-icon>
             </button>
           </div>
+
+          <el-form-item label="内容模板">
+            <div class="template-picker">
+              <el-select
+                v-model="brief.template_id"
+                clearable
+                placeholder="不使用模板"
+                @change="applySelectedTemplate"
+              >
+                <el-option
+                  v-for="item in templates"
+                  :key="item.id"
+                  :label="item.name"
+                  :value="item.id"
+                >
+                  <span>{{ item.name }}</span>
+                  <small>{{ item.is_builtin ? '内置' : '自定义' }}</small>
+                </el-option>
+              </el-select>
+              <el-button :icon="Collection" aria-label="管理内容模板" @click="templateDialogVisible = true" />
+            </div>
+            <p v-if="selectedTemplate" class="template-note">{{ selectedTemplate.description || selectedTemplate.instruction }}</p>
+          </el-form-item>
 
           <el-form-item label="文章主题" prop="topic">
             <el-input
@@ -332,6 +358,65 @@
         </div>
       </section>
     </div>
+
+    <el-dialog v-model="batchDialogVisible" title="批量生成文章" width="620px" class="editorial-dialog">
+      <div class="batch-intro">
+        <span>BATCH / 最多 5 篇</span>
+        <p>沿用当前品牌、关键词、长度、内容类型和模板。每行填写一个主题，生成后自动保存为草稿。</p>
+      </div>
+      <el-input
+        v-model="batchTopics"
+        type="textarea"
+        :rows="7"
+        resize="none"
+        placeholder="企业如何选择 AI Agent&#10;AI Agent 项目落地的常见误区"
+      />
+      <div v-if="batchResult" class="batch-result">
+        <strong>已保存 {{ batchResult.created_count }} 篇</strong>
+        <span v-if="batchResult.failed_count">{{ batchResult.failed_count }} 篇未完成</span>
+      </div>
+      <template #footer>
+        <el-button v-if="batchResult?.created_count" @click="router.push('/content-library')">查看内容库</el-button>
+        <el-button @click="batchDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="batchGenerating" :disabled="!canBatchGenerate" @click="generateBatch">
+          生成并保存草稿
+        </el-button>
+      </template>
+    </el-dialog>
+
+    <el-dialog v-model="templateDialogVisible" title="内容模板" width="760px" class="editorial-dialog">
+      <div class="template-registry">
+        <article v-for="item in templates" :key="item.id" :class="{ active: brief.template_id === item.id }">
+          <div>
+            <span>{{ item.is_builtin ? 'BUILT-IN' : 'CUSTOM' }} / {{ item.content_type }}</span>
+            <strong>{{ item.name }}</strong>
+            <p>{{ item.description || item.instruction }}</p>
+          </div>
+          <div class="template-actions">
+            <el-button text @click="selectTemplate(item)">使用</el-button>
+            <el-button v-if="!item.is_builtin" text @click="editTemplate(item)">编辑</el-button>
+            <el-button v-if="item.is_builtin" text @click="copyTemplate(item)">复制</el-button>
+            <el-button v-if="!item.is_builtin" text type="danger" @click="removeTemplate(item)">删除</el-button>
+          </div>
+        </article>
+      </div>
+
+      <div class="template-editor">
+        <span>{{ templateForm.id ? 'EDIT CUSTOM TEMPLATE' : 'NEW CUSTOM TEMPLATE' }}</span>
+        <div class="template-form-row">
+          <el-input v-model="templateForm.name" maxlength="80" placeholder="模板名称" />
+          <el-select v-model="templateForm.content_type">
+            <el-option v-for="item in contentTypes" :key="item" :label="item" :value="item" />
+          </el-select>
+        </div>
+        <el-input v-model="templateForm.description" maxlength="300" placeholder="用途说明（可选）" />
+        <el-input v-model="templateForm.instruction" type="textarea" :rows="4" maxlength="2000" show-word-limit placeholder="告诉模型应采用什么结构、语气和事实边界" />
+        <div class="template-editor-actions">
+          <el-button v-if="templateForm.id" text @click="resetTemplateForm">取消编辑</el-button>
+          <el-button type="primary" :loading="templateSaving" @click="saveTemplate">{{ templateForm.id ? '保存修改' : '新增模板' }}</el-button>
+        </div>
+      </div>
+    </el-dialog>
   </main>
 </template>
 
@@ -341,9 +426,11 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
   CircleCheckFilled,
+  Collection,
   DataAnalysis,
   EditPen,
   FolderChecked,
+  Files,
   MagicStick,
   Refresh,
   WarningFilled
@@ -368,6 +455,13 @@ const savedArticleId = ref(null)
 const dirty = ref(false)
 const loadingExisting = ref(false)
 const articleStatus = ref('draft')
+const templates = ref([])
+const templateDialogVisible = ref(false)
+const templateSaving = ref(false)
+const batchDialogVisible = ref(false)
+const batchGenerating = ref(false)
+const batchTopics = ref('')
+const batchResult = ref(null)
 
 const contentTypes = ['行业科普', '品牌介绍', '产品介绍', '解决方案', '对比文章', 'FAQ', '新闻稿']
 const platforms = [
@@ -375,7 +469,13 @@ const platforms = [
   { label: '知乎', value: '知乎' },
   { label: '今日头条', value: '今日头条' },
   { label: '百家号', value: '百家号' },
-  { label: '搜狐', value: '搜狐' }
+  { label: '搜狐', value: '搜狐' },
+  { label: '小红书', value: '小红书' },
+  { label: '抖音', value: '抖音' },
+  { label: '快手', value: '快手' },
+  { label: 'Bilibili', value: 'Bilibili' },
+  { label: '视频号', value: '视频号' },
+  { label: 'TikTok', value: 'TikTok' }
 ]
 
 const brief = reactive({
@@ -384,7 +484,16 @@ const brief = reactive({
   keywords: [],
   length: 1000,
   content_type: '行业科普',
-  target_platform: ''
+  target_platform: '',
+  template_id: null
+})
+
+const templateForm = reactive({
+  id: null,
+  name: '',
+  description: '',
+  content_type: '行业科普',
+  instruction: ''
 })
 
 const draft = reactive({
@@ -402,6 +511,22 @@ const briefRules = {
 
 const selectedProject = computed(() => (
   projects.value.find(project => project.id === brief.project_id) || null
+))
+
+const selectedTemplate = computed(() => (
+  templates.value.find(item => item.id === brief.template_id) || null
+))
+
+const parsedBatchTopics = computed(() => [...new Set(
+  batchTopics.value.split(/\r?\n/).map(item => item.trim()).filter(Boolean)
+)].slice(0, 6))
+
+const canBatchGenerate = computed(() => Boolean(
+  brief.project_id
+  && brief.keywords.length
+  && parsedBatchTopics.value.length > 0
+  && parsedBatchTopics.value.length <= 5
+  && !batchGenerating.value
 ))
 
 const availableKeywords = computed(() => {
@@ -460,6 +585,124 @@ const fetchProjects = async () => {
   }
 }
 
+const fetchTemplates = async () => {
+  try {
+    const response = await articleApi.getTemplates()
+    templates.value = response.data || []
+  } catch (error) {
+    console.error('加载内容模板失败:', error)
+  }
+}
+
+const applySelectedTemplate = () => {
+  if (selectedTemplate.value?.content_type) {
+    brief.content_type = selectedTemplate.value.content_type
+  }
+}
+
+const selectTemplate = (item) => {
+  brief.template_id = item.id
+  applySelectedTemplate()
+  templateDialogVisible.value = false
+}
+
+const resetTemplateForm = () => {
+  Object.assign(templateForm, {
+    id: null,
+    name: '',
+    description: '',
+    content_type: brief.content_type,
+    instruction: ''
+  })
+}
+
+const editTemplate = (item) => {
+  Object.assign(templateForm, {
+    id: item.id,
+    name: item.name,
+    description: item.description,
+    content_type: item.content_type,
+    instruction: item.instruction
+  })
+}
+
+const copyTemplate = (item) => {
+  Object.assign(templateForm, {
+    id: null,
+    name: `${item.name}副本`,
+    description: item.description,
+    content_type: item.content_type,
+    instruction: item.instruction
+  })
+}
+
+const saveTemplate = async () => {
+  if (!templateForm.name.trim() || !templateForm.instruction.trim()) {
+    ElMessage.warning('模板名称和写作要求不能为空')
+    return
+  }
+  templateSaving.value = true
+  const isUpdate = Boolean(templateForm.id)
+  try {
+    const payload = {
+      name: templateForm.name.trim(),
+      description: templateForm.description.trim(),
+      content_type: templateForm.content_type,
+      instruction: templateForm.instruction.trim()
+    }
+    const response = templateForm.id
+      ? await articleApi.updateTemplate(templateForm.id, payload)
+      : await articleApi.createTemplate(payload)
+    brief.template_id = response.data.id
+    await fetchTemplates()
+    applySelectedTemplate()
+    resetTemplateForm()
+    ElMessage.success(isUpdate ? '模板已更新' : '模板已创建')
+  } catch (error) {
+    console.error('保存内容模板失败:', error)
+  } finally {
+    templateSaving.value = false
+  }
+}
+
+const removeTemplate = async (item) => {
+  try {
+    await articleApi.deleteTemplate(item.id)
+    if (brief.template_id === item.id) brief.template_id = null
+    await fetchTemplates()
+    if (templateForm.id === item.id) resetTemplateForm()
+    ElMessage.success('模板已删除')
+  } catch (error) {
+    console.error('删除内容模板失败:', error)
+  }
+}
+
+const generateBatch = async () => {
+  if (!canBatchGenerate.value) {
+    if (parsedBatchTopics.value.length > 5) ElMessage.warning('一次最多生成 5 篇')
+    return
+  }
+  batchGenerating.value = true
+  batchResult.value = null
+  try {
+    const response = await articleApi.generateBatch({
+      project_id: brief.project_id,
+      topics: parsedBatchTopics.value,
+      keywords: brief.keywords,
+      length: brief.length,
+      content_type: brief.content_type,
+      target_platform: brief.target_platform,
+      template_id: brief.template_id
+    })
+    batchResult.value = response.data
+    ElMessage.success(`已保存 ${response.data.created_count} 篇批量草稿`)
+  } catch (error) {
+    console.error('批量生成失败:', error)
+  } finally {
+    batchGenerating.value = false
+  }
+}
+
 const applyProjectKeywords = () => {
   brief.keywords = [...(selectedProject.value?.keywords || [])]
 }
@@ -497,7 +740,8 @@ const generateDraft = async () => {
       keywords: brief.keywords,
       length: brief.length,
       content_type: brief.content_type,
-      target_platform: brief.target_platform
+      target_platform: brief.target_platform,
+      template_id: brief.template_id
     })
     const article = response.data
     Object.assign(draft, {
@@ -653,7 +897,7 @@ const formatGenerationError = (error) => {
 }
 
 onMounted(async () => {
-  await fetchProjects()
+  await Promise.all([fetchProjects(), fetchTemplates()])
   const articleId = Number.parseInt(route.query.articleId, 10)
   if (Number.isInteger(articleId) && articleId > 0) {
     await loadExistingArticle(articleId)
@@ -1438,6 +1682,101 @@ onMounted(async () => {
   line-height: 1.5;
 }
 
+.batch-entry {
+  margin-top: 16px;
+  border-color: rgba(13, 92, 99, 0.28);
+  color: var(--teal);
+}
+
+.template-picker {
+  display: grid;
+  width: 100%;
+  grid-template-columns: minmax(0, 1fr) 38px;
+  gap: 8px;
+
+  :deep(.el-select) { width: 100%; }
+  small { float: right; color: #829095; font-size: 10px; }
+}
+
+.template-note {
+  width: 100%;
+  margin: 6px 0 0;
+  color: #74858a;
+  font-size: 10px;
+  line-height: 1.55;
+}
+
+.batch-intro {
+  margin-bottom: 16px;
+  padding: 14px 16px;
+  border-left: 3px solid var(--signal);
+  background: var(--mist);
+
+  span {
+    color: var(--teal);
+    font: 700 10px/1.2 "Cascadia Mono", monospace;
+    letter-spacing: 0.12em;
+  }
+
+  p { margin: 7px 0 0; color: #64767b; font-size: 12px; line-height: 1.65; }
+}
+
+.batch-result {
+  display: flex;
+  gap: 14px;
+  margin-top: 14px;
+  color: var(--teal);
+  font-size: 12px;
+
+  span { color: var(--amber); }
+}
+
+.template-registry {
+  display: grid;
+  max-height: 300px;
+  overflow-y: auto;
+  border-top: 1px solid #dce5e4;
+
+  article {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 16px;
+    padding: 14px 12px;
+    border-bottom: 1px solid #dce5e4;
+  }
+
+  article.active { background: #edf7f5; }
+  span { color: var(--teal); font: 700 9px/1.2 "Cascadia Mono", monospace; letter-spacing: 0.1em; }
+  strong { display: block; margin-top: 5px; color: var(--ink); font-size: 14px; }
+  p { margin: 5px 0 0; color: #728187; font-size: 11px; line-height: 1.55; }
+}
+
+.template-actions {
+  display: flex;
+  align-items: center;
+}
+
+.template-editor {
+  display: grid;
+  gap: 10px;
+  margin-top: 22px;
+  padding: 18px;
+  background: #f4f8f7;
+
+  > span { color: var(--teal); font: 700 10px/1.2 "Cascadia Mono", monospace; letter-spacing: 0.12em; }
+}
+
+.template-form-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(150px, 0.6fr);
+  gap: 10px;
+}
+
+.template-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
 @media (max-width: 1180px) {
   .workbench-header {
     align-items: flex-start;
@@ -1493,6 +1832,8 @@ onMounted(async () => {
   .form-pair {
     grid-template-columns: 1fr;
   }
+
+  .template-form-row { grid-template-columns: 1fr; }
 
   .editor-toolbar,
   .toolbar-buttons {

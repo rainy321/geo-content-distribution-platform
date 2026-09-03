@@ -1,6 +1,10 @@
 import { http } from '@/utils/request'
 
 export const publishApi = {
+  getPlatforms() {
+    return http.get('/api/publish/platforms')
+  },
+
   createJob(data) {
     return http.post('/api/publish', data)
   },

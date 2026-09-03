@@ -15,6 +15,7 @@ from db.createTable import initialize_database
 from services.publish_scheduler_runtime import create_publish_scheduler
 from services.publish_scheduler_service import run_publish_scheduler_tick
 from services.real_publisher_factory import create_real_publisher_factory
+from services.platform_capability_service import PLATFORM_CAPABILITIES
 
 
 def _environment_flag(name: str, default: bool = False) -> bool:
@@ -88,13 +89,14 @@ def _browser_runtime_status() -> str:
 
 
 def _connected_account_count(settings: WorkerSettings) -> int:
-    supported_types = (1, 5, 7, 8, 9)
+    supported_types = tuple(item["account_type"] for item in PLATFORM_CAPABILITIES)
+    placeholders = ", ".join("?" for _ in supported_types)
     with closing(sqlite3.connect(settings.database_path)) as conn:
         rows = conn.execute(
-            """
+            f"""
             SELECT filePath
             FROM user_info
-            WHERE status = 1 AND type IN (?, ?, ?, ?, ?)
+            WHERE status = 1 AND type IN ({placeholders})
             """,
             supported_types,
         ).fetchall()

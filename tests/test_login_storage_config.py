@@ -102,6 +102,20 @@ class LoginThreadStorageConfigTests(unittest.TestCase):
             cookies_directory=self.cookies_directory,
         )
 
+    def test_web_login_thread_dispatches_tiktok(self):
+        with patch(
+            "myUtils.login.tiktok_cookie_gen",
+            new=AsyncMock(return_value=True),
+        ) as login_runner:
+            run_async_function("10", "tiktok-account", Queue())
+
+        login_runner.assert_awaited_once_with(
+            "tiktok-account",
+            ANY,
+            database_path=self.db_path,
+            cookies_directory=self.cookies_directory,
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

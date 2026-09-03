@@ -137,6 +137,36 @@ class PublishJobServiceTests(unittest.TestCase):
                     images=images,
                 )
 
+    def test_persists_portable_video_and_binds_it_to_scheduled_authorization(self):
+        job = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="bilibili",
+            video="launch.mp4",
+            publish_at="2026-09-04T18:00:00+08:00",
+            auto_execute=True,
+        )
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            article = dict(
+                conn.execute(
+                    "SELECT id, title, content, tags FROM articles WHERE id = ?",
+                    (self.article_id,),
+                ).fetchone()
+            )
+
+        self.assertEqual(job["video"], "launch.mp4")
+        self.assertTrue(publish_authorization_matches(job, article))
+        changed_job = {**job, "video": "other.mp4"}
+        self.assertFalse(publish_authorization_matches(changed_job, article))
+        with self.assertRaisesRegex(ValueError, "素材库"):
+            create_publish_job(
+                self.db_path,
+                article_id=self.article_id,
+                platform="bilibili",
+                video="../launch.mp4",
+            )
+
     def test_lists_and_filters_jobs_with_pagination(self):
         first = create_publish_job(
             self.db_path,

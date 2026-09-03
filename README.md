@@ -53,6 +53,9 @@
 - **统一 CLI**：`sau <platform> <action>`，便于脚本化与 Agent 调用
 - **可扩展 uploader**：每个平台独立模块，便于二开接入新平台
 - **GEO 内容工作流**：品牌底稿 → AI 生成 → GEO 评分/优化 → 内容库 → 多渠道分发
+- **内容生产提效**：内置/自定义内容模板、最多 5 个主题批量生成、Excel/CSV 批量导入
+- **图片工作流**：从素材库智能推荐封面，或自动生成 1200×628 中性 GEO 封面并关联稿件
+- **统一 Web 分发**：10 个渠道共用同一发布清单；图文渠道校验图片，视频渠道校验视频
 - **可追踪发布任务**：`queued / processing / success / failed / need_action / scheduled`
 - **安全 Demo Mode**：完整执行任务状态链，但明确标记为演示且不访问真实平台
 
@@ -272,6 +275,18 @@ python examples/upload_article_to_baijiahao.py
 ```
 
 抖音 / 快手 / 小红书 / B 站优先用 `sau ...`，不必再走旧示例主路径。
+
+### GEO Web 统一内容链路
+
+GEO Web 已把模板、批量文章、Excel/CSV 导入、自动配图和 10 个渠道接进同一条内容分发链路：
+
+1. 在「AI 内容创作」选择内置或自定义模板，也可一次生成最多 5 个主题草稿。
+2. 在「内容库」下载标准 Excel 模板并批量导入文章。
+3. 在「发布中心」选择稿件与渠道；百家号、小红书、抖音、快手需要图片，Bilibili、视频号、TikTok 需要视频。
+4. 图片可从素材库智能推荐，也可让系统生成中性 GEO 封面；视频从素材库上传选择。
+5. 每个渠道创建独立、可追踪的发布任务，真实执行仍受 `ALLOW_REAL_PUBLISHING` 和逐次确认保护。
+
+接口和部署边界详见 [`docs/p2-web-integration.md`](./docs/p2-web-integration.md)。
 
 ## 平台能力
 

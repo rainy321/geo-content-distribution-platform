@@ -6,6 +6,13 @@ from pathlib import Path
 
 from db.createTable import initialize_database
 from services.publish_job_executor import PublisherNotConfiguredError
+from services.media_publisher_adapters import (
+    BilibiliPublisherAdapter,
+    ChannelsPublisherAdapter,
+    DouyinPublisherAdapter,
+    KuaishouPublisherAdapter,
+    TiktokPublisherAdapter,
+)
 from services.publisher_adapter import (
     BaijiahaoPublisherAdapter,
     SohuPublisherAdapter,
@@ -122,6 +129,25 @@ class RealPublisherFactoryTests(unittest.TestCase):
 
         self.assertIsInstance(publisher, XiaohongshuPublisherAdapter)
 
+    def test_builds_p2_media_adapters_from_connected_local_cookies(self):
+        cases = (
+            ("douyin", 3, DouyinPublisherAdapter),
+            ("kuaishou", 4, KuaishouPublisherAdapter),
+            ("bilibili", 6, BilibiliPublisherAdapter),
+            ("channels", 2, ChannelsPublisherAdapter),
+            ("tiktok", 10, TiktokPublisherAdapter),
+        )
+        factory = RealPublisherFactory(
+            self.db_path,
+            cookies_directory=self.cookies_dir,
+        )
+        for platform, account_type, expected_class in cases:
+            with self.subTest(platform=platform):
+                filename = f"{platform}.json"
+                (self.cookies_dir / filename).write_text("{}", encoding="utf-8")
+                self._insert_account(filename, account_type=account_type)
+                self.assertIsInstance(factory({"platform": platform}), expected_class)
+
     def test_rejects_unsupported_platform(self):
         factory = RealPublisherFactory(
             self.db_path,
@@ -129,7 +155,7 @@ class RealPublisherFactoryTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(PublisherNotConfiguredError, "尚未接入"):
-            factory({"platform": "douyin"})
+            factory({"platform": "mastodon"})
 
     def test_refuses_missing_expired_and_path_traversal_credentials(self):
         outside = self.root / "outside.json"

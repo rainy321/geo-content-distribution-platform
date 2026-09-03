@@ -73,7 +73,7 @@
 
         <fieldset class="platform-fieldset">
           <legend>分发渠道</legend>
-          <p>第一阶段优先验证文章平台；每个选项都会生成一条可重试任务。</p>
+          <p>平台能力由后端统一声明；图文渠道和视频渠道会分别校验所需素材。</p>
           <div class="platform-grid">
             <button
               v-for="platform in platforms"
@@ -94,7 +94,7 @@
         </fieldset>
 
         <section
-          :class="['asset-panel', { required: imageRequired, missing: imageRequired && !selectedImage }]"
+          :class="['asset-panel', { required: imageRequired, missing: imageRequired && !selectedImage && !autoImage }]"
           aria-labelledby="asset-title"
         >
           <div class="asset-heading">
@@ -103,7 +103,10 @@
               <strong id="asset-title">共享图片资产</strong>
               <small>百家号取首图作为封面，小红书用作笔记图片；其他渠道可按各自规则使用。</small>
             </div>
-            <i>{{ imageRequired ? '所选渠道必需' : '可选' }}</i>
+            <div class="asset-heading-controls">
+              <el-switch v-if="imageRequired" v-model="autoImage" active-text="自动配图" />
+              <i>{{ imageRequired ? '所选渠道必需' : '可选' }}</i>
+            </div>
           </div>
 
           <article v-if="selectedImage" class="asset-record">
@@ -118,6 +121,18 @@
             </div>
             <el-button text @click="clearSelectedImage">移除</el-button>
           </article>
+
+          <div v-else-if="imageRequired && autoImage" class="asset-empty asset-auto">
+            <el-icon><MagicStick /></el-icon>
+            <div>
+              <strong>发布时自动匹配图片</strong>
+              <span>优先按品牌、标题和标签推荐素材；没有合适图片时生成一张中性 GEO 封面。</span>
+            </div>
+            <div class="asset-button-pair">
+              <el-button plain :loading="imageRecommending" @click="recommendImage">智能推荐</el-button>
+              <el-button plain :loading="coverGenerating" @click="generateCover">生成封面</el-button>
+            </div>
+          </div>
 
           <div v-else class="asset-empty">
             <el-icon><Picture /></el-icon>
@@ -141,6 +156,45 @@
             accept="image/jpeg,image/png,.jpg,.jpeg,.png"
             @change="handleImageSelected"
           />
+        </section>
+
+        <section
+          v-if="videoRequired"
+          :class="['asset-panel', 'video-panel', { required: true, missing: !selectedVideo }]"
+          aria-labelledby="video-asset-title"
+        >
+          <div class="asset-heading">
+            <span class="asset-code">ASSET / VIDEO</span>
+            <div>
+              <strong id="video-asset-title">共享视频资产</strong>
+              <small>{{ videoPlatforms.map(item => item.name).join('、') }}只接受视频，文章正文会作为描述随任务传入。</small>
+            </div>
+            <i>所选渠道必需</i>
+          </div>
+
+          <article v-if="selectedVideo" class="asset-record video-record">
+            <div class="video-glyph">▶</div>
+            <div class="asset-copy">
+              <span>READY / 已入素材库</span>
+              <strong>{{ selectedVideo.name }}</strong>
+              <small>{{ selectedVideo.filename }}</small>
+              <div class="asset-routes">
+                <b v-for="platform in videoPlatforms" :key="platform.key">→ {{ platform.name }}</b>
+              </div>
+            </div>
+            <el-button text @click="clearSelectedVideo">移除</el-button>
+          </article>
+          <div v-else class="asset-empty">
+            <el-icon><VideoCamera /></el-icon>
+            <div>
+              <strong>视频渠道还缺一段视频</strong>
+              <span>MP4 / MOV / MKV / WEBM，最大 150MB；同一视频可复用到本次所有视频渠道。</span>
+            </div>
+            <el-button plain :icon="Upload" :loading="videoUploading" @click="openVideoPicker">
+              {{ videoUploading ? `${videoUploadProgress}%` : '选择视频' }}
+            </el-button>
+          </div>
+          <input ref="videoInput" class="visually-hidden" type="file" accept="video/mp4,video/quicktime,.mp4,.mov,.mkv,.webm" @change="handleVideoSelected" />
         </section>
 
         <div class="schedule-panel">
@@ -227,7 +281,7 @@
           </div>
           <div>
             <span>ASSET</span>
-            <strong>{{ selectedImage ? '01 IMG' : 'NONE' }}</strong>
+            <strong>{{ assetSummary }}</strong>
           </div>
         </div>
 
@@ -304,6 +358,7 @@
             <strong>{{ platformName(job.platform) }}</strong>
             <small v-if="job.demo" class="demo-mark">DEMO / 演示任务</small>
             <small v-if="job.images?.length" class="asset-mark">{{ job.images.length }} IMG / 已附素材</small>
+            <small v-if="job.video" class="asset-mark">01 VIDEO / 已附素材</small>
             <small v-if="job.auto_execute" class="schedule-mark">AUTO@TIME / 已授权</small>
           </div>
 
@@ -376,10 +431,10 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Link, Lock, Picture, Promotion, Refresh, Upload } from '@element-plus/icons-vue'
+import { Link, Lock, MagicStick, Picture, Promotion, Refresh, Upload, VideoCamera } from '@element-plus/icons-vue'
 import { articleApi } from '@/api/article'
 import { materialApi } from '@/api/material'
 import { publishApi } from '@/api/publish'
@@ -387,13 +442,12 @@ import { publishApi } from '@/api/publish'
 const route = useRoute()
 const router = useRouter()
 
-const platforms = [
-  { key: 'zhihu', code: 'ZH', name: '知乎', note: 'P0 · 文章' },
-  { key: 'toutiao', code: 'TT', name: '今日头条', note: 'P0 · 图文' },
-  { key: 'baijiahao', code: 'BJ', name: '百家号', note: 'P1 · 图文' },
-  { key: 'sohu', code: 'SH', name: '搜狐号', note: 'P1 · 图文' },
-  { key: 'xiaohongshu', code: 'XH', name: '小红书', note: 'P1 · 笔记' }
-]
+const platformCodes = {
+  zhihu: 'ZH', toutiao: 'TT', baijiahao: 'BJ', sohu: 'SH', xiaohongshu: 'XH',
+  douyin: 'DY', kuaishou: 'KS', bilibili: 'BI', channels: 'WX', tiktok: 'TK'
+}
+const modeNames = { article: '文章', image_article: '图文', image_note: '图片笔记', video: '视频' }
+const platforms = ref([])
 
 const statusOptions = [
   { value: 'queued', label: '排队中' },
@@ -415,8 +469,15 @@ const autoExecuteAtDue = ref(false)
 const dispatching = ref(false)
 const imageInput = ref(null)
 const selectedImage = ref(null)
+const autoImage = ref(true)
 const imageUploading = ref(false)
 const imageUploadProgress = ref(0)
+const imageRecommending = ref(false)
+const coverGenerating = ref(false)
+const videoInput = ref(null)
+const selectedVideo = ref(null)
+const videoUploading = ref(false)
+const videoUploadProgress = ref(0)
 
 const jobs = ref([])
 const jobsLoading = ref(false)
@@ -434,19 +495,32 @@ const selectedArticle = computed(() => (
 ))
 
 const manifestPlatforms = computed(() => (
-  platforms.filter(platform => selectedPlatforms.value.includes(platform.key))
+  platforms.value.filter(platform => selectedPlatforms.value.includes(platform.key))
 ))
 
 const imagePlatforms = computed(() => (
-  manifestPlatforms.value.filter(platform => ['baijiahao', 'xiaohongshu'].includes(platform.key))
+  manifestPlatforms.value.filter(platform => platform.requires_images)
 ))
 
 const imageRequired = computed(() => imagePlatforms.value.length > 0)
+const videoPlatforms = computed(() => (
+  manifestPlatforms.value.filter(platform => platform.requires_video)
+))
+const videoRequired = computed(() => videoPlatforms.value.length > 0)
+
+const assetSummary = computed(() => {
+  const parts = []
+  if (selectedImage.value) parts.push('01 IMG')
+  else if (imageRequired.value && autoImage.value) parts.push('AUTO IMG')
+  if (selectedVideo.value) parts.push('01 VIDEO')
+  return parts.join(' + ') || 'NONE'
+})
 
 const canDispatch = computed(() => Boolean(
   selectedArticleId.value
   && selectedPlatforms.value.length
-  && (!imageRequired.value || selectedImage.value)
+  && (!imageRequired.value || selectedImage.value || autoImage.value)
+  && (!videoRequired.value || selectedVideo.value)
   && (!scheduleEnabled.value || publishAt.value)
   && !imageUploading.value
   && !dispatching.value
@@ -456,7 +530,9 @@ const dispatchButtonLabel = computed(() => {
   if (!selectedArticleId.value) return '先选择就绪稿件'
   if (!selectedPlatforms.value.length) return '至少选择一个渠道'
   if (imageUploading.value) return '图片上传中'
-  if (imageRequired.value && !selectedImage.value) return '先补齐渠道图片'
+  if (videoUploading.value) return '视频上传中'
+  if (imageRequired.value && !selectedImage.value && !autoImage.value) return '先补齐渠道图片'
+  if (videoRequired.value && !selectedVideo.value) return '先补齐渠道视频'
   if (scheduleEnabled.value && !publishAt.value) return '选择计划发布时间'
   if (scheduleEnabled.value && autoExecuteAtDue.value) {
     return `创建 ${selectedPlatforms.value.length} 个自动计划任务`
@@ -499,6 +575,19 @@ const fetchArticles = async () => {
     console.error('加载就绪稿件失败:', error)
   } finally {
     articlesLoading.value = false
+  }
+}
+
+const fetchPlatforms = async () => {
+  try {
+    const response = await publishApi.getPlatforms()
+    platforms.value = (response.data || []).map(item => ({
+      ...item,
+      code: platformCodes[item.key] || item.key.slice(0, 2).toUpperCase(),
+      note: `${item.priority} · ${modeNames[item.content_mode] || item.content_mode}`
+    }))
+  } catch (error) {
+    console.error('加载平台能力失败:', error)
   }
 }
 
@@ -598,6 +687,89 @@ const clearSelectedImage = () => {
   imageUploadProgress.value = 0
 }
 
+const materialRecordToImage = record => ({
+  filename: record.file_path,
+  name: record.filename,
+  previewUrl: materialApi.getMaterialPreviewUrl(record.file_path)
+})
+
+const recommendImage = async ({ silent = false } = {}) => {
+  if (!selectedArticleId.value || imageRecommending.value) return
+  imageRecommending.value = true
+  try {
+    const response = await articleApi.recommendImages(selectedArticleId.value)
+    const first = response.data?.items?.[0]
+    if (first) {
+      selectedImage.value = materialRecordToImage(first)
+      if (!silent) ElMessage.success('已按品牌和文章关键词匹配素材')
+    } else if (!silent) {
+      ElMessage.info('素材库暂无匹配图片，可直接生成封面')
+    }
+  } catch (error) {
+    console.error('推荐文章图片失败:', error)
+  } finally {
+    imageRecommending.value = false
+  }
+}
+
+const generateCover = async () => {
+  if (!selectedArticleId.value || coverGenerating.value) return
+  coverGenerating.value = true
+  try {
+    const response = await articleApi.generateCover(selectedArticleId.value)
+    selectedImage.value = materialRecordToImage(response.data)
+    ElMessage.success('中性 GEO 封面已生成并进入素材库')
+  } catch (error) {
+    console.error('生成文章封面失败:', error)
+  } finally {
+    coverGenerating.value = false
+  }
+}
+
+const openVideoPicker = () => {
+  if (!videoUploading.value) videoInput.value?.click()
+}
+
+const handleVideoSelected = async (event) => {
+  const input = event.target
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file) return
+  if (!/\.(mp4|mov|mkv|webm)$/i.test(file.name || '')) {
+    ElMessage.error('视频仅支持 MP4、MOV、MKV、WEBM 格式')
+    return
+  }
+  if (file.size > 150 * 1024 * 1024) {
+    ElMessage.error('视频不能超过 150MB')
+    return
+  }
+  videoUploading.value = true
+  videoUploadProgress.value = 0
+  try {
+    const formData = new FormData()
+    formData.append('file', file)
+    const response = await materialApi.uploadMaterial(formData, progressEvent => {
+      if (progressEvent.total) {
+        videoUploadProgress.value = Math.round((progressEvent.loaded * 100) / progressEvent.total)
+      }
+    })
+    const filename = String(response.data?.filepath || '').trim()
+    if (!filename) throw new Error('上传接口没有返回素材文件名')
+    selectedVideo.value = { filename, name: file.name }
+    videoUploadProgress.value = 100
+    ElMessage.success('视频已进入素材库，将复用于所选视频渠道')
+  } catch (error) {
+    console.error('上传分发视频失败:', error)
+  } finally {
+    videoUploading.value = false
+  }
+}
+
+const clearSelectedVideo = () => {
+  selectedVideo.value = null
+  videoUploadProgress.value = 0
+}
+
 const dispatchArticle = async () => {
   if (!canDispatch.value) return
   let confirmedAutoExecute = false
@@ -625,10 +797,13 @@ const dispatchArticle = async () => {
 
   for (const platform of selectedPlatforms.value) {
     try {
+      const capability = platforms.value.find(item => item.key === platform)
       const response = await publishApi.createJob({
         article_id: selectedArticleId.value,
         platform,
         images: selectedImage.value ? [selectedImage.value.filename] : [],
+        video: capability?.requires_video ? (selectedVideo.value?.filename || '') : '',
+        auto_image: autoImage.value,
         publish_at: scheduleEnabled.value ? publishAt.value : null,
         auto_execute: confirmedAutoExecute
       })
@@ -740,7 +915,7 @@ const clearJobFilters = () => {
   applyJobFilters()
 }
 
-const platformName = (key) => platforms.find(platform => platform.key === key)?.name || key
+const platformName = (key) => platforms.value.find(platform => platform.key === key)?.name || key
 const statusLabel = (status) => statusOptions.find(item => item.value === status)?.label || status
 
 const latestPlatformState = (platformKey) => {
@@ -808,8 +983,14 @@ const scheduleJobPoll = () => {
 
 onMounted(async () => {
   pollingStopped = false
-  await Promise.allSettled([fetchArticles(), fetchJobs()])
+  await Promise.allSettled([fetchPlatforms(), fetchArticles(), fetchJobs()])
   scheduleJobPoll()
+})
+
+watch(selectedArticleId, async value => {
+  selectedImage.value = null
+  selectedVideo.value = null
+  if (value) await recommendImage({ silent: true })
 })
 
 onBeforeUnmount(() => {
@@ -1113,6 +1294,13 @@ onBeforeUnmount(() => {
   }
 }
 
+.asset-heading .asset-heading-controls {
+  align-items: flex-end;
+  gap: 6px;
+
+  :deep(.el-switch__label) { color: #45666c; font-size: 10px; }
+}
+
 .asset-empty,
 .asset-record {
   display: grid;
@@ -1121,6 +1309,27 @@ onBeforeUnmount(() => {
   align-items: center;
   min-height: 76px;
   padding: 13px 15px;
+}
+
+.asset-auto { background: #f3faf8; }
+
+.asset-button-pair {
+  display: flex !important;
+  flex-direction: row !important;
+  gap: 7px !important;
+}
+
+.video-panel { border-color: #9aaec2; }
+
+.video-glyph {
+  display: grid;
+  width: 70px;
+  height: 54px;
+  place-items: center;
+  border: 1px solid #aabac7;
+  background: #142c36;
+  color: #7ce0d8;
+  font-size: 18px;
 }
 
 .asset-empty {

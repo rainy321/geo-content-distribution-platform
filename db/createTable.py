@@ -40,10 +40,31 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                     filename TEXT NOT NULL,
                     filesize REAL,
                     upload_time DATETIME DEFAULT CURRENT_TIMESTAMP,
-                    file_path TEXT
+                    file_path TEXT,
+                    media_type TEXT NOT NULL DEFAULT 'file',
+                    tags TEXT NOT NULL DEFAULT '[]',
+                    source TEXT NOT NULL DEFAULT 'upload'
                 )
                 '''
             )
+            file_record_columns = {
+                row[1] for row in cursor.execute("PRAGMA table_info(file_records)")
+            }
+            if "media_type" not in file_record_columns:
+                cursor.execute(
+                    "ALTER TABLE file_records "
+                    "ADD COLUMN media_type TEXT NOT NULL DEFAULT 'file'"
+                )
+            if "tags" not in file_record_columns:
+                cursor.execute(
+                    "ALTER TABLE file_records "
+                    "ADD COLUMN tags TEXT NOT NULL DEFAULT '[]'"
+                )
+            if "source" not in file_record_columns:
+                cursor.execute(
+                    "ALTER TABLE file_records "
+                    "ADD COLUMN source TEXT NOT NULL DEFAULT 'upload'"
+                )
             cursor.execute(
                 '''
                 CREATE TABLE IF NOT EXISTS projects (
@@ -87,6 +108,58 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
             )
             cursor.execute(
                 '''
+                CREATE TABLE IF NOT EXISTS content_templates (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    description TEXT NOT NULL DEFAULT '',
+                    content_type TEXT NOT NULL DEFAULT '行业科普',
+                    instruction TEXT NOT NULL,
+                    is_builtin INTEGER NOT NULL DEFAULT 0
+                        CHECK (is_builtin IN (0, 1)),
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                '''
+            )
+            cursor.executemany(
+                '''
+                INSERT OR IGNORE INTO content_templates (
+                    id, name, description, content_type, instruction, is_builtin
+                ) VALUES (?, ?, ?, ?, ?, 1)
+                ''',
+                (
+                    (
+                        1,
+                        "行业问题拆解",
+                        "从用户问题出发，形成解释、方案、FAQ 与总结。",
+                        "行业科普",
+                        "开头直接回答文章主题中的核心问题；正文按问题、原因、判断标准、行动建议组织，并保留 FAQ。",
+                    ),
+                    (
+                        2,
+                        "产品解决方案",
+                        "围绕业务痛点说明产品如何解决问题。",
+                        "解决方案",
+                        "先描述可验证的业务场景和痛点，再说明产品能力、适用边界和实施步骤；禁止编造客户案例与效果数据。",
+                    ),
+                    (
+                        3,
+                        "竞品选择指南",
+                        "用透明维度帮助读者比较不同方案。",
+                        "对比文章",
+                        "使用适用对象、核心能力、实施成本和限制条件作为比较维度；只比较输入中可确认的事实，不贬低竞品。",
+                    ),
+                    (
+                        4,
+                        "问答知识库",
+                        "生成适合搜索与 AI 摘要引用的结构化问答。",
+                        "FAQ",
+                        "正文以 5 至 8 个真实用户问题为主，每个回答先给结论再解释依据；最后增加选择或实施清单。",
+                    ),
+                ),
+            )
+            cursor.execute(
+                '''
                 CREATE TABLE IF NOT EXISTS publish_jobs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     article_id INTEGER NOT NULL,
@@ -99,6 +172,7 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                     message TEXT NOT NULL DEFAULT '',
                     result_url TEXT NOT NULL DEFAULT '',
                     images TEXT NOT NULL DEFAULT '[]',
+                    video TEXT NOT NULL DEFAULT '',
                     publish_at DATETIME,
                     authorization_fingerprint TEXT NOT NULL DEFAULT '',
                     auto_execute INTEGER NOT NULL DEFAULT 0
@@ -119,6 +193,11 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                 cursor.execute(
                     "ALTER TABLE publish_jobs "
                     "ADD COLUMN images TEXT NOT NULL DEFAULT '[]'"
+                )
+            if "video" not in publish_job_columns:
+                cursor.execute(
+                    "ALTER TABLE publish_jobs "
+                    "ADD COLUMN video TEXT NOT NULL DEFAULT ''"
                 )
             if "auto_execute" not in publish_job_columns:
                 cursor.execute(

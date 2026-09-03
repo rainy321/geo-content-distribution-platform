@@ -719,5 +719,64 @@ async def bilibili_cookie_gen(
     status_queue.put("500")
 
 
+async def tiktok_cookie_gen(
+    id, status_queue, *, database_path=None, cookies_directory=None
+):
+    """Open a headed TikTok login and persist the browser session for Web use."""
+
+    status_queue.put("MANUAL_LOGIN")
+    cookies_dir = _login_cookies_directory(cookies_directory)
+    cookies_dir.mkdir(parents=True, exist_ok=True)
+    file_name = f"tiktok_{uuid.uuid1()}.json"
+    account_file = cookies_dir / file_name
+
+    try:
+        async with async_playwright() as playwright:
+            options = get_browser_options()
+            options["headless"] = False
+            browser = await playwright.chromium.launch(**options)
+            context = await browser.new_context()
+            context = await set_init_script(context)
+            page = await context.new_page()
+            try:
+                await page.goto(
+                    "https://www.tiktok.com/login?lang=en",
+                    timeout=60_000,
+                    wait_until="domcontentloaded",
+                )
+                authenticated = False
+                for _ in range(200):
+                    cookies = await context.cookies()
+                    cookie_names = {str(item.get("name") or "") for item in cookies}
+                    if cookie_names.intersection({"sessionid", "sessionid_ss", "sid_tt"}):
+                        authenticated = True
+                        break
+                    await page.wait_for_timeout(1000)
+                if not authenticated:
+                    status_queue.put("500")
+                    return None
+                await context.storage_state(path=account_file)
+            finally:
+                await context.close()
+                await browser.close()
+
+        result = await check_cookie(10, file_name, cookies_directory=cookies_dir)
+        with sqlite3.connect(_login_database_path(database_path)) as conn:
+            conn.execute(
+                """
+                INSERT INTO user_info (type, filePath, userName, status)
+                VALUES (?, ?, ?, ?)
+                """,
+                (10, file_name, id, 1 if result else 0),
+            )
+            conn.commit()
+        status_queue.put("200")
+        return True
+    except Exception as exc:
+        print(f"❌ TikTok登录异常: {exc}")
+        status_queue.put("500")
+        return None
+
+
 # a = asyncio.run(xiaohongshu_cookie_gen(4,None))
 # print(a)

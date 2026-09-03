@@ -103,6 +103,7 @@ def generate_geo_content(
     length: int,
     content_type: str,
     target_platform: str = "",
+    template_instruction: str = "",
     settings: AISettings | None = None,
     http_post=None,
 ) -> dict[str, Any]:
@@ -116,6 +117,7 @@ def generate_geo_content(
         length=length,
         content_type=content_type,
         target_platform=target_platform,
+        template_instruction=template_instruction,
     )
 
     raw_content = _request_chat_completion(
@@ -328,9 +330,16 @@ def _build_prompt(
     length: int,
     content_type: str,
     target_platform: str,
+    template_instruction: str = "",
 ) -> str:
     keyword_text = "、".join(keywords) if keywords else "无指定关键词"
     platform_text = target_platform or "通用内容媒体平台"
+    template_text = str(template_instruction or "").strip()
+    template_section = (
+        f"\n本次内容模板的额外要求：\n{template_text}\n"
+        if template_text
+        else ""
+    )
     return f"""
 请根据以下资料生成一篇适合搜索引擎、生成式 AI 以及内容媒体平台收录的中文文章。
 
@@ -343,6 +352,7 @@ def _build_prompt(
 文章主题：{topic}
 内容类型：{content_type}
 目标平台：{platform_text}
+{template_section}
 
 要求：
 1. 生成一个自然、可读的标题。

@@ -52,10 +52,12 @@ class FixedWindowRateLimiter:
         key: str,
         *,
         limit: int,
+        cost: int = 1,
         now: float | None = None,
     ) -> RateLimitDecision:
         if limit <= 0:
             return RateLimitDecision(True, 0, 0)
+        normalized_cost = max(1, int(cost))
 
         current = time.time() if now is None else float(now)
         window = int(current // self.window_seconds)
@@ -65,7 +67,7 @@ class FixedWindowRateLimiter:
             stored_window, count = self._buckets.get(bucket_key, (window, 0))
             if stored_window != window:
                 count = 0
-            if count >= limit:
+            if count + normalized_cost > limit:
                 retry_after = max(
                     1,
                     int(((window + 1) * self.window_seconds) - current + 0.999),
@@ -73,7 +75,7 @@ class FixedWindowRateLimiter:
                 self._buckets[bucket_key] = (window, count)
                 return RateLimitDecision(False, 0, retry_after)
 
-            count += 1
+            count += normalized_cost
             self._buckets[bucket_key] = (window, count)
             if len(self._buckets) > self.max_buckets:
                 self._prune(window)
@@ -106,12 +108,13 @@ class UpstashRateLimiter:
     _CONSUME_SCRIPT = """
 local current = tonumber(redis.call('GET', KEYS[1]) or '0')
 local limit = tonumber(ARGV[1])
-if current >= limit then
+local cost = tonumber(ARGV[2])
+if current + cost > limit then
   return {0, current}
 end
-current = redis.call('INCR', KEYS[1])
-if current == 1 then
-  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+current = redis.call('INCRBY', KEYS[1], cost)
+if current == cost then
+  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
 end
 return {1, current}
 """.strip()
@@ -167,10 +170,12 @@ return {1, current}
         key: str,
         *,
         limit: int,
+        cost: int = 1,
         now: float | None = None,
     ) -> RateLimitDecision:
         if limit <= 0:
             return RateLimitDecision(True, 0, 0)
+        normalized_cost = max(1, int(cost))
 
         current = time.time() if now is None else float(now)
         window = int(current // self.window_seconds)
@@ -188,6 +193,7 @@ return {1, current}
             "1",
             redis_key,
             int(limit),
+            normalized_cost,
             retry_after + 1,
         ]
 
@@ -215,11 +221,21 @@ return {1, current}
                 "rate_limit.shared_unavailable error_type=%s fallback=instance",
                 type(exc).__name__,
             )
-            return self._fallback.consume(key, limit=limit, now=current)
+            return self._fallback.consume(
+                key,
+                limit=limit,
+                cost=normalized_cost,
+                now=current,
+            )
 
         # Mirror successful traffic locally so failover does not start from an
         # empty counter after the shared provider becomes unavailable.
-        self._fallback.consume(key, limit=limit, now=current)
+        self._fallback.consume(
+            key,
+            limit=limit,
+            cost=normalized_cost,
+            now=current,
+        )
         return RateLimitDecision(
             allowed=allowed,
             remaining=max(0, int(limit) - count),

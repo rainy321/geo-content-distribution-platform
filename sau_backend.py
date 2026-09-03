@@ -2,6 +2,7 @@ import asyncio
 import hmac
 import json
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -17,6 +18,7 @@ from flask import (
     jsonify,
     render_template,
     request,
+    send_file,
     send_from_directory,
     session,
 )
@@ -33,9 +35,29 @@ from services.article_service import (
     ARTICLE_STATUSES,
     ArticleNotFoundError,
     create_article,
+    create_articles_bulk,
     get_article,
     list_articles,
     update_article,
+)
+from services.article_import_service import (
+    ArticleImportError,
+    build_article_import_template,
+    parse_article_import,
+)
+from services.content_template_service import (
+    BuiltinTemplateMutationError,
+    ContentTemplateNotFoundError,
+    create_content_template,
+    delete_content_template,
+    get_content_template,
+    list_content_templates,
+    update_content_template,
+)
+from services.cover_image_service import (
+    ensure_article_cover,
+    generate_article_cover,
+    recommend_article_images,
 )
 from services.geo_score_service import score_geo_content
 from services.dashboard_service import get_dashboard_overview
@@ -45,6 +67,10 @@ from services.media_account_service import (
     MediaAccountNotFoundError,
     check_media_account,
     get_media_accounts_overview,
+)
+from services.platform_capability_service import (
+    get_platform_capability,
+    list_platform_capabilities,
 )
 from services.project_service import (
     ProjectHasArticlesError,
@@ -65,6 +91,7 @@ from services.publish_job_service import (
     get_publish_job,
     list_publish_jobs,
     normalize_publish_images,
+    normalize_publish_video,
     retry_publish_job,
 )
 from services.publish_scheduler_runtime import create_publish_scheduler
@@ -506,13 +533,14 @@ ARTICLE_CONTENT_TYPES = {
 }
 
 
-def _enforce_ai_rate_limit():
+def _enforce_ai_rate_limit(*, cost=1):
     limit = int(app.config.get("AI_RATE_LIMIT_PER_MINUTE", 0))
     if limit <= 0:
         return None
     decision = app.config["AI_RATE_LIMITER"].consume(
         f"ai:{_client_rate_key()}",
         limit=limit,
+        cost=cost,
     )
     if decision.allowed:
         return None
@@ -535,44 +563,9 @@ def generate_article():
     if not isinstance(data, dict):
         return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
 
-    try:
-        project_id = int(data.get("project_id"))
-    except (TypeError, ValueError):
-        return jsonify({"code": 400, "msg": "project_id 必须是整数", "data": None}), 400
-    if project_id <= 0:
-        return jsonify({"code": 400, "msg": "project_id 必须是正整数", "data": None}), 400
-
-    topic = str(data.get("topic") or "").strip()
-    if not topic:
-        return jsonify({"code": 400, "msg": "文章主题不能为空", "data": None}), 400
-
-    try:
-        length = int(data.get("length", 1000))
-    except (TypeError, ValueError):
-        return jsonify({"code": 400, "msg": "文章长度必须是整数", "data": None}), 400
-    if length not in ARTICLE_LENGTHS:
-        return jsonify({"code": 400, "msg": "文章长度仅支持 600、1000、1500", "data": None}), 400
-
-    content_type = str(data.get("content_type") or "行业科普").strip()
-    if content_type not in ARTICLE_CONTENT_TYPES:
-        return jsonify({"code": 400, "msg": "不支持的内容类型", "data": None}), 400
-
-    project = _get_project(project_id)
-    if project is None:
-        return jsonify({"code": 404, "msg": "品牌项目不存在", "data": None}), 404
-
-    requested_keywords = data.get("keywords", project["keywords"])
-    if not isinstance(requested_keywords, list):
-        return jsonify({"code": 400, "msg": "keywords 必须是字符串数组", "data": None}), 400
-    keywords = _normalize_string_list(requested_keywords)
-    target_platform = str(
-        data.get("target_platform") or data.get("targetPlatform") or ""
-    ).strip()
-
-    try:
-        ai_settings = _request_ai_settings(data)
-    except AIConfigurationError as exc:
-        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    generation, error = _prepare_generation_request(data)
+    if error is not None:
+        return error
 
     rate_limit_response = _enforce_ai_rate_limit()
     if rate_limit_response is not None:
@@ -580,13 +573,7 @@ def generate_article():
 
     try:
         article = generate_geo_content(
-            project=project,
-            topic=topic,
-            keywords=keywords,
-            length=length,
-            content_type=content_type,
-            target_platform=target_platform,
-            settings=ai_settings,
+            **generation,
         )
     except AIConfigurationError as exc:
         return jsonify({"code": 503, "msg": str(exc), "data": None}), 503
@@ -594,6 +581,211 @@ def generate_article():
         return jsonify({"code": 502, "msg": str(exc), "data": None}), 502
 
     return jsonify({"code": 200, "msg": "success", "data": article}), 200
+
+
+@app.route('/api/articles/generate-batch', methods=['POST'])
+def generate_article_batch():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
+    topics = data.get("topics")
+    if not isinstance(topics, list):
+        return jsonify({"code": 400, "msg": "topics 必须是字符串数组", "data": None}), 400
+    normalized_topics = _normalize_string_list(topics)
+    if not normalized_topics:
+        return jsonify({"code": 400, "msg": "至少提供一个文章主题", "data": None}), 400
+    if len(normalized_topics) > 5:
+        return jsonify({"code": 400, "msg": "一次最多批量生成 5 篇文章", "data": None}), 400
+
+    generation, error = _prepare_generation_request(
+        {**data, "topic": normalized_topics[0]}
+    )
+    if error is not None:
+        return error
+    rate_limit_response = _enforce_ai_rate_limit(cost=len(normalized_topics))
+    if rate_limit_response is not None:
+        return rate_limit_response
+
+    items = []
+    stopped = False
+    for topic in normalized_topics:
+        if stopped:
+            items.append(
+                {
+                    "topic": topic,
+                    "status": "skipped",
+                    "message": "前一个模型请求失败，未继续消耗额度",
+                }
+            )
+            continue
+        try:
+            draft = generate_geo_content(**{**generation, "topic": topic})
+            article = create_article(
+                app.config["DATABASE_PATH"],
+                project_id=int(data["project_id"]),
+                title=draft["title"],
+                summary=draft["summary"],
+                content=draft["content"],
+                tags=draft["tags"],
+                status="draft",
+            )
+            items.append({"topic": topic, "status": "created", "article": article})
+        except (AIConfigurationError, AIServiceError) as exc:
+            items.append({"topic": topic, "status": "failed", "message": str(exc)})
+            stopped = True
+
+    created_count = sum(item["status"] == "created" for item in items)
+    return jsonify(
+        {
+            "code": 200,
+            "msg": f"批量任务完成，已保存 {created_count} 篇草稿",
+            "data": {
+                "items": items,
+                "created_count": created_count,
+                "failed_count": len(items) - created_count,
+            },
+        }
+    ), 200
+
+
+def _prepare_generation_request(data):
+    try:
+        project_id = int(data.get("project_id"))
+    except (TypeError, ValueError):
+        return None, (jsonify({"code": 400, "msg": "project_id 必须是整数", "data": None}), 400)
+    if project_id <= 0:
+        return None, (jsonify({"code": 400, "msg": "project_id 必须是正整数", "data": None}), 400)
+    topic = str(data.get("topic") or "").strip()
+    if not topic:
+        return None, (jsonify({"code": 400, "msg": "文章主题不能为空", "data": None}), 400)
+    try:
+        length = int(data.get("length", 1000))
+    except (TypeError, ValueError):
+        return None, (jsonify({"code": 400, "msg": "文章长度必须是整数", "data": None}), 400)
+    if length not in ARTICLE_LENGTHS:
+        return None, (jsonify({"code": 400, "msg": "文章长度仅支持 600、1000、1500", "data": None}), 400)
+    content_type = str(data.get("content_type") or "行业科普").strip()
+    if content_type not in ARTICLE_CONTENT_TYPES:
+        return None, (jsonify({"code": 400, "msg": "不支持的内容类型", "data": None}), 400)
+    project = _get_project(project_id)
+    if project is None:
+        return None, (jsonify({"code": 404, "msg": "品牌项目不存在", "data": None}), 404)
+    requested_keywords = data.get("keywords", project["keywords"])
+    if not isinstance(requested_keywords, list):
+        return None, (jsonify({"code": 400, "msg": "keywords 必须是字符串数组", "data": None}), 400)
+    template_instruction = ""
+    if data.get("template_id") not in (None, ""):
+        try:
+            template_id = int(data["template_id"])
+            if template_id <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return None, (jsonify({"code": 400, "msg": "template_id 必须是正整数", "data": None}), 400)
+        try:
+            template_instruction = get_content_template(
+                app.config["DATABASE_PATH"], template_id
+            )["instruction"]
+        except ContentTemplateNotFoundError as exc:
+            return None, (jsonify({"code": 404, "msg": str(exc), "data": None}), 404)
+    try:
+        ai_settings = _request_ai_settings(data)
+    except AIConfigurationError as exc:
+        return None, (jsonify({"code": 400, "msg": str(exc), "data": None}), 400)
+    return {
+        "project": project,
+        "topic": topic,
+        "keywords": _normalize_string_list(requested_keywords),
+        "length": length,
+        "content_type": content_type,
+        "target_platform": str(
+            data.get("target_platform") or data.get("targetPlatform") or ""
+        ).strip(),
+        "template_instruction": template_instruction,
+        "settings": ai_settings,
+    }, None
+
+
+@app.route('/api/content-templates', methods=['GET'])
+def get_content_template_list():
+    return jsonify(
+        {
+            "code": 200,
+            "msg": "success",
+            "data": list_content_templates(app.config["DATABASE_PATH"]),
+        }
+    ), 200
+
+
+@app.route('/api/content-templates', methods=['POST'])
+def save_content_template():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
+    values, error = _parse_content_template_fields(data, partial=False)
+    if error:
+        return jsonify({"code": 400, "msg": error, "data": None}), 400
+    try:
+        template = create_content_template(app.config["DATABASE_PATH"], **values)
+    except ValueError as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+    return jsonify({"code": 201, "msg": "内容模板已创建", "data": template}), 201
+
+
+@app.route('/api/content-templates/<int:template_id>', methods=['PUT'])
+def edit_content_template(template_id):
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
+    values, error = _parse_content_template_fields(data, partial=True)
+    if error:
+        return jsonify({"code": 400, "msg": error, "data": None}), 400
+    if not values:
+        return jsonify({"code": 400, "msg": "没有可更新的模板字段", "data": None}), 400
+    try:
+        template = update_content_template(
+            app.config["DATABASE_PATH"], template_id, values
+        )
+    except ContentTemplateNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except BuiltinTemplateMutationError as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+    except ValueError as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+    return jsonify({"code": 200, "msg": "内容模板已更新", "data": template}), 200
+
+
+@app.route('/api/content-templates/<int:template_id>', methods=['DELETE'])
+def remove_content_template(template_id):
+    try:
+        delete_content_template(app.config["DATABASE_PATH"], template_id)
+    except ContentTemplateNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except BuiltinTemplateMutationError as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+    return jsonify({"code": 200, "msg": "内容模板已删除", "data": None}), 200
+
+
+def _parse_content_template_fields(data, *, partial):
+    limits = {"name": 80, "description": 300, "instruction": 2000}
+    result = {}
+    for field, maximum in limits.items():
+        if partial and field not in data:
+            continue
+        value = data.get(field, "")
+        if not isinstance(value, str):
+            return None, f"{field} 必须是字符串"
+        value = value.strip()
+        if field in {"name", "instruction"} and not value:
+            return None, "模板名称和写作要求不能为空"
+        if len(value) > maximum:
+            return None, f"{field} 不能超过 {maximum} 字"
+        result[field] = value
+    if not partial or "content_type" in data:
+        content_type = str(data.get("content_type") or "行业科普").strip()
+        if content_type not in ARTICLE_CONTENT_TYPES:
+            return None, "不支持的内容类型"
+        result["content_type"] = content_type
+    return result, None
 
 
 @app.route('/api/ai/config-status', methods=['GET'])
@@ -773,6 +965,56 @@ def get_article_list():
     return jsonify({"code": 200, "msg": "success", "data": result}), 200
 
 
+@app.route('/api/articles/import-template.xlsx', methods=['GET'])
+def download_article_import_template():
+    return send_file(
+        build_article_import_template(),
+        as_attachment=True,
+        download_name="GEO-文章导入模板.xlsx",
+        mimetype=(
+            "application/vnd.openxmlformats-officedocument."
+            "spreadsheetml.sheet"
+        ),
+    )
+
+
+@app.route('/api/articles/import', methods=['POST'])
+def import_articles():
+    upload = request.files.get("file")
+    if upload is None or not upload.filename:
+        return jsonify({"code": 400, "msg": "请选择 Excel 或 CSV 文件", "data": None}), 400
+    try:
+        project_id = int(request.form.get("project_id"))
+    except (TypeError, ValueError):
+        return jsonify({"code": 400, "msg": "project_id 必须是整数", "data": None}), 400
+    if project_id <= 0:
+        return jsonify({"code": 400, "msg": "project_id 必须是正整数", "data": None}), 400
+    try:
+        records = parse_article_import(upload.stream, filename=upload.filename)
+        articles = create_articles_bulk(
+            app.config["DATABASE_PATH"],
+            project_id=project_id,
+            articles=records,
+        )
+    except ArticleImportError as exc:
+        return jsonify(
+            {
+                "code": 400,
+                "msg": str(exc),
+                "data": {"row_errors": exc.rows},
+            }
+        ), 400
+    except ProjectNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    return jsonify(
+        {
+            "code": 201,
+            "msg": f"已导入 {len(articles)} 篇文章",
+            "data": {"items": articles, "created_count": len(articles)},
+        }
+    ), 201
+
+
 @app.route('/api/articles/<int:article_id>', methods=['GET'])
 def get_article_detail(article_id):
     try:
@@ -780,6 +1022,47 @@ def get_article_detail(article_id):
     except ArticleNotFoundError as exc:
         return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
     return jsonify({"code": 200, "msg": "success", "data": article}), 200
+
+
+@app.route('/api/articles/<int:article_id>/images/recommend', methods=['GET'])
+def get_article_image_recommendations(article_id):
+    try:
+        article = get_article(app.config["DATABASE_PATH"], article_id)
+    except ArticleNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    project = _get_project(article["project_id"])
+    if project is None:
+        return jsonify({"code": 409, "msg": "文章关联的品牌项目不存在", "data": None}), 409
+    try:
+        limit = int(request.args.get("limit", 3))
+        items = recommend_article_images(
+            app.config["DATABASE_PATH"],
+            media_root=app.config["MEDIA_ROOT"],
+            article=article,
+            project=project,
+            limit=limit,
+        )
+    except (TypeError, ValueError) as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    return jsonify({"code": 200, "msg": "success", "data": {"items": items}}), 200
+
+
+@app.route('/api/articles/<int:article_id>/images/generate', methods=['POST'])
+def create_article_cover_image(article_id):
+    try:
+        article = get_article(app.config["DATABASE_PATH"], article_id)
+    except ArticleNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    project = _get_project(article["project_id"])
+    if project is None:
+        return jsonify({"code": 409, "msg": "文章关联的品牌项目不存在", "data": None}), 409
+    record = generate_article_cover(
+        app.config["DATABASE_PATH"],
+        media_root=app.config["MEDIA_ROOT"],
+        article=article,
+        project=project,
+    )
+    return jsonify({"code": 201, "msg": "文章封面已生成", "data": record}), 201
 
 
 @app.route('/api/articles/<int:article_id>', methods=['PUT'])
@@ -946,11 +1229,40 @@ def create_publish_task():
 
     try:
         images = _validate_publish_images(data.get("images"))
+        video = _validate_publish_video(data.get("video"))
     except ValueError as exc:
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
 
+    capability = get_platform_capability(platform)
+    if capability is None:
+        return jsonify({"code": 400, "msg": "暂不支持该发布平台", "data": None}), 400
+
+    auto_image = data.get("auto_image", False)
+    if not isinstance(auto_image, bool):
+        return jsonify({"code": 400, "msg": "auto_image 必须是布尔值", "data": None}), 400
+    if auto_image and not images and platform in {
+        "baijiahao",
+        "xiaohongshu",
+        "douyin",
+        "kuaishou",
+    }:
+        try:
+            article = get_article(app.config["DATABASE_PATH"], article_id)
+        except ArticleNotFoundError as exc:
+            return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+        project = _get_project(article["project_id"])
+        if project is None:
+            return jsonify({"code": 409, "msg": "文章关联的品牌项目不存在", "data": None}), 409
+        record, _generated = ensure_article_cover(
+            app.config["DATABASE_PATH"],
+            media_root=app.config["MEDIA_ROOT"],
+            article=article,
+            project=project,
+        )
+        images = [record["file_path"]]
+
     if (
-        platform in {"baijiahao", "xiaohongshu"}
+        capability["requires_images"]
         and not app.config.get("DEMO_MODE", False)
         and not images
     ):
@@ -958,6 +1270,19 @@ def create_publish_task():
             {
                 "code": 400,
                 "msg": f"{platform} 图文发布必须提供至少一张素材图片",
+                "data": None,
+            }
+        ), 400
+
+    if (
+        capability["requires_video"]
+        and not app.config.get("DEMO_MODE", False)
+        and not video
+    ):
+        return jsonify(
+            {
+                "code": 400,
+                "msg": f"{capability['name']} 发布必须提供一段视频素材",
                 "data": None,
             }
         ), 400
@@ -994,6 +1319,7 @@ def create_publish_task():
             article_id=article_id,
             platform=platform,
             images=images,
+            video=video,
             publish_at=data.get("publish_at"),
             auto_execute=auto_execute,
             demo=bool(app.config.get("DEMO_MODE", False)),
@@ -1168,6 +1494,7 @@ def _publish_job_payload(job):
         "message": job["message"],
         "url": job["result_url"],
         "images": list(job.get("images") or ()),
+        "video": str(job.get("video") or ""),
         "publish_at": job["publish_at"],
         "auto_execute": bool(job.get("auto_execute", False)),
         "authorization_bound": bool(job.get("authorization_bound", False)),
@@ -1203,6 +1530,30 @@ def _validate_publish_images(value):
         if not image_path.is_file():
             raise ValueError(f"素材图片不存在：{filename}")
     return images
+
+
+def _validate_publish_video(value):
+    video = normalize_publish_video(value)
+    if not video:
+        return ""
+    if Path(video).suffix.lower() not in {".mp4", ".mov", ".mkv", ".webm"}:
+        raise ValueError("发布视频仅支持 MP4、MOV、MKV、WEBM 格式")
+    media_root = Path(app.config["MEDIA_ROOT"]).expanduser().resolve()
+    video_path = (media_root / video).resolve()
+    try:
+        video_path.relative_to(media_root)
+    except ValueError as exc:
+        raise ValueError("发布视频必须来自素材库") from exc
+    if not video_path.is_file():
+        raise ValueError(f"素材视频不存在：{video}")
+    return video
+
+
+@app.route('/api/publish/platforms', methods=['GET'])
+def get_publish_platforms():
+    return jsonify(
+        {"code": 200, "msg": "success", "data": list_platform_capabilities()}
+    ), 200
 
 
 @app.route('/api/projects', methods=['POST'])
@@ -1401,12 +1752,28 @@ def upload_save():
         # 保存文件
         file.save(filepath)
 
+        suffix = filepath.suffix.lower()
+        media_type = (
+            "image" if suffix in {".jpg", ".jpeg", ".png"}
+            else "video" if suffix in {".mp4", ".mov", ".mkv", ".webm"}
+            else "file"
+        )
+        upload_tags = _normalize_string_list(
+            re.split(r"[,，;；]", str(request.form.get("tags") or ""))
+        )[:20]
         with sqlite3.connect(app.config["DATABASE_PATH"]) as conn:
             cursor = conn.cursor()
             cursor.execute('''
-                                INSERT INTO file_records (filename, filesize, file_path)
-            VALUES (?, ?, ?)
-                                ''', (filename, round(float(os.path.getsize(filepath)) / (1024 * 1024),2), final_filename))
+                INSERT INTO file_records (
+                    filename, filesize, file_path, media_type, tags, source
+                ) VALUES (?, ?, ?, ?, ?, 'upload')
+                ''', (
+                    filename,
+                    round(float(os.path.getsize(filepath)) / (1024 * 1024), 2),
+                    final_filename,
+                    media_type,
+                    json.dumps(upload_tags, ensure_ascii=False),
+                ))
             conn.commit()
             print("✅ 上传文件已记录")
 
@@ -1443,6 +1810,7 @@ def get_all_files():
             data = []
             for row in rows:
                 row_dict = dict(row)
+                row_dict['tags'] = _decode_json_list(row_dict.get('tags'))
                 # 从 file_path 中提取 UUID (文件名的第一部分，下划线前)
                 if row_dict.get('file_path'):
                     file_path_parts = row_dict['file_path'].split('_', 1)  # 只分割第一个下划线
@@ -1668,7 +2036,7 @@ def login():
     login_type = str(request.args.get('type') or '').strip()
     # 账号名
     account_id = str(request.args.get('id') or '').strip()
-    if login_type not in {str(value) for value in range(1, 10)}:
+    if login_type not in {str(value) for value in range(1, 11)}:
         return jsonify({"code": 400, "msg": "不支持的平台类型", "data": None}), 400
     if not account_id:
         return jsonify({"code": 400, "msg": "账号名不能为空", "data": None}), 400
@@ -2334,6 +2702,7 @@ def run_async_function(type,id,status_queue):
         get_tencent_cookie,
         sohu_cookie_gen,
         toutiao_cookie_gen,
+        tiktok_cookie_gen,
         xiaohongshu_cookie_gen,
         zhihu_cookie_gen,
     )
@@ -2406,6 +2775,13 @@ def run_async_function(type,id,status_queue):
                 asyncio.set_event_loop(loop)
                 loop.run_until_complete(
                     zhihu_cookie_gen(id, status_queue, **login_storage)
+                )
+                loop.close()
+            case '10':
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+                loop.run_until_complete(
+                    tiktok_cookie_gen(id, status_queue, **login_storage)
                 )
                 loop.close()
             case _:

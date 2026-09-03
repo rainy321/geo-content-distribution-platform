@@ -45,7 +45,7 @@ class DashboardApiTests(unittest.TestCase):
         data = response.get_json()["data"]
         self.assertIn("today_generated", data["summary"])
         self.assertEqual(len(data["trend"]), 7)
-        self.assertEqual(len(data["platforms"]), 5)
+        self.assertEqual(len(data["platforms"]), 10)
         self.assertEqual(data["recent_jobs"], [])
 
 

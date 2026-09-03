@@ -1,5 +1,6 @@
 import { http } from '@/utils/request'
 import { withCustomAIConfig } from '@/utils/aiConfig'
+import { apiUrl } from '@/config/api'
 
 export const articleApi = {
   getArticles(params = {}) {
@@ -16,6 +17,42 @@ export const articleApi = {
 
   generateArticle(data) {
     return http.post('/api/articles/generate', withCustomAIConfig(data))
+  },
+
+  generateBatch(data) {
+    return http.post('/api/articles/generate-batch', withCustomAIConfig(data))
+  },
+
+  getTemplates() {
+    return http.get('/api/content-templates')
+  },
+
+  createTemplate(data) {
+    return http.post('/api/content-templates', data)
+  },
+
+  updateTemplate(id, data) {
+    return http.put(`/api/content-templates/${id}`, data)
+  },
+
+  deleteTemplate(id) {
+    return http.delete(`/api/content-templates/${id}`)
+  },
+
+  importArticles(formData, onUploadProgress) {
+    return http.upload('/api/articles/import', formData, onUploadProgress)
+  },
+
+  getImportTemplateUrl() {
+    return apiUrl('/api/articles/import-template.xlsx')
+  },
+
+  recommendImages(id) {
+    return http.get(`/api/articles/${id}/images/recommend`)
+  },
+
+  generateCover(id) {
+    return http.post(`/api/articles/${id}/images/generate`)
   },
 
   getAIConfigStatus() {

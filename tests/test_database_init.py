@@ -181,7 +181,7 @@ class DatabaseInitializationTests(unittest.TestCase):
                 job = conn.execute(
                     """
                     SELECT article_id, platform, status, message, result_url,
-                           images, publish_at, authorization_fingerprint,
+                           images, video, publish_at, authorization_fingerprint,
                            auto_execute, demo,
                            created_at, started_at, finished_at
                     FROM publish_jobs
@@ -198,6 +198,7 @@ class DatabaseInitializationTests(unittest.TestCase):
                     "message",
                     "result_url",
                     "images",
+                    "video",
                     "publish_at",
                     "authorization_fingerprint",
                     "auto_execute",
@@ -208,14 +209,14 @@ class DatabaseInitializationTests(unittest.TestCase):
                 },
             )
             self.assertEqual(
-                job[:10],
-                (article_id, "zhihu", "queued", "", "", "[]", None, "", 0, 0),
+                job[:11],
+                (article_id, "zhihu", "queued", "", "", "[]", "", None, "", 0, 0),
             )
-            self.assertTrue(job[10])
-            self.assertIsNone(job[11])
+            self.assertTrue(job[11])
             self.assertIsNone(job[12])
+            self.assertIsNone(job[13])
 
-    def test_reinitialization_adds_images_to_existing_publish_jobs(self):
+    def test_reinitialization_adds_assets_to_existing_publish_jobs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             db_path = Path(temp_dir) / "database.db"
             with closing(sqlite3.connect(db_path)) as conn:
@@ -247,17 +248,19 @@ class DatabaseInitializationTests(unittest.TestCase):
                 columns = {
                     row[1] for row in conn.execute("PRAGMA table_info(publish_jobs)")
                 }
-                images, fingerprint = conn.execute(
+                images, video, fingerprint = conn.execute(
                     """
-                    SELECT images, authorization_fingerprint
+                    SELECT images, video, authorization_fingerprint
                     FROM publish_jobs
                     WHERE id = 1
                     """
                 ).fetchone()
             self.assertIn("images", columns)
+            self.assertIn("video", columns)
             self.assertIn("auto_execute", columns)
             self.assertIn("authorization_fingerprint", columns)
             self.assertEqual(images, "[]")
+            self.assertEqual(video, "")
             self.assertEqual(fingerprint, "")
 
     def test_publish_jobs_reject_unknown_status_and_invalid_demo_flag(self):

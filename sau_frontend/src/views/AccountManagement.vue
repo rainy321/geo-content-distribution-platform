@@ -71,8 +71,8 @@
         <div class="section-heading">
           <div>
             <span>OMNIPOST CAPABILITY / 02</span>
-            <h2 id="video-platforms">既有视频渠道</h2>
-            <p>保留 OmniPost 原有平台能力，不让视频发布拖慢文章 GEO 主流程。</p>
+            <h2 id="video-platforms">扩展图文与视频渠道</h2>
+            <p>P2 渠道已接入统一任务流；真实执行仍需要本机 Worker、有效账号和人工授权。</p>
           </div>
           <small>{{ secondaryPlatforms.length }} 个渠道</small>
         </div>
@@ -255,7 +255,7 @@ const loginForm = reactive({ platformType: null, accountName: '', existingAccoun
 let eventSource = null
 
 const primaryPlatforms = computed(() => overview.platforms.filter(item => ['P0', 'P1'].includes(item.priority)))
-const secondaryPlatforms = computed(() => overview.platforms.filter(item => item.priority === 'VIDEO'))
+const secondaryPlatforms = computed(() => overview.platforms.filter(item => !['P0', 'P1'].includes(item.priority)))
 const syncLabel = computed(() => lastSyncedAt.value
   ? `本地同步 ${lastSyncedAt.value.toLocaleTimeString('zh-CN', { hour12: false })}`
   : '等待首次同步')

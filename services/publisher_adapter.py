@@ -39,6 +39,7 @@ class PublishContent:
     title: str
     content: str
     images: tuple[str, ...] = ()
+    video: str = ""
     tags: tuple[str, ...] = ()
     publish_at: datetime | None = None
 
@@ -59,6 +60,7 @@ class PublishContent:
         object.__setattr__(self, "title", title)
         object.__setattr__(self, "content", content)
         object.__setattr__(self, "images", _normalize_string_tuple(self.images))
+        object.__setattr__(self, "video", str(self.video or "").strip())
         object.__setattr__(self, "tags", _normalize_string_tuple(self.tags))
 
 

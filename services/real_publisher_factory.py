@@ -6,6 +6,17 @@ from pathlib import Path
 from typing import Any
 
 from services.publish_job_executor import PublisherNotConfiguredError
+from services.media_publisher_adapters import (
+    BilibiliPublisherAdapter,
+    ChannelsPublisherAdapter,
+    DouyinPublisherAdapter,
+    KuaishouPublisherAdapter,
+    TiktokPublisherAdapter,
+)
+from services.platform_capability_service import (
+    PLATFORM_BY_KEY,
+    SUPPORTED_PUBLISH_PLATFORMS,
+)
 from services.publisher_adapter import (
     BaijiahaoPublisherAdapter,
     PublisherAdapter,
@@ -16,15 +27,9 @@ from services.publisher_adapter import (
 )
 
 
-REAL_PUBLISH_PLATFORMS = frozenset(
-    {"zhihu", "toutiao", "baijiahao", "sohu", "xiaohongshu"}
-)
+REAL_PUBLISH_PLATFORMS = SUPPORTED_PUBLISH_PLATFORMS
 _PLATFORM_ACCOUNT_TYPES = {
-    "zhihu": 9,
-    "toutiao": 7,
-    "baijiahao": 5,
-    "sohu": 8,
-    "xiaohongshu": 1,
+    key: value["account_type"] for key, value in PLATFORM_BY_KEY.items()
 }
 
 
@@ -73,6 +78,16 @@ class RealPublisherFactory:
                     return BaijiahaoPublisherAdapter(account_file)
                 if platform == "xiaohongshu":
                     return XiaohongshuPublisherAdapter(account_file)
+                if platform == "douyin":
+                    return DouyinPublisherAdapter(account_file)
+                if platform == "kuaishou":
+                    return KuaishouPublisherAdapter(account_file)
+                if platform == "bilibili":
+                    return BilibiliPublisherAdapter(account_file)
+                if platform == "channels":
+                    return ChannelsPublisherAdapter(account_file)
+                if platform == "tiktok":
+                    return TiktokPublisherAdapter(account_file)
 
         raise PublisherNotConfiguredError(
             f"{platform} 没有可用的已连接账号，请先在媒体账号页登录并检测状态"

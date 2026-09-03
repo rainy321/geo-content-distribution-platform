@@ -13,6 +13,7 @@
           <strong>{{ pagination.total }}</strong>
           <small>ARTICLES</small>
         </div>
+        <el-button plain :icon="Upload" @click="importDialogVisible = true">Excel 导入</el-button>
         <el-button type="primary" :icon="DocumentAdd" @click="router.push('/content-create')">
           新建内容
         </el-button>
@@ -175,6 +176,33 @@
         </footer>
       </section>
     </div>
+
+    <el-dialog v-model="importDialogVisible" title="批量导入文章" width="560px">
+      <div class="import-guide">
+        <span>IMPORT / XLSX OR CSV</span>
+        <h3>先选品牌，再导入稿件</h3>
+        <p>必需列为“标题”和“正文”；可选“摘要、标签、状态”。一次最多 200 篇，整批校验通过后才会写入。</p>
+      </div>
+      <label class="import-label">归属品牌项目</label>
+      <el-select v-model="importProjectId" filterable placeholder="选择品牌项目">
+        <el-option v-for="project in projects" :key="project.id" :label="project.name" :value="project.id" />
+      </el-select>
+      <button type="button" class="import-file" @click="importInput?.click()">
+        <el-icon><Upload /></el-icon>
+        <strong>{{ importFile?.name || '选择 Excel 或 CSV 文件' }}</strong>
+        <span>{{ importFile ? formatFileSize(importFile.size) : '最大 2MB · 不会覆盖现有文章' }}</span>
+      </button>
+      <input ref="importInput" class="visually-hidden" type="file" accept=".xlsx,.csv" @change="handleImportFile" />
+      <div class="import-template-link">
+        <el-button text :icon="Download" @click="downloadImportTemplate">下载标准 Excel 模板</el-button>
+      </div>
+      <template #footer>
+        <el-button @click="importDialogVisible = false">取消</el-button>
+        <el-button type="primary" :loading="importing" :disabled="!importProjectId || !importFile" @click="importArticles">
+          导入到内容库
+        </el-button>
+      </template>
+    </el-dialog>
   </main>
 </template>
 
@@ -182,7 +210,7 @@
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Aim, DocumentAdd, EditPen, Promotion, Refresh } from '@element-plus/icons-vue'
+import { Aim, DocumentAdd, Download, EditPen, Promotion, Refresh, Upload } from '@element-plus/icons-vue'
 import { articleApi } from '@/api/article'
 import { projectApi } from '@/api/project'
 
@@ -194,6 +222,11 @@ const loadError = ref(false)
 const projectsLoading = ref(false)
 const projectsError = ref(false)
 const updatingArticleId = ref(null)
+const importDialogVisible = ref(false)
+const importProjectId = ref(null)
+const importFile = ref(null)
+const importInput = ref(null)
+const importing = ref(false)
 let requestSequence = 0
 
 const filters = reactive({
@@ -302,6 +335,48 @@ const clearFilters = () => {
   filters.status = ''
   applyFilters()
 }
+
+const handleImportFile = (event) => {
+  const file = event.target.files?.[0]
+  event.target.value = ''
+  if (!file) return
+  if (!/\.(xlsx|csv)$/i.test(file.name)) {
+    ElMessage.error('仅支持 XLSX 或 CSV 文件')
+    return
+  }
+  if (file.size > 2 * 1024 * 1024) {
+    ElMessage.error('导入文件不能超过 2MB')
+    return
+  }
+  importFile.value = file
+}
+
+const importArticles = async () => {
+  if (!importProjectId.value || !importFile.value || importing.value) return
+  importing.value = true
+  try {
+    const formData = new FormData()
+    formData.append('project_id', String(importProjectId.value))
+    formData.append('file', importFile.value)
+    const response = await articleApi.importArticles(formData)
+    ElMessage.success(`已导入 ${response.data.created_count} 篇文章`)
+    importDialogVisible.value = false
+    importFile.value = null
+    filters.project_id = importProjectId.value
+    pagination.page = 1
+    await fetchArticles()
+  } catch (error) {
+    console.error('批量导入文章失败:', error)
+  } finally {
+    importing.value = false
+  }
+}
+
+const downloadImportTemplate = () => {
+  window.open(articleApi.getImportTemplateUrl(), '_blank', 'noopener,noreferrer')
+}
+
+const formatFileSize = bytes => `${Math.max(0.1, bytes / 1024).toFixed(bytes > 1024 * 1024 ? 0 : 1)} KB`
 
 const openEditor = (articleId) => {
   router.push({ path: '/content-create', query: { articleId } })
@@ -872,6 +947,56 @@ onMounted(() => {
 }
 
 :deep(.el-select) { width: 100%; }
+
+.import-guide {
+  margin-bottom: 20px;
+  padding: 16px 18px;
+  border-left: 3px solid var(--signal);
+  background: var(--mist);
+
+  span { color: var(--teal); font: 700 10px/1.2 "Cascadia Mono", monospace; letter-spacing: 0.12em; }
+  h3 { margin: 8px 0 5px; color: var(--deep-teal); font-size: 17px; }
+  p { margin: 0; color: #68787d; font-size: 12px; line-height: 1.65; }
+}
+
+.import-label {
+  display: block;
+  margin: 0 0 8px;
+  color: #44585e;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.import-file {
+  display: grid;
+  width: 100%;
+  margin-top: 14px;
+  padding: 24px;
+  place-items: center;
+  border: 1px dashed rgba(13, 92, 99, 0.38);
+  background: #f8fbfa;
+  color: var(--teal);
+  cursor: pointer;
+
+  .el-icon { margin-bottom: 8px; font-size: 24px; }
+  strong { color: var(--deep-teal); font-size: 13px; }
+  span { margin-top: 5px; color: #7b898d; font-size: 10px; }
+}
+
+.import-template-link {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 6px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
 
 @media (max-width: 1100px) {
   .article-record {

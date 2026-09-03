@@ -122,11 +122,24 @@ def _build_publish_content(
             raise FileNotFoundError(f"发布图片不存在：{filename}")
         image_paths.append(str(image_path))
 
+    video_path = ""
+    video_filename = str(job.get("video") or "").strip()
+    if video_filename:
+        resolved_video_path = (resolved_media_root / video_filename).resolve()
+        try:
+            resolved_video_path.relative_to(resolved_media_root)
+        except ValueError as exc:
+            raise ValueError("发布视频必须位于素材目录内") from exc
+        if not resolved_video_path.is_file():
+            raise FileNotFoundError(f"发布视频不存在：{video_filename}")
+        video_path = str(resolved_video_path)
+
     return PublishContent(
         platform=job["platform"],
         title=article["title"],
         content=article["content"],
         images=tuple(image_paths),
+        video=video_path,
         tags=tuple(article.get("tags") or ()),
         publish_at=publish_at,
     )

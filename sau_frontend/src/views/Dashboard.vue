@@ -218,7 +218,8 @@ const barHeight = value => value ? `${Math.max(8, (value / trendMax.value) * 100
 const trendAriaLabel = day => `${day.date}：生成 ${day.generated}，发布任务 ${day.published}，成功 ${day.success}`
 
 const platformLabels = {
-  zhihu: '知乎', toutiao: '今日头条', baijiahao: '百家号', sohu: '搜狐号', xiaohongshu: '小红书'
+  zhihu: '知乎', toutiao: '今日头条', baijiahao: '百家号', sohu: '搜狐号', xiaohongshu: '小红书',
+  douyin: '抖音', kuaishou: '快手', bilibili: 'Bilibili', channels: '视频号', tiktok: 'TikTok'
 }
 const statusLabels = {
   queued: '排队中', processing: '发布中', success: '成功', failed: '失败', need_action: '等待确认', scheduled: '计划中'

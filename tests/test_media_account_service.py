@@ -73,7 +73,8 @@ class MediaAccountServiceTests(unittest.IsolatedAsyncioTestCase):
             overview["summary"],
             {"total": 2, "connected": 1, "needs_action": 1, "checking": 0},
         )
-        self.assertEqual(len(overview["platforms"]), 9)
+        self.assertEqual(len(overview["platforms"]), 10)
+        self.assertEqual(overview["platforms"][-1]["key"], "tiktok")
         zhihu = next(item for item in overview["platforms"] if item["key"] == "zhihu")
         toutiao = next(item for item in overview["platforms"] if item["key"] == "toutiao")
         self.assertEqual(zhihu["connected_count"], 1)

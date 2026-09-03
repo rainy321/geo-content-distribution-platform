@@ -179,6 +179,11 @@ async def check_cookie(type, file_path, *, cookies_directory=None):
         # 知乎
         case 9:
             return await cookie_auth_zhihu(cookies_root / file_path)
+        # TikTok
+        case 10:
+            from uploader.tk_uploader.main_chrome import cookie_auth as tiktok_cookie_auth
+
+            return await tiktok_cookie_auth(cookies_root / file_path)
         case _:
             return False
 

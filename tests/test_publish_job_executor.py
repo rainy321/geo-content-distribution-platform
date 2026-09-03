@@ -65,12 +65,13 @@ class PublishJobExecutorTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def _create_job(self, *, demo=False, publish_at=None, images=None):
+    def _create_job(self, *, demo=False, publish_at=None, images=None, video=None, platform="zhihu"):
         return create_publish_job(
             self.db_path,
             article_id=self.article_id,
-            platform="zhihu",
+            platform=platform,
             images=images,
+            video=video,
             publish_at=publish_at,
             demo=demo,
         )
@@ -154,6 +155,27 @@ class PublishJobExecutorTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "success")
         self.assertEqual(publisher.calls[0].images, (str(image_path.resolve()),))
+
+    def test_resolves_job_video_from_media_root_before_publishing(self):
+        media_root = Path(self.temp_dir.name) / "videoFile"
+        media_root.mkdir()
+        video_path = media_root / "demo.mp4"
+        video_path.write_bytes(b"video")
+        job = self._create_job(platform="bilibili", video="demo.mp4")
+        publisher = StubPublisher(
+            "bilibili",
+            PublishResult(False, "bilibili", "processing", message="待核验"),
+        )
+
+        result = execute_publish_job(
+            self.db_path,
+            job["id"],
+            publisher_factory=lambda _job: publisher,
+            media_root=media_root,
+        )
+
+        self.assertEqual(result["status"], "processing")
+        self.assertEqual(publisher.calls[0].video, str(video_path.resolve()))
 
     def test_persists_need_action_result(self):
         job = self._create_job()

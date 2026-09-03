@@ -10,15 +10,12 @@ from pathlib import Path
 from typing import Any
 
 from services.article_service import ArticleNotFoundError
+from services.platform_capability_service import SUPPORTED_PUBLISH_PLATFORMS
 
 
 PUBLISH_JOB_STATUSES = frozenset(
     {"queued", "processing", "success", "failed", "need_action", "scheduled"}
 )
-SUPPORTED_PUBLISH_PLATFORMS = frozenset(
-    {"zhihu", "toutiao", "baijiahao", "sohu", "xiaohongshu"}
-)
-
 _ALLOWED_TRANSITIONS = {
     "scheduled": frozenset({"queued", "failed"}),
     "queued": frozenset({"processing", "failed", "need_action"}),
@@ -51,6 +48,7 @@ def create_publish_job(
     article_id: int,
     platform: str,
     images: list[str] | tuple[str, ...] | None = None,
+    video: str | None = None,
     publish_at: str | datetime | None = None,
     auto_execute: bool = False,
     demo: bool = False,
@@ -59,6 +57,7 @@ def create_publish_job(
         raise ValueError("auto_execute 必须是布尔值")
     normalized_platform = _normalize_platform(platform)
     normalized_images = normalize_publish_images(images)
+    normalized_video = normalize_publish_video(video)
     normalized_publish_at = _normalize_publish_at(publish_at)
     if auto_execute and normalized_publish_at is None:
         raise ValueError("auto_execute 仅适用于定时发布任务")
@@ -75,6 +74,7 @@ def create_publish_job(
                     article=dict(article_row),
                     platform=normalized_platform,
                     images=normalized_images,
+                    video=normalized_video,
                     publish_at=normalized_publish_at,
                 )
                 if normalized_auto_execute
@@ -83,15 +83,16 @@ def create_publish_job(
             cursor = conn.execute(
                 """
                 INSERT INTO publish_jobs (
-                    article_id, platform, status, images, publish_at,
+                    article_id, platform, status, images, video, publish_at,
                     authorization_fingerprint, auto_execute, demo
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     article_id,
                     normalized_platform,
                     initial_status,
                     json.dumps(normalized_images, ensure_ascii=False),
+                    normalized_video,
                     normalized_publish_at,
                     authorization_fingerprint,
                     int(normalized_auto_execute),
@@ -107,18 +108,20 @@ def build_publish_authorization_fingerprint(
     article: dict[str, Any],
     platform: str,
     images: list[str] | tuple[str, ...] | None,
+    video: str | None = None,
     publish_at: str | datetime | None,
 ) -> str:
     """Bind automatic execution to the exact publishable payload."""
 
     canonical_payload = {
-        "schema": 1,
+        "schema": 2,
         "article_id": int(article["id"]),
         "title": str(article.get("title") or "").strip(),
         "content": str(article.get("content") or "").strip(),
         "tags": _normalize_authorization_tags(article.get("tags")),
         "platform": _normalize_platform(platform),
         "images": normalize_publish_images(images),
+        "video": normalize_publish_video(video),
         "publish_at": _normalize_publish_at(publish_at),
     }
     encoded = json.dumps(
@@ -141,6 +144,7 @@ def publish_authorization_matches(
         article=article,
         platform=job["platform"],
         images=job.get("images"),
+        video=job.get("video"),
         publish_at=job.get("publish_at"),
     )
     return hmac.compare_digest(expected, actual)
@@ -528,6 +532,21 @@ def normalize_publish_images(
             normalized.append(filename)
             seen.add(filename)
     return normalized
+
+
+def normalize_publish_video(video: str | None) -> str:
+    """Normalize one portable video filename stored with a publish job."""
+
+    if video is None:
+        return ""
+    if not isinstance(video, str):
+        raise ValueError("video 必须是字符串")
+    filename = video.strip()
+    if not filename:
+        return ""
+    if Path(filename).name != filename or "/" in filename or "\\" in filename:
+        raise ValueError("视频只能引用素材库中的文件名")
+    return filename
 
 
 def _normalize_platform(platform: str) -> str:

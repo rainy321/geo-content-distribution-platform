@@ -7,13 +7,12 @@ from datetime import date, datetime, time, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from services.platform_capability_service import PLATFORM_CAPABILITIES
 
-_DASHBOARD_PLATFORMS = (
-    ("zhihu", "知乎", 9),
-    ("toutiao", "今日头条", 7),
-    ("baijiahao", "百家号", 5),
-    ("sohu", "搜狐号", 8),
-    ("xiaohongshu", "小红书", 1),
+
+_DASHBOARD_PLATFORMS = tuple(
+    (item["key"], item["name"], item["account_type"])
+    for item in PLATFORM_CAPABILITIES
 )
 
 
