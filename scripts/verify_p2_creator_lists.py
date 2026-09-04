@@ -65,9 +65,11 @@ async def _verify(
     platform: str,
     account_path: Path,
     screenshot_directory: Path,
+    *,
+    headless: bool = True,
 ) -> dict[str, object]:
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=True)
+        browser = await playwright.chromium.launch(headless=headless)
         if platform == "bilibili":
             account_payload = json.loads(account_path.read_text(encoding="utf-8"))
             raw_cookies = account_payload.get("cookie_info", {}).get("cookies", [])
@@ -99,6 +101,28 @@ async def _verify(
                 timeout=60_000,
             )
             await page.wait_for_timeout(8000)
+            content_ready = True
+            if platform == "tiktok":
+                try:
+                    await page.wait_for_function(
+                        """() => {
+                            const text = (document.body?.innerText || '').trim();
+                            return text.length >= 80
+                                || text.includes('暂无内容')
+                                || text.includes('No content')
+                                || text.includes('Upload your first video');
+                        }""",
+                        timeout=45_000,
+                    )
+                except Exception:
+                    content_ready = False
+            current_url = str(page.url or "").lower()
+            login_required = any(
+                marker in current_url
+                for marker in ("/login", "/passport", "accounts.google.com")
+            )
+            if login_required:
+                content_ready = False
             tab_labels = {
                 "douyin": ["全部", "已发布", "审核中", "未通过"],
                 "kuaishou": ["全部作品", "已发布", "待发布", "未通过"],
@@ -166,10 +190,27 @@ async def _verify(
             screenshot_directory.mkdir(parents=True, exist_ok=True)
             screenshot_path = screenshot_directory / f"{platform}_published_list.png"
             await page.screenshot(path=str(screenshot_path), full_page=True)
+            rendered_body_text = "\n".join(
+                await page.locator("body").all_inner_texts()
+            ).strip()
+            body_text_length = len(rendered_body_text)
             return {
                 "platform": platform,
                 "title_found": title_found,
+                "content_ready": content_ready,
+                "verification_state": (
+                    "login_required"
+                    if login_required
+                    else "found"
+                    if title_found
+                    else "not_found"
+                    if content_ready
+                    else "inconclusive"
+                ),
                 "page_url": page.url,
+                "login_required": login_required,
+                "page_title": await page.title(),
+                "body_text_length": body_text_length,
                 "matching_links": list(dict.fromkeys(matching_links)),
                 "found_tab": found_tab,
                 "checked_tabs": checked_tabs,
@@ -193,7 +234,12 @@ async def main_async(args: argparse.Namespace) -> None:
             platform,
         )
         try:
-            result = await _verify(platform, account_path, screenshot_directory)
+            result = await _verify(
+                platform,
+                account_path,
+                screenshot_directory,
+                headless=not args.headful,
+            )
         except Exception as exc:
             result = {
                 "platform": platform,
@@ -216,6 +262,11 @@ def main() -> None:
         "--screenshots",
         type=Path,
         default=Path("cookiesFile/p2-verification"),
+    )
+    parser.add_argument(
+        "--headful",
+        action="store_true",
+        help="使用可见浏览器核验，适合无头模式无法加载的创作者中心。",
     )
     asyncio.run(main_async(parser.parse_args()))
 

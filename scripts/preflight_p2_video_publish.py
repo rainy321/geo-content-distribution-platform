@@ -70,7 +70,11 @@ async def _preflight_browser_platform(
         )
         await publisher.main()
     elif platform == "channels":
-        publisher = TencentVideo(**common, desc=DESCRIPTION)
+        publisher = TencentVideo(
+            **common,
+            desc=DESCRIPTION,
+            preview_seconds=preview_seconds,
+        )
         await publisher.main()
     elif platform == "tiktok":
         publisher = TiktokVideo(

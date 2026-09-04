@@ -356,7 +356,7 @@ async def _tiktok_login_checker(account_file: str) -> bool:
     return await cookie_auth(account_file)
 
 
-async def _tiktok_publish_runner(content: PublishContent, account_file: str) -> None:
+async def _tiktok_publish_runner(content: PublishContent, account_file: str):
     from uploader.tk_uploader.main_chrome import TiktokVideo
 
     publisher = TiktokVideo(
@@ -368,7 +368,7 @@ async def _tiktok_publish_runner(content: PublishContent, account_file: str) -> 
         thumbnail_path=content.images[0] if content.images else None,
         headless=False,
     )
-    await publisher.main()
+    return await publisher.main()
 
 
 def _is_public_http_url(value: str) -> bool:

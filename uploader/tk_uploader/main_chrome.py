@@ -3,7 +3,7 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from playwright.async_api import Playwright, async_playwright
+from playwright.async_api import Playwright, TimeoutError as PlaywrightTimeoutError, async_playwright
 import os
 import asyncio
 
@@ -262,6 +262,8 @@ class TiktokVideo(object):
         await self.add_title_tags(page)
         # detect upload status
         await self.detect_upload_status(page)
+        # Some TikTok prompts are mounted only after transcoding completes.
+        await self.dismiss_upload_interstitials(page)
         if self.thumbnail_path:
             tiktok_logger.info(f'[+] Uploading thumbnail file {self.title}.png')
             await self.upload_thumbnails(page)
@@ -285,7 +287,13 @@ class TiktokVideo(object):
             return
 
         await self.click_publish(page)
-        tiktok_logger.success(f"video_id: {await self.get_last_video_id(page)}")
+        public_url = await self.get_published_video_url(page)
+        if public_url:
+            tiktok_logger.success(f"published_url: {public_url}")
+        else:
+            tiktok_logger.warning(
+                "TikTok accepted the submission but its public URL is not visible yet"
+            )
 
         await context.storage_state(path=f"{self.account_file}")  # save cookie
         tiktok_logger.info('  [-] update cookie！')
@@ -293,11 +301,30 @@ class TiktokVideo(object):
         # close all
         await context.close()
         await browser.close()
+        if public_url:
+            return {
+                "status": "success",
+                "url": public_url,
+                "message": "TikTok 内容列表已返回精确标题和公开链接",
+            }
+        return {
+            "status": "processing",
+            "message": "TikTok 已接受提交，公开链接仍在生成",
+        }
 
     async def add_title_tags(self, page):
 
         editor_locator = self.locator_base.locator('div.public-DraftEditor-content')
-        await editor_locator.click()
+        await editor_locator.wait_for(state="visible", timeout=60000)
+        await self.dismiss_joyride_overlay(page)
+        try:
+            await editor_locator.click(timeout=10000)
+        except PlaywrightTimeoutError:
+            # React Joyride is mounted asynchronously and can appear after the
+            # initial interstitial check. Dismiss it, then retry the editor once.
+            if not await self.dismiss_joyride_overlay(page):
+                raise
+            await editor_locator.click(timeout=10000)
 
         await page.keyboard.press("End")
 
@@ -344,6 +371,56 @@ class TiktokVideo(object):
                 await button.click()
                 await page.wait_for_timeout(400)
 
+        await self.dismiss_joyride_overlay(page)
+
+    async def dismiss_joyride_overlay(self, page):
+        """Dismiss upload-page tours while staying inside the Joyride portal."""
+        portal = page.locator("#react-joyride-portal").first
+        active_tour = page.locator(
+            '#react-joyride-portal [data-test-id="overlay"]:visible, '
+            '#react-joyride-portal .react-joyride__tooltip:visible'
+        ).first
+        if not await portal.count() or not await active_tour.count():
+            return False
+
+        tiktok_logger.info("[+] TikTok onboarding overlay detected")
+        dismiss_selector = (
+            '[data-action="skip"], [data-action="close"], '
+            'button[aria-label="Skip"], button[aria-label="Close"], '
+            'button:has-text("跳过"), button:has-text("关闭"), '
+            'button:has-text("知道了"), button:has-text("Got it")'
+        )
+        advance_selector = (
+            '[data-action="primary"], button:has-text("Next"), '
+            'button:has-text("下一步"), button:has-text("完成")'
+        )
+
+        for _ in range(8):
+            if not await active_tour.count() or not await active_tour.is_visible():
+                return True
+            dismiss_button = portal.locator(dismiss_selector).first
+            if await dismiss_button.count() and await dismiss_button.is_visible():
+                await dismiss_button.click(force=True)
+                await page.wait_for_timeout(400)
+                continue
+            advance_button = portal.locator(advance_selector).first
+            if await advance_button.count() and await advance_button.is_visible():
+                await advance_button.click(force=True)
+                await page.wait_for_timeout(400)
+                continue
+            try:
+                await page.keyboard.press("Escape")
+                await page.wait_for_timeout(400)
+            except Exception:
+                pass
+            break
+
+        if await active_tour.count() and await active_tour.is_visible():
+            raise RuntimeError(
+                "TikTok onboarding overlay could not be dismissed before editing"
+            )
+        return True
+
     async def upload_thumbnails(self, page):
         await self.locator_base.locator(".cover-container").click()
         await self.locator_base.locator(".cover-edit-container >> text=Upload cover").click()
@@ -388,28 +465,107 @@ class TiktokVideo(object):
         await page.locator('#creator-tools-selection-menu-header >> text=English (US)').click()
 
     async def click_publish(self, page):
-        publish_button = self.locator_base.locator('div.button-group button').nth(0)
+        publish_button = self.locator_base.locator(
+            'div.button-group > button:has-text("Post"), '
+            'div.button-group > button:has-text("发布")'
+        ).first
         await publish_button.wait_for(state="visible", timeout=10000)
+        if await publish_button.get_attribute("disabled") is not None:
+            raise RuntimeError("TikTok Post button is disabled before submission")
+        before_path = str(Path(self.account_file).with_name("tiktok_before_post.png"))
+        try:
+            await page.screenshot(full_page=True, path=before_path)
+        except Exception as exc:
+            tiktok_logger.warning(f"TikTok pre-submit screenshot failed: {exc}")
         await publish_button.click()
         tiktok_logger.info("  [-] Post clicked once; waiting for a definitive result")
+        await self.confirm_incomplete_copyright_check(page)
         try:
             await page.wait_for_url(
                 TIKTOK_CONTENT_URL_PATTERN,
                 timeout=30000,
             )
         except Exception as exc:
+            after_path = str(
+                Path(self.account_file).with_name("tiktok_after_post_unknown.png")
+            )
+            try:
+                await page.screenshot(full_page=True, path=after_path)
+            except Exception as screenshot_exc:
+                tiktok_logger.warning(
+                    f"TikTok post-submit screenshot failed: {screenshot_exc}"
+                )
+            diagnostic_texts = await page.locator(
+                '[role="alert"]:visible, [role="dialog"]:visible, '
+                '[class*="toast"]:visible, [class*="error"]:visible'
+            ).all_inner_texts()
+            diagnostic = " | ".join(
+                dict.fromkeys(
+                    text.strip().replace("\n", " ")[:240]
+                    for text in diagnostic_texts
+                    if text.strip()
+                )
+            )
+            detail = f"; page feedback: {diagnostic}" if diagnostic else ""
             raise RuntimeError(
-                "TikTok final state is unknown after one Post click; automatic retry was disabled"
+                "TikTok final state is unknown after one Post click; "
+                f"automatic retry was disabled{detail}"
             ) from exc
         tiktok_logger.success("  [-] video published success")
 
+    async def confirm_incomplete_copyright_check(self, page):
+        """Confirm only TikTok's known unfinished copyright-check prompt once."""
+        for _ in range(20):
+            if "/tiktokstudio/content" in str(page.url or ""):
+                return False
+            dialog = page.locator('[role="dialog"]:visible').first
+            if await dialog.count() and await dialog.is_visible():
+                dialog_text = (await dialog.inner_text()).strip()
+                known_prompt = any(
+                    marker in dialog_text
+                    for marker in (
+                        "版权检查未完成",
+                        "版权检查尚未完成",
+                        "Copyright check isn't complete",
+                        "Copyright check is not complete",
+                    )
+                )
+                if not known_prompt:
+                    return False
+                confirm_button = dialog.get_by_role(
+                    "button",
+                    name=re.compile(r"^(立即发布|Post now)$", re.IGNORECASE),
+                ).first
+                if not await confirm_button.count() or not await confirm_button.is_visible():
+                    raise RuntimeError(
+                        "TikTok copyright-check prompt appeared without its confirm button"
+                    )
+                await confirm_button.click()
+                tiktok_logger.info(
+                    "  [-] Copyright check was incomplete; clicked its final confirmation once"
+                )
+                return True
+            await page.wait_for_timeout(500)
+        return False
+
     async def get_last_video_id(self, page):
-        await page.wait_for_selector('div[data-tt="components_PostTable_Container"]')
-        video_list_locator = self.locator_base.locator('div[data-tt="components_PostTable_Container"] div[data-tt="components_PostInfoCell_Container"] a')
-        if await video_list_locator.count():
-            first_video_obj = await video_list_locator.nth(0).get_attribute('href')
-            video_id = re.search(r'video/(\d+)', first_video_obj).group(1) if first_video_obj else None
-            return video_id
+        public_url = await self.get_published_video_url(page)
+        match = re.search(r"/video/(\d+)", public_url or "")
+        return match.group(1) if match else None
+
+    async def get_published_video_url(self, page):
+        """Read the exact-title public link from TikTok Studio's current list."""
+        link = page.locator('a[href*="/video/"]').filter(has_text=self.title).first
+        try:
+            await link.wait_for(state="visible", timeout=45000)
+        except PlaywrightTimeoutError:
+            return ""
+        href = str(await link.get_attribute("href") or "").strip()
+        if href.startswith("/"):
+            href = f"https://www.tiktok.com{href}"
+        if not href.startswith("https://www.tiktok.com/") or "/video/" not in href:
+            return ""
+        return href
 
 
     async def detect_upload_status(self, page):
@@ -448,4 +604,4 @@ class TiktokVideo(object):
 
     async def main(self):
         async with async_playwright() as playwright:
-            await self.upload(playwright)
+            return await self.upload(playwright)

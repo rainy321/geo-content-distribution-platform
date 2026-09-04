@@ -627,24 +627,40 @@ class TencentBaseUploader(BaseVideoUploader):
             try:
                 diagnostic_path = Path(BASE_DIR) / "debug_tencent_original_missing.png"
                 await page.screenshot(path=str(diagnostic_path), full_page=True)
-                visible_text = (await page.locator("body").inner_text())[-4000:]
+                visible_text = "\n".join(
+                    await page.locator("body").all_inner_texts()
+                )[-4000:]
                 tencent_logger.warning(_msg("😵", f"未确认声明原创，诊断截图: {diagnostic_path}"))
                 tencent_logger.warning(_msg("🧾", f"页面末尾文本: {visible_text}"))
             except Exception as exc:
                 tencent_logger.warning(_msg("😵", f"生成原创声明诊断信息失败: {exc}"))
             raise RuntimeError("未能在视频号发布页找到并设置“声明原创”，已停止发布")
 
-    async def wait_for_upload_complete(self, page: Page) -> None:
-        max_retries = 120
+    async def wait_for_upload_complete(
+        self,
+        page: Page,
+        *,
+        max_retries: int = 120,
+    ) -> None:
         retry_count = 0
         while retry_count < max_retries:
             retry_count += 1
             try:
-                publish_button = page.get_by_role("button", name="发表")
-                button_class = await publish_button.get_attribute("class")
-                if button_class and "weui-desktop-btn_disabled" not in button_class:
-                    tencent_logger.info(_msg("🥳", "视频上传完毕"))
-                    break
+                publish_buttons = page.get_by_role("button", name="发表", exact=True)
+                button_count = await publish_buttons.count()
+                for index in range(button_count - 1, -1, -1):
+                    publish_button = publish_buttons.nth(index)
+                    if not await publish_button.is_visible():
+                        continue
+                    button_class = str(
+                        await publish_button.get_attribute("class") or ""
+                    )
+                    if (
+                        "weui-desktop-btn_disabled" not in button_class
+                        and not await publish_button.is_disabled()
+                    ):
+                        tencent_logger.info(_msg("🥳", "视频上传完毕"))
+                        return
 
                 if retry_count % 5 == 0:
                     tencent_logger.info(_msg("🏃", f"正在上传视频中...（第{retry_count}次）"))
@@ -660,7 +676,17 @@ class TencentBaseUploader(BaseVideoUploader):
                     tencent_logger.info(_msg("🏃", f"正在上传视频中...（第{retry_count}次）"))
                 await asyncio.sleep(2)
         else:
-            tencent_logger.warning(_msg("⚠️", f"上传等待超时：{max_retries}次尝试后仍未完成"))
+            diagnostic_path = Path(self.account_file).with_name(
+                "channels_upload_timeout.png"
+            )
+            try:
+                await page.screenshot(path=str(diagnostic_path), full_page=True)
+            except Exception as exc:
+                tencent_logger.warning(_msg("😵", f"上传超时截图失败: {exc}"))
+            raise RuntimeError(
+                f"视频号上传等待超时：{max_retries}次检查后仍未完成；"
+                f"诊断截图: {diagnostic_path}"
+            )
 
     async def submit_publish(self, page: Page) -> None:
         max_publish_retries = 600
@@ -759,6 +785,7 @@ class TencentVideo(TencentBaseUploader):
         debug: bool = DEBUG_MODE,
         headless: bool = LOCAL_CHROME_HEADLESS,
         dry_run: bool = False,
+        preview_seconds: int = 120,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -776,6 +803,7 @@ class TencentVideo(TencentBaseUploader):
         self.thumbnail_path = thumbnail_path
         self.short_title = short_title
         self.dry_run = bool(dry_run)
+        self.preview_seconds = max(0, int(preview_seconds))
 
     async def validate_upload_args(self):
         await self.validate_base_args()
@@ -883,16 +911,26 @@ class TencentVideo(TencentBaseUploader):
             if getattr(self, "dry_run", False):
                 tencent_logger.warning(_msg("🛑", "【仅预览不发布】已跳过点击发表按钮"))
                 tencent_logger.info(_msg("👀", "请在浏览器窗口核对表单是否正确"))
-                tencent_logger.info(_msg("⏳", "页面将保持打开约 120 秒后自动关闭"))
+                tencent_logger.info(
+                    _msg(
+                        "⏳",
+                        f"页面将保持打开约 {self.preview_seconds} 秒后自动关闭",
+                    )
+                )
                 try:
                     from pathlib import Path as _Path
                     await page.screenshot(full_page=True, path=str(_Path(self.account_file).with_name("dry_run_preview.png")))
                 except Exception:
                     pass
-                for i in range(120):
+                for i in range(self.preview_seconds):
                     await asyncio.sleep(1)
                     if i > 0 and i % 30 == 0:
-                        tencent_logger.info(_msg("⏳", f"预览中…还剩约 {120 - i} 秒自动关闭"))
+                        tencent_logger.info(
+                            _msg(
+                                "⏳",
+                                f"预览中…还剩约 {self.preview_seconds - i} 秒自动关闭",
+                            )
+                        )
                 tencent_logger.info(_msg("🛑", "预览结束，关闭浏览器（未点击发表）"))
             else:
                 await self.submit_publish(page)
