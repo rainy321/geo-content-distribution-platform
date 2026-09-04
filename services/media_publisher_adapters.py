@@ -86,10 +86,10 @@ class MediaPublisherAdapter(PublisherAdapter):
             return PublishResult(
                 False,
                 self.platform,
-                "processing",
+                "need_action",
                 message=(
                     f"{self.platform_name}发布操作超时，平台最终状态未知；"
-                    "请先人工核对，系统不会自动重试"
+                    "请先人工核对，确认后再重新授权；系统不会自动重试"
                 ),
             )
         except Exception as exc:
@@ -133,17 +133,25 @@ class MediaPublisherAdapter(PublisherAdapter):
                     "failed",
                     message=f"{self.platform_name}发布器返回了错误的平台标识",
                 )
+            if raw_result.status == "success" and not _is_public_http_url(
+                raw_result.url
+            ):
+                return self._processing_without_public_url(raw_result.message)
             return raw_result
         if isinstance(raw_result, Mapping):
             status = str(raw_result.get("status") or "processing").strip().lower()
             if status not in PUBLISH_RESULT_STATUSES:
                 status = "failed"
+            url = str(raw_result.get("url") or raw_result.get("result_url") or "").strip()
+            message = str(raw_result.get("message") or "").strip()
+            if status == "success" and not _is_public_http_url(url):
+                return self._processing_without_public_url(message)
             return PublishResult(
                 status == "success",
                 self.platform,
                 status,
-                url=str(raw_result.get("url") or "").strip(),
-                message=str(raw_result.get("message") or "").strip(),
+                url=url,
+                message=message,
             )
         # Legacy uploaders can verify navigation but do not consistently return
         # a public URL. Keep the job processing instead of claiming success.
@@ -156,6 +164,17 @@ class MediaPublisherAdapter(PublisherAdapter):
                 "请在平台后台核对"
             ),
         )
+
+    def _processing_without_public_url(self, message: str = "") -> PublishResult:
+        detail = str(message or "").strip()
+        if detail and "公开链接" not in detail:
+            detail = f"{detail}；平台未返回可核验公开链接，请在平台后台核对"
+        if not detail:
+            detail = (
+                f"已执行{self.platform_name}提交链路，但平台未返回可核验公开链接；"
+                "请在平台后台核对"
+            )
+        return PublishResult(False, self.platform, "processing", message=detail)
 
     def _exception_result(self, exc: Exception, *, prefix: str) -> PublishResult:
         detail = str(exc).strip() or exc.__class__.__name__
@@ -350,6 +369,11 @@ async def _tiktok_publish_runner(content: PublishContent, account_file: str) -> 
         headless=False,
     )
     await publisher.main()
+
+
+def _is_public_http_url(value: str) -> bool:
+    normalized = str(value or "").strip().lower()
+    return normalized.startswith(("https://", "http://"))
 
 
 def _run_with_timeout(

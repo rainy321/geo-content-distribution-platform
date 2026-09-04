@@ -214,4 +214,6 @@ Vercel CLI 部署上下文：新增 `.vercelignore`，显式排除本地 `.venv`
 
 ## Git 状态
 
+状态修复记录：抖音任务 `19` 与快手任务 `20` 的发布器超时结果已从长期 `processing` 纠正为 `need_action`；两项仍保持“不自动重试”，后续必须人工核对并重新授权。
+
 `main` 跟踪项目所有者仓库 `rainy321/geo-content-distribution-platform`，内容提效、P2 Web 接入及真实验收安全修复均推送到 `origin/main`；原 OmniPost 仓库仅作为 `upstream` 保留。
