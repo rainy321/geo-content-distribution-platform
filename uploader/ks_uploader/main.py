@@ -820,7 +820,9 @@ class KSVideo(KSBaseUploader):
             if self.publish_strategy == KUAISHOU_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
                 await self.set_schedule_time(page, self.publish_date)
 
-            max_publish_retries = 600
+            # One check takes roughly six seconds. Cap ambiguous final-state
+            # waiting at about five minutes instead of blocking a worker for an hour.
+            max_publish_retries = 50
             publish_retry_count = 0
             verification_waited = False
             publish_clicked = False
@@ -1040,7 +1042,9 @@ class KSNote(KSBaseUploader):
             await page.wait_for_timeout(120_000)
             return
 
-        max_publish_retries = 600
+        # One check takes roughly six seconds. Cap ambiguous final-state
+        # waiting at about five minutes instead of blocking a worker for an hour.
+        max_publish_retries = 50
         publish_retry_count = 0
         verification_waited = False
         publish_clicked = False

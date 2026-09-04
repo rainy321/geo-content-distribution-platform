@@ -10,6 +10,11 @@ import asyncio
 from conf import LOCAL_CHROME_PATH, LOCAL_CHROME_HEADLESS
 from uploader.tk_uploader.tk_config import Tk_Locator
 from utils.base_social_media import set_init_script
+
+
+TIKTOK_UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload?lang=en"
+TIKTOK_UPLOAD_URL_PATTERN = "**/tiktokstudio/upload**"
+TIKTOK_CONTENT_URL_PATTERN = "**/tiktokstudio/content**"
 from utils.files_times import get_absolute_path
 from utils.log import tiktok_logger
 
@@ -203,13 +208,11 @@ class TiktokVideo(object):
         # context = await set_init_script(context)
         page = await context.new_page()
 
-        # change language to eng first
-        await self.change_language(page)
         navigation_error = None
         for attempt in range(1, 4):
             try:
                 await page.goto(
-                    "https://www.tiktok.com/tiktokstudio/upload",
+                    TIKTOK_UPLOAD_URL,
                     wait_until="domcontentloaded",
                     timeout=60_000,
                 )
@@ -227,7 +230,7 @@ class TiktokVideo(object):
             ) from navigation_error
         tiktok_logger.info(f'[+]Uploading-------{self.title}.mp4')
 
-        await page.wait_for_url("https://www.tiktok.com/tiktokstudio/upload", timeout=10000)
+        await page.wait_for_url(TIKTOK_UPLOAD_URL_PATTERN, timeout=10000)
 
         try:
             await page.wait_for_selector('iframe[data-tt="Upload_index_iframe"], div.upload-container', timeout=10000)
@@ -238,14 +241,24 @@ class TiktokVideo(object):
         await self.choose_base_locator(page)
 
         upload_button = self.locator_base.locator(
-            'button:has-text("Select video"):visible')
-        await upload_button.wait_for(state='visible')  # 确保按钮可见
+            'button:has-text("Select video"), button:has-text("选择视频")'
+        ).first
+        if await upload_button.count():
+            await upload_button.wait_for(state="visible")
+            async with page.expect_file_chooser() as fc_info:
+                await upload_button.click()
+            file_chooser = await fc_info.value
+            await file_chooser.set_files(self.file_path)
+        else:
+            # TikTok may render the upload page in Chinese even with `lang=en`.
+            # Fall back to its stable video input instead of assuming button text.
+            video_input = self.locator_base.locator(
+                'input[type="file"][accept*="video"]'
+            ).first
+            await video_input.wait_for(state="attached", timeout=30000)
+            await video_input.set_input_files(self.file_path)
 
-        async with page.expect_file_chooser() as fc_info:
-            await upload_button.click()
-        file_chooser = await fc_info.value
-        await file_chooser.set_files(self.file_path)
-
+        await self.dismiss_upload_interstitials(page)
         await self.add_title_tags(page)
         # detect upload status
         await self.detect_upload_status(page)
@@ -314,6 +327,23 @@ class TiktokVideo(object):
             await page.keyboard.press("Backspace")
             await page.keyboard.press("End")
 
+    async def dismiss_upload_interstitials(self, page):
+        """Close known onboarding/settings prompts without touching publish controls."""
+        prompts = (
+            ("开启自动内容检查？", "取消"),
+            ("全新编辑功能已上线", "知道了"),
+        )
+        for prompt, button_name in prompts:
+            dialog = page.locator('[role="dialog"]:visible').filter(
+                has_text=prompt
+            ).first
+            if not await dialog.count():
+                continue
+            button = dialog.get_by_role("button", name=button_name, exact=True).first
+            if await button.count() and await button.is_visible():
+                await button.click()
+                await page.wait_for_timeout(400)
+
     async def upload_thumbnails(self, page):
         await self.locator_base.locator(".cover-container").click()
         await self.locator_base.locator(".cover-edit-container >> text=Upload cover").click()
@@ -364,7 +394,7 @@ class TiktokVideo(object):
         tiktok_logger.info("  [-] Post clicked once; waiting for a definitive result")
         try:
             await page.wait_for_url(
-                "https://www.tiktok.com/tiktokstudio/content",
+                TIKTOK_CONTENT_URL_PATTERN,
                 timeout=30000,
             )
         except Exception as exc:
@@ -383,23 +413,31 @@ class TiktokVideo(object):
 
 
     async def detect_upload_status(self, page):
-        while True:
+        # The upload form can be localized, and a missing Post button must not
+        # be interpreted as "ready". Poll for a visible, enabled button with a
+        # bounded timeout so a worker cannot spin forever.
+        for _ in range(300):
             try:
-                # if await self.locator_base.locator('div.btn-post > button').get_attribute("disabled") is None:
+                post_button = self.locator_base.locator(
+                    'div.button-group > button:has-text("Post"), '
+                    'div.button-group > button:has-text("发布")'
+                ).first
+                if await post_button.count() and await post_button.is_visible():
+                    if await post_button.get_attribute("disabled") is None:
+                        tiktok_logger.info("  [-]video uploaded.")
+                        return
                 if await self.locator_base.locator(
-                        'div.button-group > button >> text=Post').get_attribute("disabled") is None:
-                    tiktok_logger.info("  [-]video uploaded.")
-                    break
+                    'button[aria-label="Select file"], button:has-text("选择文件")'
+                ).count():
+                    tiktok_logger.info("  [-] found some error while uploading now retry...")
+                    await self.handle_upload_error(page)
                 else:
                     tiktok_logger.info("  [-] video uploading...")
                     await asyncio.sleep(2)
-                    if await self.locator_base.locator(
-                            'button[aria-label="Select file"]').count():
-                        tiktok_logger.info("  [-] found some error while uploading now retry...")
-                        await self.handle_upload_error(page)
-            except:
+            except Exception:
                 tiktok_logger.info("  [-] video uploading...")
                 await asyncio.sleep(2)
+        raise RuntimeError("TikTok video upload did not reach a ready state within 10 minutes")
 
     async def choose_base_locator(self, page):
         # await page.wait_for_selector('div.upload-container')

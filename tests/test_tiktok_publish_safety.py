@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
-from uploader.tk_uploader.main_chrome import TiktokVideo
+from uploader.tk_uploader.main_chrome import TIKTOK_UPLOAD_URL, TiktokVideo
 
 
 class TiktokPublishSafetyTests(unittest.IsolatedAsyncioTestCase):
@@ -28,6 +28,12 @@ class TiktokPublishSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(publisher.dry_run)
         self.assertFalse(publisher.headless)
         self.assertEqual(publisher.preview_seconds, 15)
+
+    def test_upload_url_requests_english_without_homepage_navigation(self):
+        self.assertEqual(
+            TIKTOK_UPLOAD_URL,
+            "https://www.tiktok.com/tiktokstudio/upload?lang=en",
+        )
 
     async def test_unknown_result_never_clicks_post_twice(self):
         with tempfile.TemporaryDirectory() as temp_dir:
