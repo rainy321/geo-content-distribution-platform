@@ -60,7 +60,7 @@ class RealPublisherFactory:
                 SELECT id, filePath, userName
                 FROM user_info
                 WHERE type = ? AND status = 1
-                ORDER BY COALESCE(last_checked_at, '') DESC, id ASC
+                ORDER BY COALESCE(last_checked_at, '') DESC, id DESC
                 """,
                 (account_type,),
             ).fetchall()

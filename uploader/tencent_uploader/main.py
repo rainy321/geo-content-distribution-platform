@@ -640,7 +640,7 @@ class TencentBaseUploader(BaseVideoUploader):
         self,
         page: Page,
         *,
-        max_retries: int = 120,
+        max_retries: int = 80,
     ) -> None:
         retry_count = 0
         while retry_count < max_retries:

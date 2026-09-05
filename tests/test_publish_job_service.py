@@ -16,6 +16,7 @@ from services.publish_job_service import (
     get_publish_job,
     list_publish_jobs,
     publish_authorization_matches,
+    reconcile_publish_job_failure,
     reconcile_publish_job_success,
     retry_publish_job,
     transition_publish_job,
@@ -375,6 +376,43 @@ class PublishJobServiceTests(unittest.TestCase):
             "https://baijiahao.baidu.com/s?id=123456789",
         )
         self.assertTrue(reconciled["finished_at"])
+
+    def test_reconciles_need_action_as_failed_with_no_submit_evidence(self):
+        job = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="channels",
+        )
+        transition_publish_job(
+            self.db_path,
+            job["id"],
+            "need_action",
+            message="平台状态未知",
+        )
+
+        reconciled = reconcile_publish_job_failure(
+            self.db_path,
+            job["id"],
+            message="发表按钮未启用，五个内容状态均无记录",
+        )
+
+        self.assertEqual(reconciled["status"], "failed")
+        self.assertEqual(reconciled["result_url"], "")
+        self.assertTrue(reconciled["finished_at"])
+
+    def test_failure_reconciliation_rejects_queued_job(self):
+        job = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="channels",
+        )
+
+        with self.assertRaises(InvalidPublishJobTransitionError):
+            reconcile_publish_job_failure(
+                self.db_path,
+                job["id"],
+                message="无提交证据",
+            )
 
     def test_article_stays_published_when_another_platform_fails(self):
         zhihu_job = create_publish_job(

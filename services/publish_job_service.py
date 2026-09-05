@@ -415,6 +415,42 @@ def reconcile_publish_job_success(
     return _serialize_job(updated_row)
 
 
+def reconcile_publish_job_failure(
+    database_path: str | Path,
+    job_id: int,
+    *,
+    message: str,
+) -> dict[str, Any]:
+    """Close an ambiguous job when read-only platform evidence proves no submit."""
+
+    normalized_message = _normalize_text(message)
+    if not normalized_message:
+        raise ValueError("平台失败对账必须提供核验说明")
+    with closing(_connect(database_path)) as conn:
+        with conn:
+            current_row = _fetch_job(conn, job_id)
+            if current_row is None:
+                raise PublishJobNotFoundError("发布任务不存在")
+            if current_row["status"] == "failed":
+                return _serialize_job(current_row)
+            if current_row["status"] not in {"processing", "need_action"}:
+                raise InvalidPublishJobTransitionError(
+                    f"状态为 {current_row['status']} 的发布任务不能通过平台证据结案"
+                )
+            conn.execute(
+                """
+                UPDATE publish_jobs
+                SET status = 'failed', message = ?, result_url = '',
+                    finished_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (normalized_message, job_id),
+            )
+            _sync_article_status(conn, current_row["article_id"])
+            updated_row = _fetch_job(conn, job_id)
+    return _serialize_job(updated_row)
+
+
 def _connect(database_path: str | Path) -> sqlite3.Connection:
     conn = sqlite3.connect(Path(database_path))
     conn.row_factory = sqlite3.Row

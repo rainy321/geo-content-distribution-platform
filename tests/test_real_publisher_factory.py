@@ -148,6 +148,29 @@ class RealPublisherFactoryTests(unittest.TestCase):
                 self._insert_account(filename, account_type=account_type)
                 self.assertIsInstance(factory({"platform": platform}), expected_class)
 
+    def test_prefers_newest_account_when_check_times_are_equal(self):
+        old_cookie = self.cookies_dir / "channels-old.json"
+        new_cookie = self.cookies_dir / "channels-new.json"
+        old_cookie.write_text("{}", encoding="utf-8")
+        new_cookie.write_text("{}", encoding="utf-8")
+        self._insert_account(
+            old_cookie.name,
+            account_type=2,
+            account_name="channels-old",
+        )
+        self._insert_account(
+            new_cookie.name,
+            account_type=2,
+            account_name="channels-secondary",
+        )
+
+        publisher = RealPublisherFactory(
+            self.db_path,
+            cookies_directory=self.cookies_dir,
+        )({"platform": "channels"})
+
+        self.assertEqual(Path(publisher.account_file), new_cookie)
+
     def test_rejects_unsupported_platform(self):
         factory = RealPublisherFactory(
             self.db_path,

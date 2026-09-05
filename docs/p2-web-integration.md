@@ -30,12 +30,12 @@
 | 抖音 | 图片笔记 | 图片 | `DouYinNote` | 最新任务 `28` 单次提交后后台无记录，状态 `need_action` |
 | 快手 | 图片笔记 | 图片 | `KSNote` | 最新任务 `29` 单次提交后后台无记录，状态 `need_action` |
 | Bilibili | 视频 | 视频 | `biliup` | 任务 `27` 已发布并取得公开 BV 链接 |
-| 视频号 | 视频 | 视频 | `TencentVideo` | 旧号有发布证据；新号已登录但两次 dry-run 上传停在 0%，均未点击发表 |
+| 视频号 | 视频 | 视频 | `TencentVideo` | 旧号有发布证据；新号任务 `34` 与两次 dry-run 均上传 0%，未点发表且五状态无记录 |
 | TikTok | 视频 | 视频 | `TiktokVideo` | 任务 `33` 已发布并取得公开视频链接 |
 
 上述适配器已接入统一发布任务、素材路径校验、账号解析、任务状态和超时保护。最终发布按钮每次最多点击一次；结果不明时先只读核对平台内容列表，不会自动重试。AI 测试内容在抖音、快手找不到或无法确认声明控件时，会在最终按钮前失败。发布器明确提交但尚无链接时任务保持 `processing`；发布器超时或状态未知时转为 `need_action`，均不会虚报公开链接。TikTok 兼容异步挂载的 React Joyride 引导、精确 `Post/发布` 按钮及“版权检查未完成”唯一二次确认，并在未知状态保存诊断截图。
 
-本轮合规视频为本地 `videoFile/geo-p2-neutral-test.mp4`：10 秒、720×1280、H.264、无音频的中性几何动画，不含人物、音乐、平台 Logo、品牌或效果承诺。Bilibili 公开链接为 `https://www.bilibili.com/video/BV1xJt66fEyq/`；TikTok 公开链接为 `https://www.tiktok.com/@redemption3731/video/7681719912934477072`；视频号旧号已取得创作者后台发布证据，改登新号 `channels-secondary` 后列表无同名稿且两次 dry-run 上传均停在 0%，未点击发表。其他平台的真实结果和继续条件以 `docs/GEO-MVP-ACCEPTANCE.md` 未完成项账本为准。
+本轮合规视频为本地 `videoFile/geo-p2-neutral-test.mp4`：10 秒、720×1280、H.264、无音频的中性几何动画，不含人物、音乐、平台 Logo、品牌或效果承诺。Bilibili 公开链接为 `https://www.bilibili.com/video/BV1xJt66fEyq/`；TikTok 公开链接为 `https://www.tiktok.com/@redemption3731/video/7681719912934477072`；视频号旧号已取得创作者后台发布证据，新号 `channels-secondary` 的任务 `34` 与两次 dry-run 均停在上传 0%，发表按钮未启用/点击，五状态无记录。其他平台的真实结果和继续条件以 `docs/GEO-MVP-ACCEPTANCE.md` 未完成项账本为准。
 
 状态边界补充：旧 uploader 正常返回但没有公开链接时仍保持 `processing`，等待人工核对；发布器自身超时且调用结果不可知时现在转为 `need_action`，并要求人工核对后重新授权，避免任务永久显示为处理中。
 
@@ -58,7 +58,7 @@
 - Playwright、Chrome、`biliup` 和账号 Cookie 属于本地 Worker 运行面；真实发布不能仅靠 Vercel Serverless Function 完成。
 - Vercel 本地文件系统和默认 SQLite 不提供持久化保证。生产环境需要接入持久数据库与对象存储，不能把生成封面、上传视频或任务历史只保存在实例文件系统。
 - 真实发布还必须显式开启 `ALLOW_REAL_PUBLISHING=true`、连接有效账号，并在界面逐次确认。平台验证码、人机验证、实名和风控仍需账号持有人处理。
-- 本次已在项目所有者登录并明确授权后执行 P2 多轮真实验收：Bilibili、TikTok 已取得可核验公开链接，视频号旧号已有创作者后台发布证据而新号上传仍停在 0%；抖音、快手仍无可核验内容记录，不能把按钮点击写成发布成功。
+- 本次已在项目所有者登录并明确授权后执行 P2 多轮真实验收：Bilibili、TikTok 已取得可核验公开链接，视频号旧号已有创作者后台发布证据而新号真实任务 `34` 在发表前上传 0% 阶段失败；抖音、快手仍无可核验内容记录，不能把按钮点击写成发布成功。
 
 ## 本地验证
 
