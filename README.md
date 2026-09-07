@@ -184,6 +184,8 @@ sau-worker
 sau-worker --once
 ```
 
+Vercel 控制面、持久数据库、私有素材和本地/长驻 Worker 的生产拆分方案见 [生产基础设施落地清单](docs/production-infrastructure-plan.md)。
+
 `--check` 会验证数据库、Cookie/素材目录、已连接账号数量，以及真实模式所需的浏览器运行时；它只做本地准备与检查，不会访问知乎等发布平台。Worker 继续复用同一套 SQLite、素材目录、Cookie 目录、授权指纹和 PublisherAdapter。Web 与 Worker 必须挂载同一份持久数据；在没有持久存储的 Vercel 函数中不要启动媒体 Worker。
 
 ### 6. Docker Compose 本地演示
