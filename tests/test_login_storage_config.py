@@ -1,3 +1,4 @@
+import io
 import sqlite3
 import tempfile
 import unittest
@@ -115,6 +116,121 @@ class LoginThreadStorageConfigTests(unittest.TestCase):
             database_path=self.db_path,
             cookies_directory=self.cookies_directory,
         )
+
+
+class LegacyStorageConfigTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.temp_root = Path(self.temp_dir.name)
+        self.db_path = self.temp_root / "legacy.db"
+        self.cookies_directory = self.temp_root / "cookies"
+        self.media_root = self.temp_root / "media"
+        self.cookies_directory.mkdir()
+        self.media_root.mkdir()
+        initialize_database(self.db_path)
+        with sqlite3.connect(self.db_path) as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO user_info (type, filePath, userName, status)
+                VALUES (?, ?, ?, ?)
+                """,
+                (9, "account.json", "isolated-account", 1),
+            )
+            self.account_id = cursor.lastrowid
+
+        self.original_config = {
+            "DATABASE_PATH": app.config["DATABASE_PATH"],
+            "COOKIES_DIRECTORY": app.config["COOKIES_DIRECTORY"],
+            "MEDIA_ROOT": app.config["MEDIA_ROOT"],
+            "TESTING": app.config["TESTING"],
+        }
+        app.config.update(
+            DATABASE_PATH=self.db_path,
+            COOKIES_DIRECTORY=self.cookies_directory,
+            MEDIA_ROOT=self.media_root,
+            TESTING=True,
+        )
+        self.client = app.test_client()
+
+    def tearDown(self):
+        app.config.update(self.original_config)
+        self.temp_dir.cleanup()
+
+    def test_legacy_account_routes_use_runtime_database_and_cookie_root(self):
+        listed = self.client.get("/getAccounts")
+        self.assertEqual(listed.status_code, 200)
+        self.assertEqual(listed.get_json()["data"][0][3], "isolated-account")
+
+        updated = self.client.post(
+            "/updateUserinfo",
+            json={"id": self.account_id, "type": 9, "userName": "renamed"},
+        )
+        self.assertEqual(updated.status_code, 200)
+
+        uploaded = self.client.post(
+            "/uploadCookie",
+            data={
+                "id": str(self.account_id),
+                "platform": "zhihu",
+                "file": (io.BytesIO(b'{"cookies": []}'), "account.json"),
+            },
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(uploaded.status_code, 200)
+        cookie_path = self.cookies_directory / "account.json"
+        self.assertEqual(cookie_path.read_bytes(), b'{"cookies": []}')
+
+        downloaded = self.client.get(
+            "/downloadCookie", query_string={"filePath": "account.json"}
+        )
+        try:
+            self.assertEqual(downloaded.status_code, 200)
+            self.assertEqual(downloaded.data, b'{"cookies": []}')
+        finally:
+            downloaded.close()
+
+        deleted = self.client.get(
+            "/deleteAccount", query_string={"id": self.account_id}
+        )
+        self.assertEqual(deleted.status_code, 200)
+        self.assertFalse(cookie_path.exists())
+        with sqlite3.connect(self.db_path) as connection:
+            count = connection.execute(
+                "SELECT COUNT(*) FROM user_info WHERE id = ?",
+                (self.account_id,),
+            ).fetchone()[0]
+        self.assertEqual(count, 0)
+
+    def test_legacy_cookie_check_receives_runtime_cookie_root(self):
+        with patch(
+            "myUtils.auth.check_cookie",
+            new=AsyncMock(return_value=True),
+        ) as checker:
+            response = self.client.get("/getValidAccounts")
+
+        self.assertEqual(response.status_code, 200)
+        checker.assert_awaited_once_with(
+            9,
+            "account.json",
+            cookies_directory=self.cookies_directory,
+        )
+
+    def test_legacy_upload_uses_runtime_media_root_and_rejects_paths(self):
+        uploaded = self.client.post(
+            "/upload",
+            data={"file": (io.BytesIO(b"video"), "sample.mp4")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(uploaded.status_code, 200)
+        stored_filename = uploaded.get_json()["data"]
+        self.assertEqual((self.media_root / stored_filename).read_bytes(), b"video")
+
+        rejected = self.client.post(
+            "/upload",
+            data={"file": (io.BytesIO(b"escape"), "../escape.mp4")},
+            content_type="multipart/form-data",
+        )
+        self.assertEqual(rejected.status_code, 400)
 
 
 if __name__ == "__main__":

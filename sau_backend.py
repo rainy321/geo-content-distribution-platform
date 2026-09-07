@@ -275,6 +275,10 @@ def _media_root() -> Path:
     return Path(app.config["MEDIA_ROOT"]).expanduser().resolve()
 
 
+def _cookies_root() -> Path:
+    return Path(app.config["COOKIES_DIRECTORY"]).expanduser().resolve()
+
+
 def _normalize_media_filename(value) -> str:
     filename = str(value or "").strip()
     if (
@@ -1671,9 +1675,13 @@ def upload_file():
         # 保存文件到指定位置
         uuid_v1 = uuid.uuid1()
         print(f"UUID v1: {uuid_v1}")
-        filepath = Path(BASE_DIR / "videoFile" / f"{uuid_v1}_{file.filename}")
+        original_filename = _normalize_media_filename(file.filename)
+        stored_filename = f"{uuid_v1}_{original_filename}"
+        filepath = _media_root() / stored_filename
         file.save(filepath)
-        return jsonify({"code":200,"msg": "File uploaded successfully", "data": f"{uuid_v1}_{file.filename}"}), 200
+        return jsonify({"code":200,"msg": "File uploaded successfully", "data": stored_filename}), 200
+    except ValueError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
     except Exception as e:
         return jsonify({"code":500,"msg": str(e),"data":None}), 500
 
@@ -1839,7 +1847,7 @@ def get_all_files():
 def getAccounts():
     """快速获取所有账号信息，不进行cookie验证"""
     try:
-        with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+        with sqlite3.connect(app.config["DATABASE_PATH"]) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute('''
@@ -1870,7 +1878,7 @@ def getAccounts():
 async def getValidAccounts():
     from myUtils.auth import check_cookie
 
-    with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+    with sqlite3.connect(app.config["DATABASE_PATH"]) as conn:
         cursor = conn.cursor()
         cursor.execute('''
         SELECT * FROM user_info''')
@@ -1880,7 +1888,11 @@ async def getValidAccounts():
         for row in rows:
             print(row)
         for row in rows_list:
-            flag = await check_cookie(row[1],row[2])
+            flag = await check_cookie(
+                row[1],
+                row[2],
+                cookies_directory=app.config["COOKIES_DIRECTORY"],
+            )
             new_status = 1 if flag else 0
             row[4] = new_status
             cursor.execute('''
@@ -1984,7 +1996,7 @@ def delete_account():
 
     try:
         # 获取数据库连接
-        with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+        with sqlite3.connect(app.config["DATABASE_PATH"]) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
@@ -2003,7 +2015,17 @@ def delete_account():
 
             # 删除关联的cookie文件
             if record.get('filePath'):
-                cookie_file_path = Path(BASE_DIR / "cookiesFile" / record['filePath'])
+                try:
+                    cookie_filename = _normalize_media_filename(
+                        record['filePath']
+                    )
+                except ValueError:
+                    return jsonify({
+                        "code": 409,
+                        "msg": "Stored cookie path is invalid",
+                        "data": None
+                    }), 409
+                cookie_file_path = _cookies_root() / cookie_filename
                 if cookie_file_path.exists():
                     try:
                         cookie_file_path.unlink()
@@ -2364,7 +2386,7 @@ def updateUserinfo():
     userName = data.get('userName')
     try:
         # 获取数据库连接
-        with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+        with sqlite3.connect(app.config["DATABASE_PATH"]) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
@@ -2608,7 +2630,7 @@ def upload_cookie():
             }), 400
 
         # 从数据库获取账号的文件路径
-        with sqlite3.connect(Path(BASE_DIR / "db" / "database.db")) as conn:
+        with sqlite3.connect(app.config["DATABASE_PATH"]) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute('SELECT filePath FROM user_info WHERE id = ?', (account_id,))
@@ -2622,7 +2644,8 @@ def upload_cookie():
             }), 404
 
         # 保存上传的Cookie文件到对应路径
-        cookie_file_path = Path(BASE_DIR / "cookiesFile" / result['filePath'])
+        cookie_filename = _normalize_media_filename(result['filePath'])
+        cookie_file_path = _cookies_root() / cookie_filename
         cookie_file_path.parent.mkdir(parents=True, exist_ok=True)
 
         file.save(str(cookie_file_path))
@@ -2658,15 +2681,15 @@ def download_cookie():
             }), 400
 
         # 验证文件路径的安全性，防止路径遍历攻击
-        cookie_file_path = Path(BASE_DIR / "cookiesFile" / file_path).resolve()
-        base_path = Path(BASE_DIR / "cookiesFile").resolve()
-
-        if not cookie_file_path.is_relative_to(base_path):
+        try:
+            cookie_filename = _normalize_media_filename(file_path)
+        except ValueError:
             return jsonify({
                 "code": 500,
                 "msg": "非法文件路径",
                 "data": None
             }), 400
+        cookie_file_path = _cookies_root() / cookie_filename
 
         if not cookie_file_path.exists():
             return jsonify({
