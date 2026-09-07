@@ -200,7 +200,7 @@ P2 运维脚本入口：`open_p2_logins.py`、`preflight_p2_video_publish.py`、
 Vercel CLI 部署上下文：新增 `.vercelignore`，显式排除本地 `.venv`、浏览器依赖、Cookie、SQLite、素材、临时验证产物和本地环境文件，防止本地完整 Worker 环境被误打包进轻量云端控制面。
 请求安全：AI 请求可按客户端配置每分钟上限，达到阈值返回 429/Retry-After；自定义模型地址禁止 HTTP、本机/私网/保留地址、内嵌凭据及 3xx 重定向；认证端点禁止缓存，业务响应带 nosniff、DENY frame、same-origin referrer 与权限策略安全头
 共享限流：新增可选 Upstash REST 适配器，以 Lua 在服务端原子完成计数、上限判断和窗口过期；客户端标识只以 SHA-256 摘要作为 Redis Key。Upstash 不可用时回退到同步预热的本地计数器；健康与认证状态接口只公开 `instance/shared` 范围，不暴露地址或 Token
-独立 Worker：新增 `sau-worker`、`sau-worker --once` 和不访问平台的 `sau-worker --check`，继续复用原子领取、真实发布总开关、授权指纹和 PublisherAdapter；Demo/真实执行隔离回归通过，Web 可用 `RUN_PUBLISH_SCHEDULER=false` 关闭内置调度器
+独立 Worker：新增 `sau-worker`、`sau-worker --once` 和不访问平台的 `sau-worker --check`，继续复用原子领取、真实发布总开关、授权指纹和 PublisherAdapter；Demo/真实执行隔离回归通过。Vercel 控制面已显式固定 `RUN_PUBLISH_SCHEDULER=false`，不会在 Serverless 实例中启动后台扫描线程
 容器编排：仍保留默认绑定 `127.0.0.1:5409`、关闭真实发布并持久化 SQLite/Cookie/媒体目录的 `compose.yaml`；项目所有者本轮明确选择 Vercel，Docker 实机构建不再作为本次交付阻塞项
 工作区：为修复真实预演发现的话题污染风险，对 `uploader/toutiao_uploader/main.py` 做了单点精确匹配修复并新增回归测试；未发现硬编码 API Key；Cookie、`.tmp/`、本地数据库均被 Git 忽略
 ```

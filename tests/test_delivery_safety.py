@@ -166,6 +166,7 @@ class DeliverySafetyTests(unittest.TestCase):
         )
         self.assertEqual("true", config["env"]["DEMO_MODE"])
         self.assertEqual("false", config["env"]["ALLOW_REAL_PUBLISHING"])
+        self.assertEqual("false", config["env"]["RUN_PUBLISH_SCHEDULER"])
         self.assertEqual("6", config["env"]["AI_RATE_LIMIT_PER_MINUTE"])
         self.assertEqual("12", config["env"]["APP_SESSION_HOURS"])
         self.assertNotIn("APP_ACCESS_PASSWORD", config["env"])
