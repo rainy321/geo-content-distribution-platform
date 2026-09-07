@@ -127,26 +127,44 @@ async def _verify(
                 "douyin": ["全部", "已发布", "审核中", "未通过"],
                 "kuaishou": ["全部作品", "已发布", "待发布", "未通过"],
                 "bilibili": ["全部稿件", "进行中", "已通过", "未通过"],
-                "channels": ["全部", "已发表", "审核中", "未通过", "草稿"],
+                # 当前视频号 UI 没有稳定的状态标签；默认页覆盖已发布视频，
+                # “草稿箱”是侧栏中的独立入口，必须真正点击后才能声称核验过。
+                "channels": ["", "草稿箱"],
                 "tiktok": [],
             }[platform]
             checked_tabs = []
+            missing_tabs = []
+            section_screenshots: dict[str, str] = {}
             title_found = False
             matching_links: list[str] = []
             title_contexts: list[dict[str, object]] = []
             found_tab = ""
             labels_to_check = tab_labels or [""]
             for label in labels_to_check:
+                tab_clicked = not label
                 if label:
                     tab = page.get_by_text(label, exact=True).first
                     try:
                         if await tab.count() and await tab.is_visible():
                             await tab.click()
                             await page.wait_for_timeout(3500)
+                            tab_clicked = True
                     except Exception:
-                        pass
+                        tab_clicked = False
+                if not tab_clicked:
+                    missing_tabs.append(label)
+                    continue
                 body_text = "\n".join(await page.locator("body").all_inner_texts())
                 checked_tabs.append(label or "default")
+                if platform == "channels":
+                    screenshot_directory.mkdir(parents=True, exist_ok=True)
+                    section_name = "draft" if label == "草稿箱" else "published"
+                    section_path = (
+                        screenshot_directory
+                        / f"channels_{section_name}_list.png"
+                    )
+                    await page.screenshot(path=str(section_path), full_page=True)
+                    section_screenshots[label or "default"] = str(section_path)
                 if TITLE not in body_text:
                     continue
                 title_found = True
@@ -186,10 +204,49 @@ async def _verify(
                     }""",
                     TITLE,
                 )
-                break
+                if not title_contexts:
+                    try:
+                        title_locator = page.get_by_text(
+                            TITLE,
+                            exact=False,
+                        ).first
+                        if await title_locator.count():
+                            title_contexts = await title_locator.evaluate(
+                                """node => {
+                                    const contexts = [];
+                                    let current = node;
+                                    for (let depth = 0; current && depth < 7; depth += 1) {
+                                        const attributes = {};
+                                        for (const attribute of Array.from(current.attributes || [])) {
+                                            if (/^(href|src|id)$|^data-.*(id|url|key)$|(?:post|video|export).*(id|url)/i.test(attribute.name)) {
+                                                attributes[attribute.name] = attribute.value;
+                                            }
+                                        }
+                                        contexts.push({
+                                            tag: current.tagName,
+                                            className: String(current.className || '').slice(0, 200),
+                                            attributes,
+                                            links: Array.from(current.querySelectorAll('a[href]'))
+                                                .map(link => link.href)
+                                                .filter(Boolean),
+                                        });
+                                        current = current.parentElement;
+                                    }
+                                    return contexts;
+                                }"""
+                            )
+                    except Exception:
+                        pass
+                if platform != "channels":
+                    break
             screenshot_directory.mkdir(parents=True, exist_ok=True)
-            screenshot_path = screenshot_directory / f"{platform}_published_list.png"
-            await page.screenshot(path=str(screenshot_path), full_page=True)
+            if platform == "channels" and "default" in section_screenshots:
+                screenshot_path = Path(section_screenshots["default"])
+            else:
+                screenshot_path = (
+                    screenshot_directory / f"{platform}_published_list.png"
+                )
+                await page.screenshot(path=str(screenshot_path), full_page=True)
             rendered_body_text = "\n".join(
                 await page.locator("body").all_inner_texts()
             ).strip()
@@ -214,6 +271,8 @@ async def _verify(
                 "matching_links": list(dict.fromkeys(matching_links)),
                 "found_tab": found_tab,
                 "checked_tabs": checked_tabs,
+                "missing_tabs": missing_tabs,
+                "section_screenshots": section_screenshots,
                 "title_contexts": title_contexts,
                 "screenshot": str(screenshot_path),
             }

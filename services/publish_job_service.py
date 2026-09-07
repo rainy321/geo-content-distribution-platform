@@ -10,7 +10,10 @@ from pathlib import Path
 from typing import Any
 
 from services.article_service import ArticleNotFoundError
-from services.platform_capability_service import SUPPORTED_PUBLISH_PLATFORMS
+from services.platform_capability_service import (
+    PLATFORM_BY_KEY,
+    SUPPORTED_PUBLISH_PLATFORMS,
+)
 
 
 PUBLISH_JOB_STATUSES = frozenset(
@@ -52,6 +55,7 @@ def create_publish_job(
     publish_at: str | datetime | None = None,
     auto_execute: bool = False,
     demo: bool = False,
+    account_id: int | None = None,
 ) -> dict[str, Any]:
     if not isinstance(auto_execute, bool):
         raise ValueError("auto_execute 必须是布尔值")
@@ -69,6 +73,12 @@ def create_publish_job(
             article_row = _fetch_authorization_article(conn, article_id)
             if article_row is None:
                 raise ArticleNotFoundError("文章不存在")
+            resolved_account_id = _resolve_publish_account_id(
+                conn,
+                normalized_platform,
+                requested_account_id=account_id,
+                demo=demo,
+            )
             authorization_fingerprint = (
                 build_publish_authorization_fingerprint(
                     article=dict(article_row),
@@ -76,6 +86,7 @@ def create_publish_job(
                     images=normalized_images,
                     video=normalized_video,
                     publish_at=normalized_publish_at,
+                    account_id=resolved_account_id,
                 )
                 if normalized_auto_execute
                 else ""
@@ -83,12 +94,13 @@ def create_publish_job(
             cursor = conn.execute(
                 """
                 INSERT INTO publish_jobs (
-                    article_id, platform, status, images, video, publish_at,
+                    article_id, account_id, platform, status, images, video, publish_at,
                     authorization_fingerprint, auto_execute, demo
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     article_id,
+                    resolved_account_id,
                     normalized_platform,
                     initial_status,
                     json.dumps(normalized_images, ensure_ascii=False),
@@ -110,11 +122,12 @@ def build_publish_authorization_fingerprint(
     images: list[str] | tuple[str, ...] | None,
     video: str | None = None,
     publish_at: str | datetime | None,
+    account_id: int | None = None,
 ) -> str:
     """Bind automatic execution to the exact publishable payload."""
 
     canonical_payload = {
-        "schema": 2,
+        "schema": 3,
         "article_id": int(article["id"]),
         "title": str(article.get("title") or "").strip(),
         "content": str(article.get("content") or "").strip(),
@@ -123,6 +136,7 @@ def build_publish_authorization_fingerprint(
         "images": normalize_publish_images(images),
         "video": normalize_publish_video(video),
         "publish_at": _normalize_publish_at(publish_at),
+        "account_id": _normalize_optional_account_id(account_id),
     }
     encoded = json.dumps(
         canonical_payload,
@@ -146,6 +160,7 @@ def publish_authorization_matches(
         images=job.get("images"),
         video=job.get("video"),
         publish_at=job.get("publish_at"),
+        account_id=job.get("account_id"),
     )
     return hmac.compare_digest(expected, actual)
 
@@ -415,6 +430,47 @@ def reconcile_publish_job_success(
     return _serialize_job(updated_row)
 
 
+def reconcile_publish_job_platform_success(
+    database_path: str | Path,
+    job_id: int,
+    *,
+    message: str,
+    result_url: str = "",
+) -> dict[str, Any]:
+    """Close an ambiguous job using platform-side proof when no public URL exists."""
+
+    normalized_message = _normalize_text(message)
+    if not normalized_message:
+        raise ValueError("平台后台对账成功必须提供核验说明")
+    normalized_url = _normalize_text(result_url)
+    if normalized_url and not normalized_url.startswith(("https://", "http://")):
+        raise ValueError("平台后台对账链接必须是 http(s) 地址")
+
+    with closing(_connect(database_path)) as conn:
+        with conn:
+            current_row = _fetch_job(conn, job_id)
+            if current_row is None:
+                raise PublishJobNotFoundError("发布任务不存在")
+            if current_row["status"] == "success":
+                return _serialize_job(current_row)
+            if current_row["status"] not in {"processing", "failed", "need_action"}:
+                raise InvalidPublishJobTransitionError(
+                    f"状态为 {current_row['status']} 的发布任务不能通过平台后台证据对账"
+                )
+            conn.execute(
+                """
+                UPDATE publish_jobs
+                SET status = 'success', message = ?, result_url = ?,
+                    finished_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+                """,
+                (normalized_message, normalized_url, job_id),
+            )
+            _sync_article_status(conn, current_row["article_id"])
+            updated_row = _fetch_job(conn, job_id)
+    return _serialize_job(updated_row)
+
+
 def reconcile_publish_job_failure(
     database_path: str | Path,
     job_id: int,
@@ -583,6 +639,58 @@ def normalize_publish_video(video: str | None) -> str:
     if Path(filename).name != filename or "/" in filename or "\\" in filename:
         raise ValueError("视频只能引用素材库中的文件名")
     return filename
+
+
+def _normalize_optional_account_id(account_id: Any) -> int | None:
+    if account_id is None or account_id == "":
+        return None
+    if isinstance(account_id, bool):
+        raise ValueError("account_id 必须是正整数")
+    try:
+        normalized = int(account_id)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("account_id 必须是正整数") from exc
+    if normalized <= 0:
+        raise ValueError("account_id 必须是正整数")
+    return normalized
+
+
+def _resolve_publish_account_id(
+    conn: sqlite3.Connection,
+    platform: str,
+    *,
+    requested_account_id: int | None,
+    demo: bool,
+) -> int | None:
+    normalized_requested = _normalize_optional_account_id(requested_account_id)
+    if demo and normalized_requested is None:
+        return None
+
+    account_type = int(PLATFORM_BY_KEY[platform]["account_type"])
+    if normalized_requested is not None:
+        row = conn.execute(
+            """
+            SELECT id
+            FROM user_info
+            WHERE id = ? AND type = ? AND status = 1
+            """,
+            (normalized_requested, account_type),
+        ).fetchone()
+        if row is None:
+            raise ValueError("指定账号不存在、平台不匹配或当前不可用")
+        return int(row["id"])
+
+    row = conn.execute(
+        """
+        SELECT id
+        FROM user_info
+        WHERE type = ? AND status = 1
+        ORDER BY COALESCE(last_checked_at, '') DESC, id DESC
+        LIMIT 1
+        """,
+        (account_type,),
+    ).fetchone()
+    return int(row["id"]) if row is not None else None
 
 
 def _normalize_platform(platform: str) -> str:

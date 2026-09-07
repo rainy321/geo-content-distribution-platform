@@ -46,7 +46,7 @@ class RealPublisherFactoryTests(unittest.TestCase):
     ):
         with closing(sqlite3.connect(self.db_path)) as conn:
             with conn:
-                conn.execute(
+                cursor = conn.execute(
                     """
                     INSERT INTO user_info (
                         type, filePath, userName, status, last_checked_at
@@ -54,6 +54,7 @@ class RealPublisherFactoryTests(unittest.TestCase):
                     """,
                     (account_type, file_path, account_name, status, checked_at),
                 )
+                return int(cursor.lastrowid)
 
     def test_builds_zhihu_adapter_from_connected_local_cookie(self):
         cookie_file = self.cookies_dir / "zhihu.json"
@@ -170,6 +171,29 @@ class RealPublisherFactoryTests(unittest.TestCase):
         )({"platform": "channels"})
 
         self.assertEqual(Path(publisher.account_file), new_cookie)
+
+    def test_bound_account_does_not_drift_to_newer_login(self):
+        old_cookie = self.cookies_dir / "channels-old.json"
+        new_cookie = self.cookies_dir / "channels-new.json"
+        old_cookie.write_text("{}", encoding="utf-8")
+        new_cookie.write_text("{}", encoding="utf-8")
+        old_account_id = self._insert_account(
+            old_cookie.name,
+            account_type=2,
+            account_name="channels-old",
+        )
+        self._insert_account(
+            new_cookie.name,
+            account_type=2,
+            account_name="channels-secondary",
+        )
+
+        publisher = RealPublisherFactory(
+            self.db_path,
+            cookies_directory=self.cookies_dir,
+        )({"platform": "channels", "account_id": old_account_id})
+
+        self.assertEqual(Path(publisher.account_file), old_cookie)
 
     def test_rejects_unsupported_platform(self):
         factory = RealPublisherFactory(

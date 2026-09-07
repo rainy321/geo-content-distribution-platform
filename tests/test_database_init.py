@@ -182,7 +182,7 @@ class DatabaseInitializationTests(unittest.TestCase):
                     """
                     SELECT article_id, platform, status, message, result_url,
                            images, video, publish_at, authorization_fingerprint,
-                           auto_execute, demo,
+                           auto_execute, demo, account_id,
                            created_at, started_at, finished_at
                     FROM publish_jobs
                     """
@@ -193,6 +193,7 @@ class DatabaseInitializationTests(unittest.TestCase):
                 {
                     "id",
                     "article_id",
+                    "account_id",
                     "platform",
                     "status",
                     "message",
@@ -212,9 +213,10 @@ class DatabaseInitializationTests(unittest.TestCase):
                 job[:11],
                 (article_id, "zhihu", "queued", "", "", "[]", "", None, "", 0, 0),
             )
-            self.assertTrue(job[11])
-            self.assertIsNone(job[12])
+            self.assertIsNone(job[11])
+            self.assertTrue(job[12])
             self.assertIsNone(job[13])
+            self.assertIsNone(job[14])
 
     def test_reinitialization_adds_assets_to_existing_publish_jobs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -259,6 +261,7 @@ class DatabaseInitializationTests(unittest.TestCase):
             self.assertIn("video", columns)
             self.assertIn("auto_execute", columns)
             self.assertIn("authorization_fingerprint", columns)
+            self.assertIn("account_id", columns)
             self.assertEqual(images, "[]")
             self.assertEqual(video, "")
             self.assertEqual(fingerprint, "")

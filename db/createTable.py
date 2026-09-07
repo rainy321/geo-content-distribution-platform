@@ -163,6 +163,7 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                 CREATE TABLE IF NOT EXISTS publish_jobs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     article_id INTEGER NOT NULL,
+                    account_id INTEGER,
                     platform TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'queued'
                         CHECK (status IN (
@@ -182,7 +183,8 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     started_at DATETIME,
                     finished_at DATETIME,
-                    FOREIGN KEY (article_id) REFERENCES articles(id) ON DELETE CASCADE
+                    FOREIGN KEY (article_id) REFERENCES articles(id) ON DELETE CASCADE,
+                    FOREIGN KEY (account_id) REFERENCES user_info(id) ON DELETE SET NULL
                 )
                 '''
             )
@@ -210,6 +212,10 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                     "ALTER TABLE publish_jobs "
                     "ADD COLUMN authorization_fingerprint TEXT NOT NULL DEFAULT ''"
                 )
+            if "account_id" not in publish_job_columns:
+                cursor.execute(
+                    "ALTER TABLE publish_jobs ADD COLUMN account_id INTEGER"
+                )
             cursor.execute(
                 '''
                 CREATE INDEX IF NOT EXISTS idx_publish_jobs_article_id
@@ -220,6 +226,12 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                 '''
                 CREATE INDEX IF NOT EXISTS idx_publish_jobs_status
                 ON publish_jobs(status)
+                '''
+            )
+            cursor.execute(
+                '''
+                CREATE INDEX IF NOT EXISTS idx_publish_jobs_account_id
+                ON publish_jobs(account_id)
                 '''
             )
 

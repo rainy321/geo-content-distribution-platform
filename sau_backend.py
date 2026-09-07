@@ -1775,7 +1775,7 @@ def upload_save():
                     json.dumps(upload_tags, ensure_ascii=False),
                 ))
             conn.commit()
-            print("✅ 上传文件已记录")
+            print("Upload file record saved")
 
         return jsonify({
             "code": 200,

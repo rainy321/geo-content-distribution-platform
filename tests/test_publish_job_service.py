@@ -17,6 +17,7 @@ from services.publish_job_service import (
     list_publish_jobs,
     publish_authorization_matches,
     reconcile_publish_job_failure,
+    reconcile_publish_job_platform_success,
     reconcile_publish_job_success,
     retry_publish_job,
     transition_publish_job,
@@ -193,6 +194,30 @@ class PublishJobServiceTests(unittest.TestCase):
         self.assertEqual(all_jobs["items"][0]["id"], second["id"])
         self.assertEqual(failed_jobs["pagination"]["total"], 1)
         self.assertEqual(failed_jobs["items"][0]["message"], "网络异常")
+
+    def test_real_job_binds_latest_eligible_platform_account(self):
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO user_info (type, filePath, userName, status)
+                    VALUES (2, 'channels-old.json', 'channels-old', 1)
+                    """
+                )
+                latest_account_id = conn.execute(
+                    """
+                    INSERT INTO user_info (type, filePath, userName, status)
+                    VALUES (2, 'channels-new.json', 'channels-secondary', 1)
+                    """
+                ).lastrowid
+
+        job = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="channels",
+        )
+
+        self.assertEqual(job["account_id"], latest_account_id)
 
     def test_transitions_through_processing_to_success(self):
         job = create_publish_job(
@@ -376,6 +401,24 @@ class PublishJobServiceTests(unittest.TestCase):
             "https://baijiahao.baidu.com/s?id=123456789",
         )
         self.assertTrue(reconciled["finished_at"])
+
+    def test_reconciles_platform_success_without_public_url(self):
+        job = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="channels",
+        )
+        transition_publish_job(self.db_path, job["id"], "processing")
+
+        reconciled = reconcile_publish_job_platform_success(
+            self.db_path,
+            job["id"],
+            message="视频号后台精确标题与发布时间已核验，平台不提供 Web 公链",
+        )
+
+        self.assertEqual(reconciled["status"], "success")
+        self.assertEqual(reconciled["result_url"], "")
+        self.assertIn("视频号后台", reconciled["message"])
 
     def test_reconciles_need_action_as_failed_with_no_submit_evidence(self):
         job = create_publish_job(

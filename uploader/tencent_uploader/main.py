@@ -4,8 +4,10 @@ from __future__ import annotations
 import asyncio
 import inspect
 import os
+import re
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from patchright.async_api import Page
 from patchright.async_api import Playwright
@@ -103,6 +105,51 @@ def format_str_for_short_title(origin_title: str) -> str:
     return formatted_string
 
 
+def _is_tencent_login_url(url: str) -> bool:
+    parsed = urlsplit(str(url or ""))
+    if parsed.netloc.lower() != "channels.weixin.qq.com":
+        return False
+    normalized_path = parsed.path.rstrip("/").lower()
+    return normalized_path in {"", "/login", "/login.html"}
+
+
+async def _wait_for_authenticated_upload_page(
+    page: Page,
+    *,
+    max_checks: int = 30,
+    poll_interval: float = 0.5,
+) -> bool:
+    for _ in range(max_checks):
+        if _is_tencent_login_url(page.url):
+            return False
+
+        try:
+            login_markers = [
+                page.get_by_text("扫码登录", exact=True).first,
+                page.locator('iframe[src*="login-for-iframe"]').first,
+                page.locator("img.qrcode").first,
+            ]
+            for marker in login_markers:
+                if await marker.count() and await marker.is_visible():
+                    return False
+
+            if await page.locator('input[type="file"]').count():
+                return True
+            publish_markers = [
+                page.get_by_text("发表视频", exact=True).first,
+                page.get_by_role("button", name="发表", exact=True).first,
+            ]
+            for marker in publish_markers:
+                if await marker.count() and await marker.is_visible():
+                    return True
+        except Exception:
+            pass
+
+        await asyncio.sleep(poll_interval)
+
+    return False
+
+
 async def cookie_auth(account_file):
     account_file = _resolve_account_file(account_file)
     async with async_playwright() as playwright:
@@ -111,16 +158,9 @@ async def cookie_auth(account_file):
             context = await browser.new_context(storage_state=account_file)
             context = await set_init_script(context)
             page = await context.new_page()
-            await page.goto(TENCENT_UPLOAD_URL)
-            await page.wait_for_url(TENCENT_UPLOAD_URL, timeout=5000)
+            await page.goto(TENCENT_UPLOAD_URL, wait_until="domcontentloaded")
 
-            login_markers = [
-                page.get_by_text("扫码登录", exact=True).first,
-                page.get_by_text("发表视频", exact=True).first,
-                page.get_by_role("button", name="发表").first,
-            ]
-
-            if await login_markers[0].count():
+            if not await _wait_for_authenticated_upload_page(page):
                 tencent_logger.info(_msg("🥹", "cookie 已失效，得重新登录一下"))
                 return False
 
@@ -456,6 +496,121 @@ class TencentBaseUploader(BaseVideoUploader):
         self.debug = debug
         self.headless = headless
         self.local_executable_path = LOCAL_CHROME_PATH
+        self._upload_diagnostics: list[str] = []
+        self._upload_network_diagnostics_installed = False
+
+    def _record_upload_diagnostic(self, message: str) -> None:
+        normalized = " ".join(str(message or "").split())[:500]
+        if not normalized or normalized in self._upload_diagnostics:
+            return
+        self._upload_diagnostics.append(normalized)
+        del self._upload_diagnostics[:-30]
+
+    @staticmethod
+    def _safe_request_endpoint(url: str) -> str:
+        parsed = urlsplit(str(url or ""))
+        if not parsed.scheme or not parsed.netloc:
+            return "unknown-endpoint"
+        return f"{parsed.scheme}://{parsed.netloc}{parsed.path}"
+
+    def _install_upload_network_diagnostics(self, page: Page) -> None:
+        if self._upload_network_diagnostics_installed:
+            return
+
+        def record_failed_request(request) -> None:
+            try:
+                method = str(request.method or "GET").upper()
+                resource_type = str(request.resource_type or "unknown")
+                endpoint = self._safe_request_endpoint(request.url)
+                endpoint_lower = endpoint.lower()
+                upload_markers = (
+                    "upload",
+                    "multipart",
+                    "chunk",
+                    "material",
+                    "/media/",
+                    "/video/",
+                    "/file/",
+                )
+                if method not in {"POST", "PUT", "PATCH"} and not any(
+                    marker in endpoint_lower for marker in upload_markers
+                ):
+                    return
+                failure = str(request.failure or "request failed")
+                self._record_upload_diagnostic(
+                    f"request_failed {method} {resource_type} {endpoint}: {failure}"
+                )
+            except Exception as exc:
+                self._record_upload_diagnostic(
+                    f"request_failed_listener_error {type(exc).__name__}: {exc}"
+                )
+
+        def record_response(response) -> None:
+            try:
+                request = response.request
+                method = str(request.method or "GET").upper()
+                resource_type = str(request.resource_type or "unknown")
+                if method not in {"POST", "PUT", "PATCH"} or resource_type not in {"xhr", "fetch"}:
+                    return
+                endpoint = self._safe_request_endpoint(response.url)
+                endpoint_lower = endpoint.lower()
+                upload_markers = (
+                    "upload",
+                    "multipart",
+                    "chunk",
+                    "material",
+                    "/media/",
+                    "/video/",
+                    "/file/",
+                )
+                if response.status < 400 and not any(
+                    marker in endpoint_lower for marker in upload_markers
+                ):
+                    return
+                self._record_upload_diagnostic(
+                    f"http_response {method} {response.status} {resource_type} {endpoint}"
+                )
+            except Exception as exc:
+                self._record_upload_diagnostic(
+                    f"response_listener_error {type(exc).__name__}: {exc}"
+                )
+
+        page.on("requestfailed", record_failed_request)
+        page.on("response", record_response)
+        self._upload_network_diagnostics_installed = True
+
+    async def _collect_upload_page_diagnostics(self, page: Page) -> None:
+        try:
+            body_texts = await page.locator("body").all_inner_texts()
+            page_text = "\n".join(body_texts)
+            percentages = list(
+                dict.fromkeys(
+                    re.findall(r"(?<!\d)(?:100|[1-9]?\d)%", page_text)
+                )
+            )
+            if percentages:
+                self._record_upload_diagnostic(
+                    "visible_progress " + ",".join(percentages[-5:])
+                )
+
+            diagnostic_markers = (
+                "上传失败",
+                "网络异常",
+                "网络错误",
+                "暂无权限",
+                "无权限",
+                "实名认证",
+                "账号异常",
+                "账号限制",
+                "取消上传",
+            )
+            for marker in diagnostic_markers:
+                if marker in page_text:
+                    self._record_upload_diagnostic(f"visible_marker {marker}")
+        except Exception as exc:
+            self._record_upload_diagnostic(
+                f"page_diagnostic_error {type(exc).__name__}: {exc}"
+            )
 
     async def validate_base_args(self):
         if not os.path.exists(self.account_file):
@@ -499,8 +654,75 @@ class TencentBaseUploader(BaseVideoUploader):
         await page.wait_for_url(TENCENT_UPLOAD_URL)
 
     async def upload_video_file(self, page: Page, file_path: str) -> None:
-        file_input = page.locator('input[type="file"]')
+        self._install_upload_network_diagnostics(page)
+        file_input = page.locator('input[type="file"]').first
+        try:
+            await file_input.wait_for(state="attached", timeout=30000)
+        except Exception as exc:
+            await self._collect_upload_page_diagnostics(page)
+            diagnostic_path = Path(self.account_file).with_name(
+                "channels_file_input_missing.png"
+            )
+            try:
+                await page.screenshot(path=str(diagnostic_path), full_page=True)
+            except Exception as screenshot_exc:
+                self._record_upload_diagnostic(
+                    "file_input_screenshot_error "
+                    f"{type(screenshot_exc).__name__}: {screenshot_exc}"
+                )
+            diagnostic_summary = "；".join(self._upload_diagnostics[-12:])
+            raise RuntimeError(
+                "视频号发布页 30 秒内未出现视频文件选择器；"
+                f"当前页面: {self._safe_request_endpoint(page.url)}；"
+                f"诊断截图: {diagnostic_path}；诊断: "
+                f"{diagnostic_summary or type(exc).__name__}"
+            ) from exc
         await file_input.set_input_files(file_path)
+        try:
+            expected_size = Path(file_path).stat().st_size
+            selected_files = await file_input.evaluate(
+                """element => Array.from(element.files || []).map(file => ({
+                    name: file.name,
+                    size: file.size,
+                    type: file.type
+                }))"""
+            )
+            if not selected_files:
+                self._record_upload_diagnostic(
+                    "file_input_cleared_after_selection "
+                    f"expected_name={Path(file_path).name} expected_size={expected_size}"
+                )
+                tencent_logger.info(
+                    _msg(
+                        "📦",
+                        "视频号前端已接收文件选择事件并清空原输入框，"
+                        f"本地文件大小 {expected_size} 字节",
+                    )
+                )
+            else:
+                selected = selected_files[0]
+                selected_size = int(selected.get("size") or 0)
+                if selected_size != expected_size:
+                    raise RuntimeError(
+                        "浏览器选择的文件大小不一致: "
+                        f"selected={selected_size}, expected={expected_size}"
+                    )
+                self._record_upload_diagnostic(
+                    f"file_selected {selected.get('name') or Path(file_path).name} "
+                    f"size={selected_size} type={selected.get('type') or 'unknown'}"
+                )
+                tencent_logger.info(
+                    _msg(
+                        "📦",
+                        f"浏览器已确认选中视频文件，大小 {selected_size} 字节",
+                    )
+                )
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            self._record_upload_diagnostic(
+                f"file_selection_probe_error {type(exc).__name__}: {exc}"
+            )
 
     async def set_short_title(self, page: Page, title: str, short_title: str | None = None) -> None:
         short_title_element = (
@@ -625,16 +847,25 @@ class TencentBaseUploader(BaseVideoUploader):
 
         if not original_set:
             try:
-                diagnostic_path = Path(BASE_DIR) / "debug_tencent_original_missing.png"
+                diagnostic_path = Path(self.account_file).with_name(
+                    "channels_original_missing.png"
+                )
                 await page.screenshot(path=str(diagnostic_path), full_page=True)
-                visible_text = "\n".join(
-                    await page.locator("body").all_inner_texts()
-                )[-4000:]
-                tencent_logger.warning(_msg("😵", f"未确认声明原创，诊断截图: {diagnostic_path}"))
-                tencent_logger.warning(_msg("🧾", f"页面末尾文本: {visible_text}"))
+                tencent_logger.warning(
+                    _msg(
+                        "😵",
+                        f"当前账号页面没有原创声明入口，诊断截图: {diagnostic_path}",
+                    )
+                )
             except Exception as exc:
                 tencent_logger.warning(_msg("😵", f"生成原创声明诊断信息失败: {exc}"))
-            raise RuntimeError("未能在视频号发布页找到并设置“声明原创”，已停止发布")
+            if getattr(self, "require_original_statement", False):
+                raise RuntimeError(
+                    "当前视频号账号没有“声明原创”入口，但任务要求必须声明原创"
+                )
+            tencent_logger.info(
+                _msg("🧾", "当前账号不提供原创声明能力，保留平台默认设置")
+            )
 
     async def wait_for_upload_complete(
         self,
@@ -643,6 +874,7 @@ class TencentBaseUploader(BaseVideoUploader):
         max_retries: int = 80,
     ) -> None:
         retry_count = 0
+        upload_retry_count = 0
         while retry_count < max_retries:
             retry_count += 1
             try:
@@ -662,19 +894,40 @@ class TencentBaseUploader(BaseVideoUploader):
                         tencent_logger.info(_msg("🥳", "视频上传完毕"))
                         return
 
-                if retry_count % 5 == 0:
-                    tencent_logger.info(_msg("🏃", f"正在上传视频中...（第{retry_count}次）"))
-                await asyncio.sleep(2)
+                upload_error = page.locator("div.status-msg.error:visible")
+                if await upload_error.count():
+                    error_text = (
+                        " | ".join(await upload_error.all_inner_texts())
+                        or "平台显示上传失败"
+                    )
+                    self._record_upload_diagnostic(
+                        f"platform_upload_error {error_text}"
+                    )
+                    delete_button = page.locator(
+                        'div.media-status-content div.tag-inner:has-text("删除"):visible'
+                    )
+                    if await delete_button.count() and upload_retry_count < 1:
+                        upload_retry_count += 1
+                        tencent_logger.error(
+                            _msg("😵", "发现明确上传错误，执行一次文件重选")
+                        )
+                        await self.handle_upload_error(page)
+                    else:
+                        raise RuntimeError(
+                            f"视频号页面明确报告上传失败: {error_text}"
+                        )
+            except RuntimeError:
+                raise
+            except Exception as exc:
+                self._record_upload_diagnostic(
+                    f"upload_monitor_error {type(exc).__name__}: {exc}"
+                )
 
-                upload_failed = await page.locator("div.status-msg.error").count()
-                delete_button = await page.locator('div.media-status-content div.tag-inner:has-text("删除")').count()
-                if upload_failed and delete_button:
-                    tencent_logger.error(_msg("😵", "发现上传出错了，准备重试"))
-                    await self.handle_upload_error(page)
-            except Exception:
-                if retry_count % 5 == 0:
-                    tencent_logger.info(_msg("🏃", f"正在上传视频中...（第{retry_count}次）"))
-                await asyncio.sleep(2)
+            if retry_count % 5 == 0:
+                tencent_logger.info(
+                    _msg("🏃", f"正在上传视频中...（第{retry_count}次）")
+                )
+            await asyncio.sleep(2)
         else:
             diagnostic_path = Path(self.account_file).with_name(
                 "channels_upload_timeout.png"
@@ -683,9 +936,13 @@ class TencentBaseUploader(BaseVideoUploader):
                 await page.screenshot(path=str(diagnostic_path), full_page=True)
             except Exception as exc:
                 tencent_logger.warning(_msg("😵", f"上传超时截图失败: {exc}"))
+            await self._collect_upload_page_diagnostics(page)
+            diagnostic_summary = "；".join(self._upload_diagnostics[-12:])
+            if not diagnostic_summary:
+                diagnostic_summary = "未捕获到文件选择、网络响应或页面错误证据"
             raise RuntimeError(
                 f"视频号上传等待超时：{max_retries}次检查后仍未完成；"
-                f"诊断截图: {diagnostic_path}"
+                f"诊断截图: {diagnostic_path}；诊断: {diagnostic_summary}"
             )
 
     async def submit_publish(self, page: Page) -> None:
@@ -786,6 +1043,7 @@ class TencentVideo(TencentBaseUploader):
         headless: bool = LOCAL_CHROME_HEADLESS,
         dry_run: bool = False,
         preview_seconds: int = 120,
+        require_original_statement: bool = False,
     ):
         super().__init__(
             publish_date=publish_date,
@@ -804,6 +1062,7 @@ class TencentVideo(TencentBaseUploader):
         self.short_title = short_title
         self.dry_run = bool(dry_run)
         self.preview_seconds = max(0, int(preview_seconds))
+        self.require_original_statement = bool(require_original_statement)
 
     async def validate_upload_args(self):
         await self.validate_base_args()
