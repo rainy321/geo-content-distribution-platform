@@ -1,5 +1,11 @@
 # GEO MVP 生产基础设施落地清单
 
+> 2026-09-08 更新：项目所有者已经提供一台带 Docker、Nginx 和 VNC 的持久化
+> Linux 服务器。当前首选方案已改为同机部署 Web 与独立 Worker，使用服务器本地
+> SQLite、Cookie 和素材持久目录。下文的 Turso、对象存储和 Upstash 组合保留为
+> 多实例扩容路径，不是本次单机迁移的前置条件。具体步骤见
+> [`production-server-deployment.md`](./production-server-deployment.md)。
+
 ## 当前边界
 
 - Vercel 只承载 Web 控制面和轻量 API，`DEMO_MODE=true`、`ALLOW_REAL_PUBLISHING=false`、`RUN_PUBLISH_SCHEDULER=false`。

@@ -4,6 +4,8 @@
 .worktrees
 .tmp
 /.env
+deploy/production/app.env
+runtime
 cookies
 cookiesFile
 db/database.db

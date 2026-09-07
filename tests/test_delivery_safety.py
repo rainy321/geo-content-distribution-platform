@@ -139,6 +139,23 @@ class DeliverySafetyTests(unittest.TestCase):
             dockerfile,
         )
 
+    def test_production_compose_is_isolated_and_keeps_real_publishing_opt_in(self):
+        compose = (ROOT / "compose.production.yaml").read_text(encoding="utf-8")
+        env_example = (
+            ROOT / "deploy" / "production" / "app.env.example"
+        ).read_text(encoding="utf-8")
+        dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
+        gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
+
+        self.assertIn("name: geo-platform", compose)
+        self.assertIn("${GEO_BIND_ADDRESS:-127.0.0.1}", compose)
+        self.assertIn("RUN_PUBLISH_SCHEDULER: \"false\"", compose)
+        self.assertIn('command: ["sau-worker"]', compose)
+        self.assertIn("ALLOW_REAL_PUBLISHING=false", env_example)
+        self.assertNotIn("AI_API_KEY=sk-", env_example)
+        self.assertIn("deploy/production/app.env", dockerignore)
+        self.assertIn("deploy/production/app.env", gitignore)
+
     def test_source_server_defaults_to_loopback(self):
         with patch.dict("os.environ", {}, clear=True):
             self.assertEqual(("127.0.0.1", 5409), get_server_bind())

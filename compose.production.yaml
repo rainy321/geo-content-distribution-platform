@@ -1,0 +1,51 @@
+name: geo-platform
+
+x-geo-runtime: &geo-runtime
+  image: ${GEO_IMAGE:-geo-platform:production}
+  build:
+    context: .
+  env_file:
+    - ./deploy/production/app.env
+  environment:
+    DATABASE_PATH: /app/data/database.db
+    COOKIES_DIRECTORY: /app/cookiesFile
+    MEDIA_ROOT: /app/videoFile
+    LOCAL_CHROME_HEADLESS: "true"
+    SERVER_HOST: 0.0.0.0
+    SERVER_PORT: "5409"
+  volumes:
+    - ${GEO_RUNTIME_ROOT:-./runtime}/data:/app/data
+    - ${GEO_RUNTIME_ROOT:-./runtime}/cookies:/app/cookiesFile
+    - ${GEO_RUNTIME_ROOT:-./runtime}/media:/app/videoFile
+  init: true
+  restart: unless-stopped
+  shm_size: "1gb"
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+services:
+  web:
+    <<: *geo-runtime
+    environment:
+      DATABASE_PATH: /app/data/database.db
+      COOKIES_DIRECTORY: /app/cookiesFile
+      MEDIA_ROOT: /app/videoFile
+      LOCAL_CHROME_HEADLESS: "true"
+      RUN_PUBLISH_SCHEDULER: "false"
+      SERVER_HOST: 0.0.0.0
+      SERVER_PORT: "5409"
+    ports:
+      - "${GEO_BIND_ADDRESS:-127.0.0.1}:${GEO_HTTP_PORT:-5409}:5409"
+
+  worker:
+    <<: *geo-runtime
+    command: ["sau-worker"]
+    environment:
+      DATABASE_PATH: /app/data/database.db
+      COOKIES_DIRECTORY: /app/cookiesFile
+      MEDIA_ROOT: /app/videoFile
+      LOCAL_CHROME_HEADLESS: "true"
+      RUN_PUBLISH_SCHEDULER: "false"

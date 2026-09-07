@@ -195,3 +195,5 @@ videoFile
 .tmp/
 .vercel/
 .env.local
+deploy/production/app.env
+runtime/
