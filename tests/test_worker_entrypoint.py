@@ -24,6 +24,7 @@ class WorkerEntrypointTests(unittest.TestCase):
                     "PUBLISH_SCHEDULER_INTERVAL_SECONDS": "2",
                     "DEMO_MODE": "true",
                     "ALLOW_REAL_PUBLISHING": "true",
+                    "ENABLE_BILIBILI_RUNTIME": "true",
                 },
                 clear=True,
             ):
@@ -32,6 +33,7 @@ class WorkerEntrypointTests(unittest.TestCase):
         self.assertEqual(settings.interval_seconds, 5)
         self.assertTrue(settings.demo_mode)
         self.assertFalse(settings.allows_real_execution)
+        self.assertTrue(settings.enable_bilibili_runtime)
 
     @patch("sau_worker.run_publish_scheduler_tick")
     @patch("sau_worker.create_real_publisher_factory")

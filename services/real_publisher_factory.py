@@ -14,6 +14,8 @@ from services.media_publisher_adapters import (
     TiktokPublisherAdapter,
 )
 from services.platform_capability_service import (
+    BILIBILI_PLATFORM_KEY,
+    BILIBILI_RUNTIME_DISABLED_MESSAGE,
     PLATFORM_BY_KEY,
     SUPPORTED_PUBLISH_PLATFORMS,
 )
@@ -41,12 +43,19 @@ class RealPublisherFactory:
         database_path: str | Path,
         *,
         cookies_directory: str | Path,
+        enable_bilibili_runtime: bool = False,
     ):
         self.database_path = Path(database_path)
         self.cookies_directory = Path(cookies_directory).resolve()
+        self.enable_bilibili_runtime = bool(enable_bilibili_runtime)
 
     def __call__(self, job: dict[str, Any]) -> PublisherAdapter:
         platform = str(job.get("platform") or "").strip().lower()
+        if (
+            platform == BILIBILI_PLATFORM_KEY
+            and not self.enable_bilibili_runtime
+        ):
+            raise PublisherNotConfiguredError(BILIBILI_RUNTIME_DISABLED_MESSAGE)
         account_type = _PLATFORM_ACCOUNT_TYPES.get(platform)
         if account_type is None:
             raise PublisherNotConfiguredError(
@@ -134,8 +143,10 @@ def create_real_publisher_factory(
     database_path: str | Path,
     *,
     cookies_directory: str | Path,
+    enable_bilibili_runtime: bool = False,
 ) -> RealPublisherFactory:
     return RealPublisherFactory(
         database_path,
         cookies_directory=cookies_directory,
+        enable_bilibili_runtime=enable_bilibili_runtime,
     )

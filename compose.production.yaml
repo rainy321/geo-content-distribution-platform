@@ -2,8 +2,18 @@ name: geo-platform
 
 x-geo-runtime: &geo-runtime
   image: ${GEO_IMAGE:-geo-platform:production}
+  # This host uses rootless Docker: container UID 0 maps to the unprivileged
+  # dongai-deploy daemon user that owns the bind mounts. The image itself stays
+  # non-root by default for rootful/named-volume deployments; override this only
+  # after verifying the host user-namespace mapping and every runtime path.
+  user: "${GEO_CONTAINER_USER:-0:0}"
   build:
     context: .
+    args:
+      NODE_IMAGE: ${GEO_NODE_IMAGE:-dockerproxy.net/library/node:22.21.1@sha256:b84d52cd45bfe261096ccbf886955d431b8b9ed01b72eaef588e8886bda09e78}
+      PYTHON_IMAGE: ${GEO_PYTHON_IMAGE:-dockerproxy.net/library/python@sha256:04adf975cd21078f4ce5a7b1a7b6d8f83a7773428ae66268595869c2f990c21c}
+      PATCHRIGHT_CHROMIUM_URL: ${GEO_PATCHRIGHT_CHROMIUM_URL:-https://cdn.npmmirror.com/binaries/chrome-for-testing/145.0.7632.6/linux64/chrome-linux64.zip}
+      PATCHRIGHT_CHROMIUM_SHA256: ${GEO_PATCHRIGHT_CHROMIUM_SHA256:-b5e3195041af345a668d110f5daf5581961fa3608626ea588c97dd0fe81c4e38}
   env_file:
     - ./deploy/production/app.env
   environment:
@@ -14,9 +24,21 @@ x-geo-runtime: &geo-runtime
     SERVER_HOST: 0.0.0.0
     SERVER_PORT: "5409"
   volumes:
-    - ${GEO_RUNTIME_ROOT:-./runtime}/data:/app/data
-    - ${GEO_RUNTIME_ROOT:-./runtime}/cookies:/app/cookiesFile
-    - ${GEO_RUNTIME_ROOT:-./runtime}/media:/app/videoFile
+    - type: bind
+      source: ${GEO_RUNTIME_ROOT:-../runtime}/data
+      target: /app/data
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ${GEO_RUNTIME_ROOT:-../runtime}/cookies
+      target: /app/cookiesFile
+      bind:
+        create_host_path: false
+    - type: bind
+      source: ${GEO_RUNTIME_ROOT:-../runtime}/media
+      target: /app/videoFile
+      bind:
+        create_host_path: false
   init: true
   restart: unless-stopped
   shm_size: "1gb"
@@ -43,9 +65,61 @@ services:
   worker:
     <<: *geo-runtime
     command: ["sau-worker"]
+    healthcheck:
+      test: ["CMD", "sau-worker", "--check"]
+      interval: 60s
+      timeout: 15s
+      start_period: 20s
+      retries: 3
     environment:
       DATABASE_PATH: /app/data/database.db
       COOKIES_DIRECTORY: /app/cookiesFile
       MEDIA_ROOT: /app/videoFile
       LOCAL_CHROME_HEADLESS: "true"
       RUN_PUBLISH_SCHEDULER: "false"
+      # The publishing worker does not generate content or serve operator
+      # sessions. Empty values override secrets loaded from app.env without
+      # changing the existing single-file deployment workflow.
+      AI_BASE_URL: ""
+      AI_API_KEY: ""
+      AI_MODEL: ""
+      APP_ACCESS_PASSWORD: ""
+      APP_SESSION_SECRET: ""
+      UPSTASH_REDIS_REST_URL: ""
+      UPSTASH_REDIS_REST_TOKEN: ""
+      CONTENT_ENGINE: ""
+      CONTENT_ENGINE_FALLBACK: ""
+      COLLEAGUE_CONTENT_ENGINE_URL: ""
+      COLLEAGUE_CONTENT_ENGINE_TOKEN: ""
+
+  # Optional colleague-owned engine. It is deliberately profile-gated, has no
+  # host port, receives no app.env secrets, and mounts none of GEO's database,
+  # account-cookie, or media paths. The image must implement POST
+  # /api/v1/generate and its own /health/live + /health/ready checks on :8080.
+  # Web intentionally has no depends_on edge: qwen remains the default and a
+  # colleague outage must not prevent the product from starting or rolling back.
+  content-engine:
+    # The placeholder tag is intentionally non-runnable in production. Set an
+    # immutable registry digest before enabling the colleague profile.
+    image: ${COLLEAGUE_CONTENT_ENGINE_IMAGE:-geo-colleague-content-engine:not-configured}
+    profiles: ["colleague"]
+    env_file:
+      - ${COLLEAGUE_CONTENT_ENGINE_ENV_FILE:-./deploy/production/content-engine.env.example}
+    expose:
+      - "8080"
+    init: true
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    user: "${COLLEAGUE_CONTENT_ENGINE_USER:-65532:65532}"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"

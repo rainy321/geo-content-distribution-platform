@@ -7,6 +7,7 @@ from typing import Any
 
 from services.article_service import get_article
 from services.publish_job_service import (
+    ConcurrentPublishJobUpdateError,
     PUBLISH_AUTHORIZATION_MISMATCH_MESSAGE,
     claim_publish_job,
     publish_authorization_matches,
@@ -37,6 +38,7 @@ def execute_publish_job(
     publisher_factory: PublisherFactory | None = None,
     media_root: str | Path = DEFAULT_MEDIA_ROOT,
     require_authorization_match: bool = False,
+    expected_state_version: int | None = None,
 ) -> dict[str, Any]:
     """Claim and execute exactly one queued job.
 
@@ -45,7 +47,11 @@ def execute_publish_job(
     accident.
     """
 
-    job = claim_publish_job(database_path, job_id)
+    job = claim_publish_job(
+        database_path,
+        job_id,
+        expected_state_version=expected_state_version,
+    )
     try:
         article = get_article(database_path, job["article_id"])
         if require_authorization_match and not publish_authorization_matches(
@@ -57,6 +63,7 @@ def execute_publish_job(
                 job_id,
                 "need_action",
                 message=PUBLISH_AUTHORIZATION_MISMATCH_MESSAGE,
+                expected_state_version=job["state_version"],
             )
         content = _build_publish_content(job, article, media_root=media_root)
         publisher = _select_publisher(job, publisher_factory)
@@ -64,12 +71,17 @@ def execute_publish_job(
         if not isinstance(result, PublishResult):
             raise TypeError("发布器必须返回 PublishResult")
         return _persist_result(database_path, job, result)
+    except ConcurrentPublishJobUpdateError:
+        # A human action, reconciliation, or a later retry already changed the
+        # attempt. Never translate that conflict into a retryable failure.
+        raise
     except PublisherNotConfiguredError as exc:
         return transition_publish_job(
             database_path,
             job_id,
             "need_action",
             message=str(exc),
+            expected_state_version=job["state_version"],
         )
     except Exception as exc:
         detail = str(exc).strip() or exc.__class__.__name__
@@ -78,6 +90,7 @@ def execute_publish_job(
             job_id,
             classify_publisher_error(detail),
             message=f"发布执行失败：{detail}",
+            expected_state_version=job["state_version"],
         )
 
 
@@ -168,6 +181,7 @@ def _persist_result(
             result.status,
             message=result.message,
             result_url=result.url,
+            expected_state_version=job["state_version"],
         )
     if result.status == "processing":
         return update_publish_job_progress(
@@ -175,5 +189,6 @@ def _persist_result(
             job["id"],
             message=result.message,
             result_url=result.url,
+            expected_state_version=job["state_version"],
         )
     raise ValueError(f"即时发布不能返回 {result.status} 状态")

@@ -33,7 +33,7 @@ class MediaPublisherAdapterTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertEqual(calls, [("标题", "account.json")])
 
-    def test_publish_timeout_needs_manual_action_instead_of_staying_processing(self):
+    def test_publish_timeout_stays_processing_until_reconciled(self):
         async def slow_publish(*_args):
             await asyncio.sleep(0.2)
 
@@ -48,7 +48,7 @@ class MediaPublisherAdapterTests(unittest.TestCase):
             PublishContent("douyin", "标题", "正文", images=("cover.png",))
         )
 
-        self.assertEqual(result.status, "need_action")
+        self.assertEqual(result.status, "processing")
         self.assertFalse(result.success)
         self.assertIn("最终状态未知", result.message)
         self.assertIn("不会自动重试", result.message)

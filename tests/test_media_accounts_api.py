@@ -8,6 +8,7 @@ from sau_backend import app
 from services.media_account_service import (
     MediaAccountCheckError,
     MediaAccountNotFoundError,
+    MediaAccountRuntimeDisabledError,
 )
 
 
@@ -22,15 +23,18 @@ class MediaAccountsApiTests(unittest.TestCase):
         self.original_database_path = app.config["DATABASE_PATH"]
         self.original_cookies_directory = app.config["COOKIES_DIRECTORY"]
         self.original_testing = app.testing
+        self.original_bilibili_runtime = app.config["ENABLE_BILIBILI_RUNTIME"]
         app.config["DATABASE_PATH"] = self.db_path
         app.config["COOKIES_DIRECTORY"] = self.cookies_directory
         app.config["TESTING"] = True
+        app.config["ENABLE_BILIBILI_RUNTIME"] = False
         self.client = app.test_client()
 
     def tearDown(self):
         app.config["DATABASE_PATH"] = self.original_database_path
         app.config["COOKIES_DIRECTORY"] = self.original_cookies_directory
         app.config["TESTING"] = self.original_testing
+        app.config["ENABLE_BILIBILI_RUNTIME"] = self.original_bilibili_runtime
         self.temp_dir.cleanup()
 
     def test_returns_structured_empty_platform_overview(self):
@@ -73,6 +77,20 @@ class MediaAccountsApiTests(unittest.TestCase):
 
         self.assertEqual(missing.status_code, 404)
         self.assertEqual(failed.status_code, 502)
+
+    def test_check_maps_disabled_bilibili_runtime_without_calling_platform(self):
+        with patch(
+            "sau_backend.check_media_account",
+            new=AsyncMock(
+                side_effect=MediaAccountRuntimeDisabledError(
+                    "ENABLE_BILIBILI_RUNTIME=true"
+                )
+            ),
+        ):
+            response = self.client.post("/api/media-accounts/6/check")
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("ENABLE_BILIBILI_RUNTIME", response.get_json()["msg"])
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ import threading
 import time
 import uuid
 from contextlib import closing
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from queue import Queue
 from flask_cors import CORS
@@ -65,12 +65,41 @@ from services.demo_seed_service import seed_demo_data
 from services.media_account_service import (
     MediaAccountCheckError,
     MediaAccountNotFoundError,
+    MediaAccountRuntimeDisabledError,
     check_media_account,
     get_media_accounts_overview,
 )
 from services.platform_capability_service import (
+    BILIBILI_ACCOUNT_TYPE,
+    BILIBILI_PLATFORM_KEY,
+    BILIBILI_RUNTIME_DISABLED_MESSAGE,
     get_platform_capability,
     list_platform_capabilities,
+    normalize_platform_key,
+)
+from services.content_generation_run_service import (
+    GenerationRunNotFoundError,
+    GenerationRunStateError,
+    IdempotencyConflictError,
+    begin_or_replay,
+    get_run,
+    get_run_by_idempotency_key,
+    get_run_by_request_id,
+    get_run_score_context,
+)
+from services.content_engine_contract import (
+    CONTENT_ENGINE_CONTRACT_VERSION,
+    ContentEngineConfigurationError,
+    ContentEngineError,
+    ContentEngineProtocolError,
+    ContentEngineRateLimitError,
+    ContentEngineTimeoutError,
+    ContentEngineUnavailableError,
+    ContentGenerationRequest,
+)
+from services.content_generation_service import (
+    ContentGenerationInProgressError,
+    ContentGenerationService,
 )
 from services.project_service import (
     ProjectHasArticlesError,
@@ -198,6 +227,9 @@ app.config["ALLOW_REAL_PUBLISHING"] = str(
     "yes",
     "on",
 }
+app.config["ENABLE_BILIBILI_RUNTIME"] = _environment_flag(
+    "ENABLE_BILIBILI_RUNTIME"
+)
 access_password = str(os.getenv("APP_ACCESS_PASSWORD", "")).strip()
 session_secret = str(os.getenv("APP_SESSION_SECRET", "")).strip()
 if access_password and not session_secret:
@@ -257,9 +289,17 @@ app.config['MAX_CONTENT_LENGTH'] = 160 * 1024 * 1024
 
 # Docker 将前端产物复制到应用根目录；源码运行则使用 Vite 的 dist。
 current_dir = Path(__file__).resolve().parent
-_frontend_candidates = (
-    current_dir,
-    current_dir / "sau_frontend" / "dist",
+_configured_frontend_dir = str(os.getenv("FRONTEND_BUILD_DIR", "")).strip()
+_frontend_candidates = tuple(
+    candidate
+    for candidate in (
+        Path(_configured_frontend_dir).expanduser()
+        if _configured_frontend_dir
+        else None,
+        current_dir,
+        current_dir / "sau_frontend" / "dist",
+    )
+    if candidate is not None
 )
 app.config["FRONTEND_BUILD_DIR"] = next(
     (candidate for candidate in _frontend_candidates if (candidate / "index.html").is_file()),
@@ -503,6 +543,9 @@ def get_health_status():
                 "real_publishing_enabled": bool(
                     app.config.get("ALLOW_REAL_PUBLISHING", False)
                 ),
+                "bilibili_runtime_enabled": bool(
+                    app.config.get("ENABLE_BILIBILI_RUNTIME", False)
+                ),
             },
         }
     ), 200
@@ -535,6 +578,7 @@ ARTICLE_CONTENT_TYPES = {
     "FAQ",
     "新闻稿",
 }
+USER_EDITABLE_ARTICLE_STATUSES = frozenset({"draft", "ready"})
 
 
 def _enforce_ai_rate_limit(*, cost=1):
@@ -571,20 +615,144 @@ def generate_article():
     if error is not None:
         return error
 
-    rate_limit_response = _enforce_ai_rate_limit()
-    if rate_limit_response is not None:
-        return rate_limit_response
-
+    request_id, idempotency_key, identity_error = _generation_request_identity(data)
+    if identity_error is not None:
+        return identity_error
+    content_request = ContentGenerationRequest.create(
+        project_context=generation["project"],
+        topic=generation["topic"],
+        keywords=generation["keywords"],
+        length=generation["length"],
+        content_type=generation["content_type"],
+        target_platform=generation["target_platform"],
+        template_instruction=generation["template_instruction"],
+        request_id=request_id,
+        idempotency_key=idempotency_key,
+    )
+    existing_run = get_run_by_idempotency_key(
+        app.config["DATABASE_PATH"],
+        idempotency_key,
+    ) or get_run_by_request_id(app.config["DATABASE_PATH"], request_id)
     try:
-        article = generate_geo_content(
-            **generation,
+        if existing_run is not None:
+            outcome = begin_or_replay(
+                app.config["DATABASE_PATH"],
+                content_request,
+                configured_engine=str(
+                    existing_run.get("configured_engine") or "unknown"
+                ),
+            )
+            article = ContentGenerationService._replay(outcome)
+        else:
+            rate_limit_response = _enforce_ai_rate_limit()
+            if rate_limit_response is not None:
+                return rate_limit_response
+            service = _create_content_generation_service(generation["settings"])
+            article = service.generate(content_request)
+    except ContentEngineError as exc:
+        return _content_generation_error_response(
+            exc,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
         )
-    except AIConfigurationError as exc:
-        return jsonify({"code": 503, "msg": str(exc), "data": None}), 503
-    except AIServiceError as exc:
-        return jsonify({"code": 502, "msg": str(exc), "data": None}), 502
 
-    return jsonify({"code": 200, "msg": "success", "data": article}), 200
+    replayed = bool((article.get("generation") or {}).get("replayed"))
+    run_id = (article.get("generation") or {}).get("run_id")
+    run = get_run(app.config["DATABASE_PATH"], int(run_id)) if run_id else None
+    effective_request_id = str(
+        (article.get("generation") or {}).get("request_id") or request_id
+    )
+    effective_idempotency_key = str(
+        (run or {}).get("idempotency_key") or idempotency_key
+    )
+    response = jsonify({"code": 200, "msg": "success", "data": article})
+    response.headers["X-Request-ID"] = effective_request_id
+    response.headers["Idempotency-Key"] = effective_idempotency_key
+    response.headers["Idempotency-Replayed"] = "true" if replayed else "false"
+    return response, 200
+
+
+def _create_content_generation_service(settings=None):
+    return ContentGenerationService.from_environment(
+        app.config["DATABASE_PATH"],
+        qwen_settings=settings,
+    )
+
+
+def _generation_request_identity(data):
+    request_id = str(request.headers.get("X-Request-ID") or uuid.uuid4()).strip()
+    if len(request_id) > 128 or not re.fullmatch(r"[A-Za-z0-9._:-]+", request_id):
+        return None, None, (
+            jsonify({"code": 400, "msg": "X-Request-ID 格式无效", "data": None}),
+            400,
+        )
+    idempotency_key = str(
+        request.headers.get("Idempotency-Key")
+        or data.get("idempotency_key")
+        or f"gen-{uuid.uuid4()}"
+    ).strip()
+    if len(idempotency_key) > 200 or not re.fullmatch(
+        r"[A-Za-z0-9._:-]+", idempotency_key
+    ):
+        return None, None, (
+            jsonify({"code": 400, "msg": "Idempotency-Key 格式无效", "data": None}),
+            400,
+        )
+    return request_id, idempotency_key, None
+
+
+def _content_generation_error_response(exc, *, request_id, idempotency_key=""):
+    error_code = str(getattr(exc, "error_code", "engine_error") or "engine_error")
+    if isinstance(exc, (IdempotencyConflictError, ContentGenerationInProgressError)) or error_code in {
+        "idempotency_conflict",
+        "generation_in_progress",
+    }:
+        status_code = 409
+    elif isinstance(exc, ContentEngineRateLimitError) or error_code == "engine_rate_limited":
+        status_code = 429
+    elif isinstance(exc, ContentEngineTimeoutError) or error_code in {
+        "engine_timeout_unknown",
+        "generation_state_unknown",
+        "generation_result_state_unknown",
+    }:
+        status_code = 504
+    elif isinstance(exc, (ContentEngineConfigurationError, ContentEngineUnavailableError)) or error_code in {
+        "engine_not_configured",
+        "engine_unavailable",
+    }:
+        status_code = 503
+    elif isinstance(exc, ContentEngineProtocolError) or error_code == "engine_protocol_error":
+        status_code = 502
+    else:
+        status_code = 502
+    payload = {
+        "code": status_code,
+        "msg": str(exc),
+        "data": {
+            "error_code": error_code,
+            "state_unknown": bool(getattr(exc, "state_unknown", False)),
+            "request_id": str(getattr(exc, "request_id", "") or request_id),
+            "run_id": getattr(exc, "run_id", None),
+            "trace_id": str(getattr(exc, "trace_id", "") or request_id),
+            "retry_after_seconds": getattr(exc, "retry_after_seconds", None),
+        },
+    }
+    response = jsonify(payload)
+    effective_request_id = str(getattr(exc, "request_id", "") or request_id)
+    response.headers["X-Request-ID"] = effective_request_id
+    run_id = getattr(exc, "run_id", None)
+    run = get_run(app.config["DATABASE_PATH"], int(run_id)) if run_id else None
+    effective_idempotency_key = str(
+        (run or {}).get("idempotency_key") or idempotency_key or ""
+    )
+    if effective_idempotency_key:
+        response.headers["Idempotency-Key"] = effective_idempotency_key
+    if effective_request_id != request_id or exc.__class__.__name__.startswith("Replayed"):
+        response.headers["Idempotency-Replayed"] = "true"
+    retry_after = getattr(exc, "retry_after_seconds", None)
+    if retry_after is not None:
+        response.headers["Retry-After"] = str(retry_after)
+    return response, status_code
 
 
 @app.route('/api/articles/generate-batch', methods=['POST'])
@@ -606,13 +774,82 @@ def generate_article_batch():
     )
     if error is not None:
         return error
-    rate_limit_response = _enforce_ai_rate_limit(cost=len(normalized_topics))
-    if rate_limit_response is not None:
-        return rate_limit_response
+
+    base_request_id, base_idempotency_key, identity_error = (
+        _generation_request_identity(data)
+    )
+    if identity_error is not None:
+        return identity_error
+
+    content_requests = []
+    existing_outcomes = {}
+    unseen_request_count = 0
+    for index, topic in enumerate(normalized_topics, start=1):
+        child_request_id = f"{base_request_id}:{index}"
+        child_idempotency_key = f"{base_idempotency_key}:{index}"
+        content_request = ContentGenerationRequest.create(
+            project_context=generation["project"],
+            topic=topic,
+            keywords=generation["keywords"],
+            length=generation["length"],
+            content_type=generation["content_type"],
+            target_platform=generation["target_platform"],
+            template_instruction=generation["template_instruction"],
+            request_id=child_request_id,
+            idempotency_key=child_idempotency_key,
+        )
+        content_requests.append(content_request)
+        existing_run = get_run_by_idempotency_key(
+            app.config["DATABASE_PATH"],
+            child_idempotency_key,
+        ) or get_run_by_request_id(
+            app.config["DATABASE_PATH"],
+            child_request_id,
+        )
+        if existing_run is None:
+            unseen_request_count += 1
+        else:
+            try:
+                existing_outcomes[child_idempotency_key] = begin_or_replay(
+                    app.config["DATABASE_PATH"],
+                    content_request,
+                    configured_engine=str(
+                        existing_run.get("configured_engine") or "unknown"
+                    ),
+                )
+            except ContentEngineError as exc:
+                response, status_code = _content_generation_error_response(
+                    exc,
+                    request_id=child_request_id,
+                    idempotency_key=child_idempotency_key,
+                )
+                canonical_child_key = response.headers.get("Idempotency-Key", "")
+                child_suffix = f":{index}"
+                if canonical_child_key.endswith(child_suffix):
+                    response.headers["Idempotency-Key"] = canonical_child_key[
+                        :-len(child_suffix)
+                    ]
+                return response, status_code
+
+    if unseen_request_count:
+        rate_limit_response = _enforce_ai_rate_limit(cost=unseen_request_count)
+        if rate_limit_response is not None:
+            return rate_limit_response
 
     items = []
     stopped = False
-    for topic in normalized_topics:
+    service = None
+    if unseen_request_count:
+        try:
+            service = _create_content_generation_service(generation["settings"])
+        except ContentEngineError as exc:
+            return _content_generation_error_response(
+                exc,
+                request_id=base_request_id,
+                idempotency_key=base_idempotency_key,
+            )
+    for content_request in content_requests:
+        topic = content_request.topic
         if stopped:
             items.append(
                 {
@@ -623,7 +860,27 @@ def generate_article_batch():
             )
             continue
         try:
-            draft = generate_geo_content(**{**generation, "topic": topic})
+            outcome = existing_outcomes.get(content_request.idempotency_key)
+            if outcome is not None:
+                current_run = get_run(app.config["DATABASE_PATH"], outcome.run_id)
+                if current_run is not None and current_run.get("article_id") is not None:
+                    article = get_article(
+                        app.config["DATABASE_PATH"],
+                        int(current_run["article_id"]),
+                    )
+                    items.append(
+                        {
+                            "topic": topic,
+                            "status": "created",
+                            "replayed": True,
+                            "article": article,
+                        }
+                    )
+                    continue
+                draft = ContentGenerationService._replay(outcome)
+            else:
+                draft = service.generate(content_request)
+            run_id = int((draft.get("generation") or {})["run_id"])
             article = create_article(
                 app.config["DATABASE_PATH"],
                 project_id=int(data["project_id"]),
@@ -632,14 +889,39 @@ def generate_article_batch():
                 content=draft["content"],
                 tags=draft["tags"],
                 status="draft",
+                generation_run_id=run_id,
             )
-            items.append({"topic": topic, "status": "created", "article": article})
-        except (AIConfigurationError, AIServiceError) as exc:
-            items.append({"topic": topic, "status": "failed", "message": str(exc)})
+            items.append(
+                {
+                    "topic": topic,
+                    "status": "created",
+                    "replayed": bool((draft.get("generation") or {}).get("replayed")),
+                    "article": article,
+                }
+            )
+        except ContentEngineError as exc:
+            items.append(
+                {
+                    "topic": topic,
+                    "status": "failed",
+                    "message": str(exc),
+                    "error_code": str(
+                        getattr(exc, "error_code", "engine_error") or "engine_error"
+                    ),
+                    "state_unknown": bool(getattr(exc, "state_unknown", False)),
+                    "request_id": str(
+                        getattr(exc, "request_id", "") or content_request.request_id
+                    ),
+                    "run_id": getattr(exc, "run_id", None),
+                }
+            )
             stopped = True
 
     created_count = sum(item["status"] == "created" for item in items)
-    return jsonify(
+    replayed_count = sum(
+        item["status"] == "created" and item.get("replayed") for item in items
+    )
+    response = jsonify(
         {
             "code": 200,
             "msg": f"批量任务完成，已保存 {created_count} 篇草稿",
@@ -647,9 +929,16 @@ def generate_article_batch():
                 "items": items,
                 "created_count": created_count,
                 "failed_count": len(items) - created_count,
+                "replayed_count": replayed_count,
             },
         }
-    ), 200
+    )
+    response.headers["X-Request-ID"] = base_request_id
+    response.headers["Idempotency-Key"] = base_idempotency_key
+    response.headers["Idempotency-Replayed"] = (
+        "true" if replayed_count == created_count and created_count else "false"
+    )
+    return response, 200
 
 
 def _prepare_generation_request(data):
@@ -695,15 +984,22 @@ def _prepare_generation_request(data):
         ai_settings = _request_ai_settings(data)
     except AIConfigurationError as exc:
         return None, (jsonify({"code": 400, "msg": str(exc), "data": None}), 400)
+    target_platform_raw = str(
+        data.get("target_platform") or data.get("targetPlatform") or ""
+    ).strip()
+    target_platform = normalize_platform_key(target_platform_raw)
+    if target_platform_raw and not target_platform:
+        return None, (
+            jsonify({"code": 400, "msg": "不支持的目标平台", "data": None}),
+            400,
+        )
     return {
         "project": project,
         "topic": topic,
         "keywords": _normalize_string_list(requested_keywords),
         "length": length,
         "content_type": content_type,
-        "target_platform": str(
-            data.get("target_platform") or data.get("targetPlatform") or ""
-        ).strip(),
+        "target_platform": target_platform,
         "template_instruction": template_instruction,
         "settings": ai_settings,
     }, None
@@ -807,6 +1103,95 @@ def get_ai_config_status():
     ), 200
 
 
+@app.route('/api/content-engine/status', methods=['GET'])
+def get_content_engine_status():
+    """Expose deployment-managed engine readiness without configuration secrets."""
+
+    checked_at = datetime.now(timezone.utc).isoformat()
+    try:
+        engine_health = _create_content_generation_service().health()
+    except ContentEngineError as exc:
+        return jsonify(
+            {
+                "code": 200,
+                "msg": "success",
+                "data": {
+                    "contract_version": CONTENT_ENGINE_CONTRACT_VERSION,
+                    "status": "unavailable",
+                    "ready": False,
+                    "primary": {
+                        "engine": str(os.getenv("CONTENT_ENGINE", "qwen")).strip().lower(),
+                        "version": "unknown",
+                        "ready": False,
+                        "status": "not_configured",
+                    },
+                    "fallback": None,
+                    "last_checked_at": checked_at,
+                    "message": str(exc),
+                },
+            }
+        ), 200
+    return jsonify(
+        {
+            "code": 200,
+            "msg": "success",
+            "data": {
+                "contract_version": CONTENT_ENGINE_CONTRACT_VERSION,
+                **engine_health,
+                "last_checked_at": checked_at,
+                "managed_by": "deployment_environment",
+            },
+        }
+    ), 200
+
+
+@app.route('/api/content-generation/runs/<int:run_id>', methods=['GET'])
+def get_content_generation_run(run_id):
+    run = get_run(app.config["DATABASE_PATH"], run_id)
+    if run is None:
+        return jsonify({"code": 404, "msg": "生成记录不存在", "data": None}), 404
+    public_fields = {
+        key: run.get(key)
+        for key in (
+            "id",
+            "request_id",
+            "status",
+            "configured_engine",
+            "actual_engine",
+            "engine_version",
+            "trace_id",
+            "elapsed_ms",
+            "usage",
+            "usage_status",
+            "provider_geo_score",
+            "fallback_used",
+            "fallback_from",
+            "warnings",
+            "local_score",
+            "local_analysis",
+            "error_code",
+            "error_message",
+            "retry_after_seconds",
+            "article_id",
+            "created_at",
+            "updated_at",
+        )
+    }
+    result_payload = run.get("result_payload") or {}
+    sources = result_payload.get("sources")
+    public_fields["sources"] = sources if isinstance(sources, list) else []
+    project_snapshot = run.get("project_snapshot") or {}
+    brief_snapshot = run.get("brief_snapshot") or {}
+    keywords = brief_snapshot.get("keywords")
+    if not isinstance(keywords, list):
+        keywords = project_snapshot.get("keywords")
+    public_fields["score_context"] = {
+        "brand": str(project_snapshot.get("name") or "").strip(),
+        "keywords": _normalize_string_list(keywords if isinstance(keywords, list) else []),
+    }
+    return jsonify({"code": 200, "msg": "success", "data": public_fields}), 200
+
+
 @app.route('/api/dashboard', methods=['GET'])
 def get_dashboard_data():
     overview = get_dashboard_overview(app.config["DATABASE_PATH"])
@@ -833,6 +1218,9 @@ async def check_media_account_status(account_id):
             app.config["DATABASE_PATH"],
             account_id,
             cookies_directory=app.config["COOKIES_DIRECTORY"],
+            enable_bilibili_runtime=bool(
+                app.config.get("ENABLE_BILIBILI_RUNTIME", False)
+            ),
             checker=lambda account_type, file_path: check_cookie(
                 account_type,
                 file_path,
@@ -841,6 +1229,8 @@ async def check_media_account_status(account_id):
         )
     except MediaAccountNotFoundError as exc:
         return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except MediaAccountRuntimeDisabledError as exc:
+        return jsonify({"code": 403, "msg": str(exc), "data": None}), 403
     except MediaAccountCheckError as exc:
         return jsonify({"code": 502, "msg": str(exc), "data": None}), 502
     return jsonify({"code": 200, "msg": "success", "data": account}), 200
@@ -890,6 +1280,25 @@ def calculate_geo_score():
     content = str(data.get("content") or "").strip()
     brand = str(data.get("brand") or "").strip()
     keywords = data.get("keywords", [])
+    generation_run_id = data.get("generation_run_id")
+
+    if generation_run_id not in (None, ""):
+        try:
+            generation_run_id = int(generation_run_id)
+            if generation_run_id <= 0:
+                raise ValueError
+            score_context = get_run_score_context(
+                app.config["DATABASE_PATH"],
+                generation_run_id,
+            )
+        except (TypeError, ValueError):
+            return jsonify({"code": 400, "msg": "generation_run_id 必须是正整数", "data": None}), 400
+        except GenerationRunNotFoundError as exc:
+            return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+        except GenerationRunStateError as exc:
+            return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+        brand = score_context["brand"]
+        keywords = score_context["keywords"]
 
     if not title:
         return jsonify({"code": 400, "msg": "文章标题不能为空", "data": None}), 400
@@ -906,6 +1315,12 @@ def calculate_geo_score():
         brand=brand,
         keywords=_normalize_string_list(keywords),
     )
+    if generation_run_id not in (None, ""):
+        result["score_context"] = {
+            "generation_run_id": generation_run_id,
+            "brand": brand,
+            "keywords": keywords,
+        }
     return jsonify(result), 200
 
 
@@ -926,14 +1341,28 @@ def save_article():
     if validation_error:
         return jsonify({"code": 400, "msg": validation_error, "data": None}), 400
 
+    generation_run_id = None
+    if data.get("generation_run_id") not in (None, ""):
+        try:
+            generation_run_id = int(data["generation_run_id"])
+        except (TypeError, ValueError):
+            return jsonify({"code": 400, "msg": "generation_run_id 必须是整数", "data": None}), 400
+        if generation_run_id <= 0:
+            return jsonify({"code": 400, "msg": "generation_run_id 必须是正整数", "data": None}), 400
+
     try:
         article = create_article(
             app.config["DATABASE_PATH"],
             project_id=project_id,
+            generation_run_id=generation_run_id,
             **article_data,
         )
     except ProjectNotFoundError as exc:
         return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except GenerationRunNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except GenerationRunStateError as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
 
     return jsonify({"code": 201, "msg": "文章已保存", "data": article}), 201
 
@@ -1114,11 +1543,24 @@ def optimize_article(article_id):
     if project is None:
         return jsonify({"code": 409, "msg": "文章关联的品牌项目不存在", "data": None}), 409
 
+    score_brand = project["name"]
+    score_keywords = project["keywords"]
+    if article.get("generation_run_id") is not None:
+        try:
+            score_context = get_run_score_context(
+                app.config["DATABASE_PATH"],
+                article["generation_run_id"],
+            )
+        except (GenerationRunNotFoundError, GenerationRunStateError) as exc:
+            return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+        score_brand = score_context["brand"]
+        score_keywords = score_context["keywords"]
+
     before_score = score_geo_content(
         title=article["title"],
         content=article["content"],
-        brand=project["name"],
-        keywords=project["keywords"],
+        brand=score_brand,
+        keywords=score_keywords,
     )
     try:
         ai_settings = _request_ai_settings(data)
@@ -1141,8 +1583,8 @@ def optimize_article(article_id):
     after_score = score_geo_content(
         title=optimized["title"],
         content=optimized["content"],
-        brand=project["name"],
-        keywords=project["keywords"],
+        brand=score_brand,
+        keywords=score_keywords,
     )
     return jsonify(
         {
@@ -1194,8 +1636,8 @@ def _parse_article_fields(data, *, partial):
 
     if not partial or "status" in data:
         status = data.get("status", defaults["status"])
-        if not isinstance(status, str) or status not in ARTICLE_STATUSES:
-            return None, "不支持的文章状态"
+        if not isinstance(status, str) or status not in USER_EDITABLE_ARTICLE_STATUSES:
+            return None, "文章只允许保存为草稿或待发布状态"
         result["status"] = status
 
     return result, None
@@ -1313,6 +1755,18 @@ def create_publish_task():
             {
                 "code": 403,
                 "msg": "定时真实自动执行需要先开启 ALLOW_REAL_PUBLISHING",
+                "data": None,
+            }
+        ), 403
+    if (
+        auto_execute
+        and platform == BILIBILI_PLATFORM_KEY
+        and not app.config.get("ENABLE_BILIBILI_RUNTIME", False)
+    ):
+        return jsonify(
+            {
+                "code": 403,
+                "msg": BILIBILI_RUNTIME_DISABLED_MESSAGE,
                 "data": None,
             }
         ), 403
@@ -1450,6 +1904,17 @@ def execute_real_publish_task(job_id):
                 "data": None,
             }
         ), 403
+    if (
+        current["platform"] == BILIBILI_PLATFORM_KEY
+        and not app.config.get("ENABLE_BILIBILI_RUNTIME", False)
+    ):
+        return jsonify(
+            {
+                "code": 403,
+                "msg": BILIBILI_RUNTIME_DISABLED_MESSAGE,
+                "data": None,
+            }
+        ), 403
     data = request.get_json(silent=True) or {}
     if data.get("confirm") is not True:
         return jsonify(
@@ -1467,6 +1932,9 @@ def execute_real_publish_task(job_id):
     publisher_factory = create_real_publisher_factory(
         app.config["DATABASE_PATH"],
         cookies_directory=app.config["COOKIES_DIRECTORY"],
+        enable_bilibili_runtime=bool(
+            app.config.get("ENABLE_BILIBILI_RUNTIME", False)
+        ),
     )
     try:
         job = execute_publish_job(
@@ -1511,6 +1979,10 @@ def _publish_job_payload(job):
             and not app.config.get("DEMO_MODE", False)
             and app.config.get("ALLOW_REAL_PUBLISHING", False)
             and job["platform"] in REAL_PUBLISH_PLATFORMS
+            and (
+                job["platform"] != BILIBILI_PLATFORM_KEY
+                or app.config.get("ENABLE_BILIBILI_RUNTIME", False)
+            )
             and job["status"] == "queued"
         ),
     }
@@ -1888,6 +2360,11 @@ async def getValidAccounts():
         for row in rows:
             print(row)
         for row in rows_list:
+            if (
+                row[1] == BILIBILI_ACCOUNT_TYPE
+                and not app.config.get("ENABLE_BILIBILI_RUNTIME", False)
+            ):
+                continue
             flag = await check_cookie(
                 row[1],
                 row[2],
@@ -2060,6 +2537,17 @@ def login():
     account_id = str(request.args.get('id') or '').strip()
     if login_type not in {str(value) for value in range(1, 11)}:
         return jsonify({"code": 400, "msg": "不支持的平台类型", "data": None}), 400
+    if (
+        login_type == str(BILIBILI_ACCOUNT_TYPE)
+        and not app.config.get("ENABLE_BILIBILI_RUNTIME", False)
+    ):
+        return jsonify(
+            {
+                "code": 403,
+                "msg": BILIBILI_RUNTIME_DISABLED_MESSAGE,
+                "data": None,
+            }
+        ), 403
     if not account_id:
         return jsonify({"code": 400, "msg": "账号名不能为空", "data": None}), 400
     if len(account_id) > 100:
@@ -2166,6 +2654,17 @@ def postVideo():
         type = int(type)
     except (TypeError, ValueError):
         return jsonify({"code": 400, "msg": f"不支持的平台类型: {type}", "data": None}), 400
+    if (
+        type == BILIBILI_ACCOUNT_TYPE
+        and not app.config.get("ENABLE_BILIBILI_RUNTIME", False)
+    ):
+        return jsonify(
+            {
+                "code": 403,
+                "msg": BILIBILI_RUNTIME_DISABLED_MESSAGE,
+                "data": None,
+            }
+        ), 403
 
     # 支持图文文章的平台：5=百家号，7=今日头条，8=搜狐号，9=知乎
     ARTICLE_CAPABLE_PLATFORMS = (5, 7, 8, 9)
@@ -2418,6 +2917,21 @@ def postVideoBatch():
 
     if not isinstance(data_list, list):
         return jsonify({"code": 400, "msg": "Expected a JSON array", "data": None}), 400
+    if not app.config.get("ENABLE_BILIBILI_RUNTIME", False) and any(
+        (
+            item.get("type") == BILIBILI_ACCOUNT_TYPE
+            or str(item.get("type")).strip() == str(BILIBILI_ACCOUNT_TYPE)
+        )
+        for item in data_list
+        if isinstance(item, dict)
+    ):
+        return jsonify(
+            {
+                "code": 403,
+                "msg": BILIBILI_RUNTIME_DISABLED_MESSAGE,
+                "data": None,
+            }
+        ), 403
 
     from myUtils.postVideo import (
         post_article_baijiahao,
@@ -2716,6 +3230,13 @@ def download_cookie():
 
 # 包装函数：在线程中运行异步函数
 def run_async_function(type,id,status_queue):
+    if (
+        str(type) == str(BILIBILI_ACCOUNT_TYPE)
+        and not app.config.get("ENABLE_BILIBILI_RUNTIME", False)
+    ):
+        print("Bilibili 登录运行时已被安全闸门阻断", flush=True)
+        status_queue.put("500")
+        return
     # Login helpers launch real browsers and belong to the local worker runtime.
     from myUtils.login import (
         baijiahao_cookie_gen,
@@ -2869,6 +3390,9 @@ if __name__ == '__main__':
             create_real_publisher_factory(
                 app.config["DATABASE_PATH"],
                 cookies_directory=app.config["COOKIES_DIRECTORY"],
+                enable_bilibili_runtime=bool(
+                    app.config.get("ENABLE_BILIBILI_RUNTIME", False)
+                ),
             )
             if scheduler_allows_real
             else None

@@ -1,13 +1,18 @@
 import sqlite3
 import tempfile
+import threading
 import unittest
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from datetime import datetime, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from db.createTable import initialize_database
+import services.publish_job_service as publish_job_service_module
 from services.article_service import ArticleNotFoundError
 from services.publish_job_service import (
+    ConcurrentPublishJobUpdateError,
     InvalidPublishJobTransitionError,
     PublishJobNotFoundError,
     UnsupportedPublishPlatformError,
@@ -71,6 +76,21 @@ class PublishJobServiceTests(unittest.TestCase):
         self.assertFalse(scheduled["auto_execute"])
         self.assertFalse(scheduled["authorization_bound"])
         self.assertEqual(get_publish_job(self.db_path, scheduled["id"]), scheduled)
+
+    def test_rejects_draft_article_before_creating_publish_job(self):
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE articles SET status = 'draft' WHERE id = ?",
+                    (self.article_id,),
+                )
+
+        with self.assertRaisesRegex(ValueError, "必须先标记为待发布"):
+            create_publish_job(
+                self.db_path,
+                article_id=self.article_id,
+                platform="zhihu",
+            )
 
     def test_persists_real_scheduled_auto_execute_authorization(self):
         scheduled = create_publish_job(
@@ -281,6 +301,153 @@ class PublishJobServiceTests(unittest.TestCase):
         self.assertEqual(updated["status"], "processing")
         self.assertEqual(updated["message"], "已点击发布，等待平台确认")
         self.assertIsNone(updated["finished_at"])
+
+    def test_state_version_increments_for_every_state_mutation(self):
+        job = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="zhihu",
+        )
+
+        claimed = claim_publish_job(self.db_path, job["id"])
+        progressed = update_publish_job_progress(
+            self.db_path,
+            job["id"],
+            message="等待平台确认",
+            expected_state_version=claimed["state_version"],
+        )
+        completed = transition_publish_job(
+            self.db_path,
+            job["id"],
+            "success",
+            expected_state_version=progressed["state_version"],
+        )
+
+        self.assertEqual(job["state_version"], 0)
+        self.assertEqual(claimed["state_version"], 1)
+        self.assertEqual(progressed["state_version"], 2)
+        self.assertEqual(completed["state_version"], 3)
+
+    def test_obsolete_worker_cannot_finish_a_later_retry_attempt(self):
+        job = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="zhihu",
+        )
+        obsolete_claim = claim_publish_job(self.db_path, job["id"])
+        failed = transition_publish_job(
+            self.db_path,
+            job["id"],
+            "failed",
+            expected_state_version=obsolete_claim["state_version"],
+        )
+        queued_again = retry_publish_job(
+            self.db_path,
+            job["id"],
+            expected_state_version=failed["state_version"],
+        )
+        current_claim = claim_publish_job(self.db_path, job["id"])
+
+        with self.assertRaisesRegex(
+            ConcurrentPublishJobUpdateError,
+            "期望版本.*当前为 processing",
+        ):
+            transition_publish_job(
+                self.db_path,
+                job["id"],
+                "success",
+                expected_state_version=obsolete_claim["state_version"],
+            )
+
+        latest = get_publish_job(self.db_path, job["id"])
+        self.assertEqual(queued_again["status"], "queued")
+        self.assertEqual(latest["status"], "processing")
+        self.assertEqual(latest["state_version"], current_claim["state_version"])
+
+    def test_stale_failure_progress_and_retry_cannot_overwrite_success(self):
+        job = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="zhihu",
+        )
+        claimed = claim_publish_job(self.db_path, job["id"])
+        success = transition_publish_job(
+            self.db_path,
+            job["id"],
+            "success",
+            message="平台已确认成功",
+            expected_state_version=claimed["state_version"],
+        )
+
+        stale_failure = transition_publish_job(
+            self.db_path,
+            job["id"],
+            "failed",
+            message="过期失败结果",
+            expected_state_version=claimed["state_version"],
+        )
+        stale_progress = update_publish_job_progress(
+            self.db_path,
+            job["id"],
+            message="过期进度",
+            expected_state_version=claimed["state_version"],
+        )
+        stale_retry = retry_publish_job(
+            self.db_path,
+            job["id"],
+            expected_state_version=claimed["state_version"],
+        )
+
+        for resolved in (stale_failure, stale_progress, stale_retry):
+            self.assertEqual(resolved["status"], "success")
+            self.assertEqual(resolved["message"], "平台已确认成功")
+            self.assertEqual(resolved["state_version"], success["state_version"])
+
+    def test_concurrent_terminal_updates_have_exactly_one_cas_winner(self):
+        job = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="zhihu",
+        )
+        claimed = claim_publish_job(self.db_path, job["id"])
+        fetch_barrier = threading.Barrier(2)
+        thread_state = threading.local()
+        original_fetch_job = publish_job_service_module._fetch_job
+
+        def synchronized_fetch(conn, job_id):
+            row = original_fetch_job(conn, job_id)
+            if not getattr(thread_state, "initial_fetch_complete", False):
+                thread_state.initial_fetch_complete = True
+                fetch_barrier.wait(timeout=5)
+            return row
+
+        def finish(status):
+            try:
+                result = transition_publish_job(
+                    self.db_path,
+                    job["id"],
+                    status,
+                    message=f"{status} writer",
+                    expected_state_version=claimed["state_version"],
+                )
+                return "resolved", result["status"]
+            except ConcurrentPublishJobUpdateError:
+                return "conflict", get_publish_job(self.db_path, job["id"])["status"]
+
+        with patch.object(
+            publish_job_service_module,
+            "_fetch_job",
+            side_effect=synchronized_fetch,
+        ):
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                success_future = pool.submit(finish, "success")
+                failure_future = pool.submit(finish, "failed")
+                outcomes = [success_future.result(), failure_future.result()]
+
+        latest = get_publish_job(self.db_path, job["id"])
+        self.assertIn(latest["status"], {"success", "failed"})
+        self.assertEqual(latest["state_version"], claimed["state_version"] + 1)
+        self.assertNotIn(("resolved", "processing"), outcomes)
 
     def test_retries_failed_and_need_action_jobs(self):
         failed_job = create_publish_job(

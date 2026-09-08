@@ -86,14 +86,23 @@ class MediaPublisherAdapter(PublisherAdapter):
             return PublishResult(
                 False,
                 self.platform,
-                "need_action",
+                "processing",
                 message=(
                     f"{self.platform_name}发布操作超时，平台最终状态未知；"
                     "请先人工核对，确认后再重新授权；系统不会自动重试"
                 ),
             )
         except Exception as exc:
-            return self._exception_result(exc, prefix="发布失败")
+            detail = str(exc).strip() or exc.__class__.__name__
+            return PublishResult(
+                False,
+                self.platform,
+                "processing",
+                message=(
+                    f"{self.platform_name}发布过程异常：{detail}；平台最终状态未知；"
+                    "请先人工核对，确认未提交后再重新授权；系统不会自动重试"
+                ),
+            )
         return self._normalize_result(raw_result)
 
     def schedule(

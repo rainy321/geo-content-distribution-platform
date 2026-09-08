@@ -141,6 +141,7 @@ class RealPublisherFactoryTests(unittest.TestCase):
         factory = RealPublisherFactory(
             self.db_path,
             cookies_directory=self.cookies_dir,
+            enable_bilibili_runtime=True,
         )
         for platform, account_type, expected_class in cases:
             with self.subTest(platform=platform):
@@ -148,6 +149,21 @@ class RealPublisherFactoryTests(unittest.TestCase):
                 (self.cookies_dir / filename).write_text("{}", encoding="utf-8")
                 self._insert_account(filename, account_type=account_type)
                 self.assertIsInstance(factory({"platform": platform}), expected_class)
+
+    def test_bilibili_factory_is_fail_closed_by_default(self):
+        cookie_file = self.cookies_dir / "bilibili.json"
+        cookie_file.write_text("{}", encoding="utf-8")
+        self._insert_account("bilibili.json", account_type=6)
+        factory = RealPublisherFactory(
+            self.db_path,
+            cookies_directory=self.cookies_dir,
+        )
+
+        with self.assertRaisesRegex(
+            PublisherNotConfiguredError,
+            "ENABLE_BILIBILI_RUNTIME=true",
+        ):
+            factory({"platform": "bilibili"})
 
     def test_prefers_newest_account_when_check_times_are_equal(self):
         old_cookie = self.cookies_dir / "channels-old.json"

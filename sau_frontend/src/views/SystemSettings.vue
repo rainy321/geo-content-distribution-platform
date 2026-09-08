@@ -2,15 +2,15 @@
   <main class="settings-page">
     <section class="settings-hero">
       <div class="hero-copy">
-        <span class="eyebrow">MODEL ROUTING / SETTINGS</span>
-        <h1>模型连接台</h1>
+        <span class="eyebrow">SYSTEM / ENGINE ROUTING</span>
+        <h1>系统设置</h1>
         <p>
-          为当前浏览器指定 OpenAI-compatible API。自定义配置只影响 AI 内容生成和 GEO 优化，
-          不会改动服务器默认值。
+          查看当前内容引擎的运行状态，并为备用路径配置 OpenAI-compatible API。
+          浏览器配置不会改动服务器默认值。
         </p>
       </div>
       <div :class="['active-source', sourceTone]">
-        <span>当前请求来源</span>
+        <span>备用模型连接</span>
         <strong>{{ activeSourceLabel }}</strong>
         <small>{{ activeSourceHint }}</small>
       </div>
@@ -94,6 +94,48 @@
       </section>
 
       <aside class="routing-column">
+        <section class="engine-status-card" aria-live="polite">
+          <header class="engine-status-heading">
+            <div>
+              <span class="section-kicker">CONTENT ENGINE / READ ONLY</span>
+              <h2>内容引擎状态</h2>
+            </div>
+            <el-button text :loading="engineStatusLoading" @click="loadEngineStatus">刷新状态</el-button>
+          </header>
+
+          <div v-if="engineStatusLoading && !engineStatus" class="engine-status-loading">
+            正在读取部署环境状态…
+          </div>
+          <div v-else class="engine-status-body">
+            <div class="engine-health-row">
+              <span :class="['health-dot', engineHealthTone]" />
+              <div>
+                <strong>{{ engineStatusLabel }}</strong>
+                <small>{{ engineStatusHint }}</small>
+              </div>
+            </div>
+            <dl class="engine-facts">
+              <div>
+                <dt>当前引擎</dt>
+                <dd>{{ engineStatus?.engine || '无法确认' }}</dd>
+              </div>
+              <div>
+                <dt>版本</dt>
+                <dd>{{ engineStatus?.version || '未提供' }}</dd>
+              </div>
+              <div>
+                <dt>回退策略</dt>
+                <dd>{{ fallbackStatusLabel }}</dd>
+              </div>
+              <div>
+                <dt>最近检查</dt>
+                <dd>{{ engineStatus?.checkedAt || '未提供' }}</dd>
+              </div>
+            </dl>
+            <p class="engine-managed-note">该路由由部署环境管理，本页面不提供引擎切换，也不会显示内部地址或密钥。</p>
+          </div>
+        </section>
+
         <section class="routing-card">
           <header>
             <span class="section-kicker">REQUEST PRIORITY</span>
@@ -178,6 +220,9 @@ const formRef = ref(null)
 const saving = ref(false)
 const serverConfigured = ref(false)
 const accessControlEnabled = ref(false)
+const engineStatusLoading = ref(false)
+const engineStatusError = ref('')
+const engineStatus = ref(null)
 const activeCustomModel = ref(getCustomAIConfig()?.model || '')
 const form = reactive({
   baseUrl: '',
@@ -245,6 +290,38 @@ const sourceTone = computed(() => ({
   missing: !customActive.value && !serverConfigured.value
 }))
 
+const engineHealthTone = computed(() => {
+  if (!engineStatus.value || engineStatusError.value) return 'unknown'
+  if (engineStatus.value.readiness === 'ready') return 'ready'
+  if (engineStatus.value.readiness === 'degraded') return 'degraded'
+  return 'unknown'
+})
+
+const engineStatusLabel = computed(() => {
+  if (engineStatusError.value || !engineStatus.value) return '状态无法确认'
+  if (engineStatus.value.readiness === 'ready') return '内容引擎可用'
+  if (engineStatus.value.readiness === 'degraded') return '内容引擎处于降级状态'
+  if (engineStatus.value.readiness === 'unavailable') return '内容引擎不可用'
+  return '状态无法确认'
+})
+
+const engineStatusHint = computed(() => {
+  if (engineStatusError.value) return engineStatusError.value
+  if (!engineStatus.value) return '尚未取得部署环境状态。'
+  if (engineStatus.value.message) return engineStatus.value.message
+  if (engineStatus.value.readiness === 'ready') return '生成请求将按部署策略路由，最终结果以运行回执为准。'
+  if (engineStatus.value.readiness === 'degraded') return '主引擎可能不可用，成功请求会明确标记是否使用备用引擎。'
+  return '请稍后刷新；状态未知不代表服务未配置。'
+})
+
+const fallbackStatusLabel = computed(() => {
+  if (!engineStatus.value || engineStatus.value.fallbackEnabled == null) return '无法确认'
+  if (!engineStatus.value.fallbackEnabled) return '未启用'
+  return engineStatus.value.fallbackTarget
+    ? `已启用 · ${engineStatus.value.fallbackTarget}`
+    : '已启用'
+})
+
 const loadDraft = () => {
   const draft = getAIConfigDraft()
   Object.assign(form, draft)
@@ -256,6 +333,41 @@ const loadServerStatus = async () => {
     serverConfigured.value = Boolean(response.data?.server_configured)
   } catch (error) {
     console.error('读取 AI 配置状态失败:', error)
+  }
+}
+
+const formatCheckedAt = (value) => {
+  if (!value) return ''
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString('zh-CN', { hour12: false })
+}
+
+const loadEngineStatus = async () => {
+  engineStatusLoading.value = true
+  engineStatusError.value = ''
+  try {
+    const response = await articleApi.getContentEngineStatus({ suppressGlobalError: true })
+    const root = response.data || {}
+    const payload = root.content_engine || root.engine_status || root
+    const primary = payload.primary && typeof payload.primary === 'object' ? payload.primary : {}
+    const fallback = payload.fallback && typeof payload.fallback === 'object' ? payload.fallback : {}
+    const hasFallbackField = Object.prototype.hasOwnProperty.call(payload, 'fallback')
+    engineStatus.value = {
+      engine: payload.active_engine || payload.active || payload.engine || payload.name || primary.engine || '',
+      version: payload.engine_version || payload.version || primary.version || '',
+      readiness: String(payload.readiness || payload.status || 'unknown').toLowerCase(),
+      fallbackEnabled: payload.fallback_enabled ?? fallback.enabled ?? (hasFallbackField ? Boolean(payload.fallback) : null),
+      fallbackTarget: payload.fallback_target || fallback.target || fallback.engine || '',
+      checkedAt: formatCheckedAt(payload.last_checked_at || payload.checked_at),
+      message: payload.message || ''
+    }
+  } catch (error) {
+    engineStatus.value = null
+    engineStatusError.value = error.response?.status === 404
+      ? '当前部署尚未提供引擎状态接口。'
+      : '读取失败，请稍后刷新。'
+  } finally {
+    engineStatusLoading.value = false
   }
 }
 
@@ -317,21 +429,22 @@ onMounted(() => {
   loadDraft()
   loadServerStatus()
   loadSecurityStatus()
+  loadEngineStatus()
 })
 </script>
 
 <style lang="scss" scoped>
 .settings-page {
-  --ink: #17222b;
-  --teal: #0d5c63;
-  --signal: #39b8b2;
-  --mist: #edf3f3;
-  --amber: #e8a33a;
+  --ink: var(--geo-ink);
+  --teal: var(--geo-ink);
+  --signal: var(--geo-line-strong);
+  --mist: var(--geo-soft);
+  --amber: var(--geo-warning);
   --paper: #ffffff;
   max-width: 1420px;
   margin: 0 auto;
   color: var(--ink);
-  font-family: Inter, "Microsoft YaHei", "PingFang SC", sans-serif;
+  font-family: "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
 }
 
 .settings-hero {
@@ -340,11 +453,9 @@ onMounted(() => {
   justify-content: space-between;
   gap: 36px;
   padding: 34px 38px;
-  border: 1px solid #d5e1e1;
-  border-radius: 18px 5px 18px 5px;
-  background:
-    linear-gradient(110deg, rgba(57, 184, 178, 0.11), transparent 46%),
-    var(--paper);
+  border: 1px solid var(--geo-line);
+  border-radius: 12px;
+  background: var(--paper);
 }
 
 .hero-copy {
@@ -352,7 +463,7 @@ onMounted(() => {
 
   h1 {
     margin: 6px 0 12px;
-    font-family: "Arial Narrow", "Microsoft YaHei", sans-serif;
+    font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
     font-size: clamp(34px, 4vw, 54px);
     font-weight: 760;
     letter-spacing: -0.045em;
@@ -360,7 +471,7 @@ onMounted(() => {
   }
 
   p {
-    color: #607078;
+    color: var(--geo-muted);
     font-size: 14px;
     line-height: 1.8;
   }
@@ -379,9 +490,9 @@ onMounted(() => {
 .active-source {
   min-width: 230px;
   padding: 18px 20px;
-  border: 1px solid #cbdada;
-  border-radius: 12px 4px 12px 4px;
-  background: #f8fbfb;
+  border: 1px solid var(--geo-line);
+  border-radius: 10px;
+  background: var(--geo-canvas);
 
   strong,
   small {
@@ -395,12 +506,12 @@ onMounted(() => {
 
   small {
     margin-top: 5px;
-    color: #728188;
+    color: var(--geo-muted);
   }
 
-  &.custom { border-color: rgba(57, 184, 178, 0.75); }
-  &.server { border-color: rgba(13, 92, 99, 0.45); }
-  &.missing { border-color: rgba(232, 163, 58, 0.58); }
+  &.custom,
+  &.server { border-color: var(--geo-line-strong); }
+  &.missing { border-color: rgba(138, 100, 36, 0.55); }
 }
 
 .settings-layout {
@@ -411,16 +522,17 @@ onMounted(() => {
 }
 
 .config-card,
+.engine-status-card,
 .routing-card,
 .guardrail-card {
-  border: 1px solid #d7e2e2;
+  border: 1px solid var(--geo-line);
   background: var(--paper);
-  box-shadow: 0 12px 32px rgba(23, 34, 43, 0.04);
+  box-shadow: 0 12px 36px rgba(17, 18, 20, 0.04);
 }
 
 .config-card {
   padding: 30px;
-  border-radius: 16px 5px 16px 5px;
+  border-radius: 12px;
 }
 
 .section-heading {
@@ -429,7 +541,7 @@ onMounted(() => {
   justify-content: space-between;
   gap: 18px;
   padding-bottom: 22px;
-  border-bottom: 1px solid #e1e9e9;
+  border-bottom: 1px solid var(--geo-line);
 
   h2 {
     margin-top: 6px;
@@ -456,15 +568,15 @@ onMounted(() => {
 
 :deep(.el-input__wrapper) {
   min-height: 44px;
-  border-radius: 9px 3px 9px 3px;
+  border-radius: 8px;
 }
 
 .session-note {
   display: flex;
   gap: 13px;
   padding: 15px 17px;
-  border-left: 3px solid var(--signal);
-  background: #f1f7f7;
+  border-left: 3px solid var(--geo-ink);
+  background: var(--geo-soft);
 
   > .el-icon {
     margin-top: 2px;
@@ -491,9 +603,9 @@ onMounted(() => {
   :deep(.el-button--primary) {
     --el-button-bg-color: var(--teal);
     --el-button-border-color: var(--teal);
-    --el-button-hover-bg-color: #14747b;
-    --el-button-hover-border-color: #14747b;
-    border-radius: 9px 3px 9px 3px;
+    --el-button-hover-bg-color: var(--geo-action-hover);
+    --el-button-hover-border-color: var(--geo-action-hover);
+    border-radius: 8px;
   }
 }
 
@@ -503,9 +615,107 @@ onMounted(() => {
   gap: 20px;
 }
 
+.engine-status-card {
+  padding: 27px;
+  border-radius: 12px;
+}
+
+.engine-status-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+
+  h2 {
+    margin-top: 6px;
+    font-size: 21px;
+  }
+}
+
+.engine-status-loading {
+  padding: 28px 0 4px;
+  color: var(--geo-muted);
+  font-size: 12px;
+}
+
+.engine-status-body {
+  padding-top: 22px;
+}
+
+.engine-health-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding-bottom: 18px;
+  border-bottom: 1px solid var(--geo-line);
+
+  > div {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  strong { font-size: 14px; }
+  small { color: var(--geo-muted); font-size: 11px; line-height: 1.5; }
+}
+
+.health-dot {
+  width: 10px;
+  height: 10px;
+  flex: 0 0 10px;
+  border-radius: 50%;
+  background: var(--geo-subtle);
+
+  &.ready { background: var(--geo-success); }
+  &.degraded { background: var(--geo-warning); }
+  &.unknown { background: var(--geo-subtle); }
+}
+
+.engine-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  margin-top: 18px;
+  overflow: hidden;
+  border: 1px solid var(--geo-line);
+  border-radius: 8px;
+  background: var(--geo-line);
+
+  > div {
+    min-width: 0;
+    padding: 12px;
+    background: #fff;
+  }
+
+  dt {
+    color: var(--geo-muted);
+    font: 700 9px/1.2 "Cascadia Mono", monospace;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+  }
+
+  dd {
+    overflow: hidden;
+    margin-top: 6px;
+    color: var(--geo-ink);
+    font-size: 12px;
+    font-weight: 650;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}
+
+.engine-managed-note {
+  margin-top: 14px;
+  color: var(--geo-muted);
+  font-size: 10px;
+  line-height: 1.55;
+}
+
 .routing-card {
   padding: 27px;
-  border-radius: 5px 16px 5px 16px;
+  border-radius: 12px;
 
   h2 {
     margin-top: 6px;
@@ -525,7 +735,7 @@ onMounted(() => {
     bottom: 26px;
     left: 17px;
     width: 1px;
-    background: #bfd1d1;
+    background: var(--geo-line);
     content: "";
   }
 }
@@ -538,13 +748,13 @@ onMounted(() => {
   align-items: start;
   padding: 16px 14px 16px 0;
   border: 1px solid transparent;
-  border-radius: 10px 3px 10px 3px;
-  background: #f7fafa;
+  border-radius: 8px;
+  background: var(--geo-canvas);
 
   &.active {
-    border-color: rgba(57, 184, 178, 0.55);
-    background: #edf8f7;
-    box-shadow: inset 3px 0 var(--signal);
+    border-color: var(--geo-line-strong);
+    background: var(--geo-soft);
+    box-shadow: inset 3px 0 var(--geo-ink);
   }
 
   strong { font-size: 13px; }
@@ -574,16 +784,16 @@ onMounted(() => {
   font-size: 9px;
 }
 
-.provider-node { background: #102b31; }
+.provider-node { background: var(--geo-ink); }
 .provider-node strong { color: #f4fbfa; }
 .provider-node p { color: rgba(224, 241, 239, 0.65); }
-.provider-node > .el-icon { color: #64d6cf; }
+.provider-node > .el-icon { color: #fff; }
 
 .guardrail-card {
   display: flex;
   gap: 15px;
   padding: 22px;
-  border-radius: 14px 4px 14px 4px;
+  border-radius: 12px;
 
   > .el-icon {
     flex: 0 0 auto;

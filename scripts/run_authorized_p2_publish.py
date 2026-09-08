@@ -34,6 +34,15 @@ def _real_publishing_enabled() -> bool:
     }
 
 
+def _bilibili_runtime_enabled() -> bool:
+    return str(os.getenv("ENABLE_BILIBILI_RUNTIME", "false")).strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
 def _find_article(connection: sqlite3.Connection) -> int:
     row = connection.execute(
         "SELECT id FROM articles WHERE title = ? ORDER BY id DESC LIMIT 1",
@@ -120,9 +129,17 @@ def main() -> None:
     with sqlite3.connect(database_path) as connection:
         article_id = _find_article(connection)
 
+    selected_platforms = tuple(args.platform or PLATFORMS)
+    bilibili_runtime_enabled = _bilibili_runtime_enabled()
+    if "bilibili" in selected_platforms and not bilibili_runtime_enabled:
+        raise SystemExit(
+            "ENABLE_BILIBILI_RUNTIME 未开启，未访问任何真实平台"
+        )
+
     base_factory = create_real_publisher_factory(
         database_path,
         cookies_directory=cookies_directory,
+        enable_bilibili_runtime=bilibili_runtime_enabled,
     )
 
     def factory(job):
@@ -134,7 +151,6 @@ def main() -> None:
             )
         return publisher
     results: list[dict[str, object]] = []
-    selected_platforms = tuple(args.platform or PLATFORMS)
     for platform in selected_platforms:
         with sqlite3.connect(database_path) as connection:
             existing = _find_existing_job(

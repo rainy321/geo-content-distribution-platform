@@ -1,0 +1,10 @@
+{
+  "contract_version": "1.0",
+  "data": {
+    "title": "",
+    "content": "正文存在，但标题缺失。",
+    "engine": "colleague",
+    "engine_version": "2026.09",
+    "trace_id": "provider-trace-invalid"
+  }
+}

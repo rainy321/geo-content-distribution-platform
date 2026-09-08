@@ -44,6 +44,7 @@ class WorkerSettings:
     interval_seconds: int
     demo_mode: bool
     allow_real_publishing: bool
+    enable_bilibili_runtime: bool = False
 
     @property
     def allows_real_execution(self) -> bool:
@@ -64,6 +65,7 @@ class WorkerSettings:
             interval_seconds=_environment_interval(),
             demo_mode=_environment_flag("DEMO_MODE"),
             allow_real_publishing=_environment_flag("ALLOW_REAL_PUBLISHING"),
+            enable_bilibili_runtime=_environment_flag("ENABLE_BILIBILI_RUNTIME"),
         )
 
 
@@ -174,6 +176,7 @@ def _publisher_factory(settings: WorkerSettings):
     return create_real_publisher_factory(
         settings.database_path,
         cookies_directory=settings.cookies_directory,
+        enable_bilibili_runtime=settings.enable_bilibili_runtime,
     )
 
 

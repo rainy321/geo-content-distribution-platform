@@ -1,0 +1,9 @@
+{
+  "contract_version": "1.0",
+  "data": {
+    "title": "最小合规结果",
+    "content": "## 正文\n只包含必填字段。",
+    "engine": "colleague",
+    "engine_version": "2026.09"
+  }
+}

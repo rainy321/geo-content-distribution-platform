@@ -30,12 +30,18 @@ class RealPublishApiTests(unittest.TestCase):
 
         self.original_config = {
             key: app.config.get(key)
-            for key in ("DATABASE_PATH", "DEMO_MODE", "ALLOW_REAL_PUBLISHING")
+            for key in (
+                "DATABASE_PATH",
+                "DEMO_MODE",
+                "ALLOW_REAL_PUBLISHING",
+                "ENABLE_BILIBILI_RUNTIME",
+            )
         }
         app.config.update(
             DATABASE_PATH=self.db_path,
             DEMO_MODE=False,
             ALLOW_REAL_PUBLISHING=True,
+            ENABLE_BILIBILI_RUNTIME=False,
             TESTING=True,
         )
         self.client = app.test_client()
@@ -152,6 +158,23 @@ class RealPublishApiTests(unittest.TestCase):
             job["id"],
             publisher_factory=factory,
             media_root=app.config["MEDIA_ROOT"],
+        )
+
+    def test_bilibili_real_execution_is_blocked_before_factory_by_default(self):
+        job = self._create_job(platform="bilibili")
+
+        with patch("sau_backend.create_real_publisher_factory") as create_factory:
+            response = self.client.post(
+                f"/api/publish/jobs/{job['id']}/execute-real",
+                json={"confirm": True},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("ENABLE_BILIBILI_RUNTIME", response.get_json()["msg"])
+        create_factory.assert_not_called()
+        self.assertEqual(
+            get_publish_job(self.db_path, job["id"])["status"],
+            "queued",
         )
 
     def test_job_payload_exposes_real_action_only_when_all_server_gates_allow_it(self):

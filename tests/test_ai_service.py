@@ -6,6 +6,8 @@ import requests
 
 from services.ai_service import (
     AIConfigurationError,
+    AIConnectError,
+    AIReadTimeoutError,
     AIServiceError,
     AISettings,
     generate_geo_content,
@@ -182,6 +184,39 @@ class AIServiceTests(unittest.TestCase):
 
         self.assertNotIn("sensitive-provider-detail", str(raised.exception))
 
+    def test_definite_connection_refusal_is_safe_connect_failure(self):
+        def fake_post(*args, **kwargs):
+            try:
+                raise ConnectionRefusedError("refused")
+            except ConnectionRefusedError as cause:
+                raise requests.ConnectionError("failed") from cause
+
+        with self.assertRaises(AIConnectError):
+            generate_geo_content(
+                project=self.project,
+                topic="测试",
+                keywords=[],
+                length=600,
+                content_type="行业科普",
+                settings=self.settings,
+                http_post=fake_post,
+            )
+
+    def test_ambiguous_connection_reset_is_unknown(self):
+        def fake_post(*args, **kwargs):
+            raise requests.ConnectionError("reset after request")
+
+        with self.assertRaisesRegex(AIReadTimeoutError, "结果未知"):
+            generate_geo_content(
+                project=self.project,
+                topic="测试",
+                keywords=[],
+                length=600,
+                content_type="行业科普",
+                settings=self.settings,
+                http_post=fake_post,
+            )
+
     def test_requires_all_environment_settings(self):
         with patch.dict(os.environ, {}, clear=True):
             with self.assertRaisesRegex(
@@ -267,6 +302,25 @@ class AIServiceTests(unittest.TestCase):
                 settings=self.settings,
                 http_post=fake_post,
             )
+
+    def test_provider_error_does_not_expose_response_body(self):
+        secret_body = "internal prompt and bearer secret must not escape"
+
+        def fake_post(*args, **kwargs):
+            return FakeResponse({}, status_code=500, text=secret_body)
+
+        with self.assertRaisesRegex(AIServiceError, r"HTTP 500$") as raised:
+            generate_geo_content(
+                project=self.project,
+                topic="测试",
+                keywords=[],
+                length=600,
+                content_type="行业科普",
+                settings=self.settings,
+                http_post=fake_post,
+            )
+
+        self.assertNotIn(secret_body, str(raised.exception))
 
     def test_optimizes_from_score_and_suggestions_without_saving(self):
         captured = {}

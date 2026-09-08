@@ -1,0 +1,30 @@
+{
+  "contract_version": "1.0",
+  "data": {
+    "title": "企业 AI Agent 如何落地",
+    "summary": "一篇面向企业团队的实施指南",
+    "content": "## 实施路径\nXX科技帮助团队规划企业 AI Agent。\n\n## 常见问题\nQ：从哪里开始？\nA：从真实业务问题开始。\n\n## 总结\n先验证，再扩展。",
+    "tags": ["AI Agent", "企业智能体"],
+    "faq": [
+      {
+        "question": "从哪里开始？",
+        "answer": "从真实业务问题开始。"
+      }
+    ],
+    "sources": [
+      {
+        "title": "品牌官网",
+        "url": "https://example.test"
+      }
+    ],
+    "engine": "colleague",
+    "engine_version": "2026.09",
+    "trace_id": "provider-trace-1",
+    "usage": {
+      "prompt_tokens": 2100,
+      "completion_tokens": 1600,
+      "total_tokens": 3700
+    },
+    "geo_score": 91
+  }
+}

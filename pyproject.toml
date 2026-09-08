@@ -18,10 +18,12 @@ dependencies = [
   "qrcode==8.2",
   "requests==2.32.3",
   "segno>=1.6.6",
+  "waitress==3.0.2",
 ]
 
 [project.scripts]
 sau = "sau_cli:main"
+sau-web = "sau_web:main"
 sau-worker = "sau_worker:main"
 
 [project.optional-dependencies]
@@ -37,7 +39,7 @@ web = [
 package = true
 
 [tool.setuptools]
-py-modules = ["conf", "sau_cli", "sau_worker"]
+py-modules = ["conf", "sau_backend", "sau_cli", "sau_web", "sau_worker"]
 include-package-data = true
 
 [tool.setuptools.packages.find]

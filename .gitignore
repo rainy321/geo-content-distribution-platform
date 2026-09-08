@@ -196,4 +196,5 @@ videoFile
 .vercel/
 .env.local
 deploy/production/app.env
+deploy/production/content-engine.env
 runtime/

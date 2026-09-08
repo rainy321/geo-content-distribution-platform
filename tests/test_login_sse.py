@@ -13,7 +13,9 @@ from sau_backend import (
 class LoginSseTests(unittest.TestCase):
     def setUp(self):
         self.original_testing = app.testing
+        self.original_bilibili_runtime = app.config["ENABLE_BILIBILI_RUNTIME"]
         app.config["TESTING"] = True
+        app.config["ENABLE_BILIBILI_RUNTIME"] = False
         self.client = app.test_client()
         with active_queues_lock:
             active_queues.clear()
@@ -22,6 +24,7 @@ class LoginSseTests(unittest.TestCase):
         with active_queues_lock:
             active_queues.clear()
         app.config["TESTING"] = self.original_testing
+        app.config["ENABLE_BILIBILI_RUNTIME"] = self.original_bilibili_runtime
 
     def test_stream_stops_and_cleans_after_terminal_event(self):
         status_queue = Queue()
@@ -59,6 +62,19 @@ class LoginSseTests(unittest.TestCase):
 
         self.assertEqual(invalid_platform.status_code, 400)
         self.assertEqual(missing_account.status_code, 400)
+        with active_queues_lock:
+            self.assertEqual(active_queues, {})
+
+    def test_bilibili_login_is_blocked_before_thread_and_queue_registration(self):
+        with patch("sau_backend.threading.Thread") as thread:
+            response = self.client.get(
+                "/login",
+                query_string={"type": 6, "id": "bilibili-account"},
+            )
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("ENABLE_BILIBILI_RUNTIME", response.get_json()["msg"])
+        thread.assert_not_called()
         with active_queues_lock:
             self.assertEqual(active_queues, {})
 

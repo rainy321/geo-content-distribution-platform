@@ -6,11 +6,44 @@
 
 // 全局样式
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-    sans-serif;
+  font-family: $font-body;
   color: $text-primary;
   background-color: $bg-color-page;
+}
+
+:root {
+  --geo-canvas: #f7f7f5;
+  --geo-surface: #ffffff;
+  --geo-ink: #111214;
+  --geo-ink-secondary: #3f4145;
+  --geo-muted: #767980;
+  --geo-subtle: #a1a3a8;
+  --geo-line: #dedfe1;
+  --geo-line-strong: #bfc1c4;
+  --geo-soft: #f0f0ee;
+  --geo-action: #111214;
+  --geo-action-hover: #292a2c;
+  --geo-link: #1e63d6;
+  --geo-success: #32674d;
+  --geo-warning: #8a6424;
+  --geo-danger: #963e37;
+  --geo-focus: #1e63d6;
+  --el-color-primary: #111214;
+  --el-color-primary-light-3: #46474a;
+  --el-color-primary-light-5: #737477;
+  --el-color-primary-light-7: #b8b8b9;
+  --el-color-primary-light-8: #d6d6d4;
+  --el-color-primary-light-9: #eeeeec;
+  --el-border-radius-base: 8px;
+  --el-border-color: #dedfe1;
+  --el-fill-color-light: #f4f4f2;
+  --el-text-color-primary: #111214;
+  --el-text-color-regular: #3f4145;
+}
+
+:focus-visible {
+  outline: 2px solid var(--geo-focus);
+  outline-offset: 3px;
 }
 
 #app {

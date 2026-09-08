@@ -15,12 +15,12 @@ export const articleApi = {
     return http.post(`/api/articles/${id}/optimize`, withCustomAIConfig())
   },
 
-  generateArticle(data) {
-    return http.post('/api/articles/generate', withCustomAIConfig(data))
+  generateArticle(data, config = {}) {
+    return http.post('/api/articles/generate', withCustomAIConfig(data), config)
   },
 
-  generateBatch(data) {
-    return http.post('/api/articles/generate-batch', withCustomAIConfig(data))
+  generateBatch(data, config = {}) {
+    return http.post('/api/articles/generate-batch', withCustomAIConfig(data), config)
   },
 
   getTemplates() {
@@ -57,6 +57,14 @@ export const articleApi = {
 
   getAIConfigStatus() {
     return http.get('/api/ai/config-status')
+  },
+
+  getContentEngineStatus(config = {}) {
+    return http.get('/api/content-engine/status', undefined, config)
+  },
+
+  getContentGenerationRun(runId, config = {}) {
+    return http.get(`/api/content-generation/runs/${runId}`, undefined, config)
   },
 
   scoreArticle(data) {

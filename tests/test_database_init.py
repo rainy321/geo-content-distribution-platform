@@ -182,7 +182,7 @@ class DatabaseInitializationTests(unittest.TestCase):
                     """
                     SELECT article_id, platform, status, message, result_url,
                            images, video, publish_at, authorization_fingerprint,
-                           auto_execute, demo, account_id,
+                           auto_execute, demo, state_version, account_id,
                            created_at, started_at, finished_at
                     FROM publish_jobs
                     """
@@ -204,19 +204,33 @@ class DatabaseInitializationTests(unittest.TestCase):
                     "authorization_fingerprint",
                     "auto_execute",
                     "demo",
+                    "state_version",
                     "created_at",
                     "started_at",
                     "finished_at",
                 },
             )
             self.assertEqual(
-                job[:11],
-                (article_id, "zhihu", "queued", "", "", "[]", "", None, "", 0, 0),
+                job[:12],
+                (
+                    article_id,
+                    "zhihu",
+                    "queued",
+                    "",
+                    "",
+                    "[]",
+                    "",
+                    None,
+                    "",
+                    0,
+                    0,
+                    0,
+                ),
             )
-            self.assertIsNone(job[11])
-            self.assertTrue(job[12])
-            self.assertIsNone(job[13])
+            self.assertIsNone(job[12])
+            self.assertTrue(job[13])
             self.assertIsNone(job[14])
+            self.assertIsNone(job[15])
 
     def test_reinitialization_adds_assets_to_existing_publish_jobs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -250,9 +264,9 @@ class DatabaseInitializationTests(unittest.TestCase):
                 columns = {
                     row[1] for row in conn.execute("PRAGMA table_info(publish_jobs)")
                 }
-                images, video, fingerprint = conn.execute(
+                images, video, fingerprint, state_version = conn.execute(
                     """
-                    SELECT images, video, authorization_fingerprint
+                    SELECT images, video, authorization_fingerprint, state_version
                     FROM publish_jobs
                     WHERE id = 1
                     """
@@ -262,9 +276,11 @@ class DatabaseInitializationTests(unittest.TestCase):
             self.assertIn("auto_execute", columns)
             self.assertIn("authorization_fingerprint", columns)
             self.assertIn("account_id", columns)
+            self.assertIn("state_version", columns)
             self.assertEqual(images, "[]")
             self.assertEqual(video, "")
             self.assertEqual(fingerprint, "")
+            self.assertEqual(state_version, 0)
 
     def test_publish_jobs_reject_unknown_status_and_invalid_demo_flag(self):
         with tempfile.TemporaryDirectory() as temp_dir:

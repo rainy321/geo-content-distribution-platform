@@ -18,10 +18,10 @@
       <el-aside :width="sidebarCollapsed ? '68px' : '224px'">
         <div class="sidebar">
           <div class="logo">
-            <div class="logo-mark">G</div>
+            <div class="logo-mark" aria-hidden="true"><span /></div>
             <div v-show="!sidebarCollapsed" class="logo-copy">
-              <strong>GEO 内容引擎</strong>
-              <span>CONTENT OPERATIONS</span>
+              <strong>GEO</strong>
+              <span>CONTENT ENGINE</span>
             </div>
           </div>
           <el-menu
@@ -29,9 +29,9 @@
             :default-active="activeMenu"
             :collapse="sidebarCollapsed"
             class="sidebar-menu"
-            background-color="#102b31"
-            text-color="#fff"
-            active-text-color="#64d6cf"
+            background-color="#ffffff"
+            text-color="#55575b"
+            active-text-color="#ffffff"
           >
             <el-menu-item index="/">
               <el-icon><HomeFilled /></el-icon>
@@ -80,7 +80,9 @@
         <el-header>
           <div class="header-content">
             <div class="header-left">
-              <el-icon class="toggle-sidebar" @click="toggleSidebar"><Fold /></el-icon>
+              <button class="toggle-sidebar" type="button" aria-label="折叠或展开侧边导航" @click="toggleSidebar">
+                <el-icon><Fold /></el-icon>
+              </button>
               <span class="workspace-label">内容运营工作区</span>
             </div>
             <div class="header-right">
@@ -188,22 +190,23 @@ onBeforeUnmount(() => {
   place-content: center;
   justify-items: center;
   gap: 13px;
-  background: #f3f6f6;
-  color: #17222b;
+  background: var(--geo-canvas);
+  color: var(--geo-ink);
 
   .bootstrap-mark {
     display: grid;
     width: 46px;
     height: 46px;
     place-items: center;
-    border: 1px solid #39b8b2;
-    border-radius: 11px 3px 11px 3px;
-    color: #0d5c63;
-    font: 800 22px/1 "Arial Narrow", sans-serif;
+    border: 1px solid var(--geo-ink);
+    border-radius: 10px;
+    background: var(--geo-ink);
+    color: #fff;
+    font: 800 22px/1 $font-display;
   }
 
   strong { font-size: 14px; }
-  small { max-width: 420px; color: #718087; text-align: center; }
+  small { max-width: 420px; color: var(--geo-muted); text-align: center; }
 }
 
 .auth-bootstrap-error .bootstrap-mark {
@@ -213,11 +216,19 @@ onBeforeUnmount(() => {
 
 .el-container {
   height: 100vh;
+  min-width: 0;
+}
+
+#app > .el-container {
+  width: 100%;
+  overflow: hidden;
 }
 
 .el-aside {
-  background-color: #102b31;
-  color: #fff;
+  flex: 0 0 auto;
+  border-right: 1px solid var(--geo-line);
+  background-color: var(--geo-surface);
+  color: var(--geo-ink);
   height: 100vh;
   overflow: hidden;
   transition: width 0.3s;
@@ -232,21 +243,36 @@ onBeforeUnmount(() => {
       padding: 0 14px;
       display: flex;
       align-items: center;
-      background-color: #0b2429;
-      border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+      background-color: var(--geo-surface);
+      border-bottom: 1px solid var(--geo-line);
       overflow: hidden;
       
       .logo-mark {
+        position: relative;
         width: 38px;
         height: 38px;
         flex: 0 0 38px;
-        display: grid;
-        place-items: center;
-        border: 1px solid rgba(100, 214, 207, 0.65);
-        border-radius: 11px 3px 11px 3px;
-        color: #9de7e2;
-        font: 700 19px/1 "Arial Narrow", "Microsoft YaHei", sans-serif;
-        box-shadow: inset 0 0 0 3px rgba(100, 214, 207, 0.08);
+
+        &::before,
+        span {
+          position: absolute;
+          left: 9px;
+          width: 13px;
+          height: 27px;
+          border-radius: 5px;
+          background: var(--geo-ink);
+          content: "";
+          transform: rotate(36deg);
+        }
+
+        &::before { top: 3px; }
+
+        span {
+          right: 8px;
+          bottom: 3px;
+          left: auto;
+          height: 21px;
+        }
       }
 
       .logo-copy {
@@ -256,14 +282,14 @@ onBeforeUnmount(() => {
         white-space: nowrap;
 
         strong {
-          color: #f4fbfa;
-          font-size: 15px;
-          letter-spacing: 0.04em;
+          color: var(--geo-ink);
+          font-size: 19px;
+          letter-spacing: -0.03em;
         }
 
         span {
           margin-top: 2px;
-          color: rgba(208, 232, 230, 0.55);
+          color: var(--geo-muted);
           font: 600 9px/1.2 "Cascadia Mono", monospace;
           letter-spacing: 0.15em;
         }
@@ -273,6 +299,7 @@ onBeforeUnmount(() => {
     .sidebar-menu {
       border-right: none;
       flex: 1;
+      padding: 12px 8px;
       
       .el-menu-item {
         display: flex;
@@ -284,17 +311,30 @@ onBeforeUnmount(() => {
         }
 
         &.is-active {
-          background: linear-gradient(90deg, rgba(57, 184, 178, 0.18), transparent);
-          box-shadow: inset 3px 0 #39b8b2;
+          background: var(--geo-ink);
+          color: #fff;
+          box-shadow: none;
+        }
+
+        &:not(.is-active):hover {
+          background: var(--geo-soft);
         }
       }
     }
   }
 }
 
+.el-aside + .el-container {
+  width: auto;
+  min-width: 0;
+  flex: 1 1 0%;
+  overflow: hidden;
+}
+
 .el-header {
   background-color: #fff;
-  box-shadow: 0 1px 4px rgba(0, 21, 41, 0.08);
+  border-bottom: 1px solid var(--geo-line);
+  box-shadow: none;
   padding: 0;
   height: 60px;
   
@@ -311,17 +351,22 @@ onBeforeUnmount(() => {
       gap: 16px;
 
       .toggle-sidebar {
-        font-size: 20px;
-        cursor: pointer;
+        display: grid;
+        width: 34px;
+        height: 34px;
+        place-items: center;
+        border-radius: 8px;
         color: $text-regular;
+        font-size: 20px;
         
         &:hover {
+          background: var(--geo-soft);
           color: $primary-color;
         }
       }
 
       .workspace-label {
-        color: #66757d;
+        color: var(--geo-muted);
         font-size: 13px;
         letter-spacing: 0.04em;
       }
@@ -348,8 +393,11 @@ onBeforeUnmount(() => {
 }
 
 .el-main {
+  width: 100%;
+  min-width: 0;
   background-color: $bg-color-page;
   padding: 20px;
+  overflow-x: hidden;
   overflow-y: auto;
 }
 
@@ -364,6 +412,11 @@ onBeforeUnmount(() => {
 
   .el-main {
     padding: 12px;
+  }
+
+  .el-aside + .el-container {
+    width: calc(100vw - 68px);
+    max-width: calc(100vw - 68px);
   }
 }
 </style>

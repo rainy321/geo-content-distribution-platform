@@ -7,6 +7,11 @@ from pathlib import Path
 
 from db.createTable import initialize_database
 from sau_backend import app
+from services.content_engine_contract import (
+    ContentGenerationRequest,
+    ContentGenerationResult,
+)
+from services.content_generation_run_service import begin_or_replay, mark_succeeded
 
 
 class ArticlesApiTests(unittest.TestCase):
@@ -169,6 +174,102 @@ class ArticlesApiTests(unittest.TestCase):
 
         self.assertEqual(project_change.status_code, 400)
         self.assertEqual(empty_update.status_code, 400)
+
+    def test_operator_cannot_force_internal_publishing_status(self):
+        article = self._create_article()
+
+        response = self.client.put(
+            f"/api/articles/{article['id']}",
+            json={"status": "published"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("草稿或待发布", response.get_json()["msg"])
+
+    def test_generation_run_binds_once_and_keeps_snapshot_scoring_context(self):
+        request = ContentGenerationRequest.create(
+            project_context={
+                "id": self.project_id,
+                "name": "XX科技",
+                "keywords": ["AI Agent", "企业智能体"],
+            },
+            topic="快照评分",
+            keywords=["独立关键词"],
+            length=600,
+            content_type="行业科普",
+            idempotency_key="article-save-snapshot-test",
+        )
+        run = begin_or_replay(self.db_path, request, configured_engine="mock")
+        result = ContentGenerationResult.from_payload(
+            {
+                "title": "独立关键词实践",
+                "content": "XX科技围绕独立关键词提供说明。",
+                "summary": "摘要",
+                "tags": ["独立关键词"],
+            },
+            default_engine="mock",
+            default_engine_version="test",
+            request_id=request.request_id,
+            elapsed_ms=1,
+        )
+        mark_succeeded(
+            self.db_path,
+            run.run_id,
+            result,
+            local_score=30,
+            local_analysis={"dimensions": {}, "suggestions": []},
+        )
+
+        first = self.client.post(
+            "/api/articles",
+            json={
+                "project_id": self.project_id,
+                "generation_run_id": run.run_id,
+                "title": result.title,
+                "summary": result.summary,
+                "content": result.content,
+                "tags": list(result.tags),
+            },
+        )
+        self.assertEqual(first.status_code, 201)
+        article = first.get_json()["data"]
+        self.assertEqual(article["generation_run_id"], run.run_id)
+        self.assertEqual(article["generation"]["engine"], "mock")
+        self.assertEqual(article["generation"]["usage"], None)
+        score_before = article["geo_score"]
+
+        detail = self.client.get(f"/api/articles/{article['id']}")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(
+            detail.get_json()["data"]["generation"]["run_id"],
+            run.run_id,
+        )
+
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE projects SET keywords = ? WHERE id = ?",
+                    (json.dumps(["完全不同"], ensure_ascii=False), self.project_id),
+                )
+
+        updated = self.client.put(
+            f"/api/articles/{article['id']}",
+            json={"summary": "更新后的摘要"},
+        )
+        self.assertEqual(updated.status_code, 200)
+        self.assertEqual(updated.get_json()["data"]["geo_score"], score_before)
+
+        duplicate = self.client.post(
+            "/api/articles",
+            json={
+                "project_id": self.project_id,
+                "generation_run_id": run.run_id,
+                "title": "重复保存",
+                "content": "重复内容",
+            },
+        )
+        self.assertEqual(duplicate.status_code, 409)
+        self.assertIn("已经保存", duplicate.get_json()["msg"])
 
     def _create_article(self):
         response = self.client.post(

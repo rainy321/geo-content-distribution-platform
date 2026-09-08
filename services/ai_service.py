@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import socket
 import time
 from ipaddress import ip_address
 from collections.abc import Mapping, Sequence
@@ -12,6 +13,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import requests
+from urllib3.exceptions import NameResolutionError, NewConnectionError
 
 
 logger = logging.getLogger(__name__)
@@ -29,6 +31,62 @@ class AIServiceError(RuntimeError):
 
 class AIConfigurationError(AIServiceError):
     """Raised when required AI environment variables are missing."""
+
+
+class AIConnectError(AIServiceError):
+    """Raised when the provider connection could not be established."""
+
+
+class AIReadTimeoutError(AIServiceError):
+    """Raised when a sent request has an unknown remote outcome."""
+
+
+class AIProviderRateLimitError(AIServiceError):
+    """Raised when the provider rejects a request because of rate limits."""
+
+    def __init__(self, message: str, *, retry_after_seconds: int | None = None) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
+
+
+class AIProtocolError(AIServiceError):
+    """Raised when the provider response cannot satisfy the strict contract."""
+
+
+def is_definite_pre_send_connection_error(exc: BaseException) -> bool:
+    """Return true only when the failure is provably in connection setup.
+
+    ``requests.ConnectionError`` also covers resets after a request was sent.
+    Those ambiguous failures must never trigger a fallback because a second
+    provider could duplicate work and cost.  Walk the wrapped requests/urllib3
+    exception chain and approve only DNS/new-connection/refused failures.
+    """
+
+    pending: list[BaseException] = [exc]
+    seen: set[int] = set()
+    definite_types = (
+        requests.ConnectTimeout,
+        NameResolutionError,
+        NewConnectionError,
+        ConnectionRefusedError,
+        socket.gaierror,
+    )
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, definite_types):
+            return True
+        for wrapped in (
+            getattr(current, "__cause__", None),
+            getattr(current, "__context__", None),
+            getattr(current, "reason", None),
+        ):
+            if isinstance(wrapped, BaseException):
+                pending.append(wrapped)
+        pending.extend(item for item in getattr(current, "args", ()) if isinstance(item, BaseException))
+    return False
 
 
 @dataclass(frozen=True)
@@ -95,6 +153,24 @@ class AISettings:
         )
 
 
+@dataclass(frozen=True)
+class AICompletionResult:
+    content: str
+    model: str
+    provider_request_id: str
+    elapsed_ms: int
+    usage: Mapping[str, int] | None
+
+
+@dataclass(frozen=True)
+class AIGenerationResult:
+    article: Mapping[str, Any]
+    model: str
+    provider_request_id: str
+    elapsed_ms: int
+    usage: Mapping[str, int] | None
+
+
 def generate_geo_content(
     *,
     project: Mapping[str, Any],
@@ -108,6 +184,37 @@ def generate_geo_content(
     http_post=None,
 ) -> dict[str, Any]:
     """Generate one GEO article through an OpenAI-compatible endpoint."""
+    return dict(
+        generate_geo_content_detailed(
+            project=project,
+            topic=topic,
+            keywords=keywords,
+            length=length,
+            content_type=content_type,
+            target_platform=target_platform,
+            template_instruction=template_instruction,
+            settings=settings,
+            http_post=http_post,
+            strict=False,
+        ).article
+    )
+
+
+def generate_geo_content_detailed(
+    *,
+    project: Mapping[str, Any],
+    topic: str,
+    keywords: Sequence[str],
+    length: int,
+    content_type: str,
+    target_platform: str = "",
+    template_instruction: str = "",
+    settings: AISettings | None = None,
+    http_post=None,
+    strict: bool = True,
+) -> AIGenerationResult:
+    """Generate content while retaining provider metadata for audit/costing."""
+
     settings = settings or AISettings.from_environment()
     http_post = http_post or requests.post
     prompt = _build_prompt(
@@ -120,13 +227,24 @@ def generate_geo_content(
         template_instruction=template_instruction,
     )
 
-    raw_content = _request_chat_completion(
+    completion = _request_chat_completion_detailed(
         settings=settings,
         prompt=prompt,
         temperature=0.7,
         http_post=http_post,
     )
-    return _parse_model_output(raw_content, fallback_tags=keywords)
+    article = _parse_model_output(
+        completion.content,
+        fallback_tags=keywords,
+        strict=strict,
+    )
+    return AIGenerationResult(
+        article=article,
+        model=completion.model,
+        provider_request_id=completion.provider_request_id,
+        elapsed_ms=completion.elapsed_ms,
+        usage=completion.usage,
+    )
 
 
 def optimize_geo_content(
@@ -160,6 +278,23 @@ def _request_chat_completion(
     http_post,
 ) -> str:
     """Call the shared OpenAI-compatible chat completion endpoint."""
+
+    return _request_chat_completion_detailed(
+        settings=settings,
+        prompt=prompt,
+        temperature=temperature,
+        http_post=http_post,
+    ).content
+
+
+def _request_chat_completion_detailed(
+    *,
+    settings: AISettings,
+    prompt: str,
+    temperature: float,
+    http_post,
+) -> AICompletionResult:
+    """Call the provider and retain non-secret response metadata."""
 
     endpoint = _chat_completions_url(settings.base_url)
     provider_host = (urlsplit(endpoint).hostname or "unknown").lower()
@@ -201,6 +336,30 @@ def _request_chat_completion(
             timeout=settings.timeout_seconds,
             allow_redirects=False,
         )
+    except requests.ConnectTimeout as exc:
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000)
+        _log_ai_provider_event(
+            "connection_failed",
+            level=logging.ERROR,
+            host=provider_host,
+            model=settings.model,
+            elapsed_ms=elapsed_ms,
+        )
+        raise AIConnectError("无法连接 AI 服务") from exc
+    except requests.ReadTimeout as exc:
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000)
+        _log_ai_provider_event(
+            "request_timed_out",
+            level=logging.ERROR,
+            host=provider_host,
+            model=settings.model,
+            elapsed_ms=elapsed_ms,
+            timeout_seconds=settings.timeout_seconds,
+        )
+        raise AIReadTimeoutError(
+            f"AI 服务在 {settings.timeout_seconds:g} 秒内未返回，"
+            "请求结果未知，请勿自动重试"
+        ) from exc
     except requests.Timeout as exc:
         elapsed_ms = round((time.perf_counter() - started_at) * 1000)
         _log_ai_provider_event(
@@ -211,9 +370,30 @@ def _request_chat_completion(
             elapsed_ms=elapsed_ms,
             timeout_seconds=settings.timeout_seconds,
         )
-        raise AIServiceError(
+        raise AIReadTimeoutError(
             f"AI 服务在 {settings.timeout_seconds:g} 秒内未返回，"
-            "请稍后重试或改用低延迟模型"
+            "请求结果未知，请勿自动重试"
+        ) from exc
+    except requests.ConnectionError as exc:
+        elapsed_ms = round((time.perf_counter() - started_at) * 1000)
+        if is_definite_pre_send_connection_error(exc):
+            _log_ai_provider_event(
+                "connection_failed",
+                level=logging.ERROR,
+                host=provider_host,
+                model=settings.model,
+                elapsed_ms=elapsed_ms,
+            )
+            raise AIConnectError("无法连接 AI 服务") from exc
+        _log_ai_provider_event(
+            "connection_state_unknown",
+            level=logging.ERROR,
+            host=provider_host,
+            model=settings.model,
+            elapsed_ms=elapsed_ms,
+        )
+        raise AIReadTimeoutError(
+            "AI 服务连接中断，请求结果未知，请勿自动重试"
         ) from exc
     except requests.RequestException as exc:
         elapsed_ms = round((time.perf_counter() - started_at) * 1000)
@@ -238,20 +418,43 @@ def _request_chat_completion(
 
     if 300 <= response.status_code < 400:
         raise AIServiceError("AI 服务地址发生重定向，已为安全起见停止请求")
+    if response.status_code == 429:
+        retry_after = _parse_retry_after_seconds(
+            getattr(response, "headers", {}).get("Retry-After")
+            if getattr(response, "headers", None)
+            else None
+        )
+        raise AIProviderRateLimitError(
+            "AI 服务已达到限流，请稍后再试",
+            retry_after_seconds=retry_after,
+        )
     if response.status_code >= 400:
-        detail = (response.text or "").strip()[:300]
-        message = f"AI 服务返回 HTTP {response.status_code}"
-        if detail:
-            message = f"{message}: {detail}"
-        raise AIServiceError(message)
+        # Provider bodies are untrusted and can echo prompts, credentials or
+        # internal diagnostics.  Keep the public exception status-only; the
+        # structured event above already records the safe host/model/status
+        # fields needed for operations.
+        raise AIServiceError(f"AI 服务返回 HTTP {response.status_code}")
 
     try:
         payload = response.json()
         raw_content = _extract_message_content(payload)
     except (TypeError, ValueError, KeyError) as exc:
-        raise AIServiceError("AI 服务返回格式无效") from exc
+        raise AIProtocolError("AI 服务返回格式无效") from exc
 
-    return raw_content
+    headers = getattr(response, "headers", {}) or {}
+    provider_request_id = str(
+        headers.get("X-Request-ID")
+        or headers.get("x-request-id")
+        or payload.get("id")
+        or ""
+    ).strip()
+    return AICompletionResult(
+        content=raw_content,
+        model=str(payload.get("model") or settings.model).strip() or settings.model,
+        provider_request_id=provider_request_id,
+        elapsed_ms=elapsed_ms,
+        usage=_normalize_ai_usage(payload.get("usage")),
+    )
 
 
 def _chat_completions_url(base_url: str) -> str:
@@ -452,16 +655,59 @@ def _extract_message_content(payload: Mapping[str, Any]) -> str:
     raise ValueError("message.content")
 
 
-def _parse_model_output(raw_content: str, fallback_tags: Sequence[str]) -> dict[str, Any]:
+def _normalize_ai_usage(value: Any) -> dict[str, int] | None:
+    if not isinstance(value, Mapping):
+        return None
+    aliases = {
+        "input_tokens": ("input_tokens", "prompt_tokens"),
+        "output_tokens": ("output_tokens", "completion_tokens"),
+        "total_tokens": ("total_tokens",),
+        "cached_tokens": ("cached_tokens", "cache_tokens"),
+        "reasoning_tokens": ("reasoning_tokens",),
+    }
+    result: dict[str, int] = {}
+    for target, names in aliases.items():
+        raw = next((value.get(name) for name in names if value.get(name) is not None), None)
+        if raw is None or isinstance(raw, bool):
+            continue
+        try:
+            number = int(raw)
+        except (TypeError, ValueError):
+            continue
+        if number >= 0:
+            result[target] = number
+    return result or None
+
+
+def _parse_retry_after_seconds(value: Any) -> int | None:
+    try:
+        seconds = int(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+    return max(0, seconds)
+
+
+def _parse_model_output(
+    raw_content: str,
+    fallback_tags: Sequence[str],
+    *,
+    strict: bool = False,
+) -> dict[str, Any]:
     candidate = _strip_code_fence(raw_content)
     parsed = _load_json_object(candidate)
     if parsed is None:
+        if strict:
+            raise AIProtocolError("AI 服务未返回有效 JSON 对象")
         return _fallback_result(raw_content, fallback_tags)
 
     content = str(parsed.get("content") or "").strip()
+    title = str(parsed.get("title") or "").strip()
+    if strict and (not title or not content):
+        missing = "标题和正文" if not title and not content else ("标题" if not title else "正文")
+        raise AIProtocolError(f"AI 服务响应缺少{missing}")
     if not content:
         content = raw_content.strip()
-    title = str(parsed.get("title") or "").strip() or _derive_title(content)
+    title = title or _derive_title(content)
     summary = str(parsed.get("summary") or "").strip() or _derive_summary(content)
 
     return {

@@ -12,6 +12,7 @@ from services.publish_job_executor import (
     execute_publish_job,
 )
 from services.publish_job_service import (
+    ConcurrentPublishJobUpdateError,
     PUBLISH_AUTHORIZATION_MISMATCH_MESSAGE,
     get_publish_job,
     transition_publish_job,
@@ -37,7 +38,7 @@ def queue_due_publish_jobs(
         with conn:
             rows = conn.execute(
                 """
-                SELECT id, publish_at
+                SELECT id, publish_at, state_version
                 FROM publish_jobs
                 WHERE status = 'scheduled' AND publish_at IS NOT NULL
                 """
@@ -51,10 +52,11 @@ def queue_due_publish_jobs(
                     """
                     UPDATE publish_jobs
                     SET status = 'queued', message = '已到计划时间，等待执行',
-                        result_url = '', started_at = NULL, finished_at = NULL
-                    WHERE id = ? AND status = 'scheduled'
+                        result_url = '', started_at = NULL, finished_at = NULL,
+                        state_version = state_version + 1
+                    WHERE id = ? AND status = 'scheduled' AND state_version = ?
                     """,
-                    (row["id"],),
+                    (row["id"], row["state_version"]),
                 )
                 if cursor.rowcount == 1:
                     promoted_ids.append(row["id"])
@@ -74,26 +76,33 @@ def run_publish_scheduler_tick(
     """Promote due jobs and execute Demo or pre-authorized real tasks."""
 
     promoted = queue_due_publish_jobs(database_path, now=now, limit=limit)
+    automatic_jobs = _list_due_queued_automatic_jobs(
+        database_path,
+        now=now,
+        limit=limit,
+    )
+    automatic_job_ids = {job["id"] for job in automatic_jobs}
     results = []
     executed_demo_count = 0
     attempted_real_count = 0
     blocked_real_count = 0
     blocked_authorization_count = 0
-    for job in promoted:
-        if not job["demo"] and not job.get("auto_execute"):
-            results.append(job)
-            continue
+    for job in automatic_jobs:
         if not job["demo"] and (not allow_real or publisher_factory is None):
-            result = transition_publish_job(
-                database_path,
-                job["id"],
-                "need_action",
-                message=(
-                    "定时任务已到期，但真实发布总开关或发布器未就绪；"
-                    "未访问平台，请人工确认后重试"
-                ),
-            )
-            blocked_real_count += 1
+            try:
+                result = transition_publish_job(
+                    database_path,
+                    job["id"],
+                    "need_action",
+                    message=(
+                        "定时任务已到期，但真实发布总开关或发布器未就绪；"
+                        "未访问平台，请人工确认后重试"
+                    ),
+                    expected_state_version=job["state_version"],
+                )
+                blocked_real_count += 1
+            except ConcurrentPublishJobUpdateError:
+                result = get_publish_job(database_path, job["id"])
             results.append(result)
             continue
         try:
@@ -103,6 +112,7 @@ def run_publish_scheduler_tick(
                 publisher_factory=publisher_factory,
                 media_root=media_root,
                 require_authorization_match=not job["demo"],
+                expected_state_version=job["state_version"],
             )
             if job["demo"]:
                 executed_demo_count += 1
@@ -116,6 +126,11 @@ def run_publish_scheduler_tick(
             result = get_publish_job(database_path, job["id"])
         results.append(result)
 
+    # Keep newly promoted manual jobs visible in the tick result without ever
+    # auto-executing them. Automatic jobs are sourced from the durable queued
+    # state above, so a worker crash after promotion is recovered next tick.
+    results.extend(job for job in promoted if job["id"] not in automatic_job_ids)
+
     return {
         "promoted_count": len(promoted),
         "executed_demo_count": executed_demo_count,
@@ -126,10 +141,42 @@ def run_publish_scheduler_tick(
     }
 
 
+def _list_due_queued_automatic_jobs(
+    database_path: str | Path,
+    *,
+    now: datetime | None,
+    limit: int,
+) -> list[dict[str, Any]]:
+    """Return a bounded set of durable automatic jobs ready for claiming."""
+
+    if limit <= 0:
+        raise ValueError("limit 必须是正整数")
+    reference_now = now or datetime.now().astimezone()
+    if not isinstance(reference_now, datetime):
+        raise ValueError("now 必须是 datetime")
+
+    with closing(_connect(database_path)) as conn:
+        rows = conn.execute(
+            """
+            SELECT id, publish_at
+            FROM publish_jobs
+            WHERE status = 'queued'
+              AND publish_at IS NOT NULL
+              AND (demo = 1 OR auto_execute = 1)
+            """
+        ).fetchall()
+    due_rows = sorted(
+        (row for row in rows if _is_due(row["publish_at"], reference_now)),
+        key=lambda row: (_to_comparable(row["publish_at"], reference_now), row["id"]),
+    )[:limit]
+    return [get_publish_job(database_path, row["id"]) for row in due_rows]
+
+
 def _connect(database_path: str | Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(Path(database_path))
+    conn = sqlite3.connect(Path(database_path), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 30000")
     return conn
 
 

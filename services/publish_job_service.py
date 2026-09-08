@@ -45,6 +45,10 @@ class InvalidPublishJobTransitionError(RuntimeError):
     """Raised when a job status change would break the workflow."""
 
 
+class ConcurrentPublishJobUpdateError(InvalidPublishJobTransitionError):
+    """Raised when a writer is using an obsolete publish-job snapshot."""
+
+
 def create_publish_job(
     database_path: str | Path,
     *,
@@ -73,6 +77,8 @@ def create_publish_job(
             article_row = _fetch_authorization_article(conn, article_id)
             if article_row is None:
                 raise ArticleNotFoundError("文章不存在")
+            if article_row["status"] != "ready":
+                raise ValueError("文章必须先标记为待发布，才能创建发布任务")
             resolved_account_id = _resolve_publish_account_id(
                 conn,
                 normalized_platform,
@@ -181,6 +187,7 @@ def claim_publish_job(
     job_id: int,
     *,
     message: str = "正在准备发布",
+    expected_state_version: int | None = None,
 ) -> dict[str, Any]:
     """Atomically move one queued job to processing for a single worker."""
 
@@ -189,6 +196,18 @@ def claim_publish_job(
             current_row = _fetch_job(conn, job_id)
             if current_row is None:
                 raise PublishJobNotFoundError("发布任务不存在")
+            expected_version = _normalize_expected_state_version(
+                expected_state_version
+            )
+            if (
+                expected_version is not None
+                and expected_version != _state_version(current_row)
+            ):
+                raise ConcurrentPublishJobUpdateError(
+                    "领取发布任务被拒绝：发布任务状态已并发变化"
+                    f"（期望版本 {expected_version}，当前为 "
+                    f"{current_row['status']} 版本 {_state_version(current_row)}）"
+                )
             if current_row["status"] != "queued":
                 raise InvalidPublishJobTransitionError(
                     f"状态为 {current_row['status']} 的发布任务不能开始执行"
@@ -198,10 +217,15 @@ def claim_publish_job(
                 UPDATE publish_jobs
                 SET status = 'processing', message = ?, result_url = '',
                     started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
-                    finished_at = NULL
-                WHERE id = ? AND status = 'queued'
+                    finished_at = NULL,
+                    state_version = state_version + 1
+                WHERE id = ? AND status = 'queued' AND state_version = ?
                 """,
-                (_normalize_text(message), job_id),
+                (
+                    _normalize_text(message),
+                    job_id,
+                    _state_version(current_row),
+                ),
             )
             if cursor.rowcount != 1:
                 raise InvalidPublishJobTransitionError("发布任务已被其他执行器领取")
@@ -269,6 +293,7 @@ def update_publish_job_progress(
     *,
     message: str,
     result_url: str = "",
+    expected_state_version: int | None = None,
 ) -> dict[str, Any]:
     """Persist a non-terminal result while a publisher awaits confirmation."""
 
@@ -277,22 +302,41 @@ def update_publish_job_progress(
             current_row = _fetch_job(conn, job_id)
             if current_row is None:
                 raise PublishJobNotFoundError("发布任务不存在")
+            stale_row = _resolve_expected_state(
+                current_row,
+                expected_state_version,
+                operation="更新发布进度",
+            )
+            if stale_row is not None:
+                return _serialize_job(stale_row)
             if current_row["status"] != "processing":
                 raise InvalidPublishJobTransitionError(
                     f"状态为 {current_row['status']} 的发布任务不能更新进度"
                 )
-            conn.execute(
+            current_version = _state_version(current_row)
+            cursor = conn.execute(
                 """
                 UPDATE publish_jobs
-                SET message = ?, result_url = ?
-                WHERE id = ?
+                SET message = ?, result_url = ?,
+                    state_version = state_version + 1
+                WHERE id = ? AND status = 'processing' AND state_version = ?
                 """,
                 (
                     _normalize_text(message),
                     _normalize_text(result_url),
                     job_id,
+                    current_version,
                 ),
             )
+            if cursor.rowcount != 1:
+                latest_row = _resolve_cas_conflict(
+                    conn,
+                    job_id,
+                    expected_status="processing",
+                    expected_state_version=current_version,
+                    operation="更新发布进度",
+                )
+                return _serialize_job(latest_row)
             updated_row = _fetch_job(conn, job_id)
     return _serialize_job(updated_row)
 
@@ -304,6 +348,7 @@ def transition_publish_job(
     *,
     message: str = "",
     result_url: str = "",
+    expected_state_version: int | None = None,
 ) -> dict[str, Any]:
     _validate_status(new_status)
     with closing(_connect(database_path)) as conn:
@@ -312,6 +357,13 @@ def transition_publish_job(
             if current_row is None:
                 raise PublishJobNotFoundError("发布任务不存在")
             current_status = current_row["status"]
+            stale_row = _resolve_expected_state(
+                current_row,
+                expected_state_version,
+                operation=f"将发布任务变更为 {new_status}",
+            )
+            if stale_row is not None:
+                return _serialize_job(stale_row)
             if new_status == current_status:
                 _sync_article_status(conn, current_row["article_id"])
                 return _serialize_job(current_row)
@@ -320,46 +372,69 @@ def transition_publish_job(
                     f"发布任务不能从 {current_status} 变更为 {new_status}"
                 )
 
+            current_version = _state_version(current_row)
             if new_status == "processing":
-                conn.execute(
+                cursor = conn.execute(
                     """
                     UPDATE publish_jobs
                     SET status = ?, message = ?, result_url = '',
                         started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
-                        finished_at = NULL
-                    WHERE id = ?
+                        finished_at = NULL,
+                        state_version = state_version + 1
+                    WHERE id = ? AND status = ? AND state_version = ?
                     """,
-                    (new_status, _normalize_text(message), job_id),
+                    (
+                        new_status,
+                        _normalize_text(message),
+                        job_id,
+                        current_status,
+                        current_version,
+                    ),
                 )
             elif new_status in {"success", "failed"}:
-                conn.execute(
+                cursor = conn.execute(
                     """
                     UPDATE publish_jobs
                     SET status = ?, message = ?, result_url = ?,
-                        finished_at = CURRENT_TIMESTAMP
-                    WHERE id = ?
+                        finished_at = CURRENT_TIMESTAMP,
+                        state_version = state_version + 1
+                    WHERE id = ? AND status = ? AND state_version = ?
                     """,
                     (
                         new_status,
                         _normalize_text(message),
                         _normalize_text(result_url),
                         job_id,
+                        current_status,
+                        current_version,
                     ),
                 )
             else:
-                conn.execute(
+                cursor = conn.execute(
                     """
                     UPDATE publish_jobs
-                    SET status = ?, message = ?, result_url = ?
-                    WHERE id = ?
+                    SET status = ?, message = ?, result_url = ?,
+                        state_version = state_version + 1
+                    WHERE id = ? AND status = ? AND state_version = ?
                     """,
                     (
                         new_status,
                         _normalize_text(message),
                         _normalize_text(result_url),
                         job_id,
+                        current_status,
+                        current_version,
                     ),
                 )
+            if cursor.rowcount != 1:
+                latest_row = _resolve_cas_conflict(
+                    conn,
+                    job_id,
+                    expected_status=current_status,
+                    expected_state_version=current_version,
+                    operation=f"将发布任务变更为 {new_status}",
+                )
+                return _serialize_job(latest_row)
             _sync_article_status(conn, current_row["article_id"])
             updated_row = _fetch_job(conn, job_id)
     return _serialize_job(updated_row)
@@ -368,26 +443,47 @@ def transition_publish_job(
 def retry_publish_job(
     database_path: str | Path,
     job_id: int,
+    *,
+    expected_state_version: int | None = None,
 ) -> dict[str, Any]:
     with closing(_connect(database_path)) as conn:
         with conn:
             current_row = _fetch_job(conn, job_id)
             if current_row is None:
                 raise PublishJobNotFoundError("发布任务不存在")
+            stale_row = _resolve_expected_state(
+                current_row,
+                expected_state_version,
+                operation="重试发布任务",
+            )
+            if stale_row is not None:
+                return _serialize_job(stale_row)
             if current_row["status"] not in _RETRYABLE_STATUSES:
                 raise InvalidPublishJobTransitionError(
                     f"状态为 {current_row['status']} 的发布任务不能重试"
                 )
-            conn.execute(
+            current_status = current_row["status"]
+            current_version = _state_version(current_row)
+            cursor = conn.execute(
                 """
                 UPDATE publish_jobs
                 SET status = 'queued', message = '', result_url = '',
                     authorization_fingerprint = '', auto_execute = 0,
-                    started_at = NULL, finished_at = NULL
-                WHERE id = ?
+                    started_at = NULL, finished_at = NULL,
+                    state_version = state_version + 1
+                WHERE id = ? AND status = ? AND state_version = ?
                 """,
-                (job_id,),
+                (job_id, current_status, current_version),
             )
+            if cursor.rowcount != 1:
+                latest_row = _resolve_cas_conflict(
+                    conn,
+                    job_id,
+                    expected_status=current_status,
+                    expected_state_version=current_version,
+                    operation="重试发布任务",
+                )
+                return _serialize_job(latest_row)
             _sync_article_status(conn, current_row["article_id"])
             updated_row = _fetch_job(conn, job_id)
     return _serialize_job(updated_row)
@@ -399,6 +495,7 @@ def reconcile_publish_job_success(
     *,
     result_url: str,
     message: str = "平台侧已核验发布成功",
+    expected_state_version: int | None = None,
 ) -> dict[str, Any]:
     """Correct an ambiguous/failed local result using explicit platform proof."""
 
@@ -410,21 +507,46 @@ def reconcile_publish_job_success(
             current_row = _fetch_job(conn, job_id)
             if current_row is None:
                 raise PublishJobNotFoundError("发布任务不存在")
+            stale_row = _resolve_expected_state(
+                current_row,
+                expected_state_version,
+                operation="通过公开链接对账发布成功",
+            )
+            if stale_row is not None:
+                return _serialize_job(stale_row)
             if current_row["status"] == "success":
                 return _serialize_job(current_row)
             if current_row["status"] not in {"processing", "failed", "need_action"}:
                 raise InvalidPublishJobTransitionError(
                     f"状态为 {current_row['status']} 的发布任务不能通过平台证据对账"
                 )
-            conn.execute(
+            current_status = current_row["status"]
+            current_version = _state_version(current_row)
+            cursor = conn.execute(
                 """
                 UPDATE publish_jobs
                 SET status = 'success', message = ?, result_url = ?,
-                    finished_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                    finished_at = CURRENT_TIMESTAMP,
+                    state_version = state_version + 1
+                WHERE id = ? AND status = ? AND state_version = ?
                 """,
-                (_normalize_text(message), normalized_url, job_id),
+                (
+                    _normalize_text(message),
+                    normalized_url,
+                    job_id,
+                    current_status,
+                    current_version,
+                ),
             )
+            if cursor.rowcount != 1:
+                latest_row = _resolve_cas_conflict(
+                    conn,
+                    job_id,
+                    expected_status=current_status,
+                    expected_state_version=current_version,
+                    operation="通过公开链接对账发布成功",
+                )
+                return _serialize_job(latest_row)
             _sync_article_status(conn, current_row["article_id"])
             updated_row = _fetch_job(conn, job_id)
     return _serialize_job(updated_row)
@@ -436,6 +558,7 @@ def reconcile_publish_job_platform_success(
     *,
     message: str,
     result_url: str = "",
+    expected_state_version: int | None = None,
 ) -> dict[str, Any]:
     """Close an ambiguous job using platform-side proof when no public URL exists."""
 
@@ -451,21 +574,46 @@ def reconcile_publish_job_platform_success(
             current_row = _fetch_job(conn, job_id)
             if current_row is None:
                 raise PublishJobNotFoundError("发布任务不存在")
+            stale_row = _resolve_expected_state(
+                current_row,
+                expected_state_version,
+                operation="通过平台后台对账发布成功",
+            )
+            if stale_row is not None:
+                return _serialize_job(stale_row)
             if current_row["status"] == "success":
                 return _serialize_job(current_row)
             if current_row["status"] not in {"processing", "failed", "need_action"}:
                 raise InvalidPublishJobTransitionError(
                     f"状态为 {current_row['status']} 的发布任务不能通过平台后台证据对账"
                 )
-            conn.execute(
+            current_status = current_row["status"]
+            current_version = _state_version(current_row)
+            cursor = conn.execute(
                 """
                 UPDATE publish_jobs
                 SET status = 'success', message = ?, result_url = ?,
-                    finished_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                    finished_at = CURRENT_TIMESTAMP,
+                    state_version = state_version + 1
+                WHERE id = ? AND status = ? AND state_version = ?
                 """,
-                (normalized_message, normalized_url, job_id),
+                (
+                    normalized_message,
+                    normalized_url,
+                    job_id,
+                    current_status,
+                    current_version,
+                ),
             )
+            if cursor.rowcount != 1:
+                latest_row = _resolve_cas_conflict(
+                    conn,
+                    job_id,
+                    expected_status=current_status,
+                    expected_state_version=current_version,
+                    operation="通过平台后台对账发布成功",
+                )
+                return _serialize_job(latest_row)
             _sync_article_status(conn, current_row["article_id"])
             updated_row = _fetch_job(conn, job_id)
     return _serialize_job(updated_row)
@@ -476,6 +624,7 @@ def reconcile_publish_job_failure(
     job_id: int,
     *,
     message: str,
+    expected_state_version: int | None = None,
 ) -> dict[str, Any]:
     """Close an ambiguous job when read-only platform evidence proves no submit."""
 
@@ -487,36 +636,113 @@ def reconcile_publish_job_failure(
             current_row = _fetch_job(conn, job_id)
             if current_row is None:
                 raise PublishJobNotFoundError("发布任务不存在")
+            stale_row = _resolve_expected_state(
+                current_row,
+                expected_state_version,
+                operation="通过平台证据结案为失败",
+            )
+            if stale_row is not None:
+                return _serialize_job(stale_row)
             if current_row["status"] == "failed":
                 return _serialize_job(current_row)
             if current_row["status"] not in {"processing", "need_action"}:
                 raise InvalidPublishJobTransitionError(
                     f"状态为 {current_row['status']} 的发布任务不能通过平台证据结案"
                 )
-            conn.execute(
+            current_status = current_row["status"]
+            current_version = _state_version(current_row)
+            cursor = conn.execute(
                 """
                 UPDATE publish_jobs
                 SET status = 'failed', message = ?, result_url = '',
-                    finished_at = CURRENT_TIMESTAMP
-                WHERE id = ?
+                    finished_at = CURRENT_TIMESTAMP,
+                    state_version = state_version + 1
+                WHERE id = ? AND status = ? AND state_version = ?
                 """,
-                (normalized_message, job_id),
+                (normalized_message, job_id, current_status, current_version),
             )
+            if cursor.rowcount != 1:
+                latest_row = _resolve_cas_conflict(
+                    conn,
+                    job_id,
+                    expected_status=current_status,
+                    expected_state_version=current_version,
+                    operation="通过平台证据结案为失败",
+                )
+                return _serialize_job(latest_row)
             _sync_article_status(conn, current_row["article_id"])
             updated_row = _fetch_job(conn, job_id)
     return _serialize_job(updated_row)
 
 
+def _state_version(row: sqlite3.Row) -> int:
+    return int(row["state_version"])
+
+
+def _normalize_expected_state_version(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("expected_state_version 必须是非负整数")
+    return value
+
+
+def _resolve_expected_state(
+    current_row: sqlite3.Row,
+    expected_state_version: int | None,
+    *,
+    operation: str,
+) -> sqlite3.Row | None:
+    """Reject an obsolete actor before it can mutate a later publish attempt.
+
+    A confirmed success is the only irreversible terminal state. Returning it
+    is safe for stale callers and prevents their error handling from trying to
+    turn the job back into a retryable state.
+    """
+
+    expected = _normalize_expected_state_version(expected_state_version)
+    if expected is None or expected == _state_version(current_row):
+        return None
+    if current_row["status"] == "success":
+        return current_row
+    raise ConcurrentPublishJobUpdateError(
+        f"{operation}被拒绝：发布任务状态已并发变化"
+        f"（期望版本 {expected}，当前为 {current_row['status']} "
+        f"版本 {_state_version(current_row)}）"
+    )
+
+
+def _resolve_cas_conflict(
+    conn: sqlite3.Connection,
+    job_id: int,
+    *,
+    expected_status: str,
+    expected_state_version: int,
+    operation: str,
+) -> sqlite3.Row:
+    latest_row = _fetch_job(conn, job_id)
+    if latest_row is None:
+        raise PublishJobNotFoundError("发布任务不存在")
+    if latest_row["status"] == "success":
+        return latest_row
+    raise ConcurrentPublishJobUpdateError(
+        f"{operation}被拒绝：发布任务状态已并发变化"
+        f"（期望 {expected_status} 版本 {expected_state_version}，"
+        f"当前为 {latest_row['status']} 版本 {_state_version(latest_row)}）"
+    )
+
+
 def _connect(database_path: str | Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(Path(database_path))
+    conn = sqlite3.connect(Path(database_path), timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA busy_timeout = 30000")
     return conn
 
 
 def _fetch_authorization_article(conn: sqlite3.Connection, article_id: int):
     return conn.execute(
-        "SELECT id, title, content, tags FROM articles WHERE id = ?",
+        "SELECT id, title, content, tags, status FROM articles WHERE id = ?",
         (article_id,),
     ).fetchone()
 

@@ -4,12 +4,37 @@ from unittest.mock import patch
 from pathlib import Path
 
 from sau_backend import get_server_bind
+from services.platform_capability_service import normalize_platform_key
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _compose_service_block(document: str, service_name: str) -> str:
+    """Return one two-space-indented service without requiring PyYAML."""
+
+    marker = f"  {service_name}:"
+    lines = document.splitlines()
+    start = lines.index(marker)
+    end = len(lines)
+    for index in range(start + 1, len(lines)):
+        line = lines[index]
+        if (
+            line.startswith("  ")
+            and not line.startswith("    ")
+            and line.strip()
+            and not line.lstrip().startswith("#")
+        ):
+            end = index
+            break
+    return "\n".join(lines[start:end])
+
+
 class DeliverySafetyTests(unittest.TestCase):
+    def test_user_facing_sohu_label_normalizes_to_stable_platform_key(self):
+        self.assertEqual("sohu", normalize_platform_key("搜狐"))
+        self.assertEqual("sohu", normalize_platform_key("搜狐号"))
+
     def test_primary_install_docs_clone_the_geo_repository(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         install = (ROOT / "docs" / "install.md").read_text(encoding="utf-8")
@@ -84,7 +109,17 @@ class DeliverySafetyTests(unittest.TestCase):
         }
 
         self.assertTrue(
-            {"cookiesFile", ".tmp", "/.env", "db/database.db"}.issubset(
+            {
+                "cookiesFile",
+                ".tmp",
+                "/.env",
+                "/.env.*",
+                "!/.env.example",
+                "/.vercel",
+                "deploy/production/app.env",
+                "deploy/production/content-engine.env",
+                "db/database.db",
+            }.issubset(
                 patterns
             )
         )
@@ -129,11 +164,53 @@ class DeliverySafetyTests(unittest.TestCase):
 
         self.assertIn('"127.0.0.1:5409:5409"', compose)
         self.assertIn('ALLOW_REAL_PUBLISHING: "false"', compose)
+        self.assertIn('ENABLE_BILIBILI_RUNTIME: "false"', compose)
         self.assertIn('DATABASE_PATH: "/app/data/database.db"', compose)
         self.assertIn('SERVER_HOST: "0.0.0.0"', compose)
         self.assertIn("geo_cookies:/app/cookiesFile", compose)
         self.assertIn("HEALTHCHECK", dockerfile)
         self.assertIn("/api/health", dockerfile)
+        self.assertIn("ARG NODE_IMAGE=node:22.21.1", dockerfile)
+        self.assertIn("ARG PYTHON_IMAGE=python:3.10.19", dockerfile)
+        self.assertIn("PATCHRIGHT_CHROMIUM_REVISION=1208", dockerfile)
+        self.assertIn(
+            "ARG PATCHRIGHT_CHROMIUM_SHA256="
+            "b5e3195041af345a668d110f5daf5581961fa3608626ea588c97dd0fe81c4e38",
+            dockerfile,
+        )
+        chromium_checksum_check = (
+            'echo "${PATCHRIGHT_CHROMIUM_SHA256}  '
+            '/tmp/patchright-chromium.zip" | sha256sum -c -'
+        )
+        self.assertIn(chromium_checksum_check, dockerfile)
+        self.assertLess(
+            dockerfile.index(chromium_checksum_check),
+            dockerfile.index("unzip -q /tmp/patchright-chromium.zip"),
+        )
+        self.assertIn("https://mirrors.aliyun.com/debian", dockerfile)
+        self.assertIn("Acquire::Retries=3", dockerfile)
+        self.assertIn("fonts-noto-cjk", dockerfile)
+        self.assertIn("fc-match 'Noto Sans CJK SC'", dockerfile)
+        self.assertNotIn("RUN patchright install chromium", dockerfile)
+        self.assertIn("groupadd --gid 1000 geo", dockerfile)
+        self.assertIn("useradd --uid 1000 --gid 1000", dockerfile)
+        self.assertIn("/app/data", dockerfile)
+        self.assertIn("/app/cookiesFile", dockerfile)
+        self.assertIn("/app/logs", dockerfile)
+        user_directives = [
+            line.strip()
+            for line in dockerfile.splitlines()
+            if line.strip().startswith("USER ")
+        ]
+        self.assertEqual("USER geo", user_directives[-1])
+        self.assertLess(
+            dockerfile.rfind("USER geo"),
+            dockerfile.rfind('CMD ["python", "-m", "sau_web"]'),
+        )
+        self.assertLess(
+            dockerfile.rfind("USER geo"),
+            dockerfile.rfind("from patchright.sync_api import sync_playwright"),
+        )
         self.assertIn(
             "COPY --from=builder /app/dist/geo-favicon.svg /app/geo-favicon.svg",
             dockerfile,
@@ -148,13 +225,95 @@ class DeliverySafetyTests(unittest.TestCase):
         gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
 
         self.assertIn("name: geo-platform", compose)
+        self.assertIn("source: ${GEO_RUNTIME_ROOT:-../runtime}/data", compose)
+        self.assertIn("target: /app/data", compose)
+        self.assertEqual(compose.count("create_host_path: false"), 3)
+        self.assertIn('user: "${GEO_CONTAINER_USER:-0:0}"', compose)
         self.assertIn("${GEO_BIND_ADDRESS:-127.0.0.1}", compose)
+        self.assertIn("GEO_NODE_IMAGE", compose)
+        self.assertIn("GEO_PYTHON_IMAGE", compose)
+        self.assertIn("GEO_PATCHRIGHT_CHROMIUM_SHA256", compose)
+        self.assertIn("@sha256:", compose)
         self.assertIn("RUN_PUBLISH_SCHEDULER: \"false\"", compose)
         self.assertIn('command: ["sau-worker"]', compose)
+        self.assertIn('test: ["CMD", "sau-worker", "--check"]', compose)
         self.assertIn("ALLOW_REAL_PUBLISHING=false", env_example)
+        self.assertIn("ENABLE_BILIBILI_RUNTIME=false", env_example)
         self.assertNotIn("AI_API_KEY=sk-", env_example)
         self.assertIn("deploy/production/app.env", dockerignore)
         self.assertIn("deploy/production/app.env", gitignore)
+
+    def test_optional_content_engine_is_private_profile_gated_and_reversible(self):
+        compose = (ROOT / "compose.production.yaml").read_text(encoding="utf-8")
+        web = _compose_service_block(compose, "web")
+        worker = _compose_service_block(compose, "worker")
+        engine = _compose_service_block(compose, "content-engine")
+        root_env = (ROOT / ".env.example").read_text(encoding="utf-8")
+        app_env = (
+            ROOT / "deploy" / "production" / "app.env.example"
+        ).read_text(encoding="utf-8")
+        engine_env = (
+            ROOT / "deploy" / "production" / "content-engine.env.example"
+        ).read_text(encoding="utf-8")
+        runbook = (
+            ROOT / "docs" / "content-engine-production-runbook.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn('profiles: ["colleague"]', engine)
+        self.assertIn("COLLEAGUE_CONTENT_ENGINE_IMAGE", engine)
+        self.assertIn("geo-colleague-content-engine:not-configured", engine)
+        self.assertIn("COLLEAGUE_CONTENT_ENGINE_ENV_FILE", engine)
+        self.assertIn('expose:\n      - "8080"', engine)
+        self.assertIn("read_only: true", engine)
+        self.assertIn("no-new-privileges:true", engine)
+        self.assertNotIn("ports:", engine)
+        self.assertNotIn("volumes:", engine)
+        self.assertNotIn("app.env", engine)
+        self.assertNotIn("depends_on:", web)
+
+        for secret_name in (
+            "AI_API_KEY",
+            "APP_ACCESS_PASSWORD",
+            "APP_SESSION_SECRET",
+            "UPSTASH_REDIS_REST_TOKEN",
+            "COLLEAGUE_CONTENT_ENGINE_TOKEN",
+        ):
+            self.assertIn(f'{secret_name}: ""', worker)
+            self.assertNotIn(f"{secret_name}=", engine_env)
+
+        for env_document in (root_env, app_env):
+            self.assertIn("CONTENT_ENGINE=qwen", env_document)
+            self.assertIn("CONTENT_ENGINE_FALLBACK=", env_document)
+            self.assertNotIn("CONTENT_ENGINE_FALLBACK=qwen", env_document)
+            self.assertIn(
+                "COLLEAGUE_CONTENT_ENGINE_URL=http://content-engine:8080",
+                env_document,
+            )
+            self.assertIn(
+                "COLLEAGUE_CONTENT_ENGINE_ALLOWED_HOSTS=content-engine",
+                env_document,
+            )
+            self.assertIn("COLLEAGUE_CONNECT_TIMEOUT_SECONDS=3", env_document)
+            self.assertIn("COLLEAGUE_READ_TIMEOUT_SECONDS=120", env_document)
+            self.assertIn("COLLEAGUE_MAX_RESPONSE_BYTES=2097152", env_document)
+
+        self.assertIn("CONTENT_ENGINE=qwen", runbook)
+        self.assertIn("config --quiet", runbook)
+        self.assertIn("--no-deps web", runbook)
+        self.assertIn("ALLOW_REAL_PUBLISHING=false", runbook)
+        self.assertIn("ENABLE_BILIBILI_RUNTIME=false", runbook)
+        self.assertIn("releases/latest", runbook)
+        self.assertIn("COLLEAGUE_CONTENT_ENGINE_ALLOWED_HOSTS", runbook)
+
+    def test_production_runbook_uses_actual_server_root_and_image_first_rollback(self):
+        deployment = (
+            ROOT / "docs" / "production-server-deployment.md"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("/srv/geo-platform/", deployment)
+        self.assertNotIn("/opt/geo-platform", deployment)
+        self.assertIn("rollback-<timestamp>", deployment)
+        self.assertIn("保留当前数据库", deployment)
 
     def test_source_server_defaults_to_loopback(self):
         with patch.dict("os.environ", {}, clear=True):

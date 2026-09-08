@@ -43,6 +43,9 @@ request.interceptors.response.use(
     }
   },
   (error) => {
+    if (axios.isCancel(error) || error.code === 'ERR_CANCELED') {
+      return Promise.reject(error)
+    }
     if (error.config?.suppressGlobalError) {
       return Promise.reject(error)
     }
@@ -89,8 +92,8 @@ request.interceptors.response.use(
 
 // 封装常用的请求方法
 export const http = {
-  get(url, params) {
-    return request.get(url, { params })
+  get(url, params, config = {}) {
+    return request.get(url, { ...config, params })
   },
   
   post(url, data, config = {}) {

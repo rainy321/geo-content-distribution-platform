@@ -200,25 +200,27 @@ class ZhihuPublisherAdapterTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertIn("幂等检查失败", result.message)
 
-    def test_manual_intervention_errors_are_classified(self):
+    def test_publish_phase_manual_intervention_is_ambiguous_until_reconciled(self):
         def raise_expired_cookie(*_args):
             raise RuntimeError("cookie 已失效，请重新登录")
 
         result = self._adapter(publish_runner=raise_expired_cookie).publish(self.content)
 
-        self.assertEqual(result.status, "need_action")
+        self.assertEqual(result.status, "processing")
         self.assertIn("cookie 已失效", result.message)
+        self.assertIn("不会自动重试", result.message)
 
-    def test_ordinary_errors_are_failed(self):
+    def test_publish_phase_ordinary_errors_are_ambiguous_until_reconciled(self):
         def raise_network_error(*_args):
             raise RuntimeError("连接被重置")
 
         result = self._adapter(publish_runner=raise_network_error).publish(self.content)
 
-        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.status, "processing")
         self.assertIn("连接被重置", result.message)
+        self.assertIn("不会自动重试", result.message)
 
-    def test_timeout_is_failed_without_leaking_exception(self):
+    def test_timeout_is_processing_without_leaking_exception(self):
         async def slow_publish(*_args):
             await asyncio.sleep(0.1)
 
@@ -227,8 +229,9 @@ class ZhihuPublisherAdapterTests(unittest.TestCase):
             timeout_seconds=0.01,
         ).publish(self.content)
 
-        self.assertEqual(result.status, "failed")
+        self.assertEqual(result.status, "processing")
         self.assertIn("超时", result.message)
+        self.assertIn("不会自动重试", result.message)
 
     def test_schedule_does_not_check_login_or_publish(self):
         calls = []
@@ -377,13 +380,14 @@ class ToutiaoPublisherAdapterTests(unittest.TestCase):
         self.assertEqual(result.status, "processing")
         self.assertIn("不会自动重试", result.message)
 
-    def test_manual_intervention_errors_are_classified(self):
+    def test_publish_phase_manual_intervention_is_ambiguous_until_reconciled(self):
         def blocked(*_args):
             raise RuntimeError("出现验证码，需要人工确认")
 
         result = self._adapter(publish_runner=blocked).publish(self.content)
 
-        self.assertEqual(result.status, "need_action")
+        self.assertEqual(result.status, "processing")
+        self.assertIn("不会自动重试", result.message)
 
     def test_schedule_does_not_contact_platform(self):
         calls = []
@@ -488,13 +492,14 @@ class SohuPublisherAdapterTests(unittest.TestCase):
         self.assertEqual(result.status, "processing")
         self.assertIn("不会自动重试", result.message)
 
-    def test_manual_intervention_errors_are_classified(self):
+    def test_publish_phase_manual_intervention_is_ambiguous_until_reconciled(self):
         def blocked(*_args):
             raise RuntimeError("检测到滑块验证，请人工完成")
 
         result = self._adapter(publish_runner=blocked).publish(self.content)
 
-        self.assertEqual(result.status, "need_action")
+        self.assertEqual(result.status, "processing")
+        self.assertIn("不会自动重试", result.message)
 
     @patch("uploader.sohu_uploader.main.SoHuArticle")
     def test_default_runner_declares_ai_content_and_observes_click(self, article_class):

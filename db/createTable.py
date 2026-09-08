@@ -11,7 +11,13 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
     db_path = Path(db_file).expanduser().resolve()
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
-    with closing(sqlite3.connect(db_path)) as conn:
+    with closing(sqlite3.connect(db_path, timeout=30)) as conn:
+        conn.execute("PRAGMA foreign_keys = ON")
+        conn.execute("PRAGMA busy_timeout = 30000")
+        # Both web and worker initialize the same SQLite file during container
+        # startup.  Serialize schema checks/migrations so two processes cannot
+        # race between PRAGMA table_info and ALTER/CREATE statements.
+        conn.execute("BEGIN IMMEDIATE")
         with conn:
             cursor = conn.cursor()
             cursor.execute(
@@ -108,6 +114,77 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
             )
             cursor.execute(
                 '''
+                CREATE TABLE IF NOT EXISTS content_generation_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    request_id TEXT NOT NULL UNIQUE,
+                    idempotency_key TEXT,
+                    request_fingerprint TEXT NOT NULL,
+                    project_id INTEGER,
+                    project_snapshot TEXT NOT NULL,
+                    brief_snapshot TEXT NOT NULL,
+                    configured_engine TEXT NOT NULL,
+                    actual_engine TEXT NOT NULL DEFAULT '',
+                    engine_version TEXT NOT NULL DEFAULT '',
+                    status TEXT NOT NULL DEFAULT 'started'
+                        CHECK (status IN ('started', 'succeeded', 'failed', 'unknown')),
+                    trace_id TEXT NOT NULL DEFAULT '',
+                    elapsed_ms INTEGER,
+                    usage TEXT,
+                    usage_status TEXT NOT NULL DEFAULT 'unknown'
+                        CHECK (usage_status IN ('reported', 'unknown')),
+                    provider_geo_score REAL,
+                    fallback_used INTEGER NOT NULL DEFAULT 0
+                        CHECK (fallback_used IN (0, 1)),
+                    fallback_from TEXT NOT NULL DEFAULT '',
+                    warnings TEXT NOT NULL DEFAULT '[]',
+                    local_score INTEGER,
+                    local_analysis TEXT,
+                    result_payload TEXT,
+                    result_digest TEXT NOT NULL DEFAULT '',
+                    error_code TEXT NOT NULL DEFAULT '',
+                    error_message TEXT NOT NULL DEFAULT '',
+                    retry_after_seconds INTEGER,
+                    article_id INTEGER,
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
+                    FOREIGN KEY (article_id) REFERENCES articles(id) ON DELETE SET NULL
+                )
+                '''
+            )
+            generation_run_columns = {
+                row[1]
+                for row in cursor.execute(
+                    "PRAGMA table_info(content_generation_runs)"
+                )
+            }
+            if "retry_after_seconds" not in generation_run_columns:
+                cursor.execute(
+                    "ALTER TABLE content_generation_runs "
+                    "ADD COLUMN retry_after_seconds INTEGER"
+                )
+            cursor.execute(
+                '''
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_generation_runs_idempotency_key
+                ON content_generation_runs(idempotency_key)
+                WHERE idempotency_key IS NOT NULL
+                '''
+            )
+            cursor.execute(
+                '''
+                CREATE INDEX IF NOT EXISTS idx_generation_runs_project_id
+                ON content_generation_runs(project_id)
+                '''
+            )
+            cursor.execute(
+                '''
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_generation_runs_article_id
+                ON content_generation_runs(article_id)
+                WHERE article_id IS NOT NULL
+                '''
+            )
+            cursor.execute(
+                '''
                 CREATE TABLE IF NOT EXISTS content_templates (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     name TEXT NOT NULL UNIQUE,
@@ -180,6 +257,8 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                         CHECK (auto_execute IN (0, 1)),
                     demo INTEGER NOT NULL DEFAULT 0
                         CHECK (demo IN (0, 1)),
+                    state_version INTEGER NOT NULL DEFAULT 0
+                        CHECK (state_version >= 0),
                     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     started_at DATETIME,
                     finished_at DATETIME,
@@ -206,6 +285,12 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                     "ALTER TABLE publish_jobs "
                     "ADD COLUMN auto_execute INTEGER NOT NULL DEFAULT 0 "
                     "CHECK (auto_execute IN (0, 1))"
+                )
+            if "state_version" not in publish_job_columns:
+                cursor.execute(
+                    "ALTER TABLE publish_jobs "
+                    "ADD COLUMN state_version INTEGER NOT NULL DEFAULT 0 "
+                    "CHECK (state_version >= 0)"
                 )
             if "authorization_fingerprint" not in publish_job_columns:
                 cursor.execute(

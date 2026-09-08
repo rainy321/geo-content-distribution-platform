@@ -4,9 +4,17 @@ import unittest
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from db.createTable import initialize_database
-from services.publish_job_service import create_publish_job, get_publish_job
+from services.publish_job_executor import execute_publish_job
+from services.publish_job_service import (
+    claim_publish_job,
+    create_publish_job,
+    get_publish_job,
+    retry_publish_job,
+    transition_publish_job,
+)
 from services.publisher_adapter import PublishContent, PublisherAdapter, PublishResult
 from services.publish_scheduler_service import (
     queue_due_publish_jobs,
@@ -131,6 +139,65 @@ class PublishSchedulerServiceTests(unittest.TestCase):
         self.assertEqual(result["executed_demo_count"], 1)
         self.assertEqual(get_publish_job(self.db_path, demo["id"])["status"], "success")
         self.assertEqual(get_publish_job(self.db_path, real["id"])["status"], "queued")
+
+    def test_tick_recovers_automatic_job_queued_before_worker_crash(self):
+        now = datetime(2026, 9, 2, 10, 0)
+        demo = self._scheduled_job(now - timedelta(seconds=1), demo=True)
+
+        # Simulate a worker committing scheduled -> queued and exiting before
+        # it can claim or execute the publisher.
+        promoted = queue_due_publish_jobs(self.db_path, now=now)
+        self.assertEqual([job["id"] for job in promoted], [demo["id"]])
+
+        result = run_publish_scheduler_tick(self.db_path, now=now)
+
+        self.assertEqual(result["promoted_count"], 0)
+        self.assertEqual(result["executed_demo_count"], 1)
+        self.assertEqual(get_publish_job(self.db_path, demo["id"])["status"], "success")
+
+    def test_stale_scheduler_cannot_claim_a_later_manual_retry_attempt(self):
+        now = datetime(2026, 9, 2, 10, 0)
+        real = self._scheduled_job(
+            now - timedelta(seconds=1),
+            auto_execute=True,
+        )
+        publisher_calls = []
+
+        def interleave_retry(database_path, job_id, **kwargs):
+            claimed = claim_publish_job(database_path, job_id)
+            failed = transition_publish_job(
+                database_path,
+                job_id,
+                "failed",
+                message="前一执行器确认未提交",
+                expected_state_version=claimed["state_version"],
+            )
+            retried = retry_publish_job(
+                database_path,
+                job_id,
+                expected_state_version=failed["state_version"],
+            )
+            self.assertFalse(retried["auto_execute"])
+            return execute_publish_job(database_path, job_id, **kwargs)
+
+        with patch(
+            "services.publish_scheduler_service.execute_publish_job",
+            side_effect=interleave_retry,
+        ):
+            result = run_publish_scheduler_tick(
+                self.db_path,
+                now=now,
+                allow_real=True,
+                publisher_factory=lambda _job: (
+                    publisher_calls.append(_job) or SuccessPublisher()
+                ),
+            )
+
+        current = get_publish_job(self.db_path, real["id"])
+        self.assertEqual(result["attempted_real_count"], 0)
+        self.assertEqual(current["status"], "queued")
+        self.assertFalse(current["auto_execute"])
+        self.assertEqual(publisher_calls, [])
 
     def test_tick_executes_pre_authorized_real_job_when_gate_is_enabled(self):
         now = datetime(2026, 9, 2, 10, 0)

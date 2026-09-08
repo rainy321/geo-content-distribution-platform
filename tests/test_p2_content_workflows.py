@@ -11,6 +11,8 @@ from openpyxl import Workbook
 
 from db.createTable import initialize_database
 from sau_backend import app
+from services.content_engine_adapters import MockContentEngineAdapter
+from services.content_generation_service import ContentGenerationService
 
 
 class P2ContentWorkflowApiTests(unittest.TestCase):
@@ -88,8 +90,8 @@ class P2ContentWorkflowApiTests(unittest.TestCase):
         self.assertEqual(created.status_code, 201)
         template = created.get_json()["data"]
 
-        with patch("sau_backend.generate_geo_content") as generate:
-            generate.return_value = {
+        with patch("sau_backend._create_content_generation_service") as factory:
+            factory.return_value.generate.return_value = {
                 "title": "生成标题",
                 "summary": "摘要",
                 "content": "正文",
@@ -108,7 +110,7 @@ class P2ContentWorkflowApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
-            generate.call_args.kwargs["template_instruction"],
+            factory.return_value.generate.call_args.args[0].template_instruction,
             "按目标、过程、结果和限制组织内容。",
         )
         updated = self.client.put(
@@ -122,28 +124,110 @@ class P2ContentWorkflowApiTests(unittest.TestCase):
         )
         self.assertEqual(self.client.delete("/api/content-templates/1").status_code, 409)
 
-    @patch("sau_backend.generate_geo_content")
-    def test_batch_generation_saves_independent_drafts(self, generate):
-        generate.side_effect = [
-            {"title": "主题一", "summary": "", "content": "正文一", "tags": ["A"], "faq": []},
-            {"title": "主题二", "summary": "", "content": "正文二", "tags": ["B"], "faq": []},
-        ]
-        response = self.client.post(
-            "/api/articles/generate-batch",
-            json={
-                "project_id": self.project_id,
-                "topics": ["主题一", "主题二"],
-                "keywords": ["AI Agent"],
+    def test_batch_generation_saves_independent_idempotent_drafts(self):
+        adapter = MockContentEngineAdapter([
+            {
+                "title": "主题一",
+                "summary": "",
+                "content": "正文一",
+                "tags": ["A"],
+                "faq": [],
+                "sources": [],
             },
-        )
+            {
+                "title": "主题二",
+                "summary": "",
+                "content": "正文二",
+                "tags": ["B"],
+                "faq": [],
+                "sources": [],
+            },
+        ])
+        service = ContentGenerationService(self.db_path, adapter)
+        payload = {
+            "project_id": self.project_id,
+            "topics": ["主题一", "主题二"],
+            "keywords": ["AI Agent"],
+        }
+        headers = {
+            "X-Request-ID": "batch-request",
+            "Idempotency-Key": "batch-request",
+        }
+        with patch(
+            "sau_backend._create_content_generation_service",
+            return_value=service,
+        ):
+            response = self.client.post(
+                "/api/articles/generate-batch",
+                headers=headers,
+                json=payload,
+            )
+            replay = self.client.post(
+                "/api/articles/generate-batch",
+                headers=headers,
+                json=payload,
+            )
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["data"]["created_count"], 2)
+        self.assertEqual(replay.status_code, 200)
+        self.assertEqual(replay.get_json()["data"]["replayed_count"], 2)
+        self.assertEqual(replay.headers["Idempotency-Replayed"], "true")
+        self.assertEqual(len(adapter.calls), 2)
         with closing(sqlite3.connect(self.db_path)) as conn:
             count = conn.execute(
                 "SELECT COUNT(*) FROM articles WHERE status = 'draft'"
             ).fetchone()[0]
+            run_count = conn.execute(
+                "SELECT COUNT(*) FROM content_generation_runs"
+            ).fetchone()[0]
         self.assertEqual(count, 2)
+        self.assertEqual(run_count, 2)
+
+    def test_batch_generation_rejects_reusing_key_for_changed_topics(self):
+        adapter = MockContentEngineAdapter([
+            {
+                "title": "主题一",
+                "summary": "",
+                "content": "正文一",
+                "tags": [],
+                "faq": [],
+                "sources": [],
+            }
+        ])
+        service = ContentGenerationService(self.db_path, adapter)
+        headers = {
+            "X-Request-ID": "batch-conflict",
+            "Idempotency-Key": "batch-conflict",
+        }
+        with patch(
+            "sau_backend._create_content_generation_service",
+            return_value=service,
+        ):
+            first = self.client.post(
+                "/api/articles/generate-batch",
+                headers=headers,
+                json={"project_id": self.project_id, "topics": ["主题一"]},
+            )
+            conflict = self.client.post(
+                "/api/articles/generate-batch",
+                headers=headers,
+                json={"project_id": self.project_id, "topics": ["换了主题"]},
+            )
+
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(conflict.status_code, 409)
+        self.assertEqual(conflict.headers["Idempotency-Key"], "batch-conflict")
+        self.assertEqual(
+            conflict.get_json()["data"]["error_code"],
+            "idempotency_conflict",
+        )
+        self.assertEqual(len(adapter.calls), 1)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            count = conn.execute(
+                "SELECT COUNT(*) FROM articles WHERE title IN ('主题一', '换了主题')"
+            ).fetchone()[0]
+        self.assertEqual(count, 1)
 
     def test_excel_template_and_import(self):
         template = self.client.get("/api/articles/import-template.xlsx")

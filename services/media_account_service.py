@@ -7,7 +7,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from services.platform_capability_service import PLATFORM_CAPABILITIES
+from services.platform_capability_service import (
+    BILIBILI_ACCOUNT_TYPE,
+    BILIBILI_RUNTIME_DISABLED_MESSAGE,
+    PLATFORM_CAPABILITIES,
+)
 
 
 PLATFORM_DEFINITIONS = tuple(
@@ -28,6 +32,10 @@ class MediaAccountNotFoundError(LookupError):
 
 class MediaAccountCheckError(RuntimeError):
     """Raised when a platform login check cannot produce a reliable result."""
+
+
+class MediaAccountRuntimeDisabledError(MediaAccountCheckError):
+    """Raised before touching a platform runtime disabled by policy."""
 
 
 def get_media_accounts_overview(
@@ -83,6 +91,7 @@ async def check_media_account(
     *,
     cookies_directory: str | Path,
     checker: Callable[[int, str], Any],
+    enable_bilibili_runtime: bool = False,
     checked_at: datetime | None = None,
 ) -> dict[str, Any]:
     cookie_dir = Path(cookies_directory)
@@ -90,6 +99,8 @@ async def check_media_account(
         row = _fetch_account(conn, account_id)
     if row is None:
         raise MediaAccountNotFoundError("媒体账号不存在")
+    if row["type"] == BILIBILI_ACCOUNT_TYPE and not enable_bilibili_runtime:
+        raise MediaAccountRuntimeDisabledError(BILIBILI_RUNTIME_DISABLED_MESSAGE)
 
     timestamp = _normalize_checked_at(checked_at)
     cookie_path = cookie_dir / row["filePath"]

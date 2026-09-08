@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from services.geo_score_service import score_geo_content
+from services.content_generation_run_service import (
+    GenerationRunNotFoundError,
+    GenerationRunStateError,
+    bind_article,
+)
 from services.project_service import ProjectNotFoundError
 
 
@@ -26,13 +31,24 @@ def create_article(
     content: str,
     tags: list[str],
     status: str,
+    generation_run_id: int | None = None,
 ) -> dict[str, Any]:
     with closing(_connect(database_path)) as conn:
         with conn:
             project = _fetch_project(conn, project_id)
             if project is None:
                 raise ProjectNotFoundError("品牌项目不存在")
-            score_result = _score_article(project, title, content)
+            score_context = _score_context_for_run(
+                conn,
+                generation_run_id,
+                project_id=project_id,
+            )
+            score_result = _score_article(
+                project,
+                title,
+                content,
+                score_context=score_context,
+            )
             cursor = conn.execute(
                 """
                 INSERT INTO articles (
@@ -52,6 +68,13 @@ def create_article(
                 ),
             )
             article_id = cursor.lastrowid
+            if generation_run_id is not None:
+                bind_article(
+                    database_path,
+                    generation_run_id,
+                    article_id,
+                    connection=conn,
+                )
             row = _fetch_article(conn, article_id)
     return _serialize_article(row)
 
@@ -177,7 +200,18 @@ def update_article(
             content = changes.get("content", current["content"])
             tags = changes.get("tags", current["tags"])
             status = changes.get("status", current["status"])
-            score_result = _score_article(project, title, content)
+            score_context = _score_context_for_run(
+                conn,
+                current.get("generation_run_id"),
+                project_id=current["project_id"],
+                article_id=article_id,
+            )
+            score_result = _score_article(
+                project,
+                title,
+                content,
+                score_context=score_context,
+            )
 
             conn.execute(
                 """
@@ -218,24 +252,119 @@ def _fetch_project(conn: sqlite3.Connection, project_id: int):
 
 def _fetch_article(conn: sqlite3.Connection, article_id: int):
     return conn.execute(
-        "SELECT * FROM articles WHERE id = ?",
+        """
+        SELECT a.*,
+               r.id AS generation_run_id,
+               r.configured_engine AS generation_configured_engine,
+               r.actual_engine AS generation_actual_engine,
+               r.engine_version AS generation_engine_version,
+               r.trace_id AS generation_trace_id,
+               r.elapsed_ms AS generation_elapsed_ms,
+               r.usage AS generation_usage,
+               r.usage_status AS generation_usage_status,
+               r.provider_geo_score AS generation_provider_geo_score,
+               r.fallback_used AS generation_fallback_used,
+               r.fallback_from AS generation_fallback_from,
+               r.warnings AS generation_warnings,
+               r.result_payload AS generation_result_payload
+        FROM articles AS a
+        LEFT JOIN content_generation_runs AS r ON r.article_id = a.id
+        WHERE a.id = ?
+        """,
         (article_id,),
     ).fetchone()
 
 
-def _score_article(project: sqlite3.Row, title: str, content: str) -> dict[str, Any]:
+def _score_article(
+    project: sqlite3.Row,
+    title: str,
+    content: str,
+    *,
+    score_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    context = score_context or {}
     return score_geo_content(
         title=title,
         content=content,
-        brand=project["name"],
-        keywords=_decode_string_list(project["keywords"]),
+        brand=str(context.get("brand") or project["name"]).strip(),
+        keywords=(
+            context["keywords"]
+            if isinstance(context.get("keywords"), list)
+            else _decode_string_list(project["keywords"])
+        ),
     )
+
+
+def _score_context_for_run(
+    conn: sqlite3.Connection,
+    generation_run_id: int | None,
+    *,
+    project_id: int,
+    article_id: int | None = None,
+) -> dict[str, Any] | None:
+    if generation_run_id is None:
+        return None
+    row = conn.execute(
+        """
+        SELECT project_id, project_snapshot, brief_snapshot, status, article_id
+        FROM content_generation_runs
+        WHERE id = ?
+        """,
+        (int(generation_run_id),),
+    ).fetchone()
+    if row is None:
+        raise GenerationRunNotFoundError("生成记录不存在")
+    if row["status"] != "succeeded":
+        raise GenerationRunStateError("仅成功的生成记录可以保存为文章")
+    if row["project_id"] is not None and int(row["project_id"]) != int(project_id):
+        raise GenerationRunStateError("生成记录与品牌项目不匹配")
+    if row["article_id"] is not None and (
+        article_id is None or int(row["article_id"]) != int(article_id)
+    ):
+        raise GenerationRunStateError("生成记录已经保存为另一篇文章")
+    project_snapshot = _decode_json_object(row["project_snapshot"])
+    brief_snapshot = _decode_json_object(row["brief_snapshot"])
+    keywords = brief_snapshot.get("keywords")
+    if not isinstance(keywords, list):
+        keywords = project_snapshot.get("keywords")
+    return {
+        "brand": str(project_snapshot.get("name") or "").strip(),
+        "keywords": _decode_string_list(keywords),
+    }
 
 
 def _serialize_article(row: sqlite3.Row) -> dict[str, Any]:
     article = dict(row)
     article["tags"] = _decode_string_list(article.get("tags"))
     article["geo_analysis"] = _decode_json_object(article.get("geo_analysis"))
+    generation_run_id = article.get("generation_run_id")
+    if generation_run_id is not None:
+        generation_result = _decode_json_object(
+            article.get("generation_result_payload")
+        )
+        article["generation"] = {
+            "run_id": generation_run_id,
+            "engine": (
+                article.get("generation_actual_engine")
+                or article.get("generation_configured_engine")
+                or "unknown"
+            ),
+            "engine_version": article.get("generation_engine_version") or "unknown",
+            "trace_id": article.get("generation_trace_id") or "",
+            "elapsed_ms": article.get("generation_elapsed_ms"),
+            "usage": _decode_json_object(article.get("generation_usage")) or None,
+            "usage_status": article.get("generation_usage_status") or "unknown",
+            "provider_geo_score": article.get("generation_provider_geo_score"),
+            "fallback_used": bool(article.get("generation_fallback_used")),
+            "fallback_from": article.get("generation_fallback_from") or "",
+            "warnings": _decode_json_list(article.get("generation_warnings")),
+            "sources": generation_result.get("sources")
+            if isinstance(generation_result.get("sources"), list)
+            else [],
+        }
+    for field in tuple(article):
+        if field.startswith("generation_") and field != "generation_run_id":
+            article.pop(field, None)
     return article
 
 
@@ -279,3 +408,11 @@ def _decode_json_object(value: Any) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _decode_json_list(value: Any) -> list[Any]:
+    try:
+        parsed = json.loads(value) if isinstance(value, str) else value
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return parsed if isinstance(parsed, list) else []

@@ -10,6 +10,7 @@ from db.createTable import initialize_database
 from services.media_account_service import (
     MediaAccountCheckError,
     MediaAccountNotFoundError,
+    MediaAccountRuntimeDisabledError,
     check_media_account,
     get_media_accounts_overview,
 )
@@ -139,6 +140,48 @@ class MediaAccountServiceTests(unittest.IsolatedAsyncioTestCase):
             ).fetchone()
         self.assertEqual(status, 1)
         self.assertIsNone(last_checked_at)
+
+    async def test_bilibili_check_is_fail_closed_before_checker_by_default(self):
+        (self.cookies_dir / "bilibili.json").write_text("{}", encoding="utf-8")
+        account_id = self._insert_account(
+            platform_type=6,
+            file_path="bilibili.json",
+            status=1,
+        )
+        checker = AsyncMock(return_value=True)
+
+        with self.assertRaisesRegex(
+            MediaAccountRuntimeDisabledError,
+            "ENABLE_BILIBILI_RUNTIME=true",
+        ):
+            await check_media_account(
+                self.db_path,
+                account_id,
+                cookies_directory=self.cookies_dir,
+                checker=checker,
+            )
+
+        checker.assert_not_called()
+
+    async def test_bilibili_check_can_be_explicitly_enabled(self):
+        (self.cookies_dir / "bilibili.json").write_text("{}", encoding="utf-8")
+        account_id = self._insert_account(
+            platform_type=6,
+            file_path="bilibili.json",
+            status=0,
+        )
+        checker = AsyncMock(return_value=True)
+
+        account = await check_media_account(
+            self.db_path,
+            account_id,
+            cookies_directory=self.cookies_dir,
+            checker=checker,
+            enable_bilibili_runtime=True,
+        )
+
+        checker.assert_awaited_once_with(6, "bilibili.json")
+        self.assertEqual(account["status"], "connected")
 
     async def test_unknown_account_is_rejected(self):
         with self.assertRaisesRegex(MediaAccountNotFoundError, "不存在"):

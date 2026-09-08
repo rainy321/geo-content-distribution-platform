@@ -8,9 +8,11 @@ from pathlib import Path
 from db.createTable import initialize_database
 from services.publish_job_executor import execute_publish_job
 from services.publish_job_service import (
+    ConcurrentPublishJobUpdateError,
     InvalidPublishJobTransitionError,
     create_publish_job,
     get_publish_job,
+    transition_publish_job,
 )
 from services.publisher_adapter import PublishContent, PublisherAdapter, PublishResult
 
@@ -249,6 +251,47 @@ class PublishJobExecutorTests(unittest.TestCase):
         self.assertEqual(result["status"], "failed")
         self.assertIn("网络连接被重置", result["message"])
         self.assertEqual(self._article_status(), "ready")
+
+    def test_worker_result_cannot_overwrite_concurrent_manual_terminal_state(self):
+        job = self._create_job()
+        test_case = self
+
+        class InterveningPublisher(PublisherAdapter):
+            platform = "zhihu"
+
+            def login(self):
+                return True
+
+            def check_login(self):
+                return True
+
+            def publish(self, content):
+                transition_publish_job(
+                    test_case.db_path,
+                    job["id"],
+                    "need_action",
+                    message="人工已接管当前任务",
+                )
+                return PublishResult(
+                    True,
+                    self.platform,
+                    "success",
+                    message="过期执行器返回成功",
+                )
+
+            def schedule(self, content, publish_at=None):
+                raise AssertionError("执行器不应调用 schedule")
+
+        with self.assertRaises(ConcurrentPublishJobUpdateError):
+            execute_publish_job(
+                self.db_path,
+                job["id"],
+                publisher_factory=lambda _job: InterveningPublisher(),
+            )
+
+        latest = get_publish_job(self.db_path, job["id"])
+        self.assertEqual(latest["status"], "need_action")
+        self.assertEqual(latest["message"], "人工已接管当前任务")
 
     def test_rejects_wrong_publisher_without_invoking_it(self):
         job = self._create_job()

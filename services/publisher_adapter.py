@@ -251,11 +251,23 @@ class ZhihuPublisherAdapter(PublisherAdapter):
                 timeout_seconds=self.timeout_seconds,
             )
         except (TimeoutError, asyncio.TimeoutError):
-            result = self._failed(
-                "知乎发布操作超时；平台最终状态未知，请先人工核对再重试"
+            result = PublishResult(
+                success=False,
+                platform=self.platform,
+                status="processing",
+                message="知乎发布操作超时；平台最终状态未知，请先人工核对，系统不会自动重试",
             )
         except Exception as exc:
-            result = self._exception_result(exc, prefix="知乎发布失败")
+            detail = str(exc).strip() or exc.__class__.__name__
+            result = PublishResult(
+                success=False,
+                platform=self.platform,
+                status="processing",
+                message=(
+                    f"知乎发布过程异常：{detail}；平台最终状态未知，"
+                    "请先人工核对，系统不会自动重试"
+                ),
+            )
         else:
             result = self._normalize_publish_result(raw_result)
 
@@ -477,7 +489,16 @@ class ToutiaoPublisherAdapter(PublisherAdapter):
                 ),
             )
         except Exception as exc:
-            return self._exception_result(exc, prefix="今日头条发布失败")
+            detail = str(exc).strip() or exc.__class__.__name__
+            return PublishResult(
+                success=False,
+                platform=self.platform,
+                status="processing",
+                message=(
+                    f"今日头条发布过程异常：{detail}；平台最终状态未知，"
+                    "请先到平台后台核对，系统不会自动重试"
+                ),
+            )
         return self._normalize_publish_result(raw_result)
 
     def schedule(
@@ -628,7 +649,16 @@ class SohuPublisherAdapter(PublisherAdapter):
                 ),
             )
         except Exception as exc:
-            return self._exception_result(exc, prefix="搜狐号发布失败")
+            detail = str(exc).strip() or exc.__class__.__name__
+            return PublishResult(
+                success=False,
+                platform=self.platform,
+                status="processing",
+                message=(
+                    f"搜狐号发布过程异常：{detail}；平台最终状态未知，"
+                    "请先到平台后台核对，系统不会自动重试"
+                ),
+            )
         return self._normalize_publish_result(raw_result)
 
     def schedule(
@@ -781,7 +811,16 @@ class BaijiahaoPublisherAdapter(PublisherAdapter):
                 message="百家号发布操作超时，平台最终状态未知；请先人工核对，系统不会自动重试",
             )
         except Exception as exc:
-            return self._exception_result(exc, prefix="百家号发布失败")
+            detail = str(exc).strip() or exc.__class__.__name__
+            return PublishResult(
+                success=False,
+                platform=self.platform,
+                status="processing",
+                message=(
+                    f"百家号发布过程异常：{detail}；平台最终状态未知，"
+                    "请先人工核对，系统不会自动重试"
+                ),
+            )
         return self._normalize_publish_result(raw_result)
 
     def schedule(
@@ -900,7 +939,16 @@ class XiaohongshuPublisherAdapter(PublisherAdapter):
                 message="小红书发布操作超时，平台最终状态未知；请先人工核对，系统不会自动重试",
             )
         except Exception as exc:
-            return self._exception_result(exc, prefix="小红书发布失败")
+            detail = str(exc).strip() or exc.__class__.__name__
+            return PublishResult(
+                success=False,
+                platform=self.platform,
+                status="processing",
+                message=(
+                    f"小红书发布过程异常：{detail}；平台最终状态未知，"
+                    "请先人工核对，系统不会自动重试"
+                ),
+            )
         return self._normalize_publish_result(raw_result)
 
     def schedule(

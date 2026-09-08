@@ -11,6 +11,7 @@ services:
       DEMO_MODE: "true"
       SEED_DEMO_DATA: "true"
       ALLOW_REAL_PUBLISHING: "false"
+      ENABLE_BILIBILI_RUNTIME: "false"
       DATABASE_PATH: "/app/data/database.db"
       COOKIES_DIRECTORY: "/app/cookiesFile"
       LOCAL_CHROME_HEADLESS: "true"
