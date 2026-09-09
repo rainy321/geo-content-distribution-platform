@@ -1,6 +1,8 @@
 import os
 import sqlite3
 import socket
+import subprocess
+import sys
 import tempfile
 import unittest
 from contextlib import closing
@@ -114,6 +116,25 @@ class DesktopEnvironmentTests(unittest.TestCase):
             self.assertTrue(
                 publishing_profile_allows_real(result["publishing_profile"])
             )
+
+    def test_source_run_ignores_working_release_metadata(self):
+        with tempfile.TemporaryDirectory() as directory:
+            working_metadata = Path(directory) / ".build" / "desktop-build-info.json"
+            working_metadata.parent.mkdir()
+            working_metadata.write_text(
+                f"""{{
+  "schema_version": 1,
+  "version": "{APP_VERSION}",
+  "publishing_profile": "authorized_real"
+}}
+""",
+                encoding="utf-8",
+            )
+
+            result = load_build_info(directory)
+
+            self.assertEqual("development", result["source_commit"])
+            self.assertEqual(PUBLISHING_PROFILE_SAFE, result["publishing_profile"])
 
     def test_rejects_unknown_publishing_profile_in_build_metadata(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -565,6 +586,31 @@ class DesktopPackagingContractTests(unittest.TestCase):
         )
         self.assertIn("internal_authorized_real_publish", build_script)
         self.assertIn("THIRD-PARTY-NOTICES.txt", build_script)
+
+    def test_windowed_build_does_not_require_a_console_stream(self):
+        logging_source = (self.project_root / "utils" / "log.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn(
+            'if sys.stdout is not None and hasattr(sys.stdout, "write"):',
+            logging_source,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            environment = dict(os.environ)
+            environment["LOGS_DIRECTORY"] = str(Path(directory) / "logs")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    "import sys; sys.stdout = None; import utils.log",
+                ],
+                cwd=self.project_root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+        self.assertEqual(0, result.returncode, result.stderr)
 
 if __name__ == "__main__":
     unittest.main()

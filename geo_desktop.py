@@ -115,10 +115,10 @@ def load_build_info(resource_root: str | Path | None = None) -> dict[str, Any]:
         if resource_root is not None
         else resolve_resource_root()
     )
-    candidates = (
-        root / "desktop-build-info.json",
-        root / ".build" / "desktop-build-info.json",
-    )
+    # The build script writes working metadata under ``.build`` for the spec,
+    # then embeds it at the extraction root.  Source runs must never inherit
+    # that authorized profile merely because a release was built nearby.
+    candidates = (root / "desktop-build-info.json",)
     for candidate in candidates:
         if not candidate.is_file():
             continue

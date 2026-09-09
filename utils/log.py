@@ -56,8 +56,10 @@ def create_logger(log_name: str, file_path: str):
 
 # Remove all existing handlers
 logger.remove()
-# Add a standard console handler
-logger.add(sys.stdout, colorize=True, format=log_formatter)
+# A PyInstaller windowed executable intentionally has no stdout.  File sinks
+# remain available, while source/console runs keep the colored sink.
+if sys.stdout is not None and hasattr(sys.stdout, "write"):
+    logger.add(sys.stdout, colorize=True, format=log_formatter)
 
 douyin_logger = create_logger('douyin', 'logs/douyin.log')
 tencent_logger = create_logger('tencent', 'logs/tencent.log')
