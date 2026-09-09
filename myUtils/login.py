@@ -726,6 +726,7 @@ async def xiaohongshu_cookie_gen(
         result = await run_xiaohongshu_login(
             str(account_file),
             headless=False,
+            cancel_event=getattr(status_queue, "cancel_event", None),
         )
         if _login_cancelled(status_queue):
             _queue_login_cancelled(status_queue, "xiaohongshu")
@@ -773,6 +774,8 @@ async def baijiahao_cookie_gen(
     browser = None
     context = None
     page = None
+    account_file = None
+    database_saved = False
     try:
         status_queue.put("MANUAL_LOGIN")
         if _login_cancelled(status_queue):
@@ -816,39 +819,50 @@ async def baijiahao_cookie_gen(
                 return None
 
             uuid_v1 = uuid.uuid1()
+            file_name = f"{uuid_v1}.json"
             _safe_login_log("baijiahao", "session_id_created")
             cookies_dir = _login_cookies_directory(cookies_directory)
             cookies_dir.mkdir(parents=True, exist_ok=True)
-            account_file = cookies_dir / f"{uuid_v1}.json"
+            account_file = cookies_dir / file_name
             await context.storage_state(path=account_file)
             if _login_cancelled(status_queue):
-                account_file.unlink(missing_ok=True)
                 _queue_login_cancelled(status_queue, "baijiahao")
                 return None
 
             result = await check_cookie(
-                5, f"{uuid_v1}.json", cookies_directory=cookies_dir
+                5, file_name, cookies_directory=cookies_dir
             )
             if not result:
                 _safe_login_log(
                     "baijiahao", "cookie_validation_failed", level="warning"
                 )
             if _login_cancelled(status_queue):
-                account_file.unlink(missing_ok=True)
                 _queue_login_cancelled(status_queue, "baijiahao")
                 return None
 
             with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
-                if _login_cancelled(status_queue):
-                    account_file.unlink(missing_ok=True)
-                    _queue_login_cancelled(status_queue, "baijiahao")
-                    return None
-                cursor = conn.cursor()
-                cursor.execute('''
-                    INSERT INTO user_info (type, filePath, userName, status)
-                    VALUES (?, ?, ?, ?)
-                ''', (5, f"{uuid_v1}.json", id, 1 if result else 0))
-                conn.commit()
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    if _login_cancelled(status_queue):
+                        conn.rollback()
+                        _queue_login_cancelled(status_queue, "baijiahao")
+                        return None
+                    conn.execute(
+                        """
+                        INSERT INTO user_info (type, filePath, userName, status)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (5, file_name, id, 1 if result else 0),
+                    )
+                    if _login_cancelled(status_queue):
+                        conn.rollback()
+                        _queue_login_cancelled(status_queue, "baijiahao")
+                        return None
+                    conn.commit()
+                    database_saved = True
+                except Exception:
+                    conn.rollback()
+                    raise
                 _safe_login_log("baijiahao", "account_saved", level="success")
             status_queue.put("200")
             return True
@@ -860,6 +874,8 @@ async def baijiahao_cookie_gen(
             pass
         return None
     finally:
+        if account_file is not None and not database_saved:
+            _discard_unregistered_login_file(account_file)
         try:
             if page:
                 await page.close()
@@ -885,6 +901,8 @@ async def toutiao_cookie_gen(
     browser = None
     context = None
     page = None
+    account_file = None
+    database_saved = False
     try:
         # 尽早通知前端进入「手动登录」态，避免浏览器启动慢时一直转圈
         status_queue.put("MANUAL_LOGIN")
@@ -926,37 +944,48 @@ async def toutiao_cookie_gen(
             _safe_login_log("toutiao", "session_id_created")
             cookies_dir = _login_cookies_directory(cookies_directory)
             cookies_dir.mkdir(parents=True, exist_ok=True)
-            account_file = cookies_dir / f"{uuid_v1}.json"
+            file_name = f"{uuid_v1}.json"
+            account_file = cookies_dir / file_name
             await context.storage_state(path=account_file)
             if _login_cancelled(status_queue):
-                account_file.unlink(missing_ok=True)
                 _queue_login_cancelled(status_queue, "toutiao")
                 return None
 
             # cookie 校验失败也不要卡死前端；仍写入账号，状态后续可再验证
             result = await check_cookie(
-                7, f"{uuid_v1}.json", cookies_directory=cookies_dir
+                7, file_name, cookies_directory=cookies_dir
             )
             if not result:
                 _safe_login_log(
                     "toutiao", "cookie_validation_failed", level="warning"
                 )
             if _login_cancelled(status_queue):
-                account_file.unlink(missing_ok=True)
                 _queue_login_cancelled(status_queue, "toutiao")
                 return None
 
             with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
-                if _login_cancelled(status_queue):
-                    account_file.unlink(missing_ok=True)
-                    _queue_login_cancelled(status_queue, "toutiao")
-                    return None
-                cursor = conn.cursor()
-                cursor.execute('''
-                    INSERT INTO user_info (type, filePath, userName, status)
-                    VALUES (?, ?, ?, ?)
-                ''', (7, f"{uuid_v1}.json", id, 1 if result else 0))
-                conn.commit()
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    if _login_cancelled(status_queue):
+                        conn.rollback()
+                        _queue_login_cancelled(status_queue, "toutiao")
+                        return None
+                    conn.execute(
+                        """
+                        INSERT INTO user_info (type, filePath, userName, status)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (7, file_name, id, 1 if result else 0),
+                    )
+                    if _login_cancelled(status_queue):
+                        conn.rollback()
+                        _queue_login_cancelled(status_queue, "toutiao")
+                        return None
+                    conn.commit()
+                    database_saved = True
+                except Exception:
+                    conn.rollback()
+                    raise
                 _safe_login_log("toutiao", "account_saved", level="success")
             status_queue.put("200")
             return True
@@ -968,6 +997,8 @@ async def toutiao_cookie_gen(
             pass
             return None
     finally:
+        if account_file is not None and not database_saved:
+            _discard_unregistered_login_file(account_file)
         try:
             if page:
                 await page.close()
@@ -992,6 +1023,8 @@ async def sohu_cookie_gen(
     browser = None
     context = None
     page = None
+    account_file = None
+    database_saved = False
     try:
         status_queue.put("MANUAL_LOGIN")
         if _login_cancelled(status_queue):
@@ -1034,37 +1067,48 @@ async def sohu_cookie_gen(
                 return None
 
             uuid_v1 = uuid.uuid1()
+            file_name = f"{uuid_v1}.json"
             _safe_login_log("sohu", "session_id_created")
             cookies_dir = _login_cookies_directory(cookies_directory)
             cookies_dir.mkdir(parents=True, exist_ok=True)
-            account_file = cookies_dir / f"{uuid_v1}.json"
+            account_file = cookies_dir / file_name
             await context.storage_state(path=account_file)
             if _login_cancelled(status_queue):
-                account_file.unlink(missing_ok=True)
                 _queue_login_cancelled(status_queue, "sohu")
                 return None
 
             result = await check_cookie(
-                8, f"{uuid_v1}.json", cookies_directory=cookies_dir
+                8, file_name, cookies_directory=cookies_dir
             )
             if not result:
                 _safe_login_log("sohu", "cookie_validation_failed", level="warning")
             if _login_cancelled(status_queue):
-                account_file.unlink(missing_ok=True)
                 _queue_login_cancelled(status_queue, "sohu")
                 return None
 
             with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
-                if _login_cancelled(status_queue):
-                    account_file.unlink(missing_ok=True)
-                    _queue_login_cancelled(status_queue, "sohu")
-                    return None
-                cursor = conn.cursor()
-                cursor.execute('''
-                    INSERT INTO user_info (type, filePath, userName, status)
-                    VALUES (?, ?, ?, ?)
-                ''', (8, f"{uuid_v1}.json", id, 1 if result else 0))
-                conn.commit()
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    if _login_cancelled(status_queue):
+                        conn.rollback()
+                        _queue_login_cancelled(status_queue, "sohu")
+                        return None
+                    conn.execute(
+                        """
+                        INSERT INTO user_info (type, filePath, userName, status)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (8, file_name, id, 1 if result else 0),
+                    )
+                    if _login_cancelled(status_queue):
+                        conn.rollback()
+                        _queue_login_cancelled(status_queue, "sohu")
+                        return None
+                    conn.commit()
+                    database_saved = True
+                except Exception:
+                    conn.rollback()
+                    raise
                 _safe_login_log("sohu", "account_saved", level="success")
             status_queue.put("200")
             return True
@@ -1076,6 +1120,8 @@ async def sohu_cookie_gen(
             pass
         return None
     finally:
+        if account_file is not None and not database_saved:
+            _discard_unregistered_login_file(account_file)
         try:
             if page:
                 await page.close()

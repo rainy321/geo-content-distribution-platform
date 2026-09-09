@@ -12,14 +12,18 @@ from unittest.mock import AsyncMock, Mock, patch
 from db.createTable import initialize_database
 from myUtils.login import (
     _wait_for_interactive_login,
+    baijiahao_cookie_gen,
     bilibili_cookie_gen,
     douyin_cookie_gen,
     get_ks_cookie,
     get_tencent_cookie,
+    sohu_cookie_gen,
     tiktok_cookie_gen,
+    toutiao_cookie_gen,
     xiaohongshu_cookie_gen,
     zhihu_cookie_gen,
 )
+import uploader.xiaohongshu_uploader.main as xhs_login_module
 
 
 class _ProtocolQueue(Queue):
@@ -226,9 +230,12 @@ class AllPlatformLoginCancelTests(unittest.IsolatedAsyncioTestCase):
         status_queue = _ProtocolQueue()
         created_path = None
 
-        async def finish_lower_login_then_cancel(account_file, *, headless):
+        async def finish_lower_login_then_cancel(
+            account_file, *, headless, cancel_event
+        ):
             nonlocal created_path
             self.assertFalse(headless)
+            self.assertIs(cancel_event, status_queue.cancel_event)
             created_path = Path(account_file)
             created_path.write_text('{"synthetic":true}', encoding="utf-8")
             status_queue.cancel_event.set()
@@ -250,6 +257,180 @@ class AllPlatformLoginCancelTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(created_path.exists())
         self.assert_no_accounts()
         _assert_operator_cancelled(self, status_queue)
+
+    async def test_xiaohongshu_lower_wait_honors_cancel_and_closes_browser(self):
+        cancel_event = threading.Event()
+        page = _Page()
+        context = _Context(page)
+        browser = _Browser(context)
+        qrcode_path = self.root / "synthetic-xhs-qrcode.png"
+
+        async def cancel_during_poll(_seconds):
+            cancel_event.set()
+
+        with patch(
+            "uploader.xiaohongshu_uploader.main.async_playwright",
+            return_value=_playwright_manager(browser),
+        ), patch(
+            "uploader.xiaohongshu_uploader.main.set_init_script",
+            new=AsyncMock(return_value=context),
+        ), patch(
+            "uploader.xiaohongshu_uploader.main._save_xhs_qrcode",
+            new=AsyncMock(
+                return_value={
+                    "image_path": str(qrcode_path),
+                    "image_data_url": "data:image/png;base64,c3ludGhldGlj",
+                }
+            ),
+        ), patch(
+            "uploader.xiaohongshu_uploader.main._is_xhs_login_completed",
+            new=AsyncMock(return_value=False),
+        ), patch(
+            "uploader.xiaohongshu_uploader.main.asyncio.sleep",
+            new=AsyncMock(side_effect=cancel_during_poll),
+        ):
+            result = await xhs_login_module.xiaohongshu_cookie_gen(
+                self.cookies_directory / "synthetic-xhs.json",
+                headless=False,
+                cancel_event=cancel_event,
+            )
+
+        self.assertEqual(result["status"], "operator_cancelled")
+        self.assertTrue(context.closed)
+        self.assertTrue(browser.closed)
+
+    async def test_manual_browser_database_failure_removes_unregistered_cookie(self):
+        cases = (
+            ("baijiahao", baijiahao_cookie_gen, "myUtils.login._wait_for_url_condition"),
+            ("toutiao", toutiao_cookie_gen, "myUtils.login.wait_for_toutiao_creator_backend"),
+            ("sohu", sohu_cookie_gen, "myUtils.login._wait_for_url_condition"),
+        )
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            connection.execute(
+                """
+                CREATE TRIGGER reject_synthetic_login
+                BEFORE INSERT ON user_info
+                BEGIN
+                    SELECT RAISE(ABORT, 'synthetic login insert failure');
+                END
+                """
+            )
+            connection.commit()
+
+        for platform, login, waiter_patch in cases:
+            with self.subTest(platform=platform):
+                status_queue = _ProtocolQueue()
+                page = _Page()
+                context = _Context(page)
+                browser = _Browser(context)
+
+                async def write_cookie(*, path):
+                    Path(path).write_text('{"synthetic":true}', encoding="utf-8")
+
+                context.storage_state = AsyncMock(side_effect=write_cookie)
+                with patch(
+                    "myUtils.login.async_playwright",
+                    return_value=_playwright_manager(browser),
+                ), patch(
+                    "myUtils.login.set_init_script",
+                    new=AsyncMock(return_value=context),
+                ), patch(
+                    waiter_patch,
+                    new=AsyncMock(return_value=True),
+                ), patch(
+                    "myUtils.login.check_cookie",
+                    new=AsyncMock(return_value=True),
+                ):
+                    result = await login(
+                        f"synthetic-{platform}",
+                        status_queue,
+                        database_path=self.database_path,
+                        cookies_directory=self.cookies_directory,
+                    )
+
+                self.assertIsNone(result)
+                self.assertEqual(list(self.cookies_directory.glob("*.json")), [])
+                self.assertTrue(page.closed)
+                self.assertTrue(context.closed)
+                self.assertTrue(browser.closed)
+                self.assert_no_accounts()
+
+    async def test_manual_browser_cancel_after_insert_rolls_back_and_removes_cookie(self):
+        cases = (
+            ("baijiahao", baijiahao_cookie_gen, "myUtils.login._wait_for_url_condition"),
+            ("toutiao", toutiao_cookie_gen, "myUtils.login.wait_for_toutiao_creator_backend"),
+            ("sohu", sohu_cookie_gen, "myUtils.login._wait_for_url_condition"),
+        )
+        real_connect = sqlite3.connect
+
+        class CancelAfterInsertConnection:
+            def __init__(self, connection, cancel_event):
+                self.connection = connection
+                self.cancel_event = cancel_event
+
+            def execute(self, statement, parameters=()):
+                cursor = self.connection.execute(statement, parameters)
+                if "INSERT INTO user_info" in statement:
+                    self.cancel_event.set()
+                return cursor
+
+            def commit(self):
+                return self.connection.commit()
+
+            def rollback(self):
+                return self.connection.rollback()
+
+            def close(self):
+                return self.connection.close()
+
+        for platform, login, waiter_patch in cases:
+            with self.subTest(platform=platform):
+                status_queue = _ProtocolQueue()
+                page = _Page()
+                context = _Context(page)
+                browser = _Browser(context)
+
+                async def write_cookie(*, path):
+                    Path(path).write_text('{"synthetic":true}', encoding="utf-8")
+
+                context.storage_state = AsyncMock(side_effect=write_cookie)
+
+                def connect_and_cancel_after_insert(*args, **kwargs):
+                    return CancelAfterInsertConnection(
+                        real_connect(*args, **kwargs),
+                        status_queue.cancel_event,
+                    )
+
+                with patch(
+                    "myUtils.login.async_playwright",
+                    return_value=_playwright_manager(browser),
+                ), patch(
+                    "myUtils.login.set_init_script",
+                    new=AsyncMock(return_value=context),
+                ), patch(
+                    waiter_patch,
+                    new=AsyncMock(return_value=True),
+                ), patch(
+                    "myUtils.login.check_cookie",
+                    new=AsyncMock(return_value=True),
+                ), patch(
+                    "myUtils.login.sqlite3.connect",
+                    side_effect=connect_and_cancel_after_insert,
+                ):
+                    result = await login(
+                        f"synthetic-{platform}",
+                        status_queue,
+                        database_path=self.database_path,
+                        cookies_directory=self.cookies_directory,
+                    )
+
+                self.assertIsNone(result)
+                self.assertEqual(list(self.cookies_directory.glob("*.json")), [])
+                self.assertTrue(page.closed)
+                self.assertTrue(context.closed)
+                self.assertTrue(browser.closed)
+                self.assert_no_accounts()
+                _assert_operator_cancelled(self, status_queue)
 
     async def test_tiktok_cancel_during_poll_closes_owned_browser(self):
         status_queue = _ProtocolQueue()

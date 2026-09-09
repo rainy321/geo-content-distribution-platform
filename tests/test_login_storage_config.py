@@ -31,7 +31,8 @@ class LoginStorageConfigTests(unittest.IsolatedAsyncioTestCase):
         self.temp_dir.cleanup()
 
     async def test_xiaohongshu_login_persists_to_injected_storage(self):
-        async def fake_login(account_file, *, headless):
+        async def fake_login(account_file, *, headless, cancel_event):
+            self.assertIsNone(cancel_event)
             Path(account_file).write_text("{}", encoding="utf-8")
             return {"success": True, "message": "ok"}
 

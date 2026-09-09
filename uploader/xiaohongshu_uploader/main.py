@@ -265,12 +265,21 @@ async def xiaohongshu_cookie_gen(
     poll_interval: int = 3,
     max_checks: int = 100,
     headless: bool = LOCAL_CHROME_HEADLESS,
+    cancel_event=None,
 ):
     if headless:
         xiaohongshu_logger.info(_msg("🖼️", "小红书登录将以无头模式运行，小人会输出终端二维码并保存本地二维码图片"))
 
     account_path = Path(account_file)
     account_path.parent.mkdir(parents=True, exist_ok=True)
+
+    if cancel_event is not None and cancel_event.is_set():
+        return _build_login_result(
+            False,
+            "operator_cancelled",
+            "已结束本次小红书登录等待",
+            account_file,
+        )
 
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(headless=headless, channel="chrome")
@@ -279,17 +288,52 @@ async def xiaohongshu_cookie_gen(
         qrcode_path = None
         qrcode_info = None
         result = _build_login_result(False, "failed", "小红书登录失败", account_file)
+
+        def cancelled_result(current_url=""):
+            return _build_login_result(
+                False,
+                "operator_cancelled",
+                "已结束本次小红书登录等待",
+                account_file,
+                qrcode_info,
+                current_url,
+            )
+
+        async def wait_or_cancel(seconds):
+            remaining = max(0.0, float(seconds))
+            while remaining > 0:
+                if cancel_event is not None and cancel_event.is_set():
+                    return False
+                interval = min(0.2, remaining)
+                await asyncio.sleep(interval)
+                remaining -= interval
+            return not (cancel_event is not None and cancel_event.is_set())
+
         try:
+            if cancel_event is not None and cancel_event.is_set():
+                result = cancelled_result()
+                return result
             page = await context.new_page()
             await page.goto(XHS_LOGIN_URL)
+            if cancel_event is not None and cancel_event.is_set():
+                result = cancelled_result(page.url)
+                return result
             qrcode_info = await _save_xhs_qrcode(page, account_file, qrcode_callback=qrcode_callback)
             qrcode_path = Path(qrcode_info["image_path"])
             xiaohongshu_logger.info(_msg("🧍", "请扫码，小人正在耐心等待登录完成"))
 
             for _ in range(max_checks):
+                if cancel_event is not None and cancel_event.is_set():
+                    result = cancelled_result(page.url)
+                    return result
                 if await _is_xhs_login_completed(page):
-                    await asyncio.sleep(2)
+                    if not await wait_or_cancel(2):
+                        result = cancelled_result(page.url)
+                        return result
                     await context.storage_state(path=account_file)
+                    if cancel_event is not None and cancel_event.is_set():
+                        result = cancelled_result(page.url)
+                        return result
                     if await cookie_auth(account_file):
                         xiaohongshu_logger.success(_msg("🥳", "小红书扫码登录成功，小人开心收工"))
                         result = _build_login_result(True, "success", "小红书扫码登录成功", account_file, qrcode_info, page.url)
@@ -304,7 +348,9 @@ async def xiaohongshu_cookie_gen(
                         )
                     return result
 
-                await asyncio.sleep(poll_interval)
+                if not await wait_or_cancel(poll_interval):
+                    result = cancelled_result(page.url)
+                    return result
 
             result = _build_login_result(
                 False,
@@ -319,7 +365,7 @@ async def xiaohongshu_cookie_gen(
         finally:
             if remove_qrcode_file(qrcode_path):
                 xiaohongshu_logger.info(_msg("🧹", f"临时二维码文件已清理: {qrcode_path}"))
-            if not result["success"]:
+            if not result["success"] and result.get("status") != "operator_cancelled":
                 xiaohongshu_logger.error(_msg("😢", f"登录失败: {result['message']}"))
             await context.close()
             await browser.close()
