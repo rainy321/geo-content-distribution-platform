@@ -19,6 +19,7 @@ test('desktop shell exposes publishing navigation only to an authorized build', 
   assert.match(appSource, /watch\(\(\) => route\.path, enforcePublishingRouteBoundary\)/)
   assert.match(appSource, /authState\.mode === 'desktop_local'/)
   assert.match(appSource, /<DesktopStatusBar @status="handleDesktopStatus"/)
+  assert.match(appSource, /grid-template-columns: auto minmax\(0, 1fr\)/)
   assert.match(statusSource, /publishing_runtime: \{ \.\.\.\(status\.publishing_runtime \|\| \{\}\) \}/)
   assert.match(statusSource, /real_publishing_authorized/)
   assert.match(statusSource, /运行时未就绪/)

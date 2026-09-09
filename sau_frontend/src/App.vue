@@ -396,6 +396,8 @@ onBeforeUnmount(() => {
 }
 
 #app > .el-container {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
   width: 100%;
   overflow: hidden;
 }
@@ -498,9 +500,9 @@ onBeforeUnmount(() => {
 }
 
 .el-aside + .el-container {
-  width: auto;
+  width: 100%;
+  max-width: 100%;
   min-width: 0;
-  flex: 1 1 0%;
   overflow: hidden;
 }
 
