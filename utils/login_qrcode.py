@@ -8,6 +8,21 @@ import cv2
 import segno
 
 
+def _safe_stdout_write(text: str) -> bool:
+    """Best-effort console output that must never break a login flow."""
+    stream = getattr(sys, "stdout", None)
+    if stream is None:
+        return False
+
+    try:
+        stream.write(text)
+        return True
+    except Exception:
+        # Desktop/windowed builds may have no usable stdout, while redirected
+        # Windows consoles can reject Unicode. QR output is informational only.
+        return False
+
+
 def build_login_qrcode_path(account_file: str, suffix: str = "login_qrcode") -> Path:
     account_path = Path(account_file)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -45,16 +60,22 @@ def decode_qrcode_from_path(qrcode_path: Path) -> str | None:
 
 
 def _print_ascii_qrcode(qrcode) -> None:
-    border = 1
-    rows = list(qrcode.matrix)
-    empty_line = "  " * (len(rows[0]) + border * 2)
-    print(empty_line)
-    for row in rows:
-        line = ["  "] * border
-        line.extend("##" if cell else "  " for cell in row)
-        line.extend(["  "] * border)
-        print("".join(line))
-    print(empty_line)
+    try:
+        border = 1
+        rows = list(qrcode.matrix)
+        if not rows:
+            return
+        empty_line = "  " * (len(rows[0]) + border * 2)
+        _safe_stdout_write(f"{empty_line}\n")
+        for row in rows:
+            line = ["  "] * border
+            line.extend("##" if cell else "  " for cell in row)
+            line.extend(["  "] * border)
+            _safe_stdout_write(f"{''.join(line)}\n")
+        _safe_stdout_write(f"{empty_line}\n")
+    except Exception:
+        # Rendering a convenience preview must not abort the browser login.
+        return
 
 
 def print_terminal_qrcode(
@@ -64,16 +85,18 @@ def print_terminal_qrcode(
     compact: bool = True,
     border: int = 0,
 ) -> None:
-    print()
-    print(f"请使用{app_name}扫描下方二维码登录：")
+    _safe_stdout_write("\n")
+    _safe_stdout_write(f"请使用{app_name}扫描下方二维码登录：\n")
     qrcode = segno.make(qrcode_content, error="L", boost_error=False)
-    try:
-        if hasattr(sys.stdout, "reconfigure"):
-            sys.stdout.reconfigure(encoding="utf-8")
-        qrcode.terminal(compact=compact, border=border)
-    except (UnicodeEncodeError, OSError):
-        print("当前终端不支持 Unicode 二维码字符，已切换为 ASCII 打印：")
-        _print_ascii_qrcode(qrcode)
-    print("在 Windows 下建议使用 Windows Terminal（支持 UTF-8，可完整显示二维码）")
-    print(f"否则请打开 {qrcode_path} 扫码")
-    print()
+    stream = getattr(sys, "stdout", None)
+    if stream is not None:
+        try:
+            reconfigure = getattr(stream, "reconfigure", None)
+            if callable(reconfigure):
+                reconfigure(encoding="utf-8", errors="replace")
+            qrcode.terminal(out=stream, compact=compact, border=border)
+        except Exception:
+            _safe_stdout_write("当前终端无法显示 Unicode 二维码，已切换为 ASCII 打印：\n")
+            _print_ascii_qrcode(qrcode)
+    _safe_stdout_write("在 Windows 下建议使用 Windows Terminal（支持 UTF-8，可完整显示二维码）\n")
+    _safe_stdout_write(f"否则请打开 {qrcode_path} 扫码\n\n")

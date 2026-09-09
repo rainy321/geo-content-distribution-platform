@@ -85,6 +85,86 @@ def _login_cookies_directory(cookies_directory=None):
         else Path(BASE_DIR / "cookiesFile")
     )
 
+
+def _safe_login_log(
+    platform: str,
+    event: str,
+    *,
+    level: str = "info",
+    error: BaseException | None = None,
+) -> None:
+    """Write a secret-free login diagnostic without depending on a console.
+
+    Windowed PyInstaller processes can expose ``sys.stdout`` as ``None`` and
+    Windows consoles can reject Unicode output under a legacy code page. A
+    diagnostic must never abort the account-login coroutine, so this helper
+    writes an ASCII-only event to the existing UTF-8 file logger and contains
+    failures from the logging path itself. Business exceptions are still
+    handled by their original callers and reported to the SSE queue.
+    """
+
+    normalized_level = str(level).lower()
+    if normalized_level not in {"debug", "info", "success", "warning", "error"}:
+        normalized_level = "info"
+
+    normalized_platform = str(platform).lower()
+    if normalized_platform not in {
+        "baijiahao",
+        "bilibili",
+        "douyin",
+        "kuaishou",
+        "sohu",
+        "tiktok",
+        "toutiao",
+        "weixin_channels",
+        "xiaohongshu",
+    }:
+        normalized_platform = "unknown"
+
+    normalized_event = str(event).lower()
+    if normalized_event not in {
+        "account_saved",
+        "browser_launch_started",
+        "cookie_validation_failed",
+        "identity_confirmed",
+        "login_failed",
+        "login_page_navigation_started",
+        "login_page_opened",
+        "login_rejected",
+        "login_started",
+        "login_timeout",
+        "navigation_retry",
+        "qr_loaded",
+        "session_id_created",
+        "terminal_open_failed",
+        "terminal_opened",
+    }:
+        normalized_event = "unknown"
+
+    def _ascii_token(value, fallback):
+        token = "".join(
+            character
+            for character in str(value).lower()
+            if character.isascii() and (character.isalnum() or character in "_-.")
+        )
+        return token[:64] or fallback
+
+    message = (
+        f"login platform={normalized_platform} "
+        f"event={normalized_event}"
+    )
+    if error is not None:
+        message += f" error_type={_ascii_token(type(error).__name__, 'exception')}"
+
+    try:
+        from utils.log import login_logger
+
+        login_logger.log(normalized_level.upper(), message)
+    except Exception:
+        # Logging is diagnostic-only. Never let a missing/invalid stdout sink
+        # replace the actual browser, database, or platform outcome.
+        return
+
 # 统一获取浏览器启动配置（防风控+引入本地浏览器）
 def get_browser_options():
     options = {
@@ -108,7 +188,7 @@ def get_browser_options():
 async def wait_for_toutiao_creator_backend(
     page,
     *,
-    timeout_seconds=200,
+    timeout_seconds=600,
     poll_interval_seconds=1,
 ):
     """Detect Toutiao's SPA login transition without waiting for page load."""
@@ -182,7 +262,7 @@ async def douyin_cookie_gen(
         img_locator = page.get_by_role("img", name="二维码")
         # 获取 src 属性值
         src = await img_locator.get_attribute("src")
-        print("✅ 抖音登录二维码已加载")
+        _safe_login_log("douyin", "qr_loaded", level="success")
         status_queue.put(src)
         authenticated = await _wait_for_interactive_login(
             page,
@@ -193,14 +273,14 @@ async def douyin_cookie_gen(
             timeout_seconds=timeout_seconds,
         )
         if not authenticated:
-            print("等待抖音登录超时")
+            _safe_login_log("douyin", "login_timeout", level="warning")
             await page.close()
             await context.close()
             await browser.close()
             status_queue.put("500")
             return None
         uuid_v1 = uuid.uuid1()
-        print(f"UUID v1: {uuid_v1}")
+        _safe_login_log("douyin", "session_id_created")
         # 确保cookiesFile目录存在
         cookies_dir = _login_cookies_directory(cookies_directory)
         cookies_dir.mkdir(parents=True, exist_ok=True)
@@ -224,7 +304,7 @@ async def douyin_cookie_gen(
                                 VALUES (?, ?, ?, ?)
                                 ''', (3, f"{uuid_v1}.json", id, 1))
             conn.commit()
-            print("✅ 用户状态已记录")
+            _safe_login_log("douyin", "account_saved", level="success")
         status_queue.put("200")
 
 
@@ -255,7 +335,7 @@ async def get_tencent_cookie(
 
         # 获取 src 属性值
         src = await img_locator.get_attribute("src")
-        print("✅ 视频号登录二维码已加载")
+        _safe_login_log("weixin_channels", "qr_loaded", level="success")
         status_queue.put(src)
 
         authenticated = await _wait_for_interactive_login(
@@ -268,13 +348,13 @@ async def get_tencent_cookie(
         )
         if not authenticated:
             status_queue.put("500")
-            print("等待视频号登录超时")
+            _safe_login_log("weixin_channels", "login_timeout", level="warning")
             await page.close()
             await context.close()
             await browser.close()
             return None
         uuid_v1 = uuid.uuid1()
-        print(f"UUID v1: {uuid_v1}")
+        _safe_login_log("weixin_channels", "session_id_created")
         # 确保cookiesFile目录存在
         cookies_dir = _login_cookies_directory(cookies_directory)
         cookies_dir.mkdir(parents=True, exist_ok=True)
@@ -299,7 +379,7 @@ async def get_tencent_cookie(
                                 VALUES (?, ?, ?, ?)
                                 ''', (2, f"{uuid_v1}.json", id, 1))
             conn.commit()
-            print("✅ 用户状态已记录")
+            _safe_login_log("weixin_channels", "account_saved", level="success")
         status_queue.put("200")
 
 # 快手登录
@@ -327,7 +407,7 @@ async def get_ks_cookie(
         # 获取 src 属性值
         src = await img_locator.get_attribute("src")
         original_url = page.url
-        print("✅ 快手登录二维码已加载")
+        _safe_login_log("kuaishou", "qr_loaded", level="success")
         status_queue.put(src)
         authenticated = await _wait_for_interactive_login(
             page,
@@ -339,13 +419,13 @@ async def get_ks_cookie(
         )
         if not authenticated:
             status_queue.put("500")
-            print("等待快手登录超时")
+            _safe_login_log("kuaishou", "login_timeout", level="warning")
             await page.close()
             await context.close()
             await browser.close()
             return None
         uuid_v1 = uuid.uuid1()
-        print(f"UUID v1: {uuid_v1}")
+        _safe_login_log("kuaishou", "session_id_created")
         # 确保cookiesFile目录存在
         cookies_dir = _login_cookies_directory(cookies_directory)
         cookies_dir.mkdir(parents=True, exist_ok=True)
@@ -370,7 +450,7 @@ async def get_ks_cookie(
                                         VALUES (?, ?, ?, ?)
                                         ''', (4, f"{uuid_v1}.json", id, 1))
             conn.commit()
-            print("✅ 用户状态已记录")
+            _safe_login_log("kuaishou", "account_saved", level="success")
         status_queue.put("200")
 
 # 小红书登录
@@ -396,7 +476,7 @@ async def xiaohongshu_cookie_gen(
             headless=False,
         )
         if not result.get("success"):
-            print(f"❌ 小红书登录失败: {result.get('message')}")
+            _safe_login_log("xiaohongshu", "login_rejected", level="warning")
             status_queue.put("500")
             return None
 
@@ -410,11 +490,11 @@ async def xiaohongshu_cookie_gen(
                 (1, file_name, id, 1),
             )
             conn.commit()
-            print("✅ 小红书用户状态已记录")
+            _safe_login_log("xiaohongshu", "account_saved", level="success")
         status_queue.put("200")
         return True
     except Exception as exc:
-        print(f"❌ 小红书登录异常: {exc}")
+        _safe_login_log("xiaohongshu", "login_failed", level="error", error=exc)
         status_queue.put("500")
         return None
 
@@ -427,7 +507,7 @@ async def baijiahao_cookie_gen(
     page = None
     try:
         status_queue.put("MANUAL_LOGIN")
-        print(f"🟢 开始百家号登录: id={id}")
+        _safe_login_log("baijiahao", "login_started")
         async with async_playwright() as playwright:
             options = get_browser_options()
             options['headless'] = False
@@ -440,20 +520,20 @@ async def baijiahao_cookie_gen(
                 timeout=60000,
                 wait_until="domcontentloaded",
             )
-            print(f"🟢 百家号登录页已打开: {page.url}")
+            _safe_login_log("baijiahao", "login_page_opened")
             try:
                 await page.wait_for_url(
                     "https://baijiahao.baidu.com/builder/rc/**",
                     timeout=200_000,
                 )
-                print("✅ 百家号登录成功，检测到页面跳转")
+                _safe_login_log("baijiahao", "identity_confirmed", level="success")
             except asyncio.TimeoutError:
-                print("❌ 百家号登录超时")
+                _safe_login_log("baijiahao", "login_timeout", level="warning")
                 status_queue.put("500")
                 return None
 
             uuid_v1 = uuid.uuid1()
-            print(f"UUID v1: {uuid_v1}")
+            _safe_login_log("baijiahao", "session_id_created")
             cookies_dir = _login_cookies_directory(cookies_directory)
             cookies_dir.mkdir(parents=True, exist_ok=True)
             await context.storage_state(path=cookies_dir / f"{uuid_v1}.json")
@@ -462,7 +542,9 @@ async def baijiahao_cookie_gen(
                 5, f"{uuid_v1}.json", cookies_directory=cookies_dir
             )
             if not result:
-                print("⚠️ cookie 即时校验未通过，仍保存账号，请稍后刷新验证")
+                _safe_login_log(
+                    "baijiahao", "cookie_validation_failed", level="warning"
+                )
 
             with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
                 cursor = conn.cursor()
@@ -471,13 +553,11 @@ async def baijiahao_cookie_gen(
                     VALUES (?, ?, ?, ?)
                 ''', (5, f"{uuid_v1}.json", id, 1 if result else 0))
                 conn.commit()
-                print("✅ 百家号用户状态已记录")
+                _safe_login_log("baijiahao", "account_saved", level="success")
             status_queue.put("200")
             return True
     except Exception as e:
-        print(f"❌ 百家号登录异常: {e}")
-        import traceback
-        traceback.print_exc()
+        _safe_login_log("baijiahao", "login_failed", level="error", error=e)
         try:
             status_queue.put("500")
         except Exception:
@@ -503,7 +583,8 @@ async def baijiahao_cookie_gen(
 
 # 今日头条登录（扫码/手动，非二维码 SSE 推送，与百家号类似）
 async def toutiao_cookie_gen(
-    id, status_queue, *, database_path=None, cookies_directory=None
+    id, status_queue, *, database_path=None, cookies_directory=None,
+    timeout_seconds=600,
 ):
     browser = None
     context = None
@@ -511,28 +592,31 @@ async def toutiao_cookie_gen(
     try:
         # 尽早通知前端进入「手动登录」态，避免浏览器启动慢时一直转圈
         status_queue.put("MANUAL_LOGIN")
-        print(f"🟢 开始今日头条登录: id={id}")
+        _safe_login_log("toutiao", "login_started")
         async with async_playwright() as playwright:
             # 登录必须有头模式，方便用户扫码
             options = get_browser_options()
             options['headless'] = False
-            print(f"🟢 启动浏览器 options={ {k: v for k, v in options.items() if k != 'args'} }")
+            _safe_login_log("toutiao", "browser_launch_started")
             browser = await playwright.chromium.launch(**options)
             context = await browser.new_context()
             context = await set_init_script(context)
             page = await context.new_page()
-            print("🟢 打开今日头条登录页...")
+            _safe_login_log("toutiao", "login_page_navigation_started")
             await page.goto("https://mp.toutiao.com/auth/page/login", timeout=60000, wait_until="domcontentloaded")
-            print(f"🟢 登录页已打开: {page.url}")
-            if await wait_for_toutiao_creator_backend(page, timeout_seconds=200):
-                print("✅ 今日头条登录成功，检测到进入创作者后台")
+            _safe_login_log("toutiao", "login_page_opened")
+            if await wait_for_toutiao_creator_backend(
+                page,
+                timeout_seconds=timeout_seconds,
+            ):
+                _safe_login_log("toutiao", "identity_confirmed", level="success")
             else:
-                print("❌ 今日头条登录超时")
+                _safe_login_log("toutiao", "login_timeout", level="warning")
                 status_queue.put("500")
                 return None
 
             uuid_v1 = uuid.uuid1()
-            print(f"UUID v1: {uuid_v1}")
+            _safe_login_log("toutiao", "session_id_created")
             cookies_dir = _login_cookies_directory(cookies_directory)
             cookies_dir.mkdir(parents=True, exist_ok=True)
             await context.storage_state(path=cookies_dir / f"{uuid_v1}.json")
@@ -542,7 +626,9 @@ async def toutiao_cookie_gen(
                 7, f"{uuid_v1}.json", cookies_directory=cookies_dir
             )
             if not result:
-                print("⚠️ cookie 即时校验未通过，仍保存账号，请稍后刷新验证")
+                _safe_login_log(
+                    "toutiao", "cookie_validation_failed", level="warning"
+                )
 
             with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
                 cursor = conn.cursor()
@@ -551,13 +637,11 @@ async def toutiao_cookie_gen(
                     VALUES (?, ?, ?, ?)
                 ''', (7, f"{uuid_v1}.json", id, 1 if result else 0))
                 conn.commit()
-                print("✅ 今日头条用户状态已记录")
+                _safe_login_log("toutiao", "account_saved", level="success")
             status_queue.put("200")
             return True
     except Exception as e:
-        print(f"❌ 今日头条登录异常: {e}")
-        import traceback
-        traceback.print_exc()
+        _safe_login_log("toutiao", "login_failed", level="error", error=e)
         try:
             status_queue.put("500")
         except Exception:
@@ -589,18 +673,18 @@ async def sohu_cookie_gen(
     page = None
     try:
         status_queue.put("MANUAL_LOGIN")
-        print(f"🟢 开始搜狐号登录: id={id}")
+        _safe_login_log("sohu", "login_started")
         async with async_playwright() as playwright:
             options = get_browser_options()
             options['headless'] = False
-            print(f"🟢 启动浏览器 options={ {k: v for k, v in options.items() if k != 'args'} }")
+            _safe_login_log("sohu", "browser_launch_started")
             browser = await playwright.chromium.launch(**options)
             # 搜狐后台为 qiankun 微前端，禁止注入 stealth（会破坏 createElement）
             context = await browser.new_context()
             page = await context.new_page()
-            print("🟢 打开搜狐号登录页...")
+            _safe_login_log("sohu", "login_page_navigation_started")
             await page.goto("https://mp.sohu.com/mpfe/v4/login", timeout=60000, wait_until="domcontentloaded")
-            print(f"🟢 登录页已打开: {page.url}")
+            _safe_login_log("sohu", "login_page_opened")
             try:
                 await page.wait_for_url(
                     lambda url: (
@@ -610,14 +694,14 @@ async def sohu_cookie_gen(
                     ),
                     timeout=200_000,
                 )
-                print("✅ 搜狐号登录成功，检测到进入创作者后台")
+                _safe_login_log("sohu", "identity_confirmed", level="success")
             except asyncio.TimeoutError:
-                print("❌ 搜狐号登录超时")
+                _safe_login_log("sohu", "login_timeout", level="warning")
                 status_queue.put("500")
                 return None
 
             uuid_v1 = uuid.uuid1()
-            print(f"UUID v1: {uuid_v1}")
+            _safe_login_log("sohu", "session_id_created")
             cookies_dir = _login_cookies_directory(cookies_directory)
             cookies_dir.mkdir(parents=True, exist_ok=True)
             await context.storage_state(path=cookies_dir / f"{uuid_v1}.json")
@@ -626,7 +710,7 @@ async def sohu_cookie_gen(
                 8, f"{uuid_v1}.json", cookies_directory=cookies_dir
             )
             if not result:
-                print("⚠️ cookie 即时校验未通过，仍保存账号，请稍后刷新验证")
+                _safe_login_log("sohu", "cookie_validation_failed", level="warning")
 
             with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
                 cursor = conn.cursor()
@@ -635,13 +719,11 @@ async def sohu_cookie_gen(
                     VALUES (?, ?, ?, ?)
                 ''', (8, f"{uuid_v1}.json", id, 1 if result else 0))
                 conn.commit()
-                print("✅ 搜狐号用户状态已记录")
+                _safe_login_log("sohu", "account_saved", level="success")
             status_queue.put("200")
             return True
     except Exception as e:
-        print(f"❌ 搜狐号登录异常: {e}")
-        import traceback
-        traceback.print_exc()
+        _safe_login_log("sohu", "login_failed", level="error", error=e)
         try:
             status_queue.put("500")
         except Exception:
@@ -914,9 +996,9 @@ async def bilibili_cookie_gen(
             subprocess.Popen(
                 ['x-terminal-emulator', '-e', biliup_path, '-u', str(account_file), 'login']
             )
-        print(f"✅ 已打开终端窗口，请在终端中扫码登录Bilibili")
+        _safe_login_log("bilibili", "terminal_opened", level="success")
     except Exception as e:
-        print(f"❌ 打开终端失败: {e}")
+        _safe_login_log("bilibili", "terminal_open_failed", level="error", error=e)
         status_queue.put("500")
         return
 
@@ -926,7 +1008,7 @@ async def bilibili_cookie_gen(
         if account_file.exists():
             result = run_biliup_command(["-u", str(account_file), "renew"])
             if result.returncode == 0:
-                print("✅ Bilibili登录成功")
+                _safe_login_log("bilibili", "identity_confirmed", level="success")
                 with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
                     conn.cursor().execute(
                         'INSERT INTO user_info (type, filePath, userName, status) VALUES (?, ?, ?, ?)',
@@ -935,7 +1017,7 @@ async def bilibili_cookie_gen(
                 status_queue.put("200")
                 return
 
-    print("❌ Bilibili登录超时")
+    _safe_login_log("bilibili", "login_timeout", level="warning")
     status_queue.put("500")
 
 
@@ -972,7 +1054,7 @@ async def tiktok_cookie_gen(
                         break
                     except Exception as exc:
                         navigation_error = exc
-                        print(f"TikTok 登录页连接失败，正在重试（{attempt}/3）")
+                        _safe_login_log("tiktok", "navigation_retry", level="warning")
                         await page.wait_for_timeout(2000)
                 if navigation_error is not None:
                     raise RuntimeError("TikTok 登录页连续三次连接失败") from navigation_error
@@ -1005,10 +1087,9 @@ async def tiktok_cookie_gen(
         status_queue.put("200" if result else "500")
         return bool(result)
     except Exception as exc:
-        print(f"❌ TikTok登录异常: {exc}")
+        _safe_login_log("tiktok", "login_failed", level="error", error=exc)
         status_queue.put("500")
         return None
 
 
 # a = asyncio.run(xiaohongshu_cookie_gen(4,None))
-# print(a)
