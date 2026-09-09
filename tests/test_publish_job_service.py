@@ -16,6 +16,7 @@ from services.publish_job_service import (
     InvalidPublishJobTransitionError,
     PublishJobNotFoundError,
     UnsupportedPublishPlatformError,
+    build_publish_confirmation_fingerprint,
     claim_publish_job,
     create_publish_job,
     get_publish_job,
@@ -133,6 +134,50 @@ class PublishJobServiceTests(unittest.TestCase):
                 publish_at="2026-09-02T18:00:00+08:00",
                 auto_execute=1,
             )
+
+    def test_interactive_confirmation_fingerprint_binds_complete_snapshot(self):
+        article = {
+            "id": self.article_id,
+            "title": "确认标题",
+            "content": "确认正文",
+            "tags": ["GEO", "AI"],
+        }
+        job = {
+            "id": 7,
+            "state_version": 3,
+            "platform": "zhihu",
+            "account_id": 11,
+            "images": ["cover.png"],
+            "video": "clip.mp4",
+            "publish_at": "2026-09-09T18:00:00+08:00",
+        }
+        baseline = build_publish_confirmation_fingerprint(
+            job=job,
+            article=article,
+        )
+        variants = (
+            ({**job}, {**article, "title": "新标题"}),
+            ({**job}, {**article, "content": "新正文"}),
+            ({**job}, {**article, "tags": ["GEO"]}),
+            ({**job, "platform": "toutiao"}, {**article}),
+            ({**job, "account_id": 12}, {**article}),
+            ({**job, "images": ["other.png"]}, {**article}),
+            ({**job, "video": "other.mp4"}, {**article}),
+            ({**job, "publish_at": None}, {**article}),
+            ({**job, "id": 8}, {**article}),
+            ({**job, "state_version": 4}, {**article}),
+        )
+
+        self.assertEqual(len(baseline), 64)
+        for changed_job, changed_article in variants:
+            with self.subTest(job=changed_job, article=changed_article):
+                self.assertNotEqual(
+                    baseline,
+                    build_publish_confirmation_fingerprint(
+                        job=changed_job,
+                        article=changed_article,
+                    ),
+                )
 
     def test_persists_portable_image_filenames_across_reads_and_retries(self):
         job = create_publish_job(

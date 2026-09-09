@@ -63,36 +63,29 @@ class RealPublisherFactory:
             )
 
         raw_account_id = job.get("account_id")
-        bound_account_id: int | None = None
-        if raw_account_id not in {None, ""}:
-            try:
-                bound_account_id = int(raw_account_id)
-            except (TypeError, ValueError) as exc:
-                raise PublisherNotConfiguredError("发布任务绑定的账号 ID 无效") from exc
-            if bound_account_id <= 0:
-                raise PublisherNotConfiguredError("发布任务绑定的账号 ID 无效")
+        if raw_account_id in {None, ""}:
+            raise PublisherNotConfiguredError(
+                f"{platform} 任务未绑定明确账号；为避免误发到后来登录的账号，请重新创建任务"
+            )
+        if isinstance(raw_account_id, bool):
+            raise PublisherNotConfiguredError("发布任务绑定的账号 ID 无效")
+        try:
+            bound_account_id = int(raw_account_id)
+        except (TypeError, ValueError) as exc:
+            raise PublisherNotConfiguredError("发布任务绑定的账号 ID 无效") from exc
+        if bound_account_id <= 0:
+            raise PublisherNotConfiguredError("发布任务绑定的账号 ID 无效")
 
         with closing(sqlite3.connect(self.database_path)) as conn:
             conn.row_factory = sqlite3.Row
-            if bound_account_id is None:
-                rows = conn.execute(
-                    """
-                    SELECT id, filePath, userName
-                    FROM user_info
-                    WHERE type = ? AND status = 1
-                    ORDER BY COALESCE(last_checked_at, '') DESC, id DESC
-                    """,
-                    (account_type,),
-                ).fetchall()
-            else:
-                rows = conn.execute(
-                    """
-                    SELECT id, filePath, userName
-                    FROM user_info
-                    WHERE id = ? AND type = ? AND status = 1
-                    """,
-                    (bound_account_id, account_type),
-                ).fetchall()
+            rows = conn.execute(
+                """
+                SELECT id, filePath, userName
+                FROM user_info
+                WHERE id = ? AND type = ? AND status = 1
+                """,
+                (bound_account_id, account_type),
+            ).fetchall()
 
         for row in rows:
             account_file = self._safe_cookie_path(row["filePath"])
@@ -118,13 +111,9 @@ class RealPublisherFactory:
                 if platform == "tiktok":
                     return TiktokPublisherAdapter(account_file)
 
-        if bound_account_id is not None:
-            raise PublisherNotConfiguredError(
-                f"{platform} 任务绑定的账号 {bound_account_id} 当前不可用，"
-                "请重新登录该账号或创建绑定新账号的任务"
-            )
         raise PublisherNotConfiguredError(
-            f"{platform} 没有可用的已连接账号，请先在媒体账号页登录并检测状态"
+            f"{platform} 任务绑定的账号 {bound_account_id} 当前不可用，"
+            "请重新登录该账号或创建绑定新账号的任务"
         )
 
     def _safe_cookie_path(self, value: str) -> Path | None:

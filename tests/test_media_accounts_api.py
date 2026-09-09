@@ -1,4 +1,5 @@
 import tempfile
+import sys
 import unittest
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -20,21 +21,31 @@ class MediaAccountsApiTests(unittest.TestCase):
         self.cookies_directory = self.temp_root / "cookies"
         self.cookies_directory.mkdir()
         initialize_database(self.db_path)
-        self.original_database_path = app.config["DATABASE_PATH"]
-        self.original_cookies_directory = app.config["COOKIES_DIRECTORY"]
-        self.original_testing = app.testing
-        self.original_bilibili_runtime = app.config["ENABLE_BILIBILI_RUNTIME"]
-        app.config["DATABASE_PATH"] = self.db_path
-        app.config["COOKIES_DIRECTORY"] = self.cookies_directory
-        app.config["TESTING"] = True
-        app.config["ENABLE_BILIBILI_RUNTIME"] = False
+        self.original_config = {
+            key: app.config.get(key)
+            for key in (
+                "DATABASE_PATH",
+                "COOKIES_DIRECTORY",
+                "TESTING",
+                "ENABLE_BILIBILI_RUNTIME",
+                "ALLOW_REAL_PUBLISHING",
+                "REAL_PUBLISHING_AUTHORIZED",
+                "PUBLISHING_RUNTIME_READY",
+            )
+        }
+        app.config.update(
+            DATABASE_PATH=self.db_path,
+            COOKIES_DIRECTORY=self.cookies_directory,
+            TESTING=True,
+            ENABLE_BILIBILI_RUNTIME=False,
+            ALLOW_REAL_PUBLISHING=True,
+            REAL_PUBLISHING_AUTHORIZED=True,
+            PUBLISHING_RUNTIME_READY=True,
+        )
         self.client = app.test_client()
 
     def tearDown(self):
-        app.config["DATABASE_PATH"] = self.original_database_path
-        app.config["COOKIES_DIRECTORY"] = self.original_cookies_directory
-        app.config["TESTING"] = self.original_testing
-        app.config["ENABLE_BILIBILI_RUNTIME"] = self.original_bilibili_runtime
+        app.config.update(self.original_config)
         self.temp_dir.cleanup()
 
     def test_returns_structured_empty_platform_overview(self):
@@ -91,6 +102,33 @@ class MediaAccountsApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 403)
         self.assertIn("ENABLE_BILIBILI_RUNTIME", response.get_json()["msg"])
+
+    def test_safe_build_gate_precedes_playwright_import(self):
+        app.config["REAL_PUBLISHING_AUTHORIZED"] = False
+        app.config["ALLOW_REAL_PUBLISHING"] = False
+
+        with patch.dict(sys.modules, {"myUtils.auth": None}), patch(
+            "sau_backend.check_media_account",
+            new=AsyncMock(),
+        ) as mocked:
+            response = self.client.post("/api/media-accounts/7/check")
+
+        self.assertEqual(response.status_code, 403)
+        mocked.assert_not_awaited()
+
+    def test_missing_runtime_gate_precedes_playwright_import(self):
+        app.config["REAL_PUBLISHING_AUTHORIZED"] = True
+        app.config["PUBLISHING_RUNTIME_READY"] = False
+        app.config["ALLOW_REAL_PUBLISHING"] = False
+
+        with patch.dict(sys.modules, {"myUtils.auth": None}), patch(
+            "sau_backend.check_media_account",
+            new=AsyncMock(),
+        ) as mocked:
+            response = self.client.post("/api/media-accounts/7/check")
+
+        self.assertEqual(response.status_code, 503)
+        mocked.assert_not_awaited()
 
 
 if __name__ == "__main__":

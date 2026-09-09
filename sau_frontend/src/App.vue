@@ -38,7 +38,7 @@
               <el-icon><HomeFilled /></el-icon>
               <span>首页</span>
             </el-menu-item>
-            <el-menu-item v-if="!desktopMode" index="/account-management">
+            <el-menu-item v-if="publishingWorkspaceVisible" index="/account-management">
               <el-icon><User /></el-icon>
               <span>媒体账号</span>
             </el-menu-item>
@@ -66,7 +66,7 @@
               <el-icon><Picture /></el-icon>
               <span>素材管理</span>
             </el-menu-item>
-            <el-menu-item v-if="!desktopMode" index="/publish-center">
+            <el-menu-item v-if="publishingWorkspaceVisible" index="/publish-center">
               <el-icon><Upload /></el-icon>
               <span>发布中心</span>
             </el-menu-item>
@@ -164,8 +164,8 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import AccessGate from '@/components/AccessGate.vue'
 import DesktopStatusBar from '@/components/DesktopStatusBar.vue'
@@ -177,6 +177,7 @@ import {
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
+const router = useRouter()
 const authState = reactive({
   loading: true,
   required: false,
@@ -200,6 +201,11 @@ const canChangePassword = computed(() => Boolean(
   && !passwordDialog.submitting
 ))
 const desktopMode = ref(false)
+const desktopStatusResolved = ref(false)
+const desktopRealPublishingAuthorized = ref(false)
+const publishingWorkspaceVisible = computed(() => (
+  !desktopMode.value || desktopRealPublishingAuthorized.value
+))
 
 // 当前激活的菜单项
 const activeMenu = computed(() => {
@@ -252,9 +258,26 @@ const handleAuthRequired = () => {
   authState.authenticated = false
 }
 
+const enforcePublishingRouteBoundary = () => {
+  if (
+    desktopStatusResolved.value
+    && desktopMode.value
+    && !desktopRealPublishingAuthorized.value
+    && ['/account-management', '/publish-center'].includes(route.path)
+  ) {
+    ElMessage.warning('当前安全构建未授权媒体账号与真实发布功能')
+    router.replace('/')
+  }
+}
+
 const handleDesktopStatus = (status) => {
   desktopMode.value = Boolean(status?.desktop)
+  desktopRealPublishingAuthorized.value = Boolean(status?.real_publishing_authorized)
+  desktopStatusResolved.value = true
+  enforcePublishingRouteBoundary()
 }
+
+watch(() => route.path, enforcePublishingRouteBoundary)
 
 const resetPasswordDialog = () => {
   passwordDialog.current = ''

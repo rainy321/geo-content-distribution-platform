@@ -1,10 +1,11 @@
 import unittest
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import AsyncMock, Mock, patch
 
 from services.baijiahao_publish_flow import (
     _summarize_responses,
     click_exact_publish_and_observe,
 )
+from uploader.baijiahao_uploader.main import _launch_browser
 
 
 class _Candidates:
@@ -120,6 +121,33 @@ class BaijiahaoPublishFlowTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["status"], "need_action")
         self.assertIn("人机验证", result["message"])
+
+    async def test_browser_launcher_falls_back_to_chrome_channel_without_stale_path(self):
+        browser = object()
+        playwright = Mock()
+        playwright.chromium.launch = AsyncMock(
+            side_effect=[OSError("synthetic missing executable"), browser]
+        )
+        proxy = {"server": "http://127.0.0.1:7890"}
+
+        with patch(
+            "uploader.baijiahao_uploader.main.LOCAL_CHROME_PATH",
+            r"C:\synthetic\chrome.exe",
+        ):
+            result = await _launch_browser(
+                playwright,
+                False,
+                proxy_setting=proxy,
+            )
+
+        self.assertIs(result, browser)
+        first_kwargs = playwright.chromium.launch.await_args_list[0].kwargs
+        fallback_kwargs = playwright.chromium.launch.await_args_list[1].kwargs
+        self.assertEqual(first_kwargs["executable_path"], r"C:\synthetic\chrome.exe")
+        self.assertEqual(first_kwargs["proxy"], proxy)
+        self.assertNotIn("executable_path", fallback_kwargs)
+        self.assertEqual(fallback_kwargs["channel"], "chrome")
+        self.assertEqual(fallback_kwargs["proxy"], proxy)
 
 
 if __name__ == "__main__":

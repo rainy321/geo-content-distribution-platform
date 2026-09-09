@@ -59,13 +59,13 @@ class RealPublisherFactoryTests(unittest.TestCase):
     def test_builds_zhihu_adapter_from_connected_local_cookie(self):
         cookie_file = self.cookies_dir / "zhihu.json"
         cookie_file.write_text("{}", encoding="utf-8")
-        self._insert_account("zhihu.json", checked_at="2026-08-31 14:30:00")
+        account_id = self._insert_account("zhihu.json", checked_at="2026-08-31 14:30:00")
         factory = RealPublisherFactory(
             self.db_path,
             cookies_directory=self.cookies_dir,
         )
 
-        publisher = factory({"platform": "zhihu"})
+        publisher = factory({"platform": "zhihu", "account_id": account_id})
 
         self.assertIsInstance(publisher, ZhihuPublisherAdapter)
         self.assertEqual(Path(publisher.account_file), cookie_file)
@@ -73,7 +73,7 @@ class RealPublisherFactoryTests(unittest.TestCase):
     def test_builds_toutiao_adapter_from_connected_local_cookie(self):
         cookie_file = self.cookies_dir / "toutiao.json"
         cookie_file.write_text("{}", encoding="utf-8")
-        self._insert_account(
+        account_id = self._insert_account(
             "toutiao.json",
             account_type=7,
             account_name="头条账号",
@@ -84,7 +84,7 @@ class RealPublisherFactoryTests(unittest.TestCase):
             cookies_directory=self.cookies_dir,
         )
 
-        publisher = factory({"platform": "toutiao"})
+        publisher = factory({"platform": "toutiao", "account_id": account_id})
 
         self.assertIsInstance(publisher, ToutiaoPublisherAdapter)
         self.assertEqual(Path(publisher.account_file), cookie_file)
@@ -92,7 +92,7 @@ class RealPublisherFactoryTests(unittest.TestCase):
     def test_builds_sohu_adapter_from_connected_local_cookie(self):
         cookie_file = self.cookies_dir / "sohu.json"
         cookie_file.write_text("{}", encoding="utf-8")
-        self._insert_account(
+        account_id = self._insert_account(
             "sohu.json",
             account_type=8,
             account_name="搜狐账号",
@@ -103,7 +103,7 @@ class RealPublisherFactoryTests(unittest.TestCase):
             cookies_directory=self.cookies_dir,
         )
 
-        publisher = factory({"platform": "sohu"})
+        publisher = factory({"platform": "sohu", "account_id": account_id})
 
         self.assertIsInstance(publisher, SohuPublisherAdapter)
         self.assertEqual(Path(publisher.account_file), cookie_file)
@@ -111,22 +111,22 @@ class RealPublisherFactoryTests(unittest.TestCase):
     def test_builds_baijiahao_adapter_from_connected_local_cookie(self):
         cookie_file = self.cookies_dir / "baijiahao.json"
         cookie_file.write_text("{}", encoding="utf-8")
-        self._insert_account("baijiahao.json", account_type=5)
+        account_id = self._insert_account("baijiahao.json", account_type=5)
         publisher = RealPublisherFactory(
             self.db_path,
             cookies_directory=self.cookies_dir,
-        )({"platform": "baijiahao"})
+        )({"platform": "baijiahao", "account_id": account_id})
 
         self.assertIsInstance(publisher, BaijiahaoPublisherAdapter)
 
     def test_builds_xiaohongshu_adapter_from_connected_local_cookie(self):
         cookie_file = self.cookies_dir / "xiaohongshu.json"
         cookie_file.write_text("{}", encoding="utf-8")
-        self._insert_account("xiaohongshu.json", account_type=1)
+        account_id = self._insert_account("xiaohongshu.json", account_type=1)
         publisher = RealPublisherFactory(
             self.db_path,
             cookies_directory=self.cookies_dir,
-        )({"platform": "xiaohongshu"})
+        )({"platform": "xiaohongshu", "account_id": account_id})
 
         self.assertIsInstance(publisher, XiaohongshuPublisherAdapter)
 
@@ -147,13 +147,16 @@ class RealPublisherFactoryTests(unittest.TestCase):
             with self.subTest(platform=platform):
                 filename = f"{platform}.json"
                 (self.cookies_dir / filename).write_text("{}", encoding="utf-8")
-                self._insert_account(filename, account_type=account_type)
-                self.assertIsInstance(factory({"platform": platform}), expected_class)
+                account_id = self._insert_account(filename, account_type=account_type)
+                self.assertIsInstance(
+                    factory({"platform": platform, "account_id": account_id}),
+                    expected_class,
+                )
 
     def test_bilibili_factory_is_fail_closed_by_default(self):
         cookie_file = self.cookies_dir / "bilibili.json"
         cookie_file.write_text("{}", encoding="utf-8")
-        self._insert_account("bilibili.json", account_type=6)
+        account_id = self._insert_account("bilibili.json", account_type=6)
         factory = RealPublisherFactory(
             self.db_path,
             cookies_directory=self.cookies_dir,
@@ -163,9 +166,9 @@ class RealPublisherFactoryTests(unittest.TestCase):
             PublisherNotConfiguredError,
             "ENABLE_BILIBILI_RUNTIME=true",
         ):
-            factory({"platform": "bilibili"})
+            factory({"platform": "bilibili", "account_id": account_id})
 
-    def test_prefers_newest_account_when_check_times_are_equal(self):
+    def test_refuses_unbound_job_instead_of_selecting_newest_account(self):
         old_cookie = self.cookies_dir / "channels-old.json"
         new_cookie = self.cookies_dir / "channels-new.json"
         old_cookie.write_text("{}", encoding="utf-8")
@@ -181,12 +184,15 @@ class RealPublisherFactoryTests(unittest.TestCase):
             account_name="channels-secondary",
         )
 
-        publisher = RealPublisherFactory(
+        factory = RealPublisherFactory(
             self.db_path,
             cookies_directory=self.cookies_dir,
-        )({"platform": "channels"})
+        )
 
-        self.assertEqual(Path(publisher.account_file), new_cookie)
+        with self.assertRaisesRegex(PublisherNotConfiguredError, "未绑定明确账号"):
+            factory({"platform": "channels"})
+        with self.assertRaisesRegex(PublisherNotConfiguredError, "ID 无效"):
+            factory({"platform": "channels", "account_id": True})
 
     def test_bound_account_does_not_drift_to_newer_login(self):
         old_cookie = self.cookies_dir / "channels-old.json"
@@ -223,7 +229,7 @@ class RealPublisherFactoryTests(unittest.TestCase):
     def test_refuses_missing_expired_and_path_traversal_credentials(self):
         outside = self.root / "outside.json"
         outside.write_text("{}", encoding="utf-8")
-        self._insert_account("missing.json", status=1)
+        missing_id = self._insert_account("missing.json", status=1)
         self._insert_account("../outside.json", status=1)
         valid_but_expired = self.cookies_dir / "expired.json"
         valid_but_expired.write_text("{}", encoding="utf-8")
@@ -233,8 +239,8 @@ class RealPublisherFactoryTests(unittest.TestCase):
             cookies_directory=self.cookies_dir,
         )
 
-        with self.assertRaisesRegex(PublisherNotConfiguredError, "没有可用"):
-            factory({"platform": "zhihu"})
+        with self.assertRaisesRegex(PublisherNotConfiguredError, "当前不可用"):
+            factory({"platform": "zhihu", "account_id": missing_id})
 
 
 if __name__ == "__main__":

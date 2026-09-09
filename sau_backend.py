@@ -129,14 +129,19 @@ from services.project_service import (
     list_projects,
     update_project,
 )
-from services.publish_job_executor import execute_publish_job
+from services.publish_job_executor import (
+    PublishConfirmationMismatchError,
+    execute_publish_job,
+)
 from services.publish_job_service import (
     PUBLISH_JOB_STATUSES,
     InvalidPublishJobTransitionError,
     PublishJobNotFoundError,
     UnsupportedPublishPlatformError,
+    build_publish_confirmation_fingerprint,
     create_publish_job,
     get_publish_job,
+    get_publish_job_with_confirmation_snapshot,
     list_publish_jobs,
     normalize_publish_images,
     normalize_publish_video,
@@ -246,9 +251,50 @@ app.config["ALLOW_REAL_PUBLISHING"] = str(
     "yes",
     "on",
 }
+_real_publishing_authorized_value = os.getenv(
+    "GEO_REAL_PUBLISHING_AUTHORIZED"
+)
+app.config["REAL_PUBLISHING_AUTHORIZED"] = (
+    None
+    if _real_publishing_authorized_value is None
+    else _environment_flag("GEO_REAL_PUBLISHING_AUTHORIZED")
+)
 app.config["ENABLE_BILIBILI_RUNTIME"] = _environment_flag(
     "ENABLE_BILIBILI_RUNTIME"
 )
+app.config["ALLOW_LEGACY_DIRECT_PUBLISHING"] = _environment_flag(
+    "ALLOW_LEGACY_DIRECT_PUBLISHING"
+)
+app.config["PUBLISHING_RUNTIME_READY"] = _environment_flag(
+    "GEO_PUBLISHING_RUNTIME_READY",
+    default=not _environment_flag("GEO_DESKTOP_MODE"),
+)
+# A future two-phase authorization flow may safely enable unattended real
+# publishing.  This release deliberately keeps the capability fail-closed.
+app.config["SCHEDULED_REAL_PUBLISHING_ENABLED"] = False
+
+
+def _real_publishing_authorized():
+    """Return immutable desktop intent, or the web deployment switch."""
+
+    configured = app.config.get("REAL_PUBLISHING_AUTHORIZED")
+    if configured is None:
+        return bool(app.config.get("ALLOW_REAL_PUBLISHING", False))
+    return bool(configured)
+
+
+def _scheduled_real_publishing_allowed():
+    """Require every safety gate before a background worker may load adapters."""
+
+    return bool(
+        app.config.get("SCHEDULED_REAL_PUBLISHING_ENABLED", False)
+        and _real_publishing_authorized()
+        and app.config.get("PUBLISHING_RUNTIME_READY", False)
+        and app.config.get("ALLOW_REAL_PUBLISHING", False)
+        and not app.config.get("DEMO_MODE", False)
+    )
+
+
 access_password = str(os.getenv("APP_ACCESS_PASSWORD", "")).strip()
 session_secret = str(os.getenv("APP_SESSION_SECRET", "")).strip()
 desktop_mode = _environment_flag("GEO_DESKTOP_MODE")
@@ -727,8 +773,18 @@ def get_health_status():
                 "real_publishing_enabled": bool(
                     app.config.get("ALLOW_REAL_PUBLISHING", False)
                 ),
+                "real_publishing_authorized": _real_publishing_authorized(),
                 "bilibili_runtime_enabled": bool(
                     app.config.get("ENABLE_BILIBILI_RUNTIME", False)
+                ),
+                "publishing_runtime_ready": bool(
+                    app.config.get("PUBLISHING_RUNTIME_READY", False)
+                ),
+                "legacy_direct_publishing_enabled": bool(
+                    app.config.get("ALLOW_LEGACY_DIRECT_PUBLISHING", False)
+                ),
+                "scheduled_real_publishing_enabled": bool(
+                    app.config.get("SCHEDULED_REAL_PUBLISHING_ENABLED", False)
                 ),
             },
         }
@@ -1395,6 +1451,22 @@ def get_media_accounts():
 async def check_media_account_status(account_id):
     # The checker loads Playwright, so keep it out of the serverless cold-start
     # path. Account/browser operations are only supported by the local worker.
+    if not _real_publishing_authorized():
+        return jsonify(
+            {"code": 403, "msg": "当前桌面构建未授权媒体账号检测", "data": None}
+        ), 403
+    if not app.config.get("PUBLISHING_RUNTIME_READY", False):
+        return jsonify(
+            {
+                "code": 503,
+                "msg": "本机发布运行时未就绪，请安装 Google Chrome 或重新安装完整发布版",
+                "data": None,
+            }
+        ), 503
+    if not app.config.get("ALLOW_REAL_PUBLISHING", False):
+        return jsonify(
+            {"code": 403, "msg": "媒体账号检测开关未开启", "data": None}
+        ), 403
     from myUtils.auth import check_cookie
 
     try:
@@ -1973,6 +2045,24 @@ def create_publish_task():
     if article_id <= 0:
         return jsonify({"code": 400, "msg": "article_id 必须是正整数", "data": None}), 400
 
+    raw_account_id = data.get("account_id")
+    account_id = None
+    if raw_account_id not in {None, ""}:
+        if isinstance(raw_account_id, bool):
+            return jsonify(
+                {"code": 400, "msg": "account_id 必须是正整数", "data": None}
+            ), 400
+        try:
+            account_id = int(raw_account_id)
+        except (TypeError, ValueError):
+            return jsonify(
+                {"code": 400, "msg": "account_id 必须是正整数", "data": None}
+            ), 400
+        if account_id <= 0:
+            return jsonify(
+                {"code": 400, "msg": "account_id 必须是正整数", "data": None}
+            ), 400
+
     platform = str(data.get("platform") or "").strip().lower()
     if not platform:
         return jsonify({"code": 400, "msg": "platform 不能为空", "data": None}), 400
@@ -1986,6 +2076,64 @@ def create_publish_task():
     capability = get_platform_capability(platform)
     if capability is None:
         return jsonify({"code": 400, "msg": "暂不支持该发布平台", "data": None}), 400
+    auto_execute = data.get("auto_execute", False)
+    if not isinstance(auto_execute, bool):
+        return jsonify(
+            {"code": 400, "msg": "auto_execute 必须是布尔值", "data": None}
+        ), 400
+    if auto_execute and not data.get("publish_at"):
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "auto_execute 仅适用于定时发布任务",
+                "data": None,
+            }
+        ), 400
+    if (
+        auto_execute
+        and not app.config.get("DEMO_MODE", False)
+        and not app.config.get("SCHEDULED_REAL_PUBLISHING_ENABLED", False)
+    ):
+        return jsonify(
+            {
+                "code": 403,
+                "msg": (
+                    "定时真实自动发布当前关闭；请创建普通定时任务，"
+                    "到期后人工确认"
+                ),
+                "data": {"scheduled_real_publishing_enabled": False},
+            }
+        ), 403
+    if (
+        not app.config.get("DEMO_MODE", False)
+        and not app.config.get("PUBLISHING_RUNTIME_READY", False)
+    ):
+        return jsonify(
+            {
+                "code": 503,
+                "msg": "本机发布运行时未就绪，未创建真实发布任务",
+                "data": {
+                    "action": "install_runtime",
+                    "platform": platform,
+                },
+            }
+        ), 503
+    if (
+        not app.config.get("DEMO_MODE", False)
+        and app.config.get("ALLOW_REAL_PUBLISHING", False)
+        and account_id is None
+    ):
+        return jsonify(
+            {
+                "code": 409,
+                "msg": f"真实发布任务必须先选择一个{capability['name']}账号",
+                "data": {
+                    "action": "login_required",
+                    "platform": platform,
+                    "account_type": capability["account_type"],
+                },
+            }
+        ), 409
 
     auto_image = data.get("auto_image", False)
     if not isinstance(auto_image, bool):
@@ -2037,33 +2185,9 @@ def create_publish_task():
             }
         ), 400
 
-    auto_execute = data.get("auto_execute", False)
-    if not isinstance(auto_execute, bool):
-        return jsonify(
-            {"code": 400, "msg": "auto_execute 必须是布尔值", "data": None}
-        ), 400
-    if auto_execute and not data.get("publish_at"):
-        return jsonify(
-            {
-                "code": 400,
-                "msg": "auto_execute 仅适用于定时发布任务",
-                "data": None,
-            }
-        ), 400
     if (
         auto_execute
         and not app.config.get("DEMO_MODE", False)
-        and not app.config.get("ALLOW_REAL_PUBLISHING", False)
-    ):
-        return jsonify(
-            {
-                "code": 403,
-                "msg": "定时真实自动执行需要先开启 ALLOW_REAL_PUBLISHING",
-                "data": None,
-            }
-        ), 403
-    if (
-        auto_execute
         and platform == BILIBILI_PLATFORM_KEY
         and not app.config.get("ENABLE_BILIBILI_RUNTIME", False)
     ):
@@ -2085,6 +2209,7 @@ def create_publish_task():
             publish_at=data.get("publish_at"),
             auto_execute=auto_execute,
             demo=bool(app.config.get("DEMO_MODE", False)),
+            account_id=account_id,
         )
     except ArticleNotFoundError as exc:
         return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
@@ -2136,11 +2261,22 @@ def get_publish_task_list():
 @app.route('/api/publish/jobs/<int:job_id>', methods=['GET'])
 def get_publish_task_detail(job_id):
     try:
-        job = get_publish_job(app.config["DATABASE_PATH"], job_id)
+        job, confirmation_article = get_publish_job_with_confirmation_snapshot(
+            app.config["DATABASE_PATH"],
+            job_id,
+        )
     except PublishJobNotFoundError as exc:
         return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
     return jsonify(
-        {"code": 200, "msg": "success", "data": _publish_job_payload(job)}
+        {
+            "code": 200,
+            "msg": "success",
+            "data": _publish_job_payload(
+                job,
+                confirmation_article=confirmation_article,
+                include_confirmation_snapshot=True,
+            ),
+        }
     ), 200
 
 
@@ -2200,13 +2336,25 @@ def execute_real_publish_task(job_id):
         return jsonify(
             {"code": 403, "msg": "Demo Mode 已开启，真实发布被禁用", "data": None}
         ), 403
-    if not app.config.get("ALLOW_REAL_PUBLISHING", False):
+    if not _real_publishing_authorized():
         return jsonify(
             {
                 "code": 403,
-                "msg": "真实发布总开关未开启，请设置 ALLOW_REAL_PUBLISHING=true",
+                "msg": "当前桌面构建未授权真实发布",
                 "data": None,
             }
+        ), 403
+    if not app.config.get("PUBLISHING_RUNTIME_READY", False):
+        return jsonify(
+            {
+                "code": 503,
+                "msg": "本机发布运行时未就绪，请安装 Google Chrome 或重新安装完整发布版",
+                "data": None,
+            }
+        ), 503
+    if not app.config.get("ALLOW_REAL_PUBLISHING", False):
+        return jsonify(
+            {"code": 403, "msg": "真实发布运行开关未开启", "data": None}
         ), 403
     if (
         current["platform"] == BILIBILI_PLATFORM_KEY
@@ -2224,6 +2372,64 @@ def execute_real_publish_task(job_id):
         return jsonify(
             {"code": 400, "msg": "真实发布需要明确确认", "data": None}
         ), 400
+    if current.get("account_id") is None:
+        return jsonify(
+            {
+                "code": 409,
+                "msg": "该任务未绑定明确账号，禁止使用后来登录的账号执行；请重新创建任务",
+                "data": {
+                    "action": "recreate_with_account",
+                    "platform": current["platform"],
+                },
+            }
+        ), 409
+    confirmation_fields = {
+        "job_id": data.get("job_id"),
+        "state_version": data.get("state_version"),
+        "account_id": data.get("account_id"),
+    }
+    if any(
+        isinstance(value, bool) or not isinstance(value, int)
+        for value in confirmation_fields.values()
+    ):
+        return jsonify(
+            {"code": 400, "msg": "真实发布确认信息不完整", "data": None}
+        ), 400
+    confirmed_job_id = confirmation_fields["job_id"]
+    confirmed_state_version = confirmation_fields["state_version"]
+    confirmed_account_id = confirmation_fields["account_id"]
+    if (
+        confirmed_job_id != job_id
+        or confirmed_state_version != int(current.get("state_version", -1))
+        or confirmed_account_id != int(current["account_id"])
+    ):
+        return jsonify(
+            {
+                "code": 409,
+                "msg": "任务、账号或内容状态已变化，请刷新后重新确认",
+                "data": None,
+            }
+        ), 409
+    provided_fingerprint = data.get("confirmation_fingerprint")
+    if not isinstance(provided_fingerprint, str) or re.fullmatch(
+        r"[0-9a-f]{64}", provided_fingerprint
+    ) is None:
+        return jsonify(
+            {"code": 400, "msg": "真实发布确认指纹缺失或格式无效", "data": None}
+        ), 400
+    article = get_article(app.config["DATABASE_PATH"], current["article_id"])
+    expected_fingerprint = build_publish_confirmation_fingerprint(
+        job=current,
+        article=article,
+    )
+    if not hmac.compare_digest(provided_fingerprint, expected_fingerprint):
+        return jsonify(
+            {
+                "code": 409,
+                "msg": "文章内容或发布参数已变化，请刷新后重新确认",
+                "data": None,
+            }
+        ), 409
     if current["platform"] not in REAL_PUBLISH_PLATFORMS:
         return jsonify(
             {
@@ -2246,7 +2452,11 @@ def execute_real_publish_task(job_id):
             job_id,
             publisher_factory=publisher_factory,
             media_root=app.config["MEDIA_ROOT"],
+            expected_state_version=confirmed_state_version,
+            expected_confirmation_fingerprint=provided_fingerprint,
         )
+    except PublishConfirmationMismatchError as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
     except InvalidPublishJobTransitionError as exc:
         return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
     return jsonify(
@@ -2261,10 +2471,28 @@ def execute_real_publish_task(job_id):
     ), 200
 
 
-def _publish_job_payload(job):
+def _publish_job_payload(
+    job,
+    *,
+    confirmation_article=None,
+    include_confirmation_snapshot=False,
+):
+    confirmation_fingerprint = ""
+    if not job["demo"] and job.get("account_id") is not None:
+        article = confirmation_article
+        if article is None:
+            article = get_article(app.config["DATABASE_PATH"], job["article_id"])
+        confirmation_fingerprint = build_publish_confirmation_fingerprint(
+            job=job,
+            article=article,
+        )
     payload = {
         "job_id": job["id"],
         "article_id": job["article_id"],
+        "account_id": job.get("account_id"),
+        "account_name": str(job.get("account_name") or ""),
+        "state_version": int(job.get("state_version", 0)),
+        "confirmation_fingerprint": confirmation_fingerprint,
         "platform": job["platform"],
         "status": job["status"],
         "message": job["message"],
@@ -2281,7 +2509,10 @@ def _publish_job_payload(job):
         "can_execute_real": bool(
             not job["demo"]
             and not app.config.get("DEMO_MODE", False)
+            and _real_publishing_authorized()
             and app.config.get("ALLOW_REAL_PUBLISHING", False)
+            and app.config.get("PUBLISHING_RUNTIME_READY", False)
+            and job.get("account_id") is not None
             and job["platform"] in REAL_PUBLISH_PLATFORMS
             and (
                 job["platform"] != BILIBILI_PLATFORM_KEY
@@ -2292,6 +2523,20 @@ def _publish_job_payload(job):
     }
     if "article_title" in job:
         payload["article_title"] = job["article_title"]
+    if include_confirmation_snapshot:
+        snapshot = confirmation_article
+        if snapshot is None:
+            snapshot = get_article(
+                app.config["DATABASE_PATH"],
+                job["article_id"],
+            )
+        payload["confirmation_snapshot"] = {
+            "article_id": int(snapshot["id"]),
+            "title": str(snapshot.get("title") or ""),
+            "content": str(snapshot.get("content") or ""),
+            "tags": list(snapshot.get("tags") or ()),
+            "updated_at": snapshot.get("updated_at"),
+        }
     return payload
 
 
@@ -2331,8 +2576,55 @@ def _validate_publish_video(value):
 
 @app.route('/api/publish/platforms', methods=['GET'])
 def get_publish_platforms():
+    demo_available = bool(app.config.get("DEMO_MODE", False))
+    real_publishing_authorized = _real_publishing_authorized()
+    real_enabled = bool(
+        real_publishing_authorized
+        and app.config.get("ALLOW_REAL_PUBLISHING", False)
+        and app.config.get("PUBLISHING_RUNTIME_READY", False)
+        and not demo_available
+    )
+    capabilities = []
+    for item in list_platform_capabilities():
+        runtime_available = bool(
+            real_enabled
+            and (
+                item["key"] != BILIBILI_PLATFORM_KEY
+                or app.config.get("ENABLE_BILIBILI_RUNTIME", False)
+            )
+        )
+        if item["key"] == BILIBILI_PLATFORM_KEY and not app.config.get(
+            "ENABLE_BILIBILI_RUNTIME", False
+        ):
+            unavailable_reason = "Bilibili 运行时尚未完成固定版本与校验，当前不可用"
+        elif demo_available:
+            unavailable_reason = "当前为演示模式，不会访问真实平台"
+        elif not real_publishing_authorized:
+            unavailable_reason = "当前构建未授权真实发布"
+        elif not app.config.get("PUBLISHING_RUNTIME_READY", False):
+            unavailable_reason = "本机发布运行时未就绪，请安装 Google Chrome"
+        elif not app.config.get("ALLOW_REAL_PUBLISHING", False):
+            unavailable_reason = "真实发布运行开关未开启"
+        else:
+            unavailable_reason = ""
+        capabilities.append(
+            {
+                **item,
+                "runtime_available": runtime_available,
+                "login_available": runtime_available,
+                "real_publishing_authorized": real_publishing_authorized,
+                "demo_available": demo_available,
+                "task_creation_available": bool(
+                    demo_available or runtime_available
+                ),
+                "scheduled_real_publishing_enabled": bool(
+                    app.config.get("SCHEDULED_REAL_PUBLISHING_ENABLED", False)
+                ),
+                "unavailable_reason": unavailable_reason,
+            }
+        )
     return jsonify(
-        {"code": 200, "msg": "success", "data": list_platform_capabilities()}
+        {"code": 200, "msg": "success", "data": capabilities}
     ), 200
 
 
@@ -2867,6 +3159,22 @@ def login():
         return jsonify({"code": 400, "msg": "账号名不能为空", "data": None}), 400
     if len(account_id) > 100:
         return jsonify({"code": 400, "msg": "账号名不能超过 100 个字符", "data": None}), 400
+    if not _real_publishing_authorized():
+        return jsonify(
+            {"code": 403, "msg": "当前桌面构建未开启媒体账号登录", "data": None}
+        ), 403
+    if not app.config.get("PUBLISHING_RUNTIME_READY", False):
+        return jsonify(
+            {
+                "code": 503,
+                "msg": "本机发布运行时未就绪，请安装 Google Chrome 或重新安装完整发布版",
+                "data": None,
+            }
+        ), 503
+    if not app.config.get("ALLOW_REAL_PUBLISHING", False):
+        return jsonify(
+            {"code": 403, "msg": "媒体账号登录运行开关未开启", "data": None}
+        ), 403
     print(f"登录请求: type={login_type}, id={account_id}")
 
     # 模拟一个用于异步通信的队列
@@ -2912,14 +3220,25 @@ def postVideo():
     # disabled deployment cannot even load publisher runtimes or create a
     # background publish thread. Safe job preparation and demo execution remain
     # available through the /api/publish endpoints above.
-    if not app.config.get("ALLOW_REAL_PUBLISHING", False):
+    if (
+        not app.config.get("ALLOW_REAL_PUBLISHING", False)
+        or not app.config.get("ALLOW_LEGACY_DIRECT_PUBLISHING", False)
+    ):
         return jsonify(
             {
                 "code": 403,
-                "msg": "真实发布总开关未开启，请设置 ALLOW_REAL_PUBLISHING=true",
+                "msg": "旧版直发入口已关闭，请使用发布任务的逐次确认入口",
                 "data": None,
             }
         ), 403
+    if not app.config.get("PUBLISHING_RUNTIME_READY", False):
+        return jsonify(
+            {
+                "code": 503,
+                "msg": "本机发布运行时未就绪，请安装 Google Chrome 或重新安装完整发布版",
+                "data": None,
+            }
+        ), 503
 
     # 获取JSON数据
     data = request.get_json()
@@ -3245,14 +3564,25 @@ def postVideoBatch():
     # Match /postVideo: reject before parsing work or importing any browser
     # publisher. This endpoint executes items synchronously after the import, so
     # the feature gate must stay before both operations.
-    if not app.config.get("ALLOW_REAL_PUBLISHING", False):
+    if (
+        not app.config.get("ALLOW_REAL_PUBLISHING", False)
+        or not app.config.get("ALLOW_LEGACY_DIRECT_PUBLISHING", False)
+    ):
         return jsonify(
             {
                 "code": 403,
-                "msg": "真实发布总开关未开启，请设置 ALLOW_REAL_PUBLISHING=true",
+                "msg": "旧版直发入口已关闭，请使用发布任务的逐次确认入口",
                 "data": None,
             }
         ), 403
+    if not app.config.get("PUBLISHING_RUNTIME_READY", False):
+        return jsonify(
+            {
+                "code": 503,
+                "msg": "本机发布运行时未就绪，请安装 Google Chrome 或重新安装完整发布版",
+                "data": None,
+            }
+        ), 503
 
     data_list = request.get_json()
 
@@ -3723,10 +4053,7 @@ if __name__ == '__main__':
             )
         except ValueError:
             scheduler_interval = 15
-        scheduler_allows_real = bool(
-            app.config.get("ALLOW_REAL_PUBLISHING", False)
-            and not app.config.get("DEMO_MODE", False)
-        )
+        scheduler_allows_real = _scheduled_real_publishing_allowed()
         scheduler_publisher_factory = (
             create_real_publisher_factory(
                 app.config["DATABASE_PATH"],

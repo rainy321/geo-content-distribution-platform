@@ -57,6 +57,7 @@ services:
       MEDIA_ROOT: /app/videoFile
       LOCAL_CHROME_HEADLESS: "true"
       RUN_PUBLISH_SCHEDULER: "false"
+      SCHEDULED_REAL_PUBLISHING_ENABLED: "false"
       SERVER_HOST: 0.0.0.0
       SERVER_PORT: "5409"
     ports:
@@ -77,6 +78,9 @@ services:
       MEDIA_ROOT: /app/videoFile
       LOCAL_CHROME_HEADLESS: "true"
       RUN_PUBLISH_SCHEDULER: "false"
+      SCHEDULED_REAL_PUBLISHING_ENABLED: "false"
+      GEO_REAL_PUBLISHING_AUTHORIZED: "false"
+      GEO_PUBLISHING_RUNTIME_READY: "false"
       # The publishing worker does not generate content or serve operator
       # sessions. Empty values override secrets loaded from app.env without
       # changing the existing single-file deployment workflow.

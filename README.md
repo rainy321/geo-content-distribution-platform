@@ -172,7 +172,7 @@ Vercel 生产地址：[https://geo-content-distribution-platform.vercel.app](htt
 
 同时配置 `APP_ACCESS_PASSWORD` 和 `APP_SESSION_SECRET` 即可启用轻量访问门；只配置口令但缺少会话密钥时，后端会拒绝启动，避免误以为站点已受保护。该机制面向单一运营者和 MVP 演示，不是多用户权限系统。
 
-如果 Web 与调度器运行在同一台受控机器，保持 `RUN_PUBLISH_SCHEDULER=true` 即可。拆成独立进程时，Web 设置为 `RUN_PUBLISH_SCHEDULER=false`，再启动：
+如果 Web 与调度器运行在同一台受控机器，保持 `RUN_PUBLISH_SCHEDULER=true` 即可；当前调度器只自动执行 Demo，并把到期真实任务推进到等待人工确认的队列。拆成独立进程时，Web 设置为 `RUN_PUBLISH_SCHEDULER=false`，再启动：
 
 ```bash
 # 启动前自检；不会打开或访问任何发布平台
@@ -346,6 +346,9 @@ GEO Web 运行环境变量：
 | `DEMO_MODE` | `false` | 为 `true` 时新发布任务使用 DemoPublisher |
 | `SEED_DEMO_DATA` | `true` | Demo Mode 下为空数据库准备幂等、明确标注的演示数据 |
 | `ALLOW_REAL_PUBLISHING` | `false` | 真实发布总开关；统一适配层已覆盖 10 个渠道 |
+| `SCHEDULED_REAL_PUBLISHING_ENABLED` | `false` | 定时真实执行专项门；本桌面版本固定关闭，到期真实任务只排队 |
+| `GEO_REAL_PUBLISHING_AUTHORIZED` | `false` | 不可变构建是否授权真实发布；不能只靠总开关替代 |
+| `GEO_PUBLISHING_RUNTIME_READY` | `false` | Chrome 与打包驱动离线探针是否通过；启动时计算 |
 | `DATABASE_PATH` | `db/database.db` | 可覆盖 SQLite 路径，便于隔离环境 |
 | `COOKIES_DIRECTORY` | `cookiesFile` | Web 登录、账号检测和真实发布共用的 Cookie 目录 |
 | `MEDIA_ROOT` | `videoFile` | 上传图片/视频、生成封面和发布素材的运行目录 |
@@ -356,9 +359,9 @@ GEO Web 运行环境变量：
 
 Web 管理台的“系统设置”支持为当前浏览器填写自定义 OpenAI-compatible API。三项填写完整时，自定义配置优先于服务器默认值；服务地址和模型名保存在浏览器本地，API Key 只放在当前标签页的 `sessionStorage`，关闭标签页后清除。自定义配置只随生成和优化请求发送，服务器状态接口不会返回密钥、地址或模型值。服务地址必须使用公开 HTTPS URL，后端拒绝本机、私网、保留地址和 URL 内嵌凭据。
 
-定时任务由 APScheduler 在 `python sau_backend.py` 启动时注册。每次 tick 会原子地将到期任务从 `scheduled` 提升为 `queued`；Demo 任务随后自动执行。真实任务默认只进入队列；只有创建计划时用户再次明确授权自动执行、授权内容指纹到期仍匹配、真实发布总开关仍开启且账号有效时，才会调用真实适配器一次。失败或状态不明不会自动重试。调度任务启用了单实例和合并补跑，避免同一进程内重复领取。
+定时任务由 APScheduler 在 `python sau_backend.py` 启动时注册。每次 tick 会原子地将到期任务从 `scheduled` 提升为 `queued`；Demo 任务随后自动执行。当前版本对真实任务固定关闭后台执行：到点只排队，用户必须打开具体任务，核对同源正文快照、平台、账号、素材和任务版本后再从手动入口执行。历史数据库中的 `auto_execute=1` 任务会在访问平台前转为 `need_action`。桌面宿主、独立后端和 `sau-worker` 都执行同一 fail-closed 边界；失败或状态不明不会自动重试。
 
-10 个渠道的真实发布默认关闭。只有同时满足 `DEMO_MODE=false`、`ALLOW_REAL_PUBLISHING=true`、任务本身不是 Demo，并且操作者在发布中心二次确认时才会进入真实适配器。所有适配器都会先验证登录状态。知乎发布前通过当前账号的公开文章列表精确匹配标题，已存在时直接返回原链接；发布后最多轮询 3 次公开文章结果并自动对账，不会自动重复点击“发布”。其余渠道只有取得平台公开内容链接才标记 `success`；发布器明确完成提交但暂时没有公开链接时保持 `processing`，发布器超时或最终状态未知时转为 `need_action`，两种情况都要求先到平台后台核对，避免盲目重试造成重复内容。百家号、小红书、抖音和快手要求图片，可由操作者选择素材，也可启用受控自动配图；Bilibili、视频号和 TikTok 要求视频。扫码、验证码、实名、风控或 Cookie 失效会进入“待人工确认”，系统不会绕过平台安全机制。五个 P2 渠道的代码适配已完成，真实账号验收状态以 [`docs/p2-web-integration.md`](./docs/p2-web-integration.md) 为准。
+10 个渠道的真实发布默认关闭。只有同时满足 `DEMO_MODE=false`、不可变构建授权、`ALLOW_REAL_PUBLISHING=true`、本机运行时探针通过、任务本身不是 Demo，并且操作者在发布中心对当前任务逐次确认时才会进入真实适配器。所有适配器都会先验证登录状态。知乎发布前通过当前账号的公开文章列表精确匹配标题，已存在时直接返回原链接；发布后最多轮询 3 次公开文章结果并自动对账，不会自动重复点击“发布”。其余渠道只有取得平台公开内容链接才标记 `success`；发布器明确完成提交但暂时没有公开链接时保持 `processing`，发布器超时或最终状态未知时转为 `need_action`，两种情况都要求先到平台后台核对，避免盲目重试造成重复内容。百家号、小红书、抖音和快手要求图片，可由操作者选择素材，也可启用受控自动配图；Bilibili、视频号和 TikTok 要求视频。扫码、验证码、实名、风控或 Cookie 失效会进入“待人工确认”，系统不会绕过平台安全机制。五个 P2 渠道的代码适配已完成，真实账号验收状态以 [`docs/p2-web-integration.md`](./docs/p2-web-integration.md) 为准。
 
 > 部署安全边界：当前 Vercel 公网站运行无媒体 Cookie、关闭真实发布的可重建 Demo，并配置服务器端 AI Secret、运营访问门和应用内 AI 限流；跨域凭据请求仅允许显式白名单来源。Vercel Serverless 实例之间不共享内存限流和 SQLite，因此持续对外服务仍应接入 Upstash/Vercel WAF 等共享限流、持久数据库与对象存储，并把媒体浏览器 Worker 隔离在受控环境，不能把本地后端和 `cookiesFile/` 直接暴露到公网。
 

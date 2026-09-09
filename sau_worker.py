@@ -45,10 +45,19 @@ class WorkerSettings:
     demo_mode: bool
     allow_real_publishing: bool
     enable_bilibili_runtime: bool = False
+    scheduled_real_publishing_enabled: bool = False
+    real_publishing_authorized: bool = False
+    publishing_runtime_ready: bool = False
 
     @property
     def allows_real_execution(self) -> bool:
-        return self.allow_real_publishing and not self.demo_mode
+        return bool(
+            self.scheduled_real_publishing_enabled
+            and self.real_publishing_authorized
+            and self.publishing_runtime_ready
+            and self.allow_real_publishing
+            and not self.demo_mode
+        )
 
     @classmethod
     def from_environment(cls) -> "WorkerSettings":
@@ -65,6 +74,15 @@ class WorkerSettings:
             interval_seconds=_environment_interval(),
             demo_mode=_environment_flag("DEMO_MODE"),
             allow_real_publishing=_environment_flag("ALLOW_REAL_PUBLISHING"),
+            scheduled_real_publishing_enabled=_environment_flag(
+                "SCHEDULED_REAL_PUBLISHING_ENABLED"
+            ),
+            real_publishing_authorized=_environment_flag(
+                "GEO_REAL_PUBLISHING_AUTHORIZED"
+            ),
+            publishing_runtime_ready=_environment_flag(
+                "GEO_PUBLISHING_RUNTIME_READY"
+            ),
             enable_bilibili_runtime=_environment_flag("ENABLE_BILIBILI_RUNTIME"),
         )
 

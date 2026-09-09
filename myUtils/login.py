@@ -41,6 +41,8 @@ def get_browser_options():
     # 如果用户在 conf.py 里配置了本地 Chrome，就用本地的，这样成功率极高
     if LOCAL_CHROME_PATH:
         options['executable_path'] = LOCAL_CHROME_PATH
+    else:
+        options['channel'] = 'chrome'
 
     return options
 
@@ -174,12 +176,9 @@ async def get_tencent_cookie(
     timeout_seconds=600,
 ):
     async with async_playwright() as playwright:
-        options = {
-            'args': [
-                '--lang en-GB'
-            ],
-            'headless': False,
-        }
+        options = get_browser_options()
+        options['args'] = ['--lang=en-GB']
+        options['headless'] = False
         # Make sure to run headed.
         browser = await playwright.chromium.launch(**options)
         # Setup context however you like.
@@ -251,12 +250,9 @@ async def get_ks_cookie(
     timeout_seconds=600,
 ):
     async with async_playwright() as playwright:
-        options = {
-            'args': [
-                '--lang en-GB'
-            ],
-            'headless': False,
-        }
+        options = get_browser_options()
+        options['args'] = ['--lang=en-GB']
+        options['headless'] = False
         # Make sure to run headed.
         browser = await playwright.chromium.launch(**options)
         # Setup context however you like.

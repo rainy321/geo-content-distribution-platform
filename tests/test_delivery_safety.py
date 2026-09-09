@@ -62,8 +62,13 @@ class DeliverySafetyTests(unittest.TestCase):
 
         for platform in ("知乎", "今日头条", "搜狐号", "百家号", "小红书"):
             self.assertIn(platform, readme)
-        self.assertIn("授权内容指纹到期仍匹配", readme)
+        self.assertIn("到点只排队", readme)
+        self.assertIn("历史数据库中的 `auto_execute=1` 任务", readme)
+        self.assertIn("`SCHEDULED_REAL_PUBLISHING_ENABLED`", readme)
+        self.assertIn("`GEO_REAL_PUBLISHING_AUTHORIZED`", readme)
+        self.assertIn("`GEO_PUBLISHING_RUNTIME_READY`", readme)
         self.assertIn("失败或状态不明不会自动重试", readme)
+        self.assertNotIn("授权内容指纹到期仍匹配", readme)
         self.assertNotIn("真实任务只进入队列，等待已配置账号", readme)
 
     def test_install_docs_preserve_environment_driven_safe_config(self):
@@ -164,6 +169,7 @@ class DeliverySafetyTests(unittest.TestCase):
 
         self.assertIn('"127.0.0.1:5409:5409"', compose)
         self.assertIn('ALLOW_REAL_PUBLISHING: "false"', compose)
+        self.assertIn('SCHEDULED_REAL_PUBLISHING_ENABLED: "false"', compose)
         self.assertIn('ENABLE_BILIBILI_RUNTIME: "false"', compose)
         self.assertIn('DATABASE_PATH: "/app/data/database.db"', compose)
         self.assertIn('SERVER_HOST: "0.0.0.0"', compose)
@@ -235,9 +241,14 @@ class DeliverySafetyTests(unittest.TestCase):
         self.assertIn("GEO_PATCHRIGHT_CHROMIUM_SHA256", compose)
         self.assertIn("@sha256:", compose)
         self.assertIn("RUN_PUBLISH_SCHEDULER: \"false\"", compose)
+        self.assertGreaterEqual(
+            compose.count('SCHEDULED_REAL_PUBLISHING_ENABLED: "false"'),
+            2,
+        )
         self.assertIn('command: ["sau-worker"]', compose)
         self.assertIn('test: ["CMD", "sau-worker", "--check"]', compose)
         self.assertIn("ALLOW_REAL_PUBLISHING=false", env_example)
+        self.assertIn("SCHEDULED_REAL_PUBLISHING_ENABLED=false", env_example)
         self.assertIn("ENABLE_BILIBILI_RUNTIME=false", env_example)
         self.assertNotIn("AI_API_KEY=sk-", env_example)
         self.assertIn("deploy/production/app.env", dockerignore)

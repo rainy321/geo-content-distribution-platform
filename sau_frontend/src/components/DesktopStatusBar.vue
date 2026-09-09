@@ -1,10 +1,16 @@
 <template>
-  <div v-if="status.desktop" class="desktop-status" aria-label="桌面运行状态">
+  <div
+    v-if="status.desktop"
+    :class="['desktop-status', `is-${publishingState}`]"
+    :aria-label="`桌面运行状态：${publishingLabel}`"
+  >
     <span class="desktop-signal" aria-hidden="true" />
-    <div class="desktop-copy">
-      <strong>桌面工作区</strong>
-      <span>{{ status.content_engine }} · 发布锁定</span>
-    </div>
+    <el-tooltip :content="publishingHint" placement="bottom">
+      <div class="desktop-copy">
+        <strong>桌面工作区</strong>
+        <span>{{ status.content_engine || '内容引擎' }} · {{ publishingLabel }}</span>
+      </div>
+    </el-tooltip>
     <el-tooltip content="打开本机数据目录" placement="bottom">
       <button class="data-button" type="button" @click="openDataDirectory">
         <el-icon><FolderOpened /></el-icon>
@@ -21,7 +27,7 @@
 </template>
 
 <script setup>
-import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { FolderOpened, Refresh } from '@element-plus/icons-vue'
 
@@ -34,7 +40,41 @@ const status = reactive({
   version: '',
   data_directory: '',
   content_engine: '',
-  real_publishing_enabled: false
+  real_publishing_authorized: false,
+  real_publishing_enabled: false,
+  publishing_runtime: {
+    ready: false,
+    browser_ready: false,
+    missing_modules: [],
+    browser_probe_error: ''
+  }
+})
+
+const publishingState = computed(() => {
+  if (!status.real_publishing_authorized) return 'locked'
+  if (status.real_publishing_enabled && status.publishing_runtime?.ready) return 'enabled'
+  return 'blocked'
+})
+
+const publishingLabel = computed(() => ({
+  enabled: '真实发布已开启',
+  blocked: '运行时未就绪',
+  locked: '发布锁定'
+}[publishingState.value]))
+
+const publishingHint = computed(() => {
+  if (publishingState.value === 'enabled') {
+    return '真实发布已授权且组件就绪；每个任务仍需绑定账号并单独确认。'
+  }
+  if (publishingState.value === 'locked') {
+    return '当前是安全构建，媒体账号与真实发布功能未授权。'
+  }
+  const runtime = status.publishing_runtime || {}
+  if (runtime.browser_ready === false) return '真实发布已授权，但未找到 Google Chrome。安装后请重启软件。'
+  if (Array.isArray(runtime.missing_modules) && runtime.missing_modules.length) {
+    return `真实发布已授权，但缺少发布组件：${runtime.missing_modules.join('、')}`
+  }
+  return runtime.browser_probe_error || '真实发布已授权，但发布组件探针未通过。请检查本机运行环境。'
 })
 
 const loadDesktopStatus = async () => {
@@ -42,7 +82,10 @@ const loadDesktopStatus = async () => {
   if (!api?.get_runtime_status) return
   try {
     Object.assign(status, await api.get_runtime_status())
-    emit('status', { ...status })
+    emit('status', {
+      ...status,
+      publishing_runtime: { ...(status.publishing_runtime || {}) }
+    })
   } catch (error) {
     console.warn('无法读取桌面运行状态', error)
   }
@@ -103,6 +146,26 @@ onBeforeUnmount(() => {
   border-radius: 50%;
   background: #32674d;
   box-shadow: 0 0 0 4px rgba(50, 103, 77, 0.1);
+}
+
+.desktop-status.is-enabled {
+  border-color: #d39a47;
+  background: #fff8ec;
+
+  .desktop-signal {
+    background: #b66d16;
+    box-shadow: 0 0 0 4px rgba(182, 109, 22, 0.12);
+  }
+}
+
+.desktop-status.is-blocked {
+  border-color: #d6b678;
+  background: #fffbf2;
+
+  .desktop-signal {
+    background: #9b742e;
+    box-shadow: 0 0 0 4px rgba(155, 116, 46, 0.11);
+  }
 }
 
 .desktop-copy {

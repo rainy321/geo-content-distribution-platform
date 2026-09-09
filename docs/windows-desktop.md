@@ -2,9 +2,9 @@
 
 ## 当前交付定位
 
-`GEO-Content-Platform.exe` 是 Windows 本机单用户便携 Beta，不是正式网站的快捷方式，也不是多租户客户端。它在本机启动 Flask/Waitress 服务，在随机的 `127.0.0.1` 端口提供 API，再由 Edge WebView2 显示内置的 Vue 界面。
+`GEO-Content-Platform.exe` 是 Windows 本机单用户便携软件，不是正式网站的快捷方式，也不是多租户客户端。它在本机启动 Flask/Waitress 服务，在随机的 `127.0.0.1` 端口提供 API，再由 Edge WebView2 显示内置的 Vue 界面。
 
-当前产品版本为 `1.0.0`。EXE 没有安装向导、自动更新器、Windows 服务或开机启动项；同一数据目录一次只允许一个实例运行。
+当前产品版本为 `1.0.0`，构建时必须选择不可变的发布 profile：默认 `safe` 版不带真实发布运行时；`authorized_real` 版带经过成品探针验收的真实发布运行面。两种构建使用不同的产物目录和 ZIP 名称，不能靠 Windows 环境变量把 `safe` 版改成真实发布版。EXE 没有安装向导、自动更新器、Windows 服务或开机启动项；同一数据目录一次只允许一个实例运行。
 
 同事交接 ZIP 未包含 `LICENSE` 或 `NOTICE`。在取得权利人的书面内部授权或补齐可核验的许可声明前，包含其 Python 移植算法的构建只用于内部受控 Beta，不作为已完成外部商业分发授权的版本。
 
@@ -12,7 +12,7 @@
 
 ## 产品边界
 
-- 延续品牌项目、内容生成、统一内容引擎适配、本地 GEO 规则分、内容库、素材、媒体账号和发布任务逻辑。
+- 延续品牌项目、内容生成、统一内容引擎适配、本地 GEO 规则分、内容库、素材、媒体账号和发布任务逻辑；媒体账号登录与真实执行只在 `authorized_real` 且本机发布运行时就绪时开放。
 - 新增 AI 可见度工作台：导入已经取得的回答，使用本机确定性规则完成品牌提及、推荐位次、引用、情感、声量和建议分析。
 - AI 可见度页面不会主动请求千问、ChatGPT 或其他外部模型。页面中的 `provider`、`model` 只是用户填写的样本溯源标签。
 - 选择“保存到本机分析历史”后，问题、回答原文、覆盖项和完整结果会写入本机 SQLite；不保存时只在当前请求和界面中处理。
@@ -64,18 +64,21 @@ GEO-Content-Platform.exe
 
 ## 发布安全边界
 
-桌面 Beta 的真实发布使用多层关闭，而不是只依赖一个界面按钮：
+真实发布不是一个可由环境变量随意切换的界面按钮，而是构建授权、运行时探针和单次任务确认共同组成的边界：
 
-1. 桌面宿主每次启动都会覆盖系统环境，强制设置 `ALLOW_REAL_PUBLISHING=false` 和 `ENABLE_BILIBILI_RUNTIME=false`。
-2. 桌面调度器固定以 `allow_real=False` 启动；真实执行 API 和旧版 `/postVideo`、`/postVideoBatch` 也在进入发布器前检查总闸门。
+1. `safe` profile 强制保持 `ALLOW_REAL_PUBLISHING=false`，不打包 Playwright、Patchright、OpenCV 或发布所需的浏览器运行时；调度器也以 `allow_real=False` 启动。
+2. `authorized_real` profile 会打包 Playwright/Patchright 驱动，但启动时仍先保持总闸门关闭。软件必须找到本机 Google Chrome，并让两个驱动各自打开一次纯本地离线页面；只有探针全部通过，当前进程才设置 `ALLOW_REAL_PUBLISHING=true`。桌面调度器本身始终以 `allow_real=False` 启动，不能无人值守访问真实平台。
+3. 发布任务必须在创建时绑定明确的媒体账号。立即发布需要在软件中再次确认同源快照里的具体文章正文、平台、账号、素材和任务版本；执行器领取任务后还会在加载发布器前二次核对该指纹。真实定时任务到点后只进入队列，仍须人工逐次确认；只有 Demo 定时任务可以自动演示且不会访问平台。验证码、扫码、风控或平台状态不明会转为待人工处理，不会绕过验证，也不会自动重试状态不明的任务。
+4. 旧版 `/postVideo`、`/postVideoBatch` 直接发布入口在桌面版始终关闭，避免绕过任务授权和状态机。
+5. Bilibili 运行时仍不随任一桌面 profile 开启。现有动态下载实现尚未完成固定版本、SHA-256、安全解包和权利验收，因此 `ENABLE_BILIBILI_RUNTIME=false`。
 
-因此当前 EXE 可以准备内容、维护任务和查看状态，但不会执行真实平台发布。它也没有打包 Playwright、Patchright、Chromium 或 Bilibili 运行时。不能通过设置 Windows 环境变量永久解锁这一构建；未来若交付发布 Worker，应使用独立、可审计且经过授权的安装包。
+`authorized_real` 表示产品具备受控真实发布执行路径，不表示所有平台账号已经登录，也不表示平台页面在未来不会变化。媒体账号页会如实显示运行时与账号状态；缺少 Chrome、驱动或有效登录时，软件保持发布闸门关闭或要求人工处理。
 
 ## 安装、升级、回滚与卸载
 
 ### 安装
 
-把 EXE 和随附的 `GEO-Content-Platform.sha256.txt` 放在普通用户可读目录即可，不需要管理员安装。当前 Beta 未做 Authenticode 代码签名，Windows 可能显示“未知发布者”或 SmartScreen 提示。只有在来源可信且 SHA-256 与交付清单完全一致时才继续；企业策略禁止未签名软件时，应改用后续签名构建。
+把 EXE 和随附的 `GEO-Content-Platform.sha256.txt` 放在普通用户可读目录即可，不需要管理员安装。先打开 manifest 核对 `publishing_profile`：只有值为 `authorized_real` 的包才可能执行真实发布。该 profile 还要求本机安装 Google Chrome；Edge WebView2 只负责显示软件窗口，不能替代发布自动化所需的 Chrome。当前构建未做 Authenticode 代码签名，Windows 可能显示“未知发布者”或 SmartScreen 提示。只有在来源可信且 SHA-256 与交付清单完全一致时才继续；企业策略禁止未签名软件时，应改用后续签名构建。
 
 ### 升级
 
@@ -89,7 +92,7 @@ GEO-Content-Platform.exe
 
 ### 回滚
 
-关闭当前版本后，换回已经验收且哈希已固定的旧 EXE，再用同一数据目录启动。AI 可见度历史表是附加表，旧版本即使不读取它也不会自动删除数据。当前没有名为 `AI_VISIBILITY_ENABLED` 的运行时开关，不能把不存在的环境变量当作回滚手段。
+关闭当前版本后，换回已经验收且哈希已固定的 `safe` EXE，再用同一数据目录启动。`safe` 构建会重新强制关闭真实发布，不能靠残留环境变量解锁。AI 可见度历史表是附加表，旧版本即使不读取它也不会自动删除数据。当前没有名为 `AI_VISIBILITY_ENABLED` 的运行时开关，不能把不存在的环境变量当作回滚手段。
 
 ### 卸载
 
@@ -97,18 +100,24 @@ GEO-Content-Platform.exe
 
 ## 构建与验收
 
-在 Windows PowerShell 的仓库根目录执行：
+在 PowerShell 7 或更高版本的仓库根目录执行。脚本包含中文交付文件名，因此会拒绝 Windows PowerShell 5.1，避免旧版默认编码破坏路径。默认生成可回滚的安全版：
 
 ```powershell
 .\scripts\build_windows_desktop.ps1
 ```
 
-构建流程会同步锁定的 Python 桌面依赖、执行 `npm ci`、构建 Vue、运行脚本中列出的桌面/认证/可见度/发布闸门/健康回归和前端测试，并在 GUID staging 目录打包单文件 EXE。成品随后从独立临时工作目录完成两次验收：HTTP 健康与首次认证状态，以及隐藏 Edge WebView2 中的首次设密、创建合成项目、本地可见度分析、历史留存和原生备份。全部通过后，staging 才会整体提升为不可覆盖的版本目录。
+已经取得本次真实发布构建授权时，显式生成真实发布版：
+
+```powershell
+.\scripts\build_windows_desktop.ps1 -PublishingProfile authorized_real
+```
+
+构建流程会同步锁定的桌面依赖；未跳过测试时还会临时同步发布依赖，以运行脚本中列出的桌面/认证/可见度/发布闸门/健康回归和前端测试。`safe` 在进入 PyInstaller 前会再次精确同步并移除浏览器发布依赖，避免测试环境污染安全版；`authorized_real` 则保留这些依赖并由 spec 明确收集。流程还会执行 `npm ci`、构建 Vue，并在 GUID staging 目录打包单文件 EXE。成品随后从独立临时工作目录完成两次验收：HTTP 健康与首次认证状态，以及隐藏 Edge WebView2 中的首次设密、创建合成项目、本地可见度分析、历史留存和原生备份。`authorized_real` 还会把 `PLAYWRIGHT_BROWSERS_PATH` 指向空缓存，再使用系统 Chrome 完成 Playwright 与 Patchright 的纯本地页面探针，证明 EXE 没有偷用构建机已下载的浏览器。全部通过后，staging 才会整体提升为不可覆盖的版本目录；验收不会访问发布平台或发送真实内容。
 
 产物目录形如：
 
-- `release\windows\GEO-Content-Platform-1.0.0-<UTC时间>-<提交短SHA>\GEO-Content-Platform.exe`
-- 同目录的 ZIP、`GEO-Content-Platform.sha256.txt`、`GEO-Content-Platform.manifest.json`、`build-info.json`、`首次使用.md`、`AI可见度接口契约.md`、`Windows桌面技术说明.md` 和 `LICENSE.txt`
+- `release\windows\GEO-Content-Platform-1.0.0-<safe或authorized-real>-<UTC时间>-<提交短SHA>\GEO-Content-Platform.exe`
+- 同目录的 ZIP、`GEO-Content-Platform.sha256.txt`、`GEO-Content-Platform.manifest.json`、`build-info.json`、`首次使用.md`、`AI可见度接口契约.md`、`Windows桌面技术说明.md`、`LICENSE.txt` 和 `THIRD-PARTY-NOTICES.txt`
 
 只有在同一提交上已经独立跑完回归时，才可显式使用 `-SkipTests`；manifest 会如实记录该状态。该参数仍不会跳过两个成品 EXE 冒烟测试。默认拒绝脏工作树，构建成功也不等于完成代码签名；签名状态会写入 manifest，外部商业交付仍必须单独完成签名与许可门禁。
 
@@ -126,6 +135,8 @@ Get-Content -Raw (Join-Path $geoCheckDir "health.json")
 
 - 提示“已在运行”：切换到现有窗口；不要反复启动相同数据目录。
 - 空白窗口或 WebView 初始化失败：确认 Microsoft Edge WebView2 Runtime 可用。
+- `authorized_real` 显示发布运行时不可用：确认 Google Chrome 已安装在当前用户或系统标准目录；Chrome 与 Edge WebView2 是两个独立前提。
+- 平台账号要求登录：在媒体账号页点击“添加 / 登录”或“重新登录”，然后在软件弹出的浏览器、二维码或终端窗口中完成平台验证。
 - 启动失败：查看 `%LOCALAPPDATA%\GEOContentPlatform\logs\desktop.log`。
 - 无法登录：确认键盘布局、大小写和首尾空格；连续失败可能触发临时频率限制。
 - “本地认证配置不可用”：保留 `config\auth.json` 和整个数据目录的副本，不要直接编辑 JSON；交给维护人员核验。

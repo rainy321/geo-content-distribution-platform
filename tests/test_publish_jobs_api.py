@@ -64,7 +64,13 @@ class PublishJobsApiTests(unittest.TestCase):
 
         detail_response = self.client.get(f"/api/publish/jobs/{job['job_id']}")
         self.assertEqual(detail_response.status_code, 200)
-        self.assertEqual(detail_response.get_json()["data"], job)
+        detail = detail_response.get_json()["data"]
+        snapshot = detail.pop("confirmation_snapshot")
+        self.assertEqual(detail, job)
+        self.assertEqual(snapshot["article_id"], self.article_id)
+        self.assertEqual(snapshot["title"], "AI Agent 指南")
+        self.assertEqual(snapshot["content"], "文章正文")
+        self.assertEqual(snapshot["tags"], ["AI"])
 
     def test_executes_demo_job_through_full_state_flow(self):
         job = self._create_job()

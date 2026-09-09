@@ -19,9 +19,23 @@ from utils.files_times import get_absolute_path
 from utils.log import tiktok_logger
 
 
+def _browser_launch_options(*, headless: bool, args=None):
+    options = {"headless": headless}
+    if args:
+        options["args"] = list(args)
+    executable_value = str(LOCAL_CHROME_PATH or "").strip()
+    if executable_value not in {"", "."}:
+        options["executable_path"] = executable_value
+    else:
+        options["channel"] = "chrome"
+    return options
+
+
 async def cookie_auth(account_file):
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=LOCAL_CHROME_HEADLESS)
+        browser = await playwright.chromium.launch(
+            **_browser_launch_options(headless=LOCAL_CHROME_HEADLESS)
+        )
         context = await browser.new_context(storage_state=account_file)
         context = await set_init_script(context)
         try:
@@ -90,12 +104,10 @@ async def tiktok_setup(account_file, handle=False):
 
 async def get_tiktok_cookie(account_file):
     async with async_playwright() as playwright:
-        options = {
-            'args': [
-                '--lang en-GB',
-            ],
-            'headless': LOCAL_CHROME_HEADLESS,  # Set headless option here
-        }
+        options = _browser_launch_options(
+            headless=LOCAL_CHROME_HEADLESS,
+            args=['--lang=en-GB'],
+        )
         # Make sure to run headed.
         browser = await playwright.chromium.launch(**options)
         # Setup context however you like.

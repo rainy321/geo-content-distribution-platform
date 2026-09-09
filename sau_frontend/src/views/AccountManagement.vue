@@ -9,7 +9,15 @@
       <div class="hero-actions">
         <span>{{ syncLabel }}</span>
         <el-button :icon="Refresh" :loading="loading" @click="fetchOverview">刷新本地状态</el-button>
-        <el-button type="primary" :icon="Plus" @click="openLogin()">添加媒体账号</el-button>
+        <el-button
+          type="primary"
+          :icon="Plus"
+          :disabled="!hasLoginCapablePlatform"
+          :title="hasLoginCapablePlatform ? '添加媒体账号' : '当前没有可用的平台登录运行时'"
+          @click="openLogin()"
+        >
+          添加媒体账号
+        </el-button>
       </div>
     </header>
 
@@ -35,8 +43,13 @@
       <div class="note-icon"><el-icon><Connection /></el-icon></div>
       <div>
         <strong>平台检测采用显式触发</strong>
-        <p>“刷新本地状态”不联网；只有点击某个账号的“检测登录”，才会打开无头浏览器访问该平台并更新最后检查时间。</p>
+        <p>“刷新本地状态”不联网；只有点击某个账号的“检测登录”，才会打开本机浏览器访问该平台并更新最后检查时间。</p>
       </div>
+    </section>
+
+    <section v-if="capabilitiesLoadError" class="capability-warning" role="alert">
+      <strong>发布能力清单暂未载入</strong>
+      <p>本地账号记录仍可查看，但登录和在线检测保持禁用，避免在运行环境未知时访问平台。</p>
     </section>
 
     <section v-if="loadError" class="load-state" role="alert">
@@ -111,6 +124,7 @@
                 :key="platform.type"
                 :label="platform.name"
                 :value="platform.type"
+                :disabled="platform.login_available === false"
               />
             </el-select>
           </el-form-item>
@@ -151,7 +165,9 @@
           打开登录流程
         </el-button>
         <el-button v-else-if="loginStage === 'failed'" type="primary" @click="retryLogin">重新尝试</el-button>
-        <el-button v-else-if="loginStage === 'success'" type="primary" @click="loginDialogVisible = false">完成</el-button>
+        <el-button v-else-if="loginStage === 'success'" type="primary" @click="completeLogin">
+          {{ returnToPublishCenter ? '返回发布中心继续' : '完成' }}
+        </el-button>
         <el-button v-else @click="loginDialogVisible = false">取消登录</el-button>
       </template>
     </el-dialog>
@@ -160,10 +176,15 @@
 
 <script setup>
 import { computed, defineComponent, h, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { CircleCheckFilled, Connection, Plus, Refresh, WarningFilled } from '@element-plus/icons-vue'
 import { ElButton, ElIcon, ElMessage } from 'element-plus'
 import { accountApi } from '@/api/account'
+import { publishApi } from '@/api/publish'
 import { apiUrl } from '@/config/api'
+
+const route = useRoute()
+const router = useRouter()
 
 const emptyOverview = () => ({
   summary: { total: 0, connected: 0, needs_action: 0, checking: 0 },
@@ -206,14 +227,22 @@ const PlatformCard = defineComponent({
           h('span', `${props.platform.priority} / ${String(props.platform.type).padStart(2, '0')}`),
           h('h3', props.platform.name)
         ]),
-        h('small', props.platform.connected_count ? `${props.platform.connected_count} ONLINE` : 'OFFLINE')
+        h('small', props.platform.login_available === false
+          ? 'RUNTIME OFF'
+          : props.platform.connected_count ? `${props.platform.connected_count} ONLINE` : 'OFFLINE')
       ]),
+      props.platform.login_available === false
+        ? h('div', { class: 'platform-runtime-note', role: 'note' }, [
+            h('strong', '平台登录不可用'),
+            h('span', props.platform.unavailable_reason || '本机发布运行时尚未就绪')
+          ])
+        : null,
       props.platform.accounts.length
         ? h('div', { class: 'account-stack' }, props.platform.accounts.map(account => {
             const copy = statusCopy[account.status] || { label: account.status, note: '状态未知' }
             return h('section', { class: 'account-entry', key: account.id }, [
               h('div', { class: 'account-identity' }, [
-                h('strong', account.account_name),
+                h('strong', `${account.account_name} · ID ${account.id}`),
                 h('span', { class: ['status-chip', account.status] }, copy.label),
                 h('p', copy.note),
                 h('time', `最后检查：${formatCheckedAt(account.last_checked_at)}`)
@@ -222,10 +251,12 @@ const PlatformCard = defineComponent({
                 h(ElButton, {
                   size: 'small',
                   loading: props.checkingIds.has(account.id),
-                  onClick: () => emit('check', account)
-                }, () => '检测登录'),
+                  disabled: props.platform.login_available === false,
+                  onClick: () => emit('check', account, props.platform)
+                }, () => props.platform.login_available === false ? '检测不可用' : '检测登录'),
                 h(ElButton, {
                   size: 'small', type: 'primary', plain: true,
+                  disabled: props.platform.login_available === false,
                   onClick: () => emit('login', props.platform, account)
                 }, () => '重新登录')
               ])
@@ -235,8 +266,9 @@ const PlatformCard = defineComponent({
             h('p', '尚未连接账号'),
             h(ElButton, {
               size: 'small', type: 'primary', plain: true,
+              disabled: props.platform.login_available === false,
               onClick: () => emit('login', props.platform)
-            }, () => '添加 / 登录')
+            }, () => props.platform.login_available === false ? '运行时不可用' : '添加 / 登录')
           ])
     ])
   }
@@ -246,6 +278,7 @@ const overview = reactive(emptyOverview())
 const loading = ref(false)
 const loaded = ref(false)
 const loadError = ref(false)
+const capabilitiesLoadError = ref(false)
 const lastSyncedAt = ref(null)
 const checkingIds = ref(new Set())
 const loginDialogVisible = ref(false)
@@ -260,6 +293,10 @@ const syncLabel = computed(() => lastSyncedAt.value
   ? `本地同步 ${lastSyncedAt.value.toLocaleTimeString('zh-CN', { hour12: false })}`
   : '等待首次同步')
 const selectedPlatform = computed(() => overview.platforms.find(item => item.type === loginForm.platformType))
+const hasLoginCapablePlatform = computed(() => (
+  overview.platforms.some(item => item.login_available === true)
+))
+const returnToPublishCenter = computed(() => route.query.return_to === '/publish-center')
 const loginDialogTitle = computed(() => `${loginForm.existingAccountId ? '重新登录' : '连接'}${selectedPlatform.value ? ` · ${selectedPlatform.value.name}` : '媒体账号'}`)
 const loginStageTitle = computed(() => ({
   connecting: '登录流程已启动', manual: '等待你完成平台登录', success: '账号登录成功', failed: '登录没有完成'
@@ -275,11 +312,54 @@ const loginStageMessage = computed(() => {
 const fetchOverview = async () => {
   loading.value = true
   loadError.value = false
+  capabilitiesLoadError.value = false
   try {
-    const response = await accountApi.getMediaAccounts()
-    Object.assign(overview, response.data || emptyOverview())
+    const [accountResult, capabilityResult] = await Promise.allSettled([
+      accountApi.getMediaAccounts(),
+      publishApi.getPlatforms()
+    ])
+    if (accountResult.status === 'rejected') throw accountResult.reason
+
+    const capabilityItems = capabilityResult.status === 'fulfilled'
+      ? (capabilityResult.value.data || [])
+      : []
+    capabilitiesLoadError.value = capabilityResult.status === 'rejected'
+    if (capabilitiesLoadError.value) {
+      console.error('加载发布能力清单失败:', capabilityResult.reason)
+    }
+    const capabilities = new Map(capabilityItems.map(item => [item.key, item]))
+    const rawOverview = accountResult.value.data || emptyOverview()
+    const nextOverview = {
+      ...rawOverview,
+      summary: { ...emptyOverview().summary, ...(rawOverview.summary || {}) },
+      accounts: [...(rawOverview.accounts || [])],
+      platforms: (rawOverview.platforms || []).map(platform => ({
+        ...platform,
+        login_available: false,
+        runtime_available: false,
+        unavailable_reason: capabilitiesLoadError.value
+          ? '发布能力清单未载入，登录与检测已安全禁用'
+          : '当前构建未开放该平台登录',
+        ...(capabilities.get(platform.key) || {})
+      }))
+    }
+    Object.assign(overview, nextOverview)
     loaded.value = true
     lastSyncedAt.value = new Date()
+    const requestedPlatform = String(route.query.login_platform || '')
+    if (requestedPlatform && !loginDialogVisible.value) {
+      const platform = overview.platforms.find(item => item.key === requestedPlatform)
+      if (platform) {
+        openLogin(platform)
+        await router.replace({
+          path: '/account-management',
+          query: {
+            ...(route.query.return_to ? { return_to: route.query.return_to } : {}),
+            ...(route.query.job_id ? { job_id: route.query.job_id } : {})
+          }
+        })
+      }
+    }
   } catch (error) {
     loadError.value = true
     console.error('加载媒体账号失败:', error)
@@ -288,7 +368,11 @@ const fetchOverview = async () => {
   }
 }
 
-const checkAccount = async account => {
+const checkAccount = async (account, platform) => {
+  if (platform?.login_available !== true) {
+    ElMessage.warning(platform?.unavailable_reason || '该平台登录运行时当前不可用')
+    return
+  }
   if (checkingIds.value.has(account.id)) return
   checkingIds.value = new Set([...checkingIds.value, account.id])
   try {
@@ -305,6 +389,14 @@ const checkAccount = async account => {
 }
 
 const openLogin = (platform = null, account = null) => {
+  if (platform && platform.login_available !== true) {
+    ElMessage.warning(platform.unavailable_reason || '该平台登录运行时当前不可用')
+    return
+  }
+  if (!platform && !hasLoginCapablePlatform.value) {
+    ElMessage.warning('当前没有可用的平台登录运行时')
+    return
+  }
   loginForm.platformType = platform?.type || null
   loginForm.accountName = account?.account_name || ''
   loginForm.existingAccountId = account?.id || null
@@ -314,6 +406,10 @@ const openLogin = (platform = null, account = null) => {
 }
 
 const startLogin = () => {
+  if (!selectedPlatform.value || selectedPlatform.value.login_available !== true) {
+    ElMessage.warning(selectedPlatform.value?.unavailable_reason || '该平台登录运行时当前不可用')
+    return
+  }
   closeEventSource()
   loginStage.value = 'connecting'
   qrCodeData.value = ''
@@ -349,6 +445,16 @@ const startLogin = () => {
 const retryLogin = () => {
   loginStage.value = 'idle'
   qrCodeData.value = ''
+}
+
+const completeLogin = async () => {
+  loginDialogVisible.value = false
+  if (returnToPublishCenter.value) {
+    await router.push({
+      path: '/publish-center',
+      query: route.query.job_id ? { job_id: route.query.job_id } : {}
+    })
+  }
 }
 
 const closeEventSource = () => {
@@ -422,6 +528,9 @@ onBeforeUnmount(closeEventSource)
 .note-icon { display: grid; place-items: center; width: 34px; height: 34px; flex: 0 0 auto; border: 1px solid #80bbb7; color: #087f81; }
 .safety-note strong { font-size: 13px; }
 .safety-note p { margin: 4px 0 0; color: #597177; font-size: 12px; line-height: 1.6; }
+.capability-warning { margin-top: 12px; padding: 13px 16px; border: 1px solid #ddc49d; background: #fff9ef; }
+.capability-warning strong { color: #6f5027; font-size: 12px; }
+.capability-warning p { margin: 4px 0 0; color: #7b684d; font-size: 11px; line-height: 1.55; }
 
 .platform-section { margin-top: 28px; }
 .platform-section.secondary { padding-top: 8px; }
@@ -438,6 +547,9 @@ onBeforeUnmount(closeEventSource)
 :deep(.platform-code) { display: grid; place-items: center; width: 40px; height: 40px; color: white; background: var(--ink); font-weight: 800; }
 :deep(.platform-card-head h3) { margin: 3px 0 0; font-size: 18px; }
 :deep(.platform-card-head small) { color: #719093; font: 700 9px "Cascadia Mono", monospace; }
+:deep(.platform-runtime-note) { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; padding: 10px 18px; border-bottom: 1px solid #ecd9b8; background: #fff9ef; }
+:deep(.platform-runtime-note strong) { color: #735126; font-size: 10px; }
+:deep(.platform-runtime-note span) { color: #806d51; font-size: 10px; line-height: 1.5; }
 :deep(.account-stack) { padding: 0 18px; }
 :deep(.account-entry) { display: flex; justify-content: space-between; gap: 16px; padding: 15px 0; border-bottom: 1px solid #e1e8e6; }
 :deep(.account-entry:last-child) { border-bottom: 0; }

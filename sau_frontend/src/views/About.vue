@@ -25,10 +25,10 @@
         <strong>本机管理员</strong>
         <p>不是云端统一账号</p>
       </article>
-      <article>
+      <article :class="['publish-boundary', `is-${publishingState}`]">
         <span>PUBLISH</span>
-        <strong>默认禁用</strong>
-        <p>不会执行真实平台发布</p>
+        <strong>{{ publishingLabel }}</strong>
+        <p>{{ publishingNote }}</p>
       </article>
       <article>
         <span>PACKAGE</span>
@@ -43,7 +43,7 @@
           <span>01 / PRODUCT</span>
           <h2 id="purpose-title">这套软件解决什么问题</h2>
         </div>
-        <p class="lead-copy">它不是网站快捷方式，也不是自动发布器。它首先是一套可追溯的 GEO 内容工作台。</p>
+        <p class="lead-copy">它不是网站快捷方式，也不只是自动发布器。它首先是一套可追溯的 GEO 内容工作台。</p>
         <ul class="capability-list">
           <li>
             <span>品牌底稿</span>
@@ -104,23 +104,93 @@
       </div>
     </section>
 
-    <section class="release-warning" aria-labelledby="release-title">
+    <section :class="['release-warning', `is-${publishingState}`]" aria-labelledby="release-title">
       <span class="warning-mark" aria-hidden="true">!</span>
       <div>
         <p class="eyebrow">04 / RELEASE STATUS</p>
         <h2 id="release-title">当前是未签名的 Windows 便携 Beta</h2>
-        <p>Windows 可能显示来源或安全提示。只运行从可信渠道取得并核对校验值的安装包。此版本强制关闭真实发布，桌面导航不会开放媒体账号与发布中心，也不会把内容发到平台。</p>
+        <p>{{ releaseBoundaryCopy }}</p>
       </div>
     </section>
 
     <footer class="about-footer">
       <span>GEO CONTENT WORKBENCH</span>
-      <p>版本 1.0.0 · 本机优先 · 可审计证据 · 发布默认关闭</p>
+      <p>版本 1.0.0 · 本机优先 · 可审计证据 · {{ publishingFooter }}</p>
     </footer>
   </main>
 </template>
 
 <script setup>
+import { computed, onBeforeUnmount, onMounted, reactive } from 'vue'
+
+const runtimeStatus = reactive({
+  real_publishing_authorized: false,
+  real_publishing_enabled: false,
+  publishing_runtime: {
+    ready: false,
+    browser_ready: false,
+    missing_modules: []
+  }
+})
+
+const publishingState = computed(() => {
+  if (!runtimeStatus.real_publishing_authorized) return 'locked'
+  if (runtimeStatus.real_publishing_enabled && runtimeStatus.publishing_runtime?.ready) return 'enabled'
+  return 'blocked'
+})
+
+const publishingLabel = computed(() => ({
+  enabled: '真实发布已开启',
+  blocked: '运行时未就绪',
+  locked: '安全构建锁定'
+}[publishingState.value]))
+
+const publishingNote = computed(() => {
+  if (publishingState.value === 'enabled') return '逐任务绑定账号并强确认'
+  if (publishingState.value === 'blocked') {
+    const runtime = runtimeStatus.publishing_runtime || {}
+    if (runtime.browser_ready === false) return '已授权，尚未检测到 Chrome'
+    if (Array.isArray(runtime.missing_modules) && runtime.missing_modules.length) return '已授权，发布组件不完整'
+    return '已授权，发布组件探针未通过'
+  }
+  return '媒体账号与真实发布未授权'
+})
+
+const releaseBoundaryCopy = computed(() => {
+  const unsigned = 'Windows 可能显示来源或安全提示。只运行从可信渠道取得并核对校验值的安装包。'
+  if (publishingState.value === 'enabled') {
+    return `${unsigned} 本机构建已开启真实发布；发布前必须核对目标平台、账号、正文与素材，并完成单任务强确认。平台接受内容后不能依靠本软件撤回。`
+  }
+  if (publishingState.value === 'blocked') {
+    return `${unsigned} 本机构建已授权真实发布，但 Chrome 或发布组件尚未通过探针；当前不能创建或执行真实发布任务。`
+  }
+  return `${unsigned} 当前是安全构建，媒体账号与真实发布入口保持锁定，不会把内容发送到媒体平台。`
+})
+
+const publishingFooter = computed(() => ({
+  enabled: '真实发布已开启',
+  blocked: '发布运行时未就绪',
+  locked: '真实发布锁定'
+}[publishingState.value]))
+
+const loadRuntimeStatus = async () => {
+  const api = window.pywebview?.api
+  if (!api?.get_runtime_status) return
+  try {
+    Object.assign(runtimeStatus, await api.get_runtime_status())
+  } catch (error) {
+    console.warn('无法读取桌面发布状态', error)
+  }
+}
+
+onMounted(() => {
+  window.addEventListener('pywebviewready', loadRuntimeStatus)
+  loadRuntimeStatus()
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('pywebviewready', loadRuntimeStatus)
+})
 </script>
 
 <style lang="scss" scoped>
@@ -170,6 +240,8 @@
 .status-ledger article:last-child { border-right: 0; }
 .status-ledger article::after { position: absolute; right: 20px; bottom: 0; left: 20px; height: 2px; background: #94aaa7; content: ''; }
 .status-ledger article:first-child::after { background: var(--signal); }
+.status-ledger article.publish-boundary.is-enabled::after { background: var(--amber); }
+.status-ledger article.publish-boundary.is-blocked::after { background: #d4ad68; }
 .status-ledger span { color: #55827e; font: 700 8px/1 "Cascadia Mono", monospace; letter-spacing: 0.1em; }
 .status-ledger strong { display: block; margin-top: 9px; font-size: 13px; }
 .status-ledger p { margin: 5px 0 0; color: var(--muted); font-size: 9px; }

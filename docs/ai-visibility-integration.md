@@ -312,7 +312,7 @@ sqrt(sample_count / 5)（最大为 1）
 
 1. AI 可见度本地分析：当前没有外部 provider，也没有 `AI_VISIBILITY_ENABLED` 运行时开关。出现回归时，先停止使用入口并回退到已验收旧 EXE；附加的 `ai_visibility_runs` 表可以保留，不会被旧版本主动执行。
 2. AI 内容生成：由 `CONTENT_ENGINE` 和 `CONTENT_ENGINE_FALLBACK` 选择 `qwen` 或未来的 `colleague` 适配器。这些变量不控制 AI 可见度。外部同事服务未验收时保持 `CONTENT_ENGINE=qwen`，并避免配置同名重复 fallback。
-3. 真实发布：桌面宿主强制 `ALLOW_REAL_PUBLISHING=false`、`ENABLE_BILIBILI_RUNTIME=false`，调度器固定 `allow_real=False`。这些是发布安全开关，也不改变可见度算法。
+3. 真实发布：`safe` 桌面 profile 强制 `ALLOW_REAL_PUBLISHING=false`，调度器固定 `allow_real=False`；`authorized_real` profile 只有在 Google Chrome、Playwright 和 Patchright 的成品离线探针全部通过后，才在当前进程开放受控发布任务。两种 profile 均强制 `ENABLE_BILIBILI_RUNTIME=false`，旧版直接发布入口也保持关闭。这些是发布安全开关，不改变可见度算法。
 
 未来接入自动回答采集时，应先增加一个默认关闭、可审计的独立采集开关；当前代码中尚无这一开关，不应在部署文档中伪造名称或状态。
 

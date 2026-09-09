@@ -13,6 +13,7 @@ PLATFORM_CAPABILITIES = (
         "requires_images": False,
         "requires_video": False,
         "supports_schedule": True,
+        "release_status": "stable",
     },
     {
         "key": "toutiao",
@@ -23,6 +24,7 @@ PLATFORM_CAPABILITIES = (
         "requires_images": False,
         "requires_video": False,
         "supports_schedule": True,
+        "release_status": "stable",
     },
     {
         "key": "baijiahao",
@@ -33,6 +35,7 @@ PLATFORM_CAPABILITIES = (
         "requires_images": True,
         "requires_video": False,
         "supports_schedule": True,
+        "release_status": "stable",
     },
     {
         "key": "sohu",
@@ -43,6 +46,7 @@ PLATFORM_CAPABILITIES = (
         "requires_images": False,
         "requires_video": False,
         "supports_schedule": True,
+        "release_status": "stable",
     },
     {
         "key": "xiaohongshu",
@@ -53,6 +57,7 @@ PLATFORM_CAPABILITIES = (
         "requires_images": True,
         "requires_video": False,
         "supports_schedule": True,
+        "release_status": "stable",
     },
     {
         "key": "douyin",
@@ -63,6 +68,7 @@ PLATFORM_CAPABILITIES = (
         "requires_images": True,
         "requires_video": False,
         "supports_schedule": True,
+        "release_status": "experimental",
     },
     {
         "key": "kuaishou",
@@ -73,6 +79,7 @@ PLATFORM_CAPABILITIES = (
         "requires_images": True,
         "requires_video": False,
         "supports_schedule": True,
+        "release_status": "experimental",
     },
     {
         "key": "bilibili",
@@ -83,6 +90,7 @@ PLATFORM_CAPABILITIES = (
         "requires_images": False,
         "requires_video": True,
         "supports_schedule": True,
+        "release_status": "disabled",
     },
     {
         "key": "channels",
@@ -93,6 +101,7 @@ PLATFORM_CAPABILITIES = (
         "requires_images": False,
         "requires_video": True,
         "supports_schedule": True,
+        "release_status": "review_required",
     },
     {
         "key": "tiktok",
@@ -103,6 +112,7 @@ PLATFORM_CAPABILITIES = (
         "requires_images": False,
         "requires_video": True,
         "supports_schedule": True,
+        "release_status": "stable",
     },
 )
 

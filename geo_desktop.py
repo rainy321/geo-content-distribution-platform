@@ -10,9 +10,11 @@ from __future__ import annotations
 import argparse
 import ctypes
 import hashlib
+import importlib
 import json
 import logging
 import os
+import shutil
 import socket
 import sys
 import threading
@@ -29,6 +31,11 @@ APP_VERSION = "1.0.0"
 BUILD_INFO_SCHEMA_VERSION = 1
 APP_TITLE = "GEO 智能内容分发平台"
 APP_DIRECTORY_NAME = "GEOContentPlatform"
+PUBLISHING_PROFILE_SAFE = "safe"
+PUBLISHING_PROFILE_AUTHORIZED_REAL = "authorized_real"
+PUBLISHING_PROFILES = frozenset(
+    {PUBLISHING_PROFILE_SAFE, PUBLISHING_PROFILE_AUTHORIZED_REAL}
+)
 LOOPBACK_HOST = "127.0.0.1"
 STARTUP_TIMEOUT_SECONDS = 30.0
 _WINDOWS_ALREADY_EXISTS = 183
@@ -125,6 +132,11 @@ def load_build_info(resource_root: str | Path | None = None) -> dict[str, Any]:
             raise RuntimeError(f"桌面构建信息版本不受支持：{candidate}")
         if payload.get("version") != APP_VERSION:
             raise RuntimeError("桌面程序版本与构建信息不一致")
+        publishing_profile = str(
+            payload.get("publishing_profile") or PUBLISHING_PROFILE_SAFE
+        ).strip()
+        if publishing_profile not in PUBLISHING_PROFILES:
+            raise RuntimeError("桌面构建信息包含不受支持的发布配置")
         return {
             "schema_version": BUILD_INFO_SCHEMA_VERSION,
             "version": APP_VERSION,
@@ -132,6 +144,7 @@ def load_build_info(resource_root: str | Path | None = None) -> dict[str, Any]:
             "source_branch": str(payload.get("source_branch") or "unknown"),
             "built_at_utc": str(payload.get("built_at_utc") or "unknown"),
             "source_dirty": bool(payload.get("source_dirty", False)),
+            "publishing_profile": publishing_profile,
         }
     return {
         "schema_version": BUILD_INFO_SCHEMA_VERSION,
@@ -140,7 +153,48 @@ def load_build_info(resource_root: str | Path | None = None) -> dict[str, Any]:
         "source_branch": "development",
         "built_at_utc": "development",
         "source_dirty": True,
+        "publishing_profile": PUBLISHING_PROFILE_SAFE,
     }
+
+
+def publishing_profile_allows_real(publishing_profile: str) -> bool:
+    """Return whether an immutable desktop build may enable real publishing."""
+
+    return str(publishing_profile).strip() == PUBLISHING_PROFILE_AUTHORIZED_REAL
+
+
+def resolve_browser_executable(
+    environ: Mapping[str, str] | None = None,
+) -> Path | None:
+    """Locate a supported system Chromium browser without downloading anything."""
+
+    values = os.environ if environ is None else environ
+    explicit = str(values.get("LOCAL_CHROME_PATH", "")).strip()
+    if explicit:
+        candidate = Path(explicit).expanduser()
+        return candidate.resolve() if candidate.is_file() else None
+
+    candidates: list[Path] = []
+    for environment_name, relative_path in (
+        ("ProgramFiles", "Google/Chrome/Application/chrome.exe"),
+        ("ProgramFiles(x86)", "Google/Chrome/Application/chrome.exe"),
+        ("LOCALAPPDATA", "Google/Chrome/Application/chrome.exe"),
+    ):
+        base = str(values.get(environment_name, "")).strip()
+        if base:
+            candidates.append(Path(base) / relative_path)
+    # The inherited uploaders use Playwright/Patchright's Chrome channel in a
+    # few platform-specific paths.  Do not claim Edge is universally supported
+    # until those upstream flows are fully browser-agnostic.
+    for executable_name in ("chrome.exe", "chrome"):
+        resolved = shutil.which(executable_name)
+        if resolved:
+            candidates.append(Path(resolved))
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+    return None
 
 
 def resolve_frontend_dir(resource_root: str | Path) -> Path:
@@ -181,18 +235,24 @@ def apply_desktop_environment(
     port: int,
     *,
     environ: MutableMapping[str, str] | None = None,
+    publishing_profile: str = PUBLISHING_PROFILE_SAFE,
 ) -> MutableMapping[str, str]:
     """Apply the desktop storage boundary before importing ``sau_backend``.
 
-    The two real-publishing flags are assigned, rather than defaulted, so a
-    globally configured developer shell cannot accidentally unlock a packaged
-    desktop build.
+    Publishing flags are derived only from immutable build provenance, rather
+    than inherited shell variables.  This keeps the safe build locked while an
+    explicitly produced authorized build can expose the complete workflow.
     """
 
     if not 1 <= int(port) <= 65535:
         raise ValueError("桌面服务端口必须在 1 到 65535 之间")
 
     target = os.environ if environ is None else environ
+    normalized_profile = str(publishing_profile).strip()
+    if normalized_profile not in PUBLISHING_PROFILES:
+        raise ValueError("不受支持的桌面发布配置")
+    real_publishing_enabled = publishing_profile_allows_real(normalized_profile)
+    browser_executable = resolve_browser_executable(target)
     paths.create()
     from services.local_auth_service import LocalAuthService
 
@@ -207,6 +267,7 @@ def apply_desktop_environment(
             "DATABASE_PATH": str(paths.database),
             "MEDIA_ROOT": str(paths.media),
             "COOKIES_DIRECTORY": str(paths.cookies),
+            "LOGS_DIRECTORY": str(paths.logs),
             "FRONTEND_BUILD_DIR": str(Path(frontend_dir).resolve()),
             "SERVER_HOST": LOOPBACK_HOST,
             "SERVER_PORT": str(port),
@@ -216,11 +277,30 @@ def apply_desktop_environment(
             "GEO_DESKTOP_AUTH_PATH": str(paths.auth_config),
             "DEMO_MODE": "false",
             "SEED_DEMO_DATA": "false",
+            # The immutable profile grants intent.  The actual gate stays
+            # closed until the packaged browser engines pass a local probe in
+            # ``run`` immediately before Flask is imported.
+            "GEO_REAL_PUBLISHING_AUTHORIZED": (
+                "true" if real_publishing_enabled else "false"
+            ),
+            "GEO_PUBLISHING_RUNTIME_READY": "false",
             "ALLOW_REAL_PUBLISHING": "false",
+            "ALLOW_LEGACY_DIRECT_PUBLISHING": "false",
             "ENABLE_BILIBILI_RUNTIME": "false",
             "RUN_PUBLISH_SCHEDULER": "true",
+            "GEO_DESKTOP_PUBLISHING_PROFILE": normalized_profile,
+            "GEO_PUBLISHING_BROWSER_READY": (
+                "true" if browser_executable is not None else "false"
+            ),
+            "LOCAL_CHROME_HEADLESS": (
+                "false" if real_publishing_enabled else "true"
+            ),
         }
     )
+    if browser_executable is not None:
+        target["LOCAL_CHROME_PATH"] = str(browser_executable)
+    else:
+        target.pop("LOCAL_CHROME_PATH", None)
     return target
 
 
@@ -304,14 +384,42 @@ class DesktopApi:
         paths: DesktopPaths,
         *,
         build_info: Mapping[str, Any] | None = None,
+        publishing_runtime: Mapping[str, Any] | None = None,
     ):
         self.paths = paths
         self.build_info = dict(build_info or load_build_info())
+        self._publishing_runtime = (
+            dict(publishing_runtime) if publishing_runtime is not None else None
+        )
 
     def get_runtime_status(self) -> dict[str, Any]:
         from services.local_auth_service import LocalAuthService
 
         auth_status = LocalAuthService(self.paths.auth_config).status()
+        publishing_profile = str(
+            self.build_info.get("publishing_profile") or PUBLISHING_PROFILE_SAFE
+        )
+        real_publishing_authorized = publishing_profile_allows_real(
+            publishing_profile
+        )
+        publishing_runtime = (
+            dict(self._publishing_runtime)
+            if self._publishing_runtime is not None
+            else inspect_publishing_runtime(
+                enabled=real_publishing_authorized,
+                probe_browser=False,
+            )
+        )
+        real_publishing_enabled = (
+            real_publishing_authorized
+            and str(os.getenv("ALLOW_REAL_PUBLISHING", "false")).lower()
+            == "true"
+            and str(os.getenv("GEO_PUBLISHING_RUNTIME_READY", "false")).lower()
+            == "true"
+        )
+        publishing_runtime["ready"] = bool(
+            publishing_runtime["ready"] and real_publishing_enabled
+        )
         return {
             "desktop": True,
             "version": APP_VERSION,
@@ -320,8 +428,12 @@ class DesktopApi:
             "fallback_engine": str(
                 os.getenv("CONTENT_ENGINE_FALLBACK", "disabled")
             ),
-            "real_publishing_enabled": False,
+            "publishing_profile": publishing_profile,
+            "real_publishing_authorized": real_publishing_authorized,
+            "real_publishing_enabled": real_publishing_enabled,
+            "scheduled_real_publishing_enabled": False,
             "bilibili_runtime_enabled": False,
+            "publishing_runtime": publishing_runtime,
             "authentication_required": True,
             "setup_required": auth_status.setup_required,
             "backup_directory": str(self.paths.backups),
@@ -394,6 +506,121 @@ def fetch_json_endpoint(base_url: str, path: str) -> dict[str, Any]:
     return payload
 
 
+def inspect_publishing_runtime(
+    *,
+    enabled: bool,
+    probe_browser: bool = False,
+) -> dict[str, Any]:
+    """Inspect packaged modules and optionally run an offline browser probe."""
+
+    browser_executable = resolve_browser_executable()
+    if not enabled:
+        return {
+            "ready": False,
+            "enabled": False,
+            "browser_ready": browser_executable is not None,
+            "browser_executable": (
+                str(browser_executable) if browser_executable is not None else ""
+            ),
+            "missing_modules": [],
+            "module_errors": {},
+            "browser_probe": "not_run",
+            "browser_probe_error": "",
+            "reason": "当前桌面构建未授权真实发布",
+            "error": "",
+        }
+
+    required_modules = (
+        "playwright.async_api",
+        "patchright.async_api",
+        "cv2",
+        "myUtils.login",
+        "services.real_publisher_factory",
+        "uploader.zhihu_uploader.main",
+        "uploader.toutiao_uploader.main",
+        "uploader.sohu_uploader.main",
+        "uploader.baijiahao_uploader.main",
+        "uploader.xiaohongshu_uploader.main",
+        "uploader.douyin_uploader.main",
+        "uploader.ks_uploader.main",
+        "uploader.tencent_uploader.main",
+        "uploader.tk_uploader.main_chrome",
+    )
+    missing_modules: list[str] = []
+    module_errors: dict[str, str] = {}
+    for module_name in required_modules:
+        try:
+            importlib.import_module(module_name)
+        except Exception as exc:
+            missing_modules.append(module_name)
+            module_errors[module_name] = exc.__class__.__name__
+    browser_ready = browser_executable is not None
+    browser_probe = "not_run"
+    browser_probe_error = ""
+    if browser_ready and not missing_modules and probe_browser:
+        try:
+            _probe_browser_automation(browser_executable)
+            browser_probe = "passed"
+        except Exception as exc:
+            browser_probe = "failed"
+            browser_probe_error = str(exc).strip() or exc.__class__.__name__
+    ready = browser_ready and not missing_modules and browser_probe != "failed"
+    if not browser_ready:
+        reason = "未找到 Google Chrome"
+        error = ""
+    elif missing_modules:
+        reason = "发布运行时组件缺失或无法加载"
+        error = ", ".join(missing_modules)
+    elif browser_probe == "failed":
+        reason = "浏览器自动化本地探针失败"
+        error = browser_probe_error
+    elif ready:
+        reason = "发布运行时已就绪"
+        error = ""
+    else:
+        reason = "发布运行时未就绪"
+        error = ""
+    return {
+        "ready": ready,
+        "enabled": True,
+        "browser_ready": browser_ready,
+        "browser_executable": (
+            str(browser_executable) if browser_executable is not None else ""
+        ),
+        "missing_modules": missing_modules,
+        "module_errors": module_errors,
+        "browser_probe": browser_probe,
+        "browser_probe_error": browser_probe_error,
+        "reason": reason,
+        "error": error,
+    }
+
+
+def _probe_browser_automation(browser_executable: Path | None) -> None:
+    """Launch both packaged engines against an offline page and close them."""
+
+    if browser_executable is None or not browser_executable.is_file():
+        raise RuntimeError("未找到 Google Chrome")
+    probes = (
+        ("Playwright", "playwright.sync_api"),
+        ("Patchright", "patchright.sync_api"),
+    )
+    for engine_name, module_name in probes:
+        sync_api = importlib.import_module(module_name)
+        with sync_api.sync_playwright() as playwright:
+            browser = playwright.chromium.launch(
+                headless=True,
+                executable_path=str(browser_executable),
+            )
+            try:
+                page = browser.new_page()
+                page.set_content(f"<title>{engine_name}</title><p>GEO runtime ready</p>")
+                if page.title() != engine_name:
+                    raise RuntimeError(f"{engine_name} 本地页面探针失败")
+            finally:
+                browser.close()
+
+
 def write_health_report(
     report_path: str | Path | None,
     payload: Mapping[str, Any],
@@ -462,6 +689,7 @@ def run_native_ui_smoke(
     base_url: str,
     paths: DesktopPaths,
     build_info: Mapping[str, Any],
+    publishing_runtime: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Exercise the packaged WebView and native bridge with synthetic data.
 
@@ -477,7 +705,11 @@ def run_native_ui_smoke(
     window = webview.create_window(
         f"{APP_TITLE} - UI Smoke",
         base_url,
-        js_api=DesktopApi(paths, build_info=build_info),
+        js_api=DesktopApi(
+            paths,
+            build_info=build_info,
+            publishing_runtime=publishing_runtime,
+        ),
         width=1200,
         height=760,
         min_size=(900, 640),
@@ -642,12 +874,16 @@ def run_native_ui_smoke(
     return outcome
 
 
-def _start_safe_scheduler(paths: DesktopPaths):
+def _start_publish_scheduler(paths: DesktopPaths):
     from services.publish_scheduler_runtime import create_publish_scheduler
 
+    # Scheduled real publishing requires a separate two-phase authorization
+    # protocol.  Until that exists, the desktop scheduler may promote due jobs
+    # but must never load a real publisher or contact a platform.
     scheduler = create_publish_scheduler(
         paths.database,
         interval_seconds=15,
+        publisher_factory=None,
         allow_real=False,
         media_root=paths.media,
     )
@@ -687,14 +923,33 @@ def run(argv: Sequence[str] | None = None) -> int:
     try:
         resource_root = resolve_resource_root()
         build_info = load_build_info(resource_root)
+        publishing_profile = str(build_info["publishing_profile"])
         frontend_dir = resolve_frontend_dir(resource_root)
         listener = reserve_loopback_socket()
         port = int(listener.getsockname()[1])
         _create_startup_backup(paths, logger)
-        apply_desktop_environment(paths, frontend_dir, port)
+        apply_desktop_environment(
+            paths,
+            frontend_dir,
+            port,
+            publishing_profile=publishing_profile,
+        )
+        publishing_runtime = inspect_publishing_runtime(
+            enabled=publishing_profile_allows_real(publishing_profile),
+            probe_browser=publishing_profile_allows_real(publishing_profile),
+        )
+        runtime_ready = bool(publishing_runtime["ready"])
+        os.environ["GEO_PUBLISHING_RUNTIME_READY"] = (
+            "true" if runtime_ready else "false"
+        )
+        os.environ["ALLOW_REAL_PUBLISHING"] = (
+            "true" if runtime_ready else "false"
+        )
         logger.info(
-            "starting version=%s data_root=%s port=%s",
+            "starting version=%s profile=%s publishing_ready=%s data_root=%s port=%s",
             APP_VERSION,
+            publishing_profile,
+            runtime_ready,
             paths.root,
             port,
         )
@@ -710,6 +965,11 @@ def run(argv: Sequence[str] | None = None) -> int:
 
         if args.health_check:
             auth = fetch_json_endpoint(base_url, "/api/auth/status")
+            native_status = DesktopApi(
+                paths,
+                build_info=build_info,
+                publishing_runtime=publishing_runtime,
+            ).get_runtime_status()
             report = {
                 "ok": True,
                 "version": APP_VERSION,
@@ -717,6 +977,8 @@ def run(argv: Sequence[str] | None = None) -> int:
                 "frontend": (frontend_dir / "index.html").is_file(),
                 "health": health.get("data", {}),
                 "auth": auth.get("data", {}),
+                "desktop": native_status,
+                "publishing_runtime_probe": publishing_runtime,
                 "data_directory": str(paths.root),
             }
             write_health_report(args.health_report, report)
@@ -724,7 +986,12 @@ def run(argv: Sequence[str] | None = None) -> int:
             return 0
 
         if args.ui_smoke:
-            ui_report = run_native_ui_smoke(base_url, paths, build_info)
+            ui_report = run_native_ui_smoke(
+                base_url,
+                paths,
+                build_info,
+                publishing_runtime=publishing_runtime,
+            )
             report = {
                 "ok": bool(ui_report.get("ok")),
                 "version": APP_VERSION,
@@ -749,14 +1016,18 @@ def run(argv: Sequence[str] | None = None) -> int:
             logging.shutdown()
             os._exit(0 if report["ok"] else 1)
 
-        scheduler = _start_safe_scheduler(paths)
+        scheduler = _start_publish_scheduler(paths)
 
         import webview
 
         webview.create_window(
             APP_TITLE,
             base_url,
-            js_api=DesktopApi(paths, build_info=build_info),
+            js_api=DesktopApi(
+                paths,
+                build_info=build_info,
+                publishing_runtime=publishing_runtime,
+            ),
             width=1440,
             height=900,
             min_size=(1080, 700),

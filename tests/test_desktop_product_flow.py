@@ -29,12 +29,14 @@ class DesktopProductFlowTests(unittest.TestCase):
                 "ACCESS_CONTROL_ENABLED",
                 "ACCESS_PASSWORD",
                 "ALLOW_REAL_PUBLISHING",
+                "ALLOW_LEGACY_DIRECT_PUBLISHING",
                 "AUTH_LOGIN_ATTEMPTS_PER_MINUTE",
                 "AUTH_RATE_LIMITER",
                 "DATABASE_PATH",
                 "DEMO_MODE",
                 "DESKTOP_MODE",
                 "ENABLE_BILIBILI_RUNTIME",
+                "PUBLISHING_RUNTIME_READY",
                 "LOCAL_AUTH_SERVICE",
                 "SECRET_KEY",
                 "SESSION_COOKIE_SECURE",
@@ -45,12 +47,14 @@ class DesktopProductFlowTests(unittest.TestCase):
             ACCESS_CONTROL_ENABLED=True,
             ACCESS_PASSWORD="",
             ALLOW_REAL_PUBLISHING=False,
+            ALLOW_LEGACY_DIRECT_PUBLISHING=False,
             AUTH_LOGIN_ATTEMPTS_PER_MINUTE=10,
             AUTH_RATE_LIMITER=FixedWindowRateLimiter(),
             DATABASE_PATH=self.database_path,
             DEMO_MODE=False,
             DESKTOP_MODE=True,
             ENABLE_BILIBILI_RUNTIME=False,
+            PUBLISHING_RUNTIME_READY=False,
             LOCAL_AUTH_SERVICE=self.local_auth,
             SECRET_KEY=self.local_auth.get_session_secret(),
             SESSION_COOKIE_SECURE=False,
@@ -140,7 +144,7 @@ class DesktopProductFlowTests(unittest.TestCase):
         # validation, imports, worker threads, or any platform I/O can occur.
         publish = self.client.post("/postVideo", json={"dryRun": False})
         self.assertEqual(publish.status_code, 403)
-        self.assertIn("ALLOW_REAL_PUBLISHING", publish.get_json()["msg"])
+        self.assertIn("旧版直发入口", publish.get_json()["msg"])
 
         changed = self.client.post(
             "/api/auth/change-password",

@@ -153,6 +153,51 @@ def build_publish_authorization_fingerprint(
     return hashlib.sha256(encoded).hexdigest()
 
 
+def build_publish_confirmation_fingerprint(
+    *,
+    job: dict[str, Any],
+    article: dict[str, Any],
+) -> str:
+    """Bind one interactive confirmation to an exact job snapshot.
+
+    This digest is intentionally not a long-lived credential.  It prevents a
+    confirmation rendered for one article body, account, media selection or
+    job state from being replayed after any of those values change.
+    """
+
+    job_id = job.get("id")
+    state_version = job.get("state_version")
+    if isinstance(job_id, bool) or not isinstance(job_id, int) or job_id <= 0:
+        raise ValueError("job_id 必须是正整数")
+    if (
+        isinstance(state_version, bool)
+        or not isinstance(state_version, int)
+        or state_version < 0
+    ):
+        raise ValueError("state_version 必须是非负整数")
+
+    publish_payload_fingerprint = build_publish_authorization_fingerprint(
+        article=article,
+        platform=job["platform"],
+        images=job.get("images"),
+        video=job.get("video"),
+        publish_at=job.get("publish_at"),
+        account_id=job.get("account_id"),
+    )
+    encoded = json.dumps(
+        {
+            "schema": 1,
+            "job_id": job_id,
+            "state_version": state_version,
+            "publish_payload_fingerprint": publish_payload_fingerprint,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def publish_authorization_matches(
     job: dict[str, Any],
     article: dict[str, Any],
@@ -180,6 +225,43 @@ def get_publish_job(
     if row is None:
         raise PublishJobNotFoundError("发布任务不存在")
     return _serialize_job(row)
+
+
+def get_publish_job_with_confirmation_snapshot(
+    database_path: str | Path,
+    job_id: int,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Read a job and its confirmable article fields from one SQLite row."""
+
+    with closing(_connect(database_path)) as conn:
+        row = conn.execute(
+            """
+            SELECT j.*, a.title AS article_title,
+                   u.userName AS account_name,
+                   a.id AS confirmation_article_id,
+                   a.title AS confirmation_title,
+                   a.content AS confirmation_content,
+                   a.tags AS confirmation_tags,
+                   a.updated_at AS confirmation_updated_at
+            FROM publish_jobs AS j
+            JOIN articles AS a ON a.id = j.article_id
+            LEFT JOIN user_info AS u ON u.id = j.account_id
+            WHERE j.id = ?
+            """,
+            (job_id,),
+        ).fetchone()
+    if row is None:
+        raise PublishJobNotFoundError("发布任务不存在")
+
+    job = _serialize_job(row)
+    article = {
+        "id": int(job.pop("confirmation_article_id")),
+        "title": str(job.pop("confirmation_title") or ""),
+        "content": str(job.pop("confirmation_content") or ""),
+        "tags": _normalize_authorization_tags(job.pop("confirmation_tags")),
+        "updated_at": job.pop("confirmation_updated_at"),
+    }
+    return job, article
 
 
 def claim_publish_job(
@@ -267,9 +349,11 @@ def list_publish_jobs(
         ).fetchone()[0]
         rows = conn.execute(
             f"""
-            SELECT j.*, a.title AS article_title
+            SELECT j.*, a.title AS article_title,
+                   u.userName AS account_name
             FROM publish_jobs AS j
             JOIN articles AS a ON a.id = j.article_id
+            LEFT JOIN user_info AS u ON u.id = j.account_id
             {where_clause}
             ORDER BY j.created_at DESC, j.id DESC
             LIMIT ? OFFSET ?
@@ -765,9 +849,11 @@ def _normalize_authorization_tags(value: Any) -> list[str]:
 def _fetch_job(conn: sqlite3.Connection, job_id: int):
     return conn.execute(
         """
-        SELECT j.*, a.title AS article_title
+        SELECT j.*, a.title AS article_title,
+               u.userName AS account_name
         FROM publish_jobs AS j
         JOIN articles AS a ON a.id = j.article_id
+        LEFT JOIN user_info AS u ON u.id = j.account_id
         WHERE j.id = ?
         """,
         (job_id,),

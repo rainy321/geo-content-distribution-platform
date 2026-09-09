@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -9,6 +10,7 @@ from services.article_service import get_article
 from services.publish_job_service import (
     ConcurrentPublishJobUpdateError,
     PUBLISH_AUTHORIZATION_MISMATCH_MESSAGE,
+    build_publish_confirmation_fingerprint,
     claim_publish_job,
     publish_authorization_matches,
     transition_publish_job,
@@ -31,6 +33,14 @@ class PublisherNotConfiguredError(RuntimeError):
     """Raised when a real publish job has no explicitly configured adapter."""
 
 
+class PublishConfirmationMismatchError(RuntimeError):
+    """Raised after a claimed job no longer matches interactive confirmation."""
+
+    def __init__(self, message: str, *, job: dict[str, Any]):
+        super().__init__(message)
+        self.job = job
+
+
 def execute_publish_job(
     database_path: str | Path,
     job_id: int,
@@ -39,6 +49,7 @@ def execute_publish_job(
     media_root: str | Path = DEFAULT_MEDIA_ROOT,
     require_authorization_match: bool = False,
     expected_state_version: int | None = None,
+    expected_confirmation_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     """Claim and execute exactly one queued job.
 
@@ -47,6 +58,14 @@ def execute_publish_job(
     accident.
     """
 
+    if (
+        expected_confirmation_fingerprint is not None
+        and expected_state_version is None
+    ):
+        raise ValueError(
+            "二次确认指纹校验必须同时提供 expected_state_version"
+        )
+
     job = claim_publish_job(
         database_path,
         job_id,
@@ -54,6 +73,36 @@ def execute_publish_job(
     )
     try:
         article = get_article(database_path, job["article_id"])
+        if expected_confirmation_fingerprint is not None:
+            confirmed_job = {
+                **job,
+                # Claim increments state_version.  The browser confirmation was
+                # rendered for the immediately preceding queued snapshot.
+                "state_version": expected_state_version,
+            }
+            current_fingerprint = build_publish_confirmation_fingerprint(
+                job=confirmed_job,
+                article=article,
+            )
+            if not hmac.compare_digest(
+                expected_confirmation_fingerprint,
+                current_fingerprint,
+            ):
+                mismatch_message = (
+                    "领取任务后检测到文章内容或发布参数已变化；"
+                    "未加载发布器、未访问平台，请重试并重新确认"
+                )
+                blocked_job = transition_publish_job(
+                    database_path,
+                    job_id,
+                    "need_action",
+                    message=mismatch_message,
+                    expected_state_version=job["state_version"],
+                )
+                raise PublishConfirmationMismatchError(
+                    mismatch_message,
+                    job=blocked_job,
+                )
         if require_authorization_match and not publish_authorization_matches(
             job,
             article,
@@ -71,6 +120,8 @@ def execute_publish_job(
         if not isinstance(result, PublishResult):
             raise TypeError("发布器必须返回 PublishResult")
         return _persist_result(database_path, job, result)
+    except PublishConfirmationMismatchError:
+        raise
     except ConcurrentPublishJobUpdateError:
         # A human action, reconciliation, or a later retry already changed the
         # attempt. Never translate that conflict into a retryable failure.

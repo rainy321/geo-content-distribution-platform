@@ -14,8 +14,12 @@ class LoginSseTests(unittest.TestCase):
     def setUp(self):
         self.original_testing = app.testing
         self.original_bilibili_runtime = app.config["ENABLE_BILIBILI_RUNTIME"]
+        self.original_real_publishing = app.config["ALLOW_REAL_PUBLISHING"]
+        self.original_runtime_ready = app.config["PUBLISHING_RUNTIME_READY"]
         app.config["TESTING"] = True
         app.config["ENABLE_BILIBILI_RUNTIME"] = False
+        app.config["ALLOW_REAL_PUBLISHING"] = True
+        app.config["PUBLISHING_RUNTIME_READY"] = True
         self.client = app.test_client()
         with active_queues_lock:
             active_queues.clear()
@@ -25,6 +29,8 @@ class LoginSseTests(unittest.TestCase):
             active_queues.clear()
         app.config["TESTING"] = self.original_testing
         app.config["ENABLE_BILIBILI_RUNTIME"] = self.original_bilibili_runtime
+        app.config["ALLOW_REAL_PUBLISHING"] = self.original_real_publishing
+        app.config["PUBLISHING_RUNTIME_READY"] = self.original_runtime_ready
 
     def test_stream_stops_and_cleans_after_terminal_event(self):
         status_queue = Queue()

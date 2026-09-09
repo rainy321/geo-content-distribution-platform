@@ -15,6 +15,40 @@
       </div>
     </header>
 
+    <section
+      v-if="accountBindingRequired"
+      :class="['publish-mode-banner', publishingRuntimeReady ? 'armed' : 'blocked']"
+      :role="publishingRuntimeReady ? 'status' : 'alert'"
+    >
+      <span>{{ publishingRuntimeReady ? 'LIVE / ARMED' : 'LIVE / BLOCKED' }}</span>
+      <div>
+        <strong>{{ publishingRuntimeReady ? '真实发布已开启' : '真实发布已授权，但运行时未就绪' }}</strong>
+        <p v-if="publishingRuntimeReady">每个平台必须手动选择一个具体账号；执行前还会核对任务版本、正文、素材和账号，并要求输入任务确认语。</p>
+        <p v-else>{{ publishingBlockedReason }}</p>
+      </div>
+    </section>
+    <section v-else-if="demoAvailable" class="publish-mode-banner demo" role="status">
+      <span>DEMO / SAFE</span>
+      <div>
+        <strong>当前为演示分发</strong>
+        <p>任务会经过完整状态链，但不会访问媒体平台，也不需要绑定真实账号。</p>
+      </div>
+    </section>
+    <section v-else-if="platformsLoadError" class="publish-mode-banner blocked" role="alert">
+      <span>ROUTE / UNKNOWN</span>
+      <div>
+        <strong>发布能力清单未载入</strong>
+        <p>所有渠道已安全禁用。请确认本机服务正常后重新进入发布中心。</p>
+      </div>
+    </section>
+    <section v-else-if="capabilitiesLoaded" class="publish-mode-banner locked" role="status">
+      <span>LIVE / LOCKED</span>
+      <div>
+        <strong>当前构建未开放发布任务</strong>
+        <p>{{ publishingBlockedReason }}</p>
+      </div>
+    </section>
+
     <section class="dispatch-console" aria-labelledby="dispatch-title">
       <div class="dispatch-form">
         <div class="section-heading">
@@ -79,19 +113,62 @@
               v-for="platform in platforms"
               :key="platform.key"
               type="button"
-              :class="['platform-option', { selected: selectedPlatforms.includes(platform.key) }]"
+              :class="['platform-option', {
+                selected: selectedPlatforms.includes(platform.key),
+                unavailable: !isPlatformSelectable(platform)
+              }]"
+              :disabled="!isPlatformSelectable(platform)"
+              :aria-disabled="!isPlatformSelectable(platform)"
               :aria-pressed="selectedPlatforms.includes(platform.key)"
               @click="togglePlatform(platform.key)"
             >
               <span class="platform-code">{{ platform.code }}</span>
               <span class="platform-name">{{ platform.name }}</span>
-              <small>{{ platform.note }}</small>
+              <small>{{ isPlatformSelectable(platform) ? platform.note : (platform.unavailable_reason || platform.note) }}</small>
               <span class="selection-mark" aria-hidden="true">
                 {{ selectedPlatforms.includes(platform.key) ? '✓' : '+' }}
               </span>
             </button>
           </div>
         </fieldset>
+
+        <section v-if="accountBindingRequired && manifestPlatforms.length" class="account-routing" aria-labelledby="account-routing-title">
+          <div class="asset-heading">
+            <span class="asset-code">ACCOUNT / BIND</span>
+            <div>
+              <strong id="account-routing-title">发布账号绑定</strong>
+              <small>必须逐个平台手动选择。任务创建时即固定账号；后续新增或切换账号不会改变已经确认的目标。</small>
+            </div>
+          </div>
+          <div v-if="accountsLoadError" class="account-route-error" role="alert">
+            <span>账号清单未载入，任务创建已暂停。</span>
+            <el-button :loading="accountsLoading" @click="fetchAccounts">重新载入账号</el-button>
+          </div>
+          <div class="account-route-list">
+            <div v-for="platform in manifestPlatforms" :key="platform.key" class="account-route-row">
+              <div>
+                <strong>{{ platform.name }}</strong>
+                <small>{{ connectedAccounts(platform.key).length ? '选择本次实际发送账号' : '还没有可用账号' }}</small>
+              </div>
+              <el-select
+                v-if="connectedAccounts(platform.key).length"
+                v-model="selectedAccountIds[platform.key]"
+                clearable
+                :placeholder="`选择${platform.name}账号`"
+              >
+                <el-option
+                  v-for="account in connectedAccounts(platform.key)"
+                  :key="account.id"
+                  :label="accountDisplayName(account)"
+                  :value="account.id"
+                />
+              </el-select>
+              <el-button v-else type="primary" plain @click="requestPlatformLogin(platform)">
+                登录 {{ platform.name }}
+              </el-button>
+            </div>
+          </div>
+        </section>
 
         <section
           :class="['asset-panel', { required: imageRequired, missing: imageRequired && !selectedImage && !autoImage }]"
@@ -200,7 +277,7 @@
         <div class="schedule-panel">
           <div>
             <strong>定时发布</strong>
-            <span>先创建计划任务；是否到点自动执行由下方单独授权。</span>
+            <span>{{ demoAvailable ? '演示任务可选择到点自动执行。' : '真实任务到点后只进入队列，等待人工逐条确认。' }}</span>
           </div>
           <el-switch
             v-model="scheduleEnabled"
@@ -215,17 +292,21 @@
             placeholder="选择发布时间"
             :disabled-date="disablePastDate"
           />
-          <div v-if="scheduleEnabled" class="schedule-auto-execute">
+          <div v-if="scheduleEnabled && demoAvailable" class="schedule-auto-execute">
             <el-checkbox v-model="autoExecuteAtDue">到点自动执行</el-checkbox>
             <p>
-              默认关闭。开启后，创建任务前还会要求一次明确确认；真实执行仍受服务端总开关、账号状态和平台风控保护。
+              仅适用于 Demo：到点后自动走演示状态链，不会访问任何媒体平台。
             </p>
+          </div>
+          <div v-else-if="scheduleEnabled" class="schedule-manual-confirm" role="note">
+            <strong>到点后等待人工确认</strong>
+            <p>系统只会把任务转为排队中，不会自动访问平台。届时需逐条核对正文、素材和账号，并输入任务确认语。</p>
           </div>
         </div>
 
         <div class="dispatch-actions">
           <p>
-            执行模式由服务端控制。Demo 任务会走完整状态链，但不会访问真实平台。
+            {{ dispatchModeCopy }}
           </p>
           <el-button
             type="primary"
@@ -277,7 +358,7 @@
           </div>
           <div>
             <span>MODE</span>
-            <strong>{{ scheduleEnabled ? (autoExecuteAtDue ? 'AUTO@TIME' : 'SCHEDULED') : 'NOW' }}</strong>
+            <strong>{{ scheduleEnabled ? (demoAvailable && autoExecuteAtDue ? 'DEMO@TIME' : 'SCHEDULED') : 'NOW' }}</strong>
           </div>
           <div>
             <span>ASSET</span>
@@ -360,6 +441,8 @@
             <small v-if="job.images?.length" class="asset-mark">{{ job.images.length }} IMG / 已附素材</small>
             <small v-if="job.video" class="asset-mark">01 VIDEO / 已附素材</small>
             <small v-if="job.auto_execute" class="schedule-mark">AUTO@TIME / 已授权</small>
+            <small v-if="job.account_name" class="account-mark">账号 / {{ job.account_name }}</small>
+            <small v-else-if="!job.demo" class="account-mark missing">未绑定账号 / 禁止执行</small>
           </div>
 
           <div class="job-article">
@@ -384,7 +467,15 @@
 
           <div class="job-actions">
             <el-button
-              v-if="['failed', 'need_action'].includes(job.status)"
+              v-if="!job.demo && !job.account_id && ['queued', 'need_action', 'failed'].includes(job.status)"
+              type="primary"
+              plain
+              @click="requestPlatformLogin(platformByKey(job.platform), job)"
+            >
+              登录并重建任务
+            </el-button>
+            <el-button
+              v-else-if="['failed', 'need_action'].includes(job.status)"
               type="primary"
               plain
               :loading="busyJobIds.has(job.job_id)"
@@ -431,11 +522,12 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, h, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Link, Lock, MagicStick, Picture, Promotion, Refresh, Upload, VideoCamera } from '@element-plus/icons-vue'
 import { articleApi } from '@/api/article'
+import { accountApi } from '@/api/account'
 import { materialApi } from '@/api/material'
 import { publishApi } from '@/api/publish'
 
@@ -447,7 +539,25 @@ const platformCodes = {
   douyin: 'DY', kuaishou: 'KS', bilibili: 'BI', channels: 'WX', tiktok: 'TK'
 }
 const modeNames = { article: '文章', image_article: '图文', image_note: '图片笔记', video: '视频' }
+const platformMaturityNotes = {
+  zhihu: '可用 · 文章发布',
+  toutiao: '可用 · 文章发布',
+  baijiahao: '可用 · 图文发布',
+  sohu: '可用 · 文章发布',
+  xiaohongshu: '可用 · 图片笔记',
+  tiktok: '可用 · 视频发布',
+  channels: '提交后需后台核对',
+  douyin: '实验性 · 可能转待人工',
+  kuaishou: '实验性 · 可能转待人工',
+  bilibili: '禁用 · 运行时未开放'
+}
 const platforms = ref([])
+const capabilitiesLoaded = ref(false)
+const platformsLoadError = ref(false)
+const accountOverview = ref({ platforms: [], accounts: [] })
+const selectedAccountIds = reactive({})
+const accountsLoading = ref(false)
+const accountsLoadError = ref(false)
 
 const statusOptions = [
   { value: 'queued', label: '排队中' },
@@ -462,7 +572,7 @@ const articles = ref([])
 const articlesLoading = ref(false)
 const articlesLoadError = ref(false)
 const selectedArticleId = ref(null)
-const selectedPlatforms = ref(['zhihu'])
+const selectedPlatforms = ref([])
 const scheduleEnabled = ref(false)
 const publishAt = ref('')
 const autoExecuteAtDue = ref(false)
@@ -507,6 +617,41 @@ const videoPlatforms = computed(() => (
   manifestPlatforms.value.filter(platform => platform.requires_video)
 ))
 const videoRequired = computed(() => videoPlatforms.value.length > 0)
+const realPublishingAuthorized = computed(() => (
+  platforms.value.some(item => item.real_publishing_authorized === true)
+))
+const publishingRuntimeReady = computed(() => (
+  realPublishingAuthorized.value
+  && platforms.value.some(item => item.runtime_available === true)
+))
+const demoAvailable = computed(() => (
+  platforms.value.some(item => item.demo_available === true)
+))
+const accountBindingRequired = computed(() => (
+  realPublishingAuthorized.value && !demoAvailable.value
+))
+const publishingBlockedReason = computed(() => (
+  platforms.value.find(item => item.task_creation_available !== true)?.unavailable_reason
+  || (realPublishingAuthorized.value
+    ? '本机发布组件未通过探针，请检查 Google Chrome 与发布组件后重启软件。'
+    : '当前构建未授权真实发布，也未启用演示任务。')
+))
+const dispatchModeCopy = computed(() => {
+  if (demoAvailable.value) return 'Demo 任务会走完整状态链，但不会访问真实平台。'
+  if (publishingRuntimeReady.value) {
+    return '真实发布已开启：任务只会发送到明确绑定的账号，并在执行前进行版本绑定和强确认。'
+  }
+  if (realPublishingAuthorized.value) return `真实发布当前不可用：${publishingBlockedReason.value}`
+  return publishingBlockedReason.value
+})
+const accountsReady = computed(() => (
+  demoAvailable.value
+  || (
+    accountBindingRequired.value
+    && !accountsLoadError.value
+    && manifestPlatforms.value.every(platform => Boolean(selectedAccountIds[platform.key]))
+  )
+))
 
 const assetSummary = computed(() => {
   const parts = []
@@ -517,24 +662,34 @@ const assetSummary = computed(() => {
 })
 
 const canDispatch = computed(() => Boolean(
-  selectedArticleId.value
+  capabilitiesLoaded.value
+  && !platformsLoadError.value
+  && selectedArticleId.value
   && selectedPlatforms.value.length
+  && manifestPlatforms.value.every(platform => platform.task_creation_available === true)
   && (!imageRequired.value || selectedImage.value || autoImage.value)
   && (!videoRequired.value || selectedVideo.value)
+  && accountsReady.value
   && (!scheduleEnabled.value || publishAt.value)
   && !imageUploading.value
+  && !videoUploading.value
   && !dispatching.value
 ))
 
 const dispatchButtonLabel = computed(() => {
+  if (platformsLoadError.value) return '发布能力未载入'
+  if (capabilitiesLoaded.value && !platforms.value.some(item => item.task_creation_available === true)) {
+    return realPublishingAuthorized.value ? '发布运行时未就绪' : '当前构建未开放发布'
+  }
   if (!selectedArticleId.value) return '先选择就绪稿件'
   if (!selectedPlatforms.value.length) return '至少选择一个渠道'
   if (imageUploading.value) return '图片上传中'
   if (videoUploading.value) return '视频上传中'
+  if (!accountsReady.value) return '先登录并选择每个平台账号'
   if (imageRequired.value && !selectedImage.value && !autoImage.value) return '先补齐渠道图片'
   if (videoRequired.value && !selectedVideo.value) return '先补齐渠道视频'
   if (scheduleEnabled.value && !publishAt.value) return '选择计划发布时间'
-  if (scheduleEnabled.value && autoExecuteAtDue.value) {
+  if (scheduleEnabled.value && demoAvailable.value && autoExecuteAtDue.value) {
     return `创建 ${selectedPlatforms.value.length} 个自动计划任务`
   }
   return scheduleEnabled.value
@@ -579,16 +734,85 @@ const fetchArticles = async () => {
 }
 
 const fetchPlatforms = async () => {
+  platformsLoadError.value = false
   try {
     const response = await publishApi.getPlatforms()
     platforms.value = (response.data || []).map(item => ({
       ...item,
       code: platformCodes[item.key] || item.key.slice(0, 2).toUpperCase(),
-      note: `${item.priority} · ${modeNames[item.content_mode] || item.content_mode}`
+      note: item.maturity || (item.key === 'bilibili' && item.demo_available
+        ? '仅演示 · 真实运行时未开放'
+        : platformMaturityNotes[item.key])
+        || `${item.priority} · ${modeNames[item.content_mode] || item.content_mode}`
     }))
+    capabilitiesLoaded.value = true
+    selectedPlatforms.value = selectedPlatforms.value.filter(key => (
+      platforms.value.some(item => item.key === key && item.task_creation_available === true)
+    ))
   } catch (error) {
+    platforms.value = []
+    selectedPlatforms.value = []
+    capabilitiesLoaded.value = false
+    platformsLoadError.value = true
     console.error('加载平台能力失败:', error)
   }
+}
+
+const fetchAccounts = async () => {
+  accountsLoading.value = true
+  accountsLoadError.value = false
+  try {
+    const response = await accountApi.getMediaAccounts()
+    accountOverview.value = response.data || { platforms: [], accounts: [] }
+    for (const platform of platforms.value) {
+      const accounts = connectedAccounts(platform.key)
+      const current = Number(selectedAccountIds[platform.key])
+      if (!accounts.some(account => account.id === current)) {
+        selectedAccountIds[platform.key] = null
+      }
+    }
+    return true
+  } catch (error) {
+    accountsLoadError.value = true
+    console.error('加载媒体账号失败:', error)
+    return false
+  } finally {
+    accountsLoading.value = false
+  }
+}
+
+const platformByKey = key => platforms.value.find(platform => platform.key === key) || {
+  key,
+  name: platformName(key)
+}
+
+const connectedAccounts = platformKey => (
+  (accountOverview.value.accounts || []).filter(account => (
+    account.platform_key === platformKey && account.status === 'connected'
+  ))
+)
+
+const accountDisplayName = account => `${account.account_name} · ID ${account.id}`
+
+const selectedAccountFor = platformKey => {
+  const accountId = Number(selectedAccountIds[platformKey])
+  return connectedAccounts(platformKey).find(account => account.id === accountId) || null
+}
+
+const requestPlatformLogin = async (platform, job = null) => {
+  if (!platform?.key) return
+  if (platform.login_available !== true) {
+    ElMessage.warning(platform.unavailable_reason || '该平台登录运行时当前不可用')
+    return
+  }
+  await router.push({
+    path: '/account-management',
+    query: {
+      login_platform: platform.key,
+      return_to: '/publish-center',
+      ...(job?.job_id ? { job_id: job.job_id } : {})
+    }
+  })
 }
 
 const fetchJobs = async (pageOrSilent = false) => {
@@ -621,10 +845,17 @@ const fetchJobs = async (pageOrSilent = false) => {
 }
 
 const togglePlatform = (key) => {
+  const platform = platforms.value.find(item => item.key === key)
+  if (platform && !isPlatformSelectable(platform)) {
+    ElMessage.warning(platform.unavailable_reason || '该平台运行时当前不可用')
+    return
+  }
   selectedPlatforms.value = selectedPlatforms.value.includes(key)
     ? selectedPlatforms.value.filter(item => item !== key)
     : [...selectedPlatforms.value, key]
 }
+
+const isPlatformSelectable = platform => platform.task_creation_available === true
 
 const handleScheduleToggle = (enabled) => {
   if (!enabled) {
@@ -773,13 +1004,13 @@ const clearSelectedVideo = () => {
 const dispatchArticle = async () => {
   if (!canDispatch.value) return
   let confirmedAutoExecute = false
-  if (scheduleEnabled.value && autoExecuteAtDue.value) {
+  if (scheduleEnabled.value && demoAvailable.value && autoExecuteAtDue.value) {
     try {
       await ElMessageBox.confirm(
-        `这将授权系统在 ${publishAt.value} 到达后，自动尝试把《${selectedArticle.value?.title || ''}》发布到 ${selectedPlatforms.value.length} 个所选渠道。任务不会提前执行，失败或状态不明时不会自动重试。是否确认？`,
-        '确认定时自动执行',
+        `这将授权系统在 ${publishAt.value} 到达后自动执行 ${selectedPlatforms.value.length} 个演示任务；不会访问真实平台。是否确认？`,
+        '确认定时演示任务',
         {
-          confirmButtonText: '确认到点自动执行',
+          confirmButtonText: '确认到点执行演示',
           cancelButtonText: '只创建普通计划',
           type: 'warning',
           distinguishCancelAndClose: true
@@ -805,7 +1036,8 @@ const dispatchArticle = async () => {
         video: capability?.requires_video ? (selectedVideo.value?.filename || '') : '',
         auto_image: autoImage.value,
         publish_at: scheduleEnabled.value ? publishAt.value : null,
-        auto_execute: confirmedAutoExecute
+        auto_execute: demoAvailable.value && confirmedAutoExecute,
+        account_id: selectedAccountIds[platform] || null
       })
       let job = response.data
       createdCount += 1
@@ -847,26 +1079,108 @@ const executeDemoJob = async (job) => {
 }
 
 const executeRealJob = async (job) => {
+  let currentJob
+  let articleSnapshot
   try {
-    await ElMessageBox.confirm(
-      `将使用已连接的${platformName(job.platform)}账号真实发布《${job.article_title || `文章 #${job.article_id}`}》。平台可能要求扫码、验证码或人工确认，是否继续？`,
-      '确认真实发布',
+    const jobResponse = await publishApi.getJob(job.job_id)
+    currentJob = jobResponse.data
+    articleSnapshot = currentJob?.confirmation_snapshot
+  } catch (error) {
+    console.error('读取真实发布确认快照失败:', error)
+    ElMessage.error('无法读取任务与正文快照，已停止真实发布')
+    return
+  }
+  if (
+    !articleSnapshot
+    || Number(articleSnapshot.article_id) !== Number(currentJob.article_id)
+    || typeof articleSnapshot.title !== 'string'
+    || typeof articleSnapshot.content !== 'string'
+  ) {
+    ElMessage.error('任务与正文的同源确认快照无效，已停止真实发布')
+    await fetchJobs(true)
+    return
+  }
+  if (!/^[0-9a-f]{64}$/.test(String(currentJob.confirmation_fingerprint || ''))) {
+    ElMessage.warning('任务确认凭据缺失，已停止执行。请刷新任务后重新核对。')
+    await fetchJobs(true)
+    return
+  }
+  if (!currentJob.can_execute_real) {
+    ElMessage.warning('任务状态已经变化，已停止执行。请刷新后重新确认。')
+    await fetchJobs(true)
+    return
+  }
+  const accountsLoaded = await fetchAccounts()
+  if (!accountsLoaded) {
+    ElMessage.error('账号清单未载入，已停止真实发布')
+    return
+  }
+  const boundAccount = (accountOverview.value.accounts || []).find(account => (
+    account.id === currentJob.account_id
+    && account.platform_key === currentJob.platform
+    && account.status === 'connected'
+  ))
+  if (!boundAccount) {
+    await requestPlatformLogin(platformByKey(currentJob.platform), currentJob)
+    return
+  }
+  const assetText = [
+    currentJob.images?.length ? `图片 ${currentJob.images.join('、')}` : '',
+    currentJob.video ? `视频 ${currentJob.video}` : ''
+  ].filter(Boolean).join('；') || '无附加素材'
+  const articleTitle = articleSnapshot?.title || currentJob.article_title || `文章 #${currentJob.article_id}`
+  const articleContent = String(articleSnapshot?.content || '').trim() || '（正文为空）'
+  const jobCode = `JOB-${String(currentJob.job_id).padStart(5, '0')}`
+  const confirmationPhrase = `发布 ${jobCode}`
+  const confirmationMessage = h('div', { style: { color: '#423b31', lineHeight: '1.65' } }, [
+    h('p', { style: { margin: '0 0 10px' } }, [
+      `任务 ${jobCode}（版本 ${currentJob.state_version}）将真实发送到 `,
+      h('strong', `${platformName(currentJob.platform)} / ${accountDisplayName(boundAccount)}`),
+      '。'
+    ]),
+    h('p', { style: { margin: '0 0 8px', fontWeight: '700' } }, `《${articleTitle}》`),
+    h('div', {
+      style: {
+        maxHeight: '180px',
+        overflow: 'auto',
+        padding: '10px 12px',
+        border: '1px solid #d8d2c7',
+        background: '#faf9f6',
+        color: '#4f5354',
+        fontSize: '12px',
+        whiteSpace: 'pre-wrap',
+        wordBreak: 'break-word'
+      }
+    }, articleContent),
+    h('p', { style: { margin: '10px 0 0' } }, `素材：${assetText}`),
+    h('p', { style: { margin: '6px 0 0', fontSize: '11px', color: '#78684f' } },
+      `确认内容绑定指纹：${String(currentJob.confirmation_fingerprint).slice(0, 12)}…`),
+    h('p', { style: { margin: '8px 0 0', color: '#985b16', fontWeight: '700' } },
+      `平台接受内容后不能依靠本软件撤回。请输入“${confirmationPhrase}”继续。`)
+  ])
+  try {
+    await ElMessageBox.prompt(
+      confirmationMessage,
+      '强确认 · 真实发布',
       {
-        confirmButtonText: '确认并执行',
+        confirmButtonText: `真实发布到 ${boundAccount.account_name}`,
         cancelButtonText: '取消',
         type: 'warning',
-        distinguishCancelAndClose: true
+        distinguishCancelAndClose: true,
+        inputPlaceholder: confirmationPhrase,
+        inputValidator: value => String(value || '').trim() === confirmationPhrase
+          || `请输入“${confirmationPhrase}”`
       }
     )
   } catch {
     return
   }
 
-  markJobBusy(job.job_id, true)
+  markJobBusy(currentJob.job_id, true)
   try {
-    const response = await publishApi.executeRealJob(job.job_id)
+    const response = await publishApi.executeRealJob(currentJob)
     const result = response.data
-    if (result.status === 'success') ElMessage.success(`${platformName(job.platform)}真实发布成功`)
+    if (result.status === 'success') ElMessage.success(`${platformName(currentJob.platform)}真实发布成功`)
     else if (result.status === 'need_action') ElMessage.warning(result.message || '需要人工确认后继续')
     else if (result.status === 'processing') ElMessage.info(result.message || '平台状态仍在确认中')
     else ElMessage.error(result.message || '真实发布未完成')
@@ -874,7 +1188,7 @@ const executeRealJob = async (job) => {
   } catch (error) {
     console.error('执行真实发布任务失败:', error)
   } finally {
-    markJobBusy(job.job_id, false)
+    markJobBusy(currentJob.job_id, false)
   }
 }
 
@@ -984,6 +1298,27 @@ const scheduleJobPoll = () => {
 onMounted(async () => {
   pollingStopped = false
   await Promise.allSettled([fetchPlatforms(), fetchArticles(), fetchJobs()])
+  if (accountBindingRequired.value) await fetchAccounts()
+  const requestedJobId = Number(route.query.job_id)
+  if (Number.isInteger(requestedJobId) && requestedJobId > 0) {
+    try {
+      const response = await publishApi.getJob(requestedJobId)
+      const requestedJob = response.data
+      const requestedPlatform = platformByKey(requestedJob.platform)
+      if (!isPlatformSelectable(requestedPlatform)) {
+        ElMessage.warning(requestedPlatform.unavailable_reason || '原任务平台当前不可用，无法重建')
+      } else {
+        selectedArticleId.value = requestedJob.article_id
+        selectedPlatforms.value = [requestedJob.platform]
+        selectedAccountIds[requestedJob.platform] = null
+        ElMessage.info('已定位原稿件与平台；请重新选择账号并核对素材后创建新任务')
+      }
+    } catch (error) {
+      console.error('恢复待重建任务失败:', error)
+    } finally {
+      await router.replace({ path: '/publish-center' })
+    }
+  }
   scheduleJobPoll()
 })
 
@@ -1024,6 +1359,46 @@ onBeforeUnmount(() => {
   margin-bottom: 22px;
   padding: 8px 4px 18px;
   border-bottom: 1px solid #cad6d2;
+}
+
+.publish-mode-banner {
+  display: grid;
+  grid-template-columns: 128px minmax(0, 1fr);
+  gap: 20px;
+  align-items: center;
+  margin: 0 0 18px;
+  padding: 15px 18px;
+  border: 1px solid #cbd8d5;
+  border-left: 4px solid #438e89;
+  background: #f5faf8;
+
+  > span {
+    color: #377b77;
+    font: 800 9px/1.25 "Cascadia Mono", monospace;
+    letter-spacing: 0.12em;
+  }
+
+  strong { color: var(--harbor); font-size: 13px; }
+  p { margin: 4px 0 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+
+  &.armed {
+    border-color: #dfc18f;
+    border-left-color: #b66d16;
+    background: #fff8ec;
+
+    > span { color: #a35e12; }
+    strong { color: #62431e; }
+    p { color: #796345; }
+  }
+
+  &.blocked,
+  &.locked {
+    border-color: #dac8a5;
+    border-left-color: #9b742e;
+    background: #fffbf2;
+
+    > span { color: #846326; }
+  }
 }
 
 .heading-copy {
@@ -1243,6 +1618,17 @@ onBeforeUnmount(() => {
   &:hover { transform: translateY(-2px); border-color: #81bebb; }
   &:focus-visible { outline: 3px solid rgba(57, 184, 178, 0.3); outline-offset: 2px; }
   &.selected { border-color: var(--signal); background: #eff9f7; box-shadow: inset 0 -3px var(--signal); }
+  &.unavailable {
+    cursor: not-allowed;
+    border-color: #dfe3e1;
+    background: #f5f6f5;
+    color: #6f7778;
+    transform: none;
+
+    .platform-code,
+    .selection-mark { color: #8b9493; }
+    small { color: #747c7d; }
+  }
 
   .platform-code {
     display: block;
@@ -1254,6 +1640,55 @@ onBeforeUnmount(() => {
   .platform-name { display: block; margin-top: 11px; font-size: 15px; font-weight: 700; }
   small { display: block; margin-top: 5px; color: var(--muted); font-size: 10px; }
   .selection-mark { position: absolute; top: 10px; right: 10px; color: #338e89; font-size: 14px; }
+}
+
+.account-routing {
+  margin-top: 18px;
+  padding: 18px;
+  border: 1px solid #c9d8d4;
+  background: #f8fbfa;
+}
+
+.account-route-list {
+  display: grid;
+  gap: 9px;
+  margin-top: 14px;
+}
+
+.account-route-error {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--danger);
+  background: #fff4f2;
+  color: #8f4744;
+  font-size: 11px;
+}
+
+.account-route-row {
+  display: grid;
+  grid-template-columns: minmax(150px, .65fr) minmax(220px, 1fr);
+  gap: 18px;
+  align-items: center;
+  padding: 10px 0;
+  border-top: 1px solid var(--rule);
+
+  > div:first-child {
+    display: grid;
+    gap: 3px;
+  }
+
+  small { color: var(--muted); }
+  :deep(.el-select) { width: 100%; }
+}
+
+.account-mark {
+  color: #257b69;
+
+  &.missing { color: var(--danger); }
 }
 
 .asset-panel {
@@ -1420,6 +1855,16 @@ onBeforeUnmount(() => {
   :deep(.el-checkbox) { grid-row: 1 / 3; margin-right: 0; }
   :deep(.el-checkbox__label) { color: #4c4b3f; font-size: 12px; font-weight: 700; }
   p { margin: 0; color: #7d7768; font-size: 10px; line-height: 1.55; }
+}
+
+.schedule-manual-confirm {
+  grid-column: 1 / -1;
+  padding: 11px 12px;
+  border-left: 3px solid #438e89;
+  background: #f0f7f5;
+
+  strong { color: #285f5c; font-size: 12px; }
+  p { margin: 4px 0 0; color: #5d7573; font-size: 10px; line-height: 1.55; }
 }
 
 .dispatch-actions {
@@ -1739,6 +2184,9 @@ onBeforeUnmount(() => {
   .live-indicator { width: 100%; box-sizing: border-box; }
   .dispatch-form, .route-manifest { padding: 20px; }
   .platform-grid { grid-template-columns: repeat(2, 1fr); }
+  .publish-mode-banner { grid-template-columns: 1fr; gap: 7px; }
+  .account-route-row { grid-template-columns: 1fr; gap: 8px; }
+  .account-route-error { align-items: stretch; flex-direction: column; }
   .asset-heading { grid-template-columns: 1fr auto; }
   .asset-heading .asset-code { grid-column: 1 / -1; }
   .asset-empty, .asset-record { grid-template-columns: auto 1fr; }

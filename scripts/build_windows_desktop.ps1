@@ -1,4 +1,8 @@
+#requires -Version 7.0
+
 param(
+    [ValidateSet("safe", "authorized_real")]
+    [string]$PublishingProfile = "safe",
     [switch]$SkipTests,
     [switch]$AllowDirtySource
 )
@@ -11,6 +15,19 @@ $buildRoot = Join-Path $projectRoot ".build\pyinstaller"
 $specPath = Join-Path $projectRoot "desktop\GEO-Desktop.spec"
 $buildInfoPath = Join-Path $projectRoot ".build\desktop-build-info.json"
 $stagingRoot = $null
+
+function Assert-NativeSuccess {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Operation,
+        [Parameter(Mandatory = $true)]
+        [int]$ExitCode
+    )
+
+    if ($ExitCode -ne 0) {
+        throw "$Operation failed with exit code $ExitCode"
+    }
+}
 
 Push-Location $projectRoot
 try {
@@ -28,8 +45,10 @@ try {
     if ($LASTEXITCODE -ne 0 -or -not $sourceBranch) {
         $sourceBranch = "detached"
     }
+    $sourceStatus = @(git status --porcelain --untracked-files=all)
+    Assert-NativeSuccess -Operation "Reading Git source status" -ExitCode $LASTEXITCODE
     $sourceDirty = @(
-        git status --porcelain --untracked-files=all |
+        $sourceStatus |
             Where-Object { $_ -and -not $_.Contains(".build/") -and -not $_.Contains("release/windows/") }
     ).Count -gt 0
     if ($sourceDirty -and -not $AllowDirtySource) {
@@ -37,9 +56,13 @@ try {
     }
     $buildInstant = [DateTime]::UtcNow
     $builtAtUtc = $buildInstant.ToString("yyyy-MM-ddTHH:mm:ssZ")
+    $isRealPublishBuild = $PublishingProfile -eq "authorized_real"
+    $profileSlug = if ($isRealPublishBuild) { "authorized-real" } else { "safe" }
+    $distributionScope = if ($isRealPublishBuild) { "internal_authorized_real_publish" } else { "internal_controlled_beta" }
     $releaseId = (
-        "GEO-Content-Platform-{0}-{1}-{2}" -f `
+        "GEO-Content-Platform-{0}-{1}-{2}-{3}" -f `
             $version,
+            $profileSlug,
             $buildInstant.ToString("yyyyMMddTHHmmssZ"),
             $sourceCommit.Substring(0, 8)
     )
@@ -54,6 +77,7 @@ try {
         source_branch = $sourceBranch
         built_at_utc = $builtAtUtc
         source_dirty = $sourceDirty
+        publishing_profile = $PublishingProfile
     }
     $buildInfoDirectory = Split-Path -Parent $buildInfoPath
     New-Item -ItemType Directory -Path $buildInfoDirectory -Force | Out-Null
@@ -64,13 +88,25 @@ try {
     )
 
     Write-Host "[1/7] Installing locked Python desktop dependencies"
-    uv sync --extra desktop --frozen
+    # The complete regression gate imports the publishing adapters directly.
+    # Give safe builds those test-only dependencies, then prune them before
+    # PyInstaller so the safe artifact cannot inherit the browser runtime.
+    if ($isRealPublishBuild -or -not $SkipTests) {
+        uv sync --extra desktop --extra web --frozen
+        Assert-NativeSuccess -Operation "Installing desktop and publishing dependencies" -ExitCode $LASTEXITCODE
+    }
+    else {
+        uv sync --extra desktop --frozen
+        Assert-NativeSuccess -Operation "Installing desktop dependencies" -ExitCode $LASTEXITCODE
+    }
 
     Write-Host "[2/7] Building the Vue desktop interface"
     Push-Location $frontendRoot
     try {
         npm ci
+        Assert-NativeSuccess -Operation "Installing frontend dependencies" -ExitCode $LASTEXITCODE
         npm run build
+        Assert-NativeSuccess -Operation "Building the frontend" -ExitCode $LASTEXITCODE
     }
     finally {
         Pop-Location
@@ -78,7 +114,7 @@ try {
 
     if (-not $SkipTests) {
         Write-Host "[3/7] Running desktop product regression tests"
-        uv run python -m unittest `
+        uv run --no-sync python -m unittest `
             tests.test_geo_desktop `
             tests.test_local_auth_service `
             tests.test_access_control `
@@ -87,7 +123,16 @@ try {
             tests.test_ai_visibility_api `
             tests.test_ai_visibility_run_service `
             tests.test_real_publish_api `
+            tests.test_real_publisher_factory `
+            tests.test_publish_job_executor `
+            tests.test_publish_job_service `
             tests.test_publish_jobs_api `
+            tests.test_publish_scheduler_service `
+            tests.test_worker_entrypoint `
+            tests.test_media_publisher_adapters `
+            tests.test_login_storage_config `
+            tests.test_login_sse `
+            tests.test_tiktok_publish_safety `
             tests.test_material_api `
             tests.test_dashboard_service `
             tests.test_dashboard_api `
@@ -96,11 +141,14 @@ try {
             tests.test_desktop_product_flow `
             tests.test_frontend_delivery `
             tests.test_health_api `
+            tests.test_delivery_safety `
             tests.test_sau_web `
             -v
+        Assert-NativeSuccess -Operation "Running Python regression tests" -ExitCode $LASTEXITCODE
         Push-Location $frontendRoot
         try {
             node --test tests/*.test.js
+            Assert-NativeSuccess -Operation "Running frontend regression tests" -ExitCode $LASTEXITCODE
         }
         finally {
             Pop-Location
@@ -110,8 +158,15 @@ try {
         Write-Host "[3/7] Tests skipped by explicit build option"
     }
 
+    if (-not $isRealPublishBuild) {
+        Write-Host "Pruning browser publishing dependencies before safe packaging"
+        uv sync --extra desktop --frozen
+        Assert-NativeSuccess -Operation "Pruning safe-build dependencies" -ExitCode $LASTEXITCODE
+    }
+
     Write-Host "[4/7] Packaging one-file Windows executable"
-    uv run pyinstaller --noconfirm --clean --distpath $stagingRoot --workpath $buildRoot $specPath
+    uv run --no-sync pyinstaller --noconfirm --clean --distpath $stagingRoot --workpath $buildRoot $specPath
+    Assert-NativeSuccess -Operation "Packaging the Windows executable" -ExitCode $LASTEXITCODE
 
     if (-not (Test-Path -LiteralPath $exePath -PathType Leaf)) {
         throw "PyInstaller did not create $exePath"
@@ -128,7 +183,12 @@ try {
     $smokeRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("geo-desktop-smoke-" + [guid]::NewGuid().ToString("N"))
     $reportPath = Join-Path $smokeRoot "health.json"
     New-Item -ItemType Directory -Path $smokeRoot | Out-Null
+    $hadPlaywrightBrowsersPath = Test-Path Env:PLAYWRIGHT_BROWSERS_PATH
+    $previousPlaywrightBrowsersPath = $env:PLAYWRIGHT_BROWSERS_PATH
     try {
+        $isolatedBrowserCache = Join-Path $smokeRoot "empty-browser-cache"
+        New-Item -ItemType Directory -Path $isolatedBrowserCache | Out-Null
+        $env:PLAYWRIGHT_BROWSERS_PATH = $isolatedBrowserCache
         $process = Start-Process -FilePath $exePath `
             -ArgumentList @(
                 "--health-check",
@@ -136,7 +196,7 @@ try {
                 "--health-report", ('"{0}"' -f $reportPath)
             ) `
             -WorkingDirectory $smokeRoot -PassThru -WindowStyle Hidden
-        if (-not $process.WaitForExit(60000)) {
+        if (-not $process.WaitForExit(180000)) {
             try {
                 $process.Kill($true)
                 $process.WaitForExit(10000) | Out-Null
@@ -144,7 +204,7 @@ try {
             catch {
                 Write-Warning "Unable to terminate timed-out packaged smoke process: $($_.Exception.Message)"
             }
-            throw "Packaged health check exceeded the 60 second timeout"
+            throw "Packaged health check exceeded the 180 second timeout"
         }
         if ($process.ExitCode -ne 0) {
             throw "Packaged health check failed with exit code $($process.ExitCode)"
@@ -154,18 +214,50 @@ try {
             -not $report.ok -or
             -not $report.frontend -or
             $report.health.status -ne "ok" -or
-            $report.health.real_publishing_enabled -ne $false -or
+            $report.health.real_publishing_enabled -ne $isRealPublishBuild -or
             $report.health.bilibili_runtime_enabled -ne $false -or
+            $report.health.legacy_direct_publishing_enabled -ne $false -or
+            $report.health.scheduled_real_publishing_enabled -ne $false -or
+            $report.desktop.real_publishing_authorized -ne $isRealPublishBuild -or
+            $report.desktop.real_publishing_enabled -ne $isRealPublishBuild -or
+            $report.desktop.publishing_profile -ne $PublishingProfile -or
             -not $report.auth.required -or
             -not $report.auth.setup_required -or
             $report.auth.mode -ne "desktop_local" -or
             $report.build.version -ne $version -or
-            $report.build.source_commit -ne $sourceCommit
+            $report.build.source_commit -ne $sourceCommit -or
+            $report.build.publishing_profile -ne $PublishingProfile
         ) {
             throw "Packaged health report did not pass"
         }
+        if (
+            $isRealPublishBuild -and (
+                -not $report.publishing_runtime_probe.ready -or
+                $report.publishing_runtime_probe.browser_probe -ne "passed" -or
+                $report.publishing_runtime_probe.missing_modules.Count -ne 0 -or
+                [string]::IsNullOrWhiteSpace(
+                    [string]$report.publishing_runtime_probe.browser_executable
+                )
+            )
+        ) {
+            throw "Packaged real-publishing browser runtime probe did not pass"
+        }
+        if (
+            -not $isRealPublishBuild -and (
+                $report.publishing_runtime_probe.enabled -ne $false -or
+                $report.publishing_runtime_probe.ready -ne $false
+            )
+        ) {
+            throw "Packaged safe build unexpectedly exposed a publishing runtime"
+        }
     }
     finally {
+        if ($hadPlaywrightBrowsersPath) {
+            $env:PLAYWRIGHT_BROWSERS_PATH = $previousPlaywrightBrowsersPath
+        }
+        else {
+            Remove-Item Env:PLAYWRIGHT_BROWSERS_PATH -ErrorAction SilentlyContinue
+        }
         $resolvedSmokeRoot = [System.IO.Path]::GetFullPath($smokeRoot)
         $resolvedTempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
         if ($resolvedSmokeRoot.StartsWith($resolvedTempRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
@@ -185,7 +277,7 @@ try {
                 "--health-report", ('"{0}"' -f $uiReportPath)
             ) `
             -WorkingDirectory $uiSmokeRoot -PassThru -WindowStyle Hidden
-        if (-not $uiProcess.WaitForExit(60000)) {
+        if (-not $uiProcess.WaitForExit(180000)) {
             try {
                 $uiProcess.Kill($true)
                 $uiProcess.WaitForExit(10000) | Out-Null
@@ -193,7 +285,7 @@ try {
             catch {
                 Write-Warning "Unable to terminate timed-out UI smoke process: $($_.Exception.Message)"
             }
-            throw "Packaged native UI smoke exceeded the 60 second timeout"
+            throw "Packaged native UI smoke exceeded the 180 second timeout"
         }
         if ($uiProcess.ExitCode -ne 0) {
             throw "Packaged native UI smoke failed with exit code $($uiProcess.ExitCode)"
@@ -232,11 +324,18 @@ try {
     )
 
     $signature = Get-AuthenticodeSignature -LiteralPath $exePath
+    $browserProbeStatus = if ($isRealPublishBuild) {
+        [string]$report.publishing_runtime_probe.browser_probe
+    }
+    else {
+        "not_applicable"
+    }
     $releaseManifest = [ordered]@{
         schema_version = 1
         product = "GEO Content Platform"
         version = $version
-        distribution_scope = "internal_controlled_beta"
+        publishing_profile = $PublishingProfile
+        distribution_scope = $distributionScope
         source = [ordered]@{
             commit = $sourceCommit
             branch = $sourceBranch
@@ -253,8 +352,23 @@ try {
         safety = [ordered]@{
             real_publishing_enabled = [bool]$report.health.real_publishing_enabled
             bilibili_runtime_enabled = [bool]$report.health.bilibili_runtime_enabled
+            legacy_direct_publishing_enabled = [bool]$report.health.legacy_direct_publishing_enabled
+            scheduled_real_publishing_enabled = [bool]$report.health.scheduled_real_publishing_enabled
+            browser_runtime_probe = $browserProbeStatus
+            explicit_account_binding_required = $true
+            job_state_confirmation_required = $true
             external_model_called_during_tests = $false
+            external_platform_called_during_tests = $false
             customer_data_used_during_tests = $false
+        }
+        publishing_runtime = [ordered]@{
+            browser_requirement = if ($isRealPublishBuild) { "Google Chrome" } else { "none" }
+            browser_cache_isolated_during_probe = $true
+            playwright_packaged = [bool]$isRealPublishBuild
+            patchright_packaged = [bool]$isRealPublishBuild
+            playwright_and_patchright_offline_probe = $browserProbeStatus
+            biliup_binary_packaged = $false
+            bilibili_blocked_reason = "untrusted_dynamic_runtime_not_shipped"
         }
         algorithm = [ordered]@{
             integration_version = "ai-visibility-python-port-1.1.0"
@@ -287,10 +401,12 @@ try {
         -Destination (Join-Path $stagingRoot "Windows桌面技术说明.md") -Force
     Copy-Item -LiteralPath (Join-Path $projectRoot "LICENSE") `
         -Destination (Join-Path $stagingRoot "LICENSE.txt") -Force
+    Copy-Item -LiteralPath (Join-Path $projectRoot "THIRD-PARTY-NOTICES.txt") `
+        -Destination (Join-Path $stagingRoot "THIRD-PARTY-NOTICES.txt") -Force
     Copy-Item -LiteralPath $buildInfoPath `
         -Destination (Join-Path $stagingRoot "build-info.json") -Force
 
-    $zipName = "GEO-Content-Platform-" + $version + "-windows-x64.zip"
+    $zipName = "GEO-Content-Platform-" + $version + "-" + $profileSlug + "-windows-x64.zip"
     $zipPath = Join-Path $stagingRoot $zipName
     Compress-Archive -LiteralPath @(
         $exePath,
@@ -300,6 +416,7 @@ try {
         (Join-Path $stagingRoot "AI可见度接口契约.md"),
         (Join-Path $stagingRoot "Windows桌面技术说明.md"),
         (Join-Path $stagingRoot "LICENSE.txt"),
+        (Join-Path $stagingRoot "THIRD-PARTY-NOTICES.txt"),
         (Join-Path $stagingRoot "build-info.json")
     ) -DestinationPath $zipPath -CompressionLevel Optimal -Force
 

@@ -1,0 +1,41 @@
+GEO Content Platform - Third-Party Notices
+==========================================
+
+This distribution is assembled from the lock file in the accompanying source
+revision. This preliminary inventory highlights the desktop and publishing
+runtime components that need explicit packaging review; it is not an
+exhaustive dependency notice:
+
+- Playwright for Python 1.52.0 - Apache License 2.0
+  https://github.com/microsoft/playwright-python
+- Patchright for Python 1.58.2 - Apache License 2.0
+  https://github.com/Kaliiiiiiiiii-Vinyzu/patchright-python
+- OpenCV / opencv-python - Apache License 2.0
+  https://github.com/opencv/opencv-python
+- NumPy - BSD-3-Clause and additional licenses recorded by the NumPy package
+  https://numpy.org/
+- pywebview - BSD-3-Clause
+  https://pywebview.flowrl.com/
+- PyInstaller - GPL-2.0-or-later with the PyInstaller bootloader exception
+  https://pyinstaller.org/
+
+Playwright and Patchright driver license and third-party notice files are
+included inside their packaged driver directories. This file identifies the
+other packages above but does not assert that their full license texts are
+embedded by PyInstaller. The executable uses an independently installed Google
+Chrome browser for publishing; Chrome is not redistributed in this release.
+
+Bilibili's biliup executable is not included or enabled by either desktop
+publishing profile. This notice does not authorize downloading or
+redistributing biliup.
+
+The colleague handoff archive used as a reference for the AI visibility port
+did not contain its own LICENSE or NOTICE. This inventory does not cure that
+missing rights statement. Until written authorization or a verifiable license
+is supplied, builds containing that port remain limited to the distribution
+scope stated in GEO-Content-Platform.manifest.json.
+
+This file is an engineering inventory, not a legal opinion or a complete
+redistribution notice. The project owner must generate a complete dependency
+inventory and finish license and trademark review before external commercial
+distribution.

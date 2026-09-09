@@ -4,12 +4,18 @@ import unittest
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
+from unittest.mock import Mock, patch
 
 from db.createTable import initialize_database
-from services.publish_job_executor import execute_publish_job
+from services.article_service import get_article
+from services.publish_job_executor import (
+    PublishConfirmationMismatchError,
+    execute_publish_job,
+)
 from services.publish_job_service import (
     ConcurrentPublishJobUpdateError,
     InvalidPublishJobTransitionError,
+    build_publish_confirmation_fingerprint,
     create_publish_job,
     get_publish_job,
     transition_publish_job,
@@ -108,6 +114,41 @@ class PublishJobExecutorTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "need_action")
         self.assertIn("真实发布器尚未配置", result["message"])
+
+    def test_confirmation_is_rechecked_after_claim_before_factory_is_called(self):
+        job = self._create_job()
+        confirmation_fingerprint = build_publish_confirmation_fingerprint(
+            job=job,
+            article=get_article(self.db_path, self.article_id),
+        )
+        publisher_factory = Mock(name="publisher_factory_must_not_be_called")
+        original_get_article = get_article
+
+        def mutate_after_claim_then_read(database_path, article_id):
+            with closing(sqlite3.connect(self.db_path)) as conn:
+                with conn:
+                    conn.execute(
+                        "UPDATE articles SET content = ? WHERE id = ?",
+                        ("任务领取后发生竞态修改", self.article_id),
+                    )
+            return original_get_article(database_path, article_id)
+
+        with patch(
+            "services.publish_job_executor.get_article",
+            side_effect=mutate_after_claim_then_read,
+        ), self.assertRaises(PublishConfirmationMismatchError):
+            execute_publish_job(
+                self.db_path,
+                job["id"],
+                publisher_factory=publisher_factory,
+                expected_state_version=job["state_version"],
+                expected_confirmation_fingerprint=confirmation_fingerprint,
+            )
+
+        publisher_factory.assert_not_called()
+        latest = get_publish_job(self.db_path, job["id"])
+        self.assertEqual(latest["status"], "need_action")
+        self.assertIn("未访问平台", latest["message"])
 
     def test_persists_success_url_and_passes_article_content(self):
         job = self._create_job()

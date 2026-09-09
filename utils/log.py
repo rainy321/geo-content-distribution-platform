@@ -2,7 +2,7 @@ import sys
 from pathlib import Path
 from loguru import logger
 
-from conf import BASE_DIR
+from conf import LOGS_DIRECTORY
 
 
 if hasattr(sys.stdout, "reconfigure"):
@@ -39,9 +39,10 @@ def create_logger(log_name: str, file_path: str):
     def filter_record(record):
         return record["extra"].get("business_name") == log_name
 
-    Path(BASE_DIR / file_path).parent.mkdir(exist_ok=True)
+    destination = LOGS_DIRECTORY / Path(file_path).name
+    destination.parent.mkdir(parents=True, exist_ok=True)
     logger.add(
-        Path(BASE_DIR / file_path),
+        destination,
         filter=filter_record,
         level="INFO",
         rotation="10 MB",

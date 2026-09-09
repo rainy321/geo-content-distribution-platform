@@ -29,15 +29,25 @@ def _build_launch_kwargs(headless: bool) -> dict:
     return options
 
 
-async def _launch_browser(playwright: Playwright, headless: bool):
+async def _launch_browser(
+    playwright: Playwright,
+    headless: bool,
+    *,
+    proxy_setting=None,
+):
     launch_kwargs = _build_launch_kwargs(headless)
+    if proxy_setting:
+        launch_kwargs["proxy"] = proxy_setting
     try:
         return await playwright.chromium.launch(**launch_kwargs)
     except Exception:
-        if "channel" not in launch_kwargs:
-            launch_kwargs["channel"] = "chrome"
-            return await playwright.chromium.launch(**launch_kwargs)
-        raise
+        # A configured executable may disappear after Chrome is upgraded or
+        # moved.  Retry once through Playwright's stable Chrome channel, but do
+        # not pass both ``executable_path`` and ``channel`` to Playwright.
+        fallback_kwargs = dict(launch_kwargs)
+        fallback_kwargs.pop("executable_path", None)
+        fallback_kwargs["channel"] = "chrome"
+        return await playwright.chromium.launch(**fallback_kwargs)
 
 
 async def _install_preview_guard(page: Page) -> None:
@@ -98,14 +108,7 @@ async def _dismiss_overlays(page: Page) -> None:
 
 async def baijiahao_cookie_gen(account_file):
     async with async_playwright() as playwright:
-        options = {
-            'args': [
-                '--lang en-GB'
-            ],
-            'headless': LOCAL_CHROME_HEADLESS,  # Set headless option here
-        }
-        # Make sure to run headed.
-        browser = await playwright.chromium.launch(**options)
+        browser = await _launch_browser(playwright, LOCAL_CHROME_HEADLESS)
         # Setup context however you like.
         context = await browser.new_context()  # Pass any options
         context = await set_init_script(context)
@@ -120,7 +123,7 @@ async def baijiahao_cookie_gen(account_file):
 
 async def cookie_auth(account_file):
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=LOCAL_CHROME_HEADLESS)
+        browser = await _launch_browser(playwright, LOCAL_CHROME_HEADLESS)
         context = await browser.new_context(storage_state=account_file)
         context = await set_init_script(context)
         # 创建一个新的页面
@@ -203,7 +206,11 @@ class BaiJiaHaoVideo(object):
 
     async def upload(self, playwright: Playwright) -> None:
         # 使用 Chromium 浏览器启动一个浏览器实例
-        browser = await playwright.chromium.launch(headless=self.headless, executable_path=self.local_executable_path, proxy=self.proxy_setting)
+        browser = await _launch_browser(
+            playwright,
+            self.headless,
+            proxy_setting=self.proxy_setting,
+        )
         # 创建一个浏览器上下文，使用指定的 cookie 文件
         context = await browser.new_context(storage_state=f"{self.account_file}", user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/127.0.4324.150 Safari/537.36')
         # context = await set_init_script(context)
@@ -336,7 +343,11 @@ class BaiJiaHaoVideo(object):
     # 使用 AI成片 功能
     async def ai2video(self, playwright: Playwright) -> None:
         # 使用 Chromium 浏览器启动一个浏览器实例
-        browser = await playwright.chromium.launch(headless=self.headless, executable_path=self.local_executable_path, proxy=self.proxy_setting)
+        browser = await _launch_browser(
+            playwright,
+            self.headless,
+            proxy_setting=self.proxy_setting,
+        )
         # 创建一个浏览器上下文，使用指定的 cookie 文件
         context = await browser.new_context(
             viewport={"width": 1600, "height": 900},
@@ -380,13 +391,13 @@ class BaiJiaHaoVideo(object):
                """)
 
         # 定位新闻列表容器（转义特殊CSS字符）
-        container_selector = '.overflow-auto.flex-grow.h-0.saas-scrollbar.mt\-\[-4px\].pl\-\[24px\].pr\-\[10px\].pb\-\[18px\]'
-        news_items = await page.locator(container_selector).locator('div.py\-\[6px\].group.cursor-pointer').all()
+        container_selector = r'.overflow-auto.flex-grow.h-0.saas-scrollbar.mt\-\[-4px\].pl\-\[24px\].pr\-\[10px\].pb\-\[18px\]'
+        news_items = await page.locator(container_selector).locator(r'div.py\-\[6px\].group.cursor-pointer').all()
 
         for item in news_items:
             try:
                 # 获取新闻标题
-                title_elem = item.locator('div.flex.text-gray-darker.items-center.relative.pr\-\[56px\] > span')
+                title_elem = item.locator(r'div.flex.text-gray-darker.items-center.relative.pr\-\[56px\] > span')
                 title = await title_elem.text_content()
                 if not title:
                     continue
