@@ -319,7 +319,10 @@ class DesktopApiTests(unittest.TestCase):
                 },
                 clear=False,
             ):
-                status = DesktopApi(DesktopPaths.from_root(directory)).get_runtime_status()
+                status = DesktopApi(
+                    DesktopPaths.from_root(directory),
+                    build_info={"publishing_profile": PUBLISHING_PROFILE_SAFE},
+                ).get_runtime_status()
             self.assertTrue(status["desktop"])
             self.assertFalse(status["real_publishing_authorized"])
             self.assertFalse(status["real_publishing_enabled"])
