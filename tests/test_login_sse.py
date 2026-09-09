@@ -1,7 +1,10 @@
 import asyncio
+import http.client
 import json
+import socket
 import sqlite3
 import tempfile
+import threading
 import unittest
 from contextlib import closing
 from pathlib import Path
@@ -145,6 +148,61 @@ class LoginSseTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_data(as_text=True), "data: 200\n\n")
+        with active_queues_lock:
+            self.assertEqual(active_queues, {})
+
+    def test_login_first_event_streams_through_real_waitress_http_stack(self):
+        """Guard against WSGI hop-by-hop headers rejected by Waitress."""
+
+        from waitress.server import create_server
+
+        worker_finished = threading.Event()
+
+        def synthetic_login(login_type, account_id, status_queue):
+            try:
+                status_queue.put("MANUAL_LOGIN")
+                status_queue.put("500")
+            finally:
+                _finish_login_session(login_type, account_id, status_queue)
+                worker_finished.set()
+
+        listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        listener.bind(("127.0.0.1", 0))
+        host, port = listener.getsockname()
+        server = create_server(
+            app,
+            sockets=[listener],
+            threads=2,
+            ident="GEO Login SSE Test",
+        )
+        server_thread = threading.Thread(target=server.run, daemon=True)
+        connection = http.client.HTTPConnection(host, port, timeout=5)
+
+        try:
+            with patch("sau_backend.run_async_function", synthetic_login):
+                server_thread.start()
+                connection.request(
+                    "GET",
+                    "/login?type=9&id=waitress-test&protocol=2",
+                )
+                response = connection.getresponse()
+
+                self.assertEqual(response.status, 200)
+                self.assertEqual(
+                    response.getheader("Content-Type"),
+                    "text/event-stream",
+                )
+                self.assertEqual(response.readline(), b"data: MANUAL_LOGIN\n")
+                self.assertEqual(response.readline(), b"\n")
+                self.assertEqual(response.read(), b"data: 500\n\n")
+                self.assertTrue(worker_finished.wait(timeout=2))
+        finally:
+            connection.close()
+            server.close()
+            server.task_dispatcher.shutdown(cancel_pending=True, timeout=5)
+            server_thread.join(timeout=5)
+
+        self.assertFalse(server_thread.is_alive())
         with active_queues_lock:
             self.assertEqual(active_queues, {})
 
