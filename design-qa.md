@@ -33,7 +33,7 @@ The existing repository logo asset is used rather than recreating the reference 
 
 ## Responsive and revision history
 
-The first browser-based 1536 x 1024 pass matched the reference hierarchy. The packaged EXE review then exposed an important desktop-shell difference: the persistent sidebar leaves less usable content width than a standalone browser viewport, so a 1320 px page breakpoint could still clip the signal card on a 1550 px Windows desktop. The final breakpoint is therefore 1600 px. At ordinary laptop widths the hero and live-signal card form a clean single-column stack; wider desktop windows retain the reference's two-column relationship. This packaged-window clipping risk is fixed.
+The first browser-based 1536 x 1024 pass matched the reference hierarchy. The packaged EXE review then exposed an important desktop-shell difference: the persistent sidebar leaves less usable content width than a standalone browser viewport, so a 1320 px page breakpoint could still clip the signal card on a 1550 px Windows desktop. The final breakpoint is therefore 1600 px. At ordinary laptop widths the hero and live-signal card form a clean single-column stack; wider desktop windows retain the reference's two-column relationship. The desktop status group also switches to its compact icon presentation at 1400 px, preventing its backup and account controls from leaving the visible Windows work area. These packaged-window clipping risks are fixed.
 
 ## Remaining visual differences
 
