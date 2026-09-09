@@ -48,7 +48,10 @@ def create_logger(log_name: str, file_path: str):
         rotation="10 MB",
         retention="10 days",
         backtrace=True,
-        diagnose=True,
+        # Publisher/login frames may hold account labels, cookie paths or
+        # article text.  Keep the traceback, but never render local variable
+        # values into production log files.
+        diagnose=False,
         encoding="utf-8",
     )
     return logger.bind(business_name=log_name)
@@ -72,3 +75,4 @@ xiaohongshu_logger = create_logger('xiaohongshu', 'logs/xiaohongshu.log')
 toutiao_logger = create_logger('toutiao', 'logs/toutiao.log')
 sohu_logger = create_logger('sohu', 'logs/sohu.log')
 zhihu_logger = create_logger('zhihu', 'logs/zhihu.log')
+login_logger = create_logger('login', 'logs/login.log')

@@ -132,6 +132,7 @@ try {
             tests.test_media_publisher_adapters `
             tests.test_login_storage_config `
             tests.test_login_sse `
+            tests.test_zhihu_login `
             tests.test_tiktok_publish_safety `
             tests.test_material_api `
             tests.test_dashboard_service `

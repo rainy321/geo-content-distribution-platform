@@ -1,4 +1,5 @@
 import asyncio
+import json
 import sqlite3
 from contextlib import closing
 
@@ -10,6 +11,63 @@ import uuid
 from pathlib import Path
 from conf import BASE_DIR, LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
 from uploader.bilibili_uploader.runtime import run_biliup_command
+
+
+_ZHIHU_LOGIN_ERROR_MESSAGES = {
+    "browser_launch_failed": "无法启动 Chrome，请关闭冲突窗口后重试",
+    "login_page_unavailable": "知乎登录页未成功打开，请检查网络后重试",
+    "login_timeout": "等待登录超时，请在弹出的 Chrome 中完成验证后重试",
+    "login_interrupted": "知乎登录窗口已关闭或流程中断，请重新尝试",
+    "browser_closed": "Chrome 登录窗口已关闭，请重新尝试",
+    "operator_cancelled": "已结束本次知乎登录等待",
+    "session_save_failed": "登录已完成但会话保存失败，请检查本机数据目录权限",
+    "unexpected_error": "知乎登录发生异常，请重试并查看本机日志",
+}
+
+_ZHIHU_LOGIN_ERROR_ACTIONS = {
+    "browser_launch_failed": "关闭冲突的浏览器窗口后重试",
+    "login_page_unavailable": "检查网络连接后重试",
+    "login_timeout": "重新打开登录并在十分钟内完成验证",
+    "login_interrupted": "重新尝试登录",
+    "browser_closed": "重新打开登录窗口",
+    "operator_cancelled": "无需操作",
+    "session_save_failed": "检查本机数据目录权限后重试",
+    "unexpected_error": "重试；如仍失败，请查看本机日志",
+}
+
+
+def _queue_login_event(status_queue, event_type: str, **fields) -> None:
+    """Send a structured, secret-free event alongside the legacy SSE tokens."""
+
+    if int(getattr(status_queue, "protocol_version", 1)) < 2:
+        return
+    payload = {"type": str(event_type)}
+    payload.update(
+        {
+            str(key): str(value)
+            for key, value in fields.items()
+            if value is not None and str(value)
+        }
+    )
+    status_queue.put(
+        json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    )
+
+
+def _queue_zhihu_login_error(status_queue, code: str) -> None:
+    normalized_code = (
+        code if code in _ZHIHU_LOGIN_ERROR_MESSAGES else "unexpected_error"
+    )
+    _queue_login_event(
+        status_queue,
+        "error",
+        code=normalized_code,
+        message=_ZHIHU_LOGIN_ERROR_MESSAGES[normalized_code],
+        action=_ZHIHU_LOGIN_ERROR_ACTIONS[normalized_code],
+    )
+    # Keep the original terminal token so older desktop frontends terminate
+    # their EventSource instead of leaving a stale login session registered.
+    status_queue.put("500")
 
 
 def _login_database_path(database_path=None):
@@ -613,59 +671,200 @@ async def zhihu_cookie_gen(
     browser = None
     context = None
     page = None
+    new_cookie_path = None
+    database_saved = False
+    stage = "browser_launch"
     try:
-        status_queue.put("MANUAL_LOGIN")
-        print(f"🟢 开始知乎登录: id={id}")
+        _queue_login_event(
+            status_queue,
+            "stage",
+            stage="opening_browser",
+            message="正在打开 Chrome 知乎登录页",
+            action="等待 Chrome 登录窗口打开",
+        )
+        from utils.log import zhihu_logger
+
+        zhihu_logger.info("开始知乎人工登录")
         async with async_playwright() as playwright:
             options = get_browser_options()
             options['headless'] = False
-            print(f"🟢 启动浏览器 options={ {k: v for k, v in options.items() if k != 'args'} }")
             browser = await playwright.chromium.launch(**options)
+            stage = "context_create"
             context = await browser.new_context()
             context = await set_init_script(context)
             page = await context.new_page()
-            print("🟢 打开知乎登录页...")
-            await page.goto("https://www.zhihu.com/signin", timeout=60000, wait_until="domcontentloaded")
-            print(f"🟢 登录页已打开: {page.url}")
-            print("🟢 请在浏览器完成登录，等待登录凭证 z_c0…")
-            from uploader.zhihu_uploader.main import _wait_until_logged_in
-            ok = await _wait_until_logged_in(page, context, timeout_ms=200_000)
-            if not ok:
-                print("❌ 知乎登录超时：未检测到 z_c0")
-                status_queue.put("500")
-                return None
-            print("✅ 知乎登录成功，已检测到 z_c0")
+            stage = "login_page"
+            from uploader.zhihu_uploader.main import (
+                ZHIHU_LOGIN_URL,
+                ZHIHU_LOGIN_TIMEOUT_MS,
+                ZhihuLoginControlError,
+                _goto_zhihu_page,
+                _wait_until_logged_in,
+            )
 
+            await _goto_zhihu_page(
+                page,
+                ZHIHU_LOGIN_URL,
+                timeout_ms=60_000,
+            )
+            # Emit the legacy manual-login stage only after Chrome has actually
+            # reached a usable page.  Protocol 2 clients then receive the more
+            # specific structured stage immediately afterwards.
+            status_queue.put("MANUAL_LOGIN")
+            _queue_login_event(
+                status_queue,
+                "stage",
+                stage="waiting_for_account",
+                message="请在 Chrome 中完成知乎登录和必要验证",
+                action="在十分钟内完成账号登录和必要验证",
+            )
+            zhihu_logger.info("知乎登录页已打开，等待账号身份确认")
+            stage = "login_wait"
+            ok = await _wait_until_logged_in(
+                page,
+                context,
+                timeout_ms=ZHIHU_LOGIN_TIMEOUT_MS,
+                cancel_event=getattr(status_queue, "cancel_event", None),
+            )
+            if not ok:
+                zhihu_logger.warning("知乎登录超时：未确认账号身份")
+                _queue_zhihu_login_error(status_queue, "login_timeout")
+                return None
+            cancel_event = getattr(status_queue, "cancel_event", None)
+            if cancel_event is not None and cancel_event.is_set():
+                raise ZhihuLoginControlError(
+                    "知乎登录已由操作者取消",
+                    code="operator_cancelled",
+                )
+            zhihu_logger.success("知乎登录成功，账号身份已确认")
+
+            stage = "session_save"
             uuid_v1 = uuid.uuid1()
-            print(f"UUID v1: {uuid_v1}")
             cookies_dir = _login_cookies_directory(cookies_directory)
             cookies_dir.mkdir(parents=True, exist_ok=True)
-            await context.storage_state(path=cookies_dir / f"{uuid_v1}.json")
+            new_cookie_path = cookies_dir / f"{uuid_v1}.json"
+            await context.storage_state(path=new_cookie_path)
 
-            result = await check_cookie(
-                9, f"{uuid_v1}.json", cookies_directory=cookies_dir
+            # The session was just verified in this live context using z_c0 or
+            # Zhihu's account-bound identity endpoint.  Starting a second
+            # browser here used to turn a successful login into a false 500 if
+            # that redundant check hit a transient launch/network failure.
+            # Regular account checks and every real publish still revalidate
+            # the persisted session before platform mutation.
+            stage = "database_save"
+            existing_account_id = getattr(
+                status_queue,
+                "existing_account_id",
+                None,
             )
-            if not result:
-                print("⚠️ cookie 即时校验未通过，仍保存账号，请稍后刷新验证")
-
+            old_cookie_filename = None
             with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
                 cursor = conn.cursor()
-                cursor.execute('''
-                    INSERT INTO user_info (type, filePath, userName, status)
-                    VALUES (?, ?, ?, ?)
-                ''', (9, f"{uuid_v1}.json", id, 1 if result else 0))
-                conn.commit()
-                print("✅ 知乎用户状态已记录")
+                conn.execute("BEGIN IMMEDIATE")
+                try:
+                    if existing_account_id is not None:
+                        existing_account = cursor.execute(
+                            """
+                            SELECT id, filePath
+                            FROM user_info
+                            WHERE id = ? AND type = ? AND userName = ?
+                            """,
+                            (existing_account_id, 9, id),
+                        ).fetchone()
+                        if existing_account is None:
+                            raise RuntimeError(
+                                "existing Zhihu account binding mismatch"
+                            )
+                        old_cookie_filename = str(existing_account[1] or "")
+                        cursor.execute(
+                            """
+                            UPDATE user_info
+                            SET filePath = ?, status = 1,
+                                last_checked_at = CURRENT_TIMESTAMP
+                            WHERE id = ? AND type = ? AND userName = ?
+                            """,
+                            (new_cookie_path.name, existing_account_id, 9, id),
+                        )
+                        if cursor.rowcount != 1:
+                            raise RuntimeError(
+                                "existing Zhihu account update lost its binding"
+                            )
+                    else:
+                        cursor.execute(
+                            """
+                            INSERT INTO user_info (
+                                type, filePath, userName, status, last_checked_at
+                            ) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+                            """,
+                            (9, new_cookie_path.name, id, 1),
+                        )
+                    conn.commit()
+                except Exception:
+                    conn.rollback()
+                    raise
+            database_saved = True
+            if old_cookie_filename and old_cookie_filename != new_cookie_path.name:
+                try:
+                    old_cookie_path = (cookies_dir / old_cookie_filename).resolve()
+                    if old_cookie_path.parent == cookies_dir.resolve():
+                        old_cookie_path.unlink(missing_ok=True)
+                    else:
+                        zhihu_logger.warning(
+                            "忽略不安全的旧知乎会话文件路径"
+                        )
+                except Exception as cleanup_error:
+                    zhihu_logger.warning(
+                        "旧知乎会话文件清理失败 error_type={}",
+                        cleanup_error.__class__.__name__,
+                    )
+            zhihu_logger.success("知乎账号会话已安全保存")
+            _queue_login_event(
+                status_queue,
+                "success",
+                message="知乎账号登录成功",
+                action="继续配置发布任务",
+            )
             status_queue.put("200")
             return True
     except Exception as e:
-        print(f"❌ 知乎登录异常: {e}")
-        import traceback
-        traceback.print_exc()
-        try:
-            status_queue.put("500")
-        except Exception:
-            pass
+        from utils.log import zhihu_logger
+
+        if new_cookie_path is not None and not database_saved:
+            try:
+                resolved_cookie = new_cookie_path.resolve()
+                cookies_root = _login_cookies_directory(
+                    cookies_directory
+                ).resolve()
+                if resolved_cookie.parent == cookies_root:
+                    resolved_cookie.unlink(missing_ok=True)
+            except Exception as cleanup_error:
+                zhihu_logger.warning(
+                    "知乎未登记会话文件清理失败 error_type={}",
+                    cleanup_error.__class__.__name__,
+                )
+        error_code = {
+            "browser_launch": "browser_launch_failed",
+            "context_create": "browser_launch_failed",
+            "login_page": "login_page_unavailable",
+            "login_wait": "login_interrupted",
+            "session_save": "session_save_failed",
+            "database_save": "session_save_failed",
+        }.get(stage, "unexpected_error")
+        control_error_code = getattr(e, "login_error_code", "")
+        if control_error_code in {"browser_closed", "operator_cancelled"}:
+            error_code = control_error_code
+            zhihu_logger.warning(
+                "知乎登录结束 stage={} reason={}",
+                stage,
+                control_error_code,
+            )
+        else:
+            zhihu_logger.exception(
+                "知乎登录异常 stage={} error_type={}",
+                stage,
+                e.__class__.__name__,
+            )
+        _queue_zhihu_login_error(status_queue, error_code)
         return None
     finally:
         try:

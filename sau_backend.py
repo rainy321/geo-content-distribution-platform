@@ -153,6 +153,50 @@ from services.real_publisher_factory import (
     create_real_publisher_factory,
 )
 from services.request_guard import create_rate_limiter_from_environment
+from utils.log import login_logger
+
+class LoginStatusQueue(Queue):
+    """SSE event queue with a cooperative browser-login cancellation signal."""
+
+    def __init__(self, *, protocol_version=1, existing_account_id=None):
+        super().__init__()
+        self.protocol_version = int(protocol_version)
+        self.existing_account_id = existing_account_id
+        self.cancel_event = threading.Event()
+        self.finished_event = threading.Event()
+        self._outcome_lock = threading.Lock()
+        self._cancel_requested = False
+        self._outcome = "pending"
+
+    def put(self, item, block=True, timeout=None):
+        terminal = str(item)
+        with self._outcome_lock:
+            if self._outcome == "pending" and terminal == "200":
+                self._outcome = "success"
+            elif self._outcome == "pending" and terminal == "500":
+                self._outcome = (
+                    "cancelled" if self._cancel_requested else "failed"
+                )
+        return super().put(item, block=block, timeout=timeout)
+
+    def cancel(self):
+        with self._outcome_lock:
+            self._cancel_requested = True
+        self.cancel_event.set()
+
+    def mark_finished(self):
+        with self._outcome_lock:
+            if self._outcome == "pending":
+                self._outcome = (
+                    "cancelled" if self._cancel_requested else "failed"
+                )
+        self.finished_event.set()
+
+    @property
+    def outcome(self):
+        with self._outcome_lock:
+            return self._outcome
+
 
 active_queues = {}
 active_queues_lock = threading.Lock()
@@ -3142,6 +3186,27 @@ def login():
     login_type = str(request.args.get('type') or '').strip()
     # 账号名
     account_id = str(request.args.get('id') or '').strip()
+    protocol_text = str(request.args.get("protocol") or "1").strip()
+    if protocol_text not in {"1", "2"}:
+        return jsonify(
+            {"code": 400, "msg": "不支持的登录协议版本", "data": None}
+        ), 400
+    protocol_version = int(protocol_text)
+    existing_account_text = str(
+        request.args.get("existing_account_id") or ""
+    ).strip()
+    existing_account_id = None
+    if existing_account_text:
+        try:
+            existing_account_id = int(existing_account_text)
+        except ValueError:
+            return jsonify(
+                {"code": 400, "msg": "已有账号标识无效", "data": None}
+            ), 400
+        if existing_account_id <= 0:
+            return jsonify(
+                {"code": 400, "msg": "已有账号标识无效", "data": None}
+            ), 400
     if login_type not in {str(value) for value in range(1, 11)}:
         return jsonify({"code": 400, "msg": "不支持的平台类型", "data": None}), 400
     if (
@@ -3175,10 +3240,40 @@ def login():
         return jsonify(
             {"code": 403, "msg": "媒体账号登录运行开关未开启", "data": None}
         ), 403
-    print(f"登录请求: type={login_type}, id={account_id}")
+    if existing_account_id is not None:
+        try:
+            with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
+                existing_account = conn.execute(
+                    "SELECT type, userName FROM user_info WHERE id = ?",
+                    (existing_account_id,),
+                ).fetchone()
+        except sqlite3.Error:
+            return jsonify(
+                {"code": 500, "msg": "无法校验已有账号", "data": None}
+            ), 500
+        if (
+            existing_account is None
+            or str(existing_account[0]) != login_type
+            or str(existing_account[1]) != account_id
+        ):
+            return jsonify(
+                {
+                    "code": 409,
+                    "msg": "已有账号与当前平台或备注名不匹配",
+                    "data": None,
+                }
+            ), 409
+    login_logger.info(
+        "媒体账号登录请求 platform_type={} protocol={}",
+        login_type,
+        protocol_version,
+    )
 
     # 模拟一个用于异步通信的队列
-    status_queue = Queue()
+    status_queue = LoginStatusQueue(
+        protocol_version=protocol_version,
+        existing_account_id=existing_account_id,
+    )
     session_key = (login_type, account_id)
     with active_queues_lock:
         if session_key in active_queues:
@@ -3188,10 +3283,13 @@ def login():
         active_queues[session_key] = status_queue
 
     def on_close():
-        with active_queues_lock:
-            if active_queues.get(session_key) is status_queue:
-                active_queues.pop(session_key, None)
-        print(f"清理登录会话: type={login_type}, id={account_id}")
+        # A closed dialog/EventSource must not leave its headed automation
+        # browser waiting for the full manual-login timeout.  Platform helpers
+        # opt into this cooperative signal; Zhihu checks it every second.
+        status_queue.cancel()
+        # The worker owns registry cleanup.  Keeping the entry until its
+        # ``finally`` block closes Playwright prevents an immediate retry from
+        # launching a second browser for the same local account.
     # 启动异步任务线程
     try:
         thread = threading.Thread(
@@ -3200,9 +3298,25 @@ def login():
             daemon=True,
         )
         thread.start()
-    except Exception:
-        on_close()
-        raise
+    except Exception as exc:
+        try:
+            _queue_login_runtime_error(status_queue, login_type)
+        except Exception:
+            pass
+        status_queue.cancel()
+        _finish_login_session(login_type, account_id, status_queue)
+        login_logger.exception(
+            "媒体账号登录线程启动失败 platform_type={} error_type={}",
+            login_type,
+            exc.__class__.__name__,
+        )
+        return jsonify(
+            {
+                "code": 500,
+                "msg": "登录服务未能启动，请重试并查看本机日志",
+                "data": None,
+            }
+        ), 500
     response = Response(
         sse_stream(status_queue, on_close=on_close),
         mimetype='text/event-stream',
@@ -3212,6 +3326,75 @@ def login():
     response.headers['Content-Type'] = 'text/event-stream'
     response.headers['Connection'] = 'keep-alive'
     return response
+
+
+@app.route('/api/media-login/cancel', methods=['POST'])
+def cancel_media_login():
+    """Cooperatively stop one active headed login without killing processes."""
+
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        return jsonify(
+            {"code": 400, "msg": "请求格式无效", "data": None}
+        ), 400
+    login_type = str(payload.get("type") or "").strip()
+    account_id = str(payload.get("id") or "").strip()
+    if login_type not in {str(value) for value in range(1, 11)}:
+        return jsonify(
+            {"code": 400, "msg": "不支持的平台类型", "data": None}
+        ), 400
+    if not account_id or len(account_id) > 100:
+        return jsonify(
+            {"code": 400, "msg": "账号名无效", "data": None}
+        ), 400
+
+    with active_queues_lock:
+        status_queue = active_queues.get((login_type, account_id))
+    if status_queue is None:
+        return jsonify(
+            {
+                "code": 200,
+                "msg": "当前没有进行中的登录",
+                "data": {
+                    "cancel_requested": False,
+                    "active": False,
+                    "outcome": "unknown",
+                },
+            }
+        ), 200
+    cancel = getattr(status_queue, "cancel", None)
+    if callable(cancel):
+        cancel()
+    finished_event = getattr(status_queue, "finished_event", None)
+    finished = bool(
+        finished_event is not None
+        and finished_event.wait(timeout=3.0)
+    )
+    with active_queues_lock:
+        still_registered = active_queues.get((login_type, account_id)) is status_queue
+        # ``finished_event`` is set only after the login coroutine (including
+        # browser/context cleanup) has returned.  Removing the exact same queue
+        # here closes a tiny race before the worker's own registry cleanup.
+        if finished and still_registered:
+            active_queues.pop((login_type, account_id), None)
+            still_registered = False
+    return jsonify(
+        {
+            "code": 200,
+            "msg": (
+                "账号登录已完成"
+                if status_queue.outcome == "success"
+                else "登录窗口已结束"
+                if not still_registered
+                else "已发送结束登录请求，Chrome 正在关闭"
+            ),
+            "data": {
+                "cancel_requested": True,
+                "active": still_registered,
+                "outcome": status_queue.outcome,
+            },
+        }
+    ), 200
 
 @app.route('/postVideo', methods=['POST'])
 def postVideo():
@@ -3900,14 +4083,17 @@ def download_cookie():
 
 
 # 包装函数：在线程中运行异步函数
-def run_async_function(type,id,status_queue):
-    if (
-        str(type) == str(BILIBILI_ACCOUNT_TYPE)
-        and not app.config.get("ENABLE_BILIBILI_RUNTIME", False)
-    ):
-        print("Bilibili 登录运行时已被安全闸门阻断", flush=True)
-        status_queue.put("500")
-        return
+def _finish_login_session(type, id, status_queue):
+    mark_finished = getattr(status_queue, "mark_finished", None)
+    if callable(mark_finished):
+        mark_finished()
+    session_key = (str(type), str(id))
+    with active_queues_lock:
+        if active_queues.get(session_key) is status_queue:
+            active_queues.pop(session_key, None)
+
+
+def _load_login_helpers():
     # Login helpers launch real browsers and belong to the local worker runtime.
     from myUtils.login import (
         baijiahao_cookie_gen,
@@ -3922,94 +4108,96 @@ def run_async_function(type,id,status_queue):
         zhihu_cookie_gen,
     )
 
-    print(f"🧵 登录线程启动: type={type}, id={id}", flush=True)
-    login_storage = {
-        "database_path": app.config["DATABASE_PATH"],
-        "cookies_directory": app.config["COOKIES_DIRECTORY"],
+    return {
+        "1": xiaohongshu_cookie_gen,
+        "2": get_tencent_cookie,
+        "3": douyin_cookie_gen,
+        "4": get_ks_cookie,
+        "5": baijiahao_cookie_gen,
+        "6": bilibili_cookie_gen,
+        "7": toutiao_cookie_gen,
+        "8": sohu_cookie_gen,
+        "9": zhihu_cookie_gen,
+        "10": tiktok_cookie_gen,
     }
+
+
+def _run_login_coroutine(coroutine):
+    """Run one login coroutine and always release its thread-local event loop."""
+
+    loop = asyncio.new_event_loop()
     try:
-        match str(type):
-            case '1':
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(
-                    xiaohongshu_cookie_gen(id, status_queue, **login_storage)
-                )
-                loop.close()
-            case '2':
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(
-                    get_tencent_cookie(id, status_queue, **login_storage)
-                )
-                loop.close()
-            case '3':
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(
-                    douyin_cookie_gen(id, status_queue, **login_storage)
-                )
-                loop.close()
-            case '4':
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(
-                    get_ks_cookie(id, status_queue, **login_storage)
-                )
-                loop.close()
-            case '5':
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(
-                    baijiahao_cookie_gen(id, status_queue, **login_storage)
-                )
-                loop.close()
-            case '6':
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(
-                    bilibili_cookie_gen(id, status_queue, **login_storage)
-                )
-                loop.close()
-            case '7':
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(
-                    toutiao_cookie_gen(id, status_queue, **login_storage)
-                )
-                loop.close()
-            case '8':
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(
-                    sohu_cookie_gen(id, status_queue, **login_storage)
-                )
-                loop.close()
-            case '9':
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(
-                    zhihu_cookie_gen(id, status_queue, **login_storage)
-                )
-                loop.close()
-            case '10':
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(
-                    tiktok_cookie_gen(id, status_queue, **login_storage)
-                )
-                loop.close()
-            case _:
-                print(f"❌ 不支持的登录平台类型: {type}", flush=True)
-                status_queue.put("500")
-    except Exception as e:
-        print(f"❌ 登录线程异常 type={type}, id={id}: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
+        asyncio.set_event_loop(loop)
+        return loop.run_until_complete(coroutine)
+    finally:
         try:
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True)
+                )
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        finally:
+            asyncio.set_event_loop(None)
+            loop.close()
+
+
+def _queue_login_runtime_error(status_queue, platform_type):
+    is_zhihu = str(platform_type) == "9"
+    payload = {
+        "type": "error",
+        "code": "unexpected_error",
+        "message": (
+            "知乎登录发生异常，请重试并查看本机日志"
+            if is_zhihu
+            else "平台登录发生异常，请重试并查看本机日志"
+        ),
+        "action": "重试；如仍失败，请查看本机登录日志",
+    }
+    if int(getattr(status_queue, "protocol_version", 1)) >= 2:
+        status_queue.put(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+        )
+    status_queue.put("500")
+
+
+def run_async_function(type, id, status_queue):
+    normalized_type = str(type)
+    try:
+        if (
+            normalized_type == str(BILIBILI_ACCOUNT_TYPE)
+            and not app.config.get("ENABLE_BILIBILI_RUNTIME", False)
+        ):
             status_queue.put("500")
+            return
+        login_helpers = _load_login_helpers()
+        login_runner = login_helpers.get(normalized_type)
+        if login_runner is None:
+            raise ValueError("unsupported login platform")
+        login_storage = {
+            "database_path": app.config["DATABASE_PATH"],
+            "cookies_directory": app.config["COOKIES_DIRECTORY"],
+        }
+        login_logger.info(
+            "媒体账号登录线程启动 platform_type={}", normalized_type
+        )
+        _run_login_coroutine(
+            login_runner(id, status_queue, **login_storage)
+        )
+    except Exception as e:
+        login_logger.exception(
+            "媒体账号登录线程异常 platform_type={} error_type={}",
+            normalized_type,
+            e.__class__.__name__,
+        )
+        try:
+            _queue_login_runtime_error(status_queue, normalized_type)
         except Exception:
             pass
+    finally:
+        _finish_login_session(type, id, status_queue)
 
 # SSE 流生成器函数
 def sse_stream(status_queue, *, on_close=None):

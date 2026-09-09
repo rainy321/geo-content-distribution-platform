@@ -4,10 +4,16 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 from datetime import datetime
 from pathlib import Path
+from urllib.parse import urlsplit
 
-from playwright.async_api import Page, async_playwright
+from playwright.async_api import (
+    Page,
+    TimeoutError as PlaywrightTimeoutError,
+    async_playwright,
+)
 
 from conf import LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
 from utils.base_social_media import set_init_script
@@ -16,6 +22,10 @@ from utils.log import zhihu_logger
 ZHIHU_LOGIN_URL = "https://www.zhihu.com/signin"
 ZHIHU_WRITE_URL = "https://zhuanlan.zhihu.com/write"
 ZHIHU_CREATOR_URL = "https://www.zhihu.com/creator"
+ZHIHU_ME_URL = "https://www.zhihu.com/api/v4/me"
+ZHIHU_LOGIN_TIMEOUT_MS = 600_000
+ZHIHU_IDENTITY_PROBE_INITIAL_DELAY_MS = 5_000
+ZHIHU_IDENTITY_PROBE_INTERVAL_MS = 30_000
 TITLE_MAX_LEN = 100
 COVER_MAX_BYTES = 10 * 1024 * 1024
 COVER_EXTS = {".jpg", ".jpeg", ".png"}
@@ -30,6 +40,14 @@ ZHIHU_CREATION_STATEMENT_OPTIONS = (
     "无声明",
 )
 ZHIHU_CREATION_STATEMENT_DEFAULT = "无声明"
+
+
+class ZhihuLoginControlError(RuntimeError):
+    """An expected operator/browser stop with a stable UI-facing code."""
+
+    def __init__(self, message: str, *, code: str):
+        super().__init__(message)
+        self.login_error_code = code
 
 
 def _build_launch_kwargs(headless: bool) -> dict:
@@ -48,64 +66,272 @@ def _build_launch_kwargs(headless: bool) -> dict:
 
 
 def _is_login_url(url: str) -> bool:
-    u = (url or "").lower()
-    return any(k in u for k in ("/signin", "/login", "passport", "account/login"))
+    try:
+        parsed = urlsplit(str(url or ""))
+    except ValueError:
+        return True
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    path = (parsed.path or "/").lower().rstrip("/") or "/"
+    if hostname == "passport.zhihu.com":
+        return True
+    return path == "/signin" or path.startswith("/signin/") or (
+        path == "/login" or path.startswith("/login/")
+    ) or path.startswith("/account/login")
 
 
-async def _has_auth_cookie(context) -> bool:
-    """知乎登录成功后会有 z_c0。"""
+def _is_trusted_zhihu_url(url: str) -> bool:
+    """Reject lookalike hosts before using a page as an authentication signal."""
+
+    try:
+        parsed = urlsplit(str(url or ""))
+    except ValueError:
+        return False
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    return parsed.scheme == "https" and (
+        hostname == "zhihu.com" or hostname.endswith(".zhihu.com")
+    )
+
+
+async def _has_auth_cookie(page: Page, context) -> bool:
+    """Validate Zhihu's auth cookie only inside a trusted Zhihu page."""
+
+    if not _is_trusted_zhihu_url(page.url):
+        return False
     try:
         cookies = await context.cookies()
     except Exception:
         return False
-    return any(c.get("name") == "z_c0" for c in cookies)
+    now = time.time()
+    for cookie in cookies:
+        if cookie.get("name") != "z_c0":
+            continue
+        if not str(cookie.get("value") or "").strip():
+            continue
+        domain = (
+            str(cookie.get("domain") or "")
+            .lower()
+            .strip()
+            .lstrip(".")
+            .rstrip(".")
+        )
+        if domain != "zhihu.com" and not domain.endswith(".zhihu.com"):
+            continue
+        try:
+            expires = float(cookie.get("expires", -1))
+        except (TypeError, ValueError):
+            continue
+        if expires != -1 and expires <= now:
+            continue
+        return True
+    return False
 
 
-async def _wait_until_logged_in(page: Page, context, timeout_ms: int = 200_000) -> bool:
-    """等待人工登录完成（优先检测 z_c0）。"""
-    elapsed = 0
+async def _has_authenticated_identity(context, *, timeout_ms=10_000) -> bool:
+    """Confirm the current account through Zhihu's read-only identity endpoint.
+
+    This is the fallback for sessions whose current cookie layout no longer
+    exposes ``z_c0``.  A successful HTTP response alone is insufficient: the
+    payload must carry the stable member ``url_token`` used by the existing
+    publication verifier.
+    """
+
+    response = None
+    try:
+        if int(timeout_ms) <= 0:
+            return False
+        response = await context.request.get(
+            ZHIHU_ME_URL,
+            timeout=max(1, min(10_000, int(timeout_ms))),
+        )
+        if not response.ok:
+            return False
+        payload = await response.json()
+        return isinstance(payload, dict) and bool(
+            str(payload.get("url_token") or "").strip()
+        )
+    except Exception as exc:
+        zhihu_logger.debug(
+            "知乎身份兜底校验未通过: {}", exc.__class__.__name__
+        )
+        return False
+    finally:
+        if response is not None:
+            try:
+                await response.dispose()
+            except Exception:
+                pass
+
+
+async def _has_authenticated_session(
+    page: Page,
+    context,
+    *,
+    probe_identity=False,
+    identity_timeout_ms=10_000,
+) -> bool:
+    """Return true only for a strong, account-bound authentication signal."""
+
+    if not _is_trusted_zhihu_url(page.url):
+        return False
+    if await _has_auth_cookie(page, context):
+        return True
+    if not probe_identity:
+        return False
+    return await _has_authenticated_identity(
+        context,
+        timeout_ms=identity_timeout_ms,
+    )
+
+
+async def _page_is_interactive_zhihu(page: Page) -> bool:
+    """Check whether a timed-out navigation still produced a usable Zhihu page."""
+
+    try:
+        if page.is_closed() or not _is_trusted_zhihu_url(page.url):
+            return False
+        ready_state = await page.evaluate("document.readyState")
+        if ready_state in {"interactive", "complete"}:
+            return bool(await page.locator("body").count())
+        # A slowly loading login page can remain in ``loading`` while its form
+        # is already usable.  Require an actual interactive control, not merely
+        # a trusted URL, before tolerating the timeout.
+        return bool(
+            await page.locator(
+                'input, button, [role="button"], [contenteditable="true"]'
+            ).count()
+        )
+    except Exception:
+        return False
+
+
+async def _goto_zhihu_page(
+    page: Page,
+    url: str,
+    *,
+    timeout_ms: int = 60_000,
+) -> bool:
+    """Navigate to Zhihu and tolerate only a demonstrably usable timeout.
+
+    Returns ``True`` for a normal navigation and ``False`` when Playwright
+    timed out after the trusted page had already become interactive.
+    """
+
+    try:
+        await page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+        completed = True
+    except PlaywrightTimeoutError:
+        if not await _page_is_interactive_zhihu(page):
+            raise
+        completed = False
+        zhihu_logger.warning("知乎页面加载超时，但页面已可交互，继续当前流程")
+    try:
+        await page.bring_to_front()
+    except Exception:
+        pass
+    return completed
+
+
+async def _wait_until_logged_in(
+    page: Page,
+    context,
+    timeout_ms: int = ZHIHU_LOGIN_TIMEOUT_MS,
+    *,
+    cancel_event=None,
+) -> bool:
+    """等待人工登录完成，使用 cookie 或身份接口的强认证信号。"""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0, int(timeout_ms)) / 1000
     step = 1000
-    while elapsed < timeout_ms:
-        if await _has_auth_cookie(context):
+    next_identity_probe = (
+        loop.time() + ZHIHU_IDENTITY_PROBE_INITIAL_DELAY_MS / 1000
+    )
+    previous_url = str(page.url or "")
+    while loop.time() < deadline:
+        if cancel_event is not None and cancel_event.is_set():
+            raise ZhihuLoginControlError(
+                "知乎登录已由操作者取消",
+                code="operator_cancelled",
+            )
+        if page.is_closed():
+            raise ZhihuLoginControlError(
+                "知乎登录浏览器已关闭",
+                code="browser_closed",
+            )
+        if await _has_authenticated_session(page, context):
             return True
-        if (not _is_login_url(page.url)) and ("zhihu.com" in (page.url or "")):
-            # 已离开登录页时再确认一次 cookie
-            await page.wait_for_timeout(500)
-            if await _has_auth_cookie(context):
+        current_url = str(page.url or "")
+        left_login_page = (
+            current_url != previous_url
+            and _is_trusted_zhihu_url(current_url)
+            and not _is_login_url(current_url)
+        )
+        now = loop.time()
+        if left_login_page or now >= next_identity_probe:
+            remaining_ms = max(0, int((deadline - now) * 1000))
+            if await _has_authenticated_session(
+                page,
+                context,
+                probe_identity=True,
+                identity_timeout_ms=min(10_000, remaining_ms),
+            ):
                 return True
-        await page.wait_for_timeout(step)
-        elapsed += step
-    return await _has_auth_cookie(context)
+            next_identity_probe = (
+                loop.time() + ZHIHU_IDENTITY_PROBE_INTERVAL_MS / 1000
+            )
+        previous_url = current_url
+        remaining_ms = max(0, int((deadline - loop.time()) * 1000))
+        if remaining_ms <= 0:
+            break
+        wait_ms = min(step, remaining_ms)
+        try:
+            await page.wait_for_timeout(wait_ms)
+        except Exception:
+            if page.is_closed():
+                raise ZhihuLoginControlError(
+                    "知乎登录浏览器已关闭",
+                    code="browser_closed",
+                ) from None
+            raise
+    if cancel_event is not None and cancel_event.is_set():
+        raise ZhihuLoginControlError(
+            "知乎登录已由操作者取消",
+            code="operator_cancelled",
+        )
+    if page.is_closed():
+        raise ZhihuLoginControlError(
+            "知乎登录浏览器已关闭",
+            code="browser_closed",
+        )
+    remaining_ms = max(0, int((deadline - loop.time()) * 1000))
+    return await _has_authenticated_session(
+        page,
+        context,
+        probe_identity=True,
+        identity_timeout_ms=remaining_ms,
+    )
 
 
 async def cookie_auth(account_file) -> bool:
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(**_build_launch_kwargs(headless=LOCAL_CHROME_HEADLESS))
+        browser = None
         try:
+            browser = await playwright.chromium.launch(
+                **_build_launch_kwargs(headless=LOCAL_CHROME_HEADLESS)
+            )
             context = await browser.new_context(storage_state=account_file)
             context = await set_init_script(context)
             page = await context.new_page()
-            await page.goto(ZHIHU_WRITE_URL, timeout=60000)
-            await page.wait_for_timeout(3000)
+            await _goto_zhihu_page(page, ZHIHU_WRITE_URL, timeout_ms=60_000)
+            await page.wait_for_timeout(2000)
             if _is_login_url(page.url):
                 zhihu_logger.error("[+] 知乎 cookie 失效")
                 return False
-            # 写文章页或创作中心标记
-            markers = [
-                'textarea[placeholder*="标题"]',
-                'input[placeholder*="标题"]',
-                'text=发布',
-                'text=写文章',
-            ]
-            for sel in markers:
-                try:
-                    if await page.locator(sel).count():
-                        zhihu_logger.success("[+] 知乎 cookie 有效")
-                        return True
-                except Exception:
-                    continue
-            if "zhihu.com" in page.url and not _is_login_url(page.url):
-                zhihu_logger.success("[+] 知乎 cookie 有效（域名已登录）")
+            if await _has_authenticated_session(
+                page,
+                context,
+                probe_identity=True,
+            ):
+                zhihu_logger.success("[+] 知乎 cookie 有效（账号身份已确认）")
                 return True
             zhihu_logger.error("[+] 知乎 cookie 失效")
             return False
@@ -113,7 +339,8 @@ async def cookie_auth(account_file) -> bool:
             zhihu_logger.warning(f"[+] cookie 校验异常，按失效处理: {exc}")
             return False
         finally:
-            await browser.close()
+            if browser is not None:
+                await browser.close()
 
 
 async def zhihu_cookie_gen(account_file):
@@ -123,13 +350,17 @@ async def zhihu_cookie_gen(account_file):
         context = await browser.new_context()
         context = await set_init_script(context)
         page = await context.new_page()
-        await page.goto(ZHIHU_LOGIN_URL, timeout=60000)
-        zhihu_logger.info("请在浏览器中完成知乎登录；检测到登录凭证 z_c0 后会自动保存…")
-        ok = await _wait_until_logged_in(page, context, timeout_ms=200_000)
+        await _goto_zhihu_page(page, ZHIHU_LOGIN_URL, timeout_ms=60_000)
+        zhihu_logger.info("请在浏览器中完成知乎登录；确认账号身份后会自动保存…")
+        ok = await _wait_until_logged_in(
+            page,
+            context,
+            timeout_ms=ZHIHU_LOGIN_TIMEOUT_MS,
+        )
         if not ok:
             await context.close()
             await browser.close()
-            raise RuntimeError("知乎登录超时：未检测到登录凭证 z_c0，请重新登录")
+            raise RuntimeError("知乎登录超时：未确认账号身份，请重新登录")
         Path(account_file).parent.mkdir(parents=True, exist_ok=True)
         await context.storage_state(path=account_file)
         zhihu_logger.success(f"cookie saved: {account_file}")

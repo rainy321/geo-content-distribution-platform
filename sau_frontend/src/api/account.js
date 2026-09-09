@@ -12,6 +12,11 @@ export const accountApi = {
     return http.post(`/api/media-accounts/${id}/check`)
   },
 
+  // 结束由当前软件启动的交互式登录，并让后台关闭对应浏览器。
+  cancelMediaLogin(data) {
+    return http.post('/api/media-login/cancel', data, { suppressGlobalError: true })
+  },
+
   // 获取有效账号列表（带验证）
   getValidAccounts() {
     return http.get('/getValidAccounts')

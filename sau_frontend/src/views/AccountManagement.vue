@@ -106,6 +106,8 @@
       v-model="loginDialogVisible"
       width="min(520px, calc(100vw - 32px))"
       :close-on-click-modal="false"
+      :close-on-press-escape="loginCanClose"
+      :show-close="loginCanClose"
       @closed="resetLoginDialog"
     >
       <template #header>
@@ -116,7 +118,7 @@
       </template>
 
       <div class="login-dialog">
-        <el-form label-position="top">
+        <el-form v-if="loginStage === 'idle'" label-position="top">
           <el-form-item label="媒体平台">
             <el-select v-model="loginForm.platformType" placeholder="选择平台" :disabled="loginStage !== 'idle'">
               <el-option
@@ -138,19 +140,59 @@
           </el-form-item>
         </el-form>
 
+        <div v-else class="login-session-context" aria-label="当前登录对象">
+          <div><span>PLATFORM</span><strong>{{ selectedPlatform?.name || '媒体平台' }}</strong></div>
+          <div><span>LOCAL LABEL</span><strong>{{ loginForm.accountName }}</strong></div>
+        </div>
+
         <div v-if="loginStage === 'idle'" class="login-consent">
           <el-icon><WarningFilled /></el-icon>
           <p>继续后会打开对应平台的登录流程。请只操作你有权使用的账号；扫码、验证码和人工确认不会被绕过。</p>
         </div>
 
-        <div v-else class="login-progress">
-          <img v-if="qrCodeData" :src="qrCodeData" alt="平台登录二维码" />
-          <div v-else class="progress-symbol" :class="loginStage">
-            <el-icon v-if="loginStage === 'success'"><CircleCheckFilled /></el-icon>
-            <span v-else>{{ loginStage === 'failed' ? '!' : '•••' }}</span>
+        <div v-else class="login-progress" :class="`stage-${loginStage}`">
+          <ol class="login-stage-rail" aria-label="登录进度">
+            <li :class="loginStepState(1)"><span>01</span>启动流程</li>
+            <li :class="loginStepState(2)"><span>02</span>平台验证</li>
+            <li :class="loginStepState(3)"><span>03</span>保存账号</li>
+          </ol>
+
+          <div class="login-visual">
+            <img v-if="qrCodeData" :src="qrCodeData" alt="平台登录二维码" />
+            <div v-else class="progress-symbol" :class="loginStage">
+              <el-icon v-if="loginStage === 'success'"><CircleCheckFilled /></el-icon>
+              <span v-else>{{ loginStage === 'failed' ? '!' : (loginStage === 'review' ? '?' : '•••') }}</span>
+            </div>
           </div>
-          <strong>{{ loginStageTitle }}</strong>
-          <p>{{ loginStageMessage }}</p>
+
+          <div class="login-status-copy">
+            <div class="login-status-meta">
+              <span>{{ loginStageCode }}</span>
+              <time>{{ loginElapsedLabel }}</time>
+            </div>
+            <strong>{{ loginStageTitle }}</strong>
+            <p>{{ loginStageMessage }}</p>
+          </div>
+
+          <aside
+            v-if="['opening', 'manual'].includes(loginStage) && !qrCodeData"
+            class="login-window-tip"
+            role="status"
+          >
+            <strong>请查看桌面和任务栏</strong>
+            <p>软件会另外打开 Google Chrome。登录窗口可能被挡在本软件后面；请切换到浏览器完成{{ selectedPlatform?.name || '平台' }}验证，并保持该窗口打开。</p>
+          </aside>
+
+          <aside v-if="loginStage === 'failed'" class="login-error-detail" role="alert">
+            <span>{{ loginFailure.code === 'operator_cancelled' ? 'STATUS' : 'ERROR' }} / {{ loginFailure.code }}</span>
+            <strong>{{ loginFailure.message }}</strong>
+            <p><b>下一步：</b>{{ loginFailure.action }}</p>
+          </aside>
+          <aside v-if="loginStage === 'review'" class="login-review-detail" role="status">
+            <span>STATUS / OUTCOME UNKNOWN</span>
+            <strong>{{ loginFailure.message }}</strong>
+            <p>{{ loginFailure.action }}</p>
+          </aside>
         </div>
       </div>
 
@@ -164,11 +206,31 @@
         >
           打开登录流程
         </el-button>
-        <el-button v-else-if="loginStage === 'failed'" type="primary" @click="retryLogin">重新尝试</el-button>
+        <template v-else-if="loginStage === 'failed'">
+          <el-button @click="loginDialogVisible = false">关闭</el-button>
+          <el-button
+            v-if="loginFailure.code === 'cancel_pending'"
+            type="primary"
+            :loading="loginCancelPending"
+            @click="checkLoginCancellation"
+          >
+            检查关闭状态
+          </el-button>
+          <el-button v-else type="primary" @click="retryLogin">按提示重试</el-button>
+        </template>
+        <template v-else-if="loginStage === 'review'">
+          <el-button @click="loginDialogVisible = false">关闭</el-button>
+          <el-button type="primary" :loading="loading" @click="refreshLoginStatus">刷新账号状态</el-button>
+        </template>
         <el-button v-else-if="loginStage === 'success'" type="primary" @click="completeLogin">
           {{ returnToPublishCenter ? '返回发布中心继续' : '完成' }}
         </el-button>
-        <el-button v-else @click="loginDialogVisible = false">取消登录</el-button>
+        <template v-else>
+          <el-button :disabled="loginCancelPending" @click="cancelLogin">
+            {{ loginCancelPending ? '正在结束登录…' : '结束本次登录' }}
+          </el-button>
+          <el-button type="primary" disabled>等待平台确认</el-button>
+        </template>
       </template>
     </el-dialog>
   </main>
@@ -178,10 +240,15 @@
 import { computed, defineComponent, h, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { CircleCheckFilled, Connection, Plus, Refresh, WarningFilled } from '@element-plus/icons-vue'
-import { ElButton, ElIcon, ElMessage } from 'element-plus'
+import { ElButton, ElIcon, ElMessage, ElMessageBox } from 'element-plus'
 import { accountApi } from '@/api/account'
 import { publishApi } from '@/api/publish'
 import { apiUrl } from '@/config/api'
+import {
+  buildStreamFailure,
+  parseLoginSessionEvent,
+  resolveLoginCancellation
+} from '@/utils/loginSession'
 
 const route = useRoute()
 const router = useRouter()
@@ -284,8 +351,13 @@ const checkingIds = ref(new Set())
 const loginDialogVisible = ref(false)
 const loginStage = ref('idle')
 const qrCodeData = ref('')
+const loginEventMessage = ref('')
+const loginElapsedSeconds = ref(0)
+const loginCancelPending = ref(false)
+const loginFailure = reactive({ code: '', message: '', action: '' })
 const loginForm = reactive({ platformType: null, accountName: '', existingAccountId: null })
 let eventSource = null
+let loginTimer = null
 
 const primaryPlatforms = computed(() => overview.platforms.filter(item => ['P0', 'P1'].includes(item.priority)))
 const secondaryPlatforms = computed(() => overview.platforms.filter(item => !['P0', 'P1'].includes(item.priority)))
@@ -298,15 +370,60 @@ const hasLoginCapablePlatform = computed(() => (
 ))
 const returnToPublishCenter = computed(() => route.query.return_to === '/publish-center')
 const loginDialogTitle = computed(() => `${loginForm.existingAccountId ? '重新登录' : '连接'}${selectedPlatform.value ? ` · ${selectedPlatform.value.name}` : '媒体账号'}`)
-const loginStageTitle = computed(() => ({
-  connecting: '登录流程已启动', manual: '等待你完成平台登录', success: '账号登录成功', failed: '登录没有完成'
-}[loginStage.value] || '准备登录'))
+const loginStageTitle = computed(() => {
+  if (loginStage.value === 'failed' && loginFailure.code === 'operator_cancelled') {
+    return '已请求结束本次登录'
+  }
+  return ({
+    connecting: '正在连接本机登录服务',
+    opening: '正在打开平台登录窗口',
+    manual: `请完成${selectedPlatform.value?.name || '平台'}验证`,
+    success: '账号登录成功',
+    failed: '本次登录未完成',
+    review: '请确认账号状态'
+  }[loginStage.value] || '准备登录')
+})
 const loginStageMessage = computed(() => {
-  if (loginStage.value === 'success') return '本地账号记录已刷新，可以返回媒体账号页继续检测。'
-  if (loginStage.value === 'failed') return '平台登录超时或验证失败，没有绕过任何安全步骤。'
+  if (loginStage.value === 'success') return loginEventMessage.value || '本地账号和登录凭证已经保存，可以继续发布流程。'
+  if (loginStage.value === 'failed' && loginFailure.code === 'operator_cancelled') return '本次未完成的登录信息不会保存。'
+  if (loginStage.value === 'review') return '结果无法可靠判定，软件已刷新本地账号列表。'
+  if (loginStage.value === 'failed') return '软件没有执行任何绕过验证的操作；请按下方诊断处理后重试。'
   if (qrCodeData.value) return '请使用对应平台 App 扫描二维码，并在平台侧完成确认。'
-  if (loginStage.value === 'manual') return '请在已打开的浏览器或终端中完成登录，系统会等待结果。'
-  return '正在等待平台返回二维码或人工登录窗口。'
+  if (loginEventMessage.value) return loginEventMessage.value
+  if (loginStage.value === 'manual') return '系统正在等待浏览器中的扫码、验证码或人工确认结果。'
+  if (loginStage.value === 'opening') return '本机服务已连接，正在调用 Google Chrome 打开平台登录页。'
+  return '正在申请本机浏览器登录会话。'
+})
+const loginStageCode = computed(() => ({
+  connecting: 'SESSION / CONNECTING',
+  opening: 'BROWSER / OPENING',
+  manual: 'PLATFORM / WAITING',
+  success: 'ACCOUNT / SAVED',
+  failed: `LOGIN / ${loginFailure.code || 'FAILED'}`,
+  review: 'ACCOUNT / VERIFY'
+}[loginStage.value] || 'LOGIN / READY'))
+const loginElapsedLabel = computed(() => {
+  const minutes = Math.floor(loginElapsedSeconds.value / 60)
+  const seconds = loginElapsedSeconds.value % 60
+  return `${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`
+})
+const loginCurrentStep = computed(() => {
+  if (['connecting', 'opening'].includes(loginStage.value)) return 1
+  if (loginStage.value === 'failed') {
+    if (['browser_launch_failed', 'login_page_unavailable', 'stream_disconnected'].includes(loginFailure.code)) return 1
+    if (loginFailure.code === 'session_save_failed') return 3
+    return 2
+  }
+  if (loginStage.value === 'manual' || qrCodeData.value) return 2
+  if (loginStage.value === 'review') return 3
+  if (loginStage.value === 'success') return 3
+  return 0
+})
+const loginCanClose = computed(() => ['idle', 'success', 'failed', 'review'].includes(loginStage.value))
+const loginStepState = step => ({
+  active: loginCurrentStep.value === step,
+  complete: loginCurrentStep.value > step || loginStage.value === 'success',
+  failed: loginStage.value === 'failed' && step === loginCurrentStep.value
 })
 
 const fetchOverview = async () => {
@@ -402,7 +519,90 @@ const openLogin = (platform = null, account = null) => {
   loginForm.existingAccountId = account?.id || null
   loginStage.value = 'idle'
   qrCodeData.value = ''
+  loginEventMessage.value = ''
+  loginCancelPending.value = false
+  Object.assign(loginFailure, { code: '', message: '', action: '' })
   loginDialogVisible.value = true
+}
+
+const stopLoginTimer = () => {
+  if (loginTimer) window.clearInterval(loginTimer)
+  loginTimer = null
+}
+
+const startLoginTimer = () => {
+  stopLoginTimer()
+  const startedAt = Date.now()
+  loginElapsedSeconds.value = 0
+  loginTimer = window.setInterval(() => {
+    loginElapsedSeconds.value = Math.floor((Date.now() - startedAt) / 1000)
+  }, 1000)
+}
+
+const finishLoginWithFailure = failure => {
+  if (
+    failure.code === 'login_not_completed'
+    && loginFailure.code
+    && loginFailure.code !== 'login_not_completed'
+  ) return
+  Object.assign(loginFailure, {
+    code: failure.code || 'unexpected_error',
+    message: failure.message || '平台登录流程没有完成。',
+    action: failure.action || '关闭残留登录窗口后重新尝试。'
+  })
+  loginCancelPending.value = false
+  loginStage.value = 'failed'
+  stopLoginTimer()
+  closeEventSource()
+}
+
+const finishLoginWithSuccess = message => {
+  loginStage.value = 'success'
+  loginEventMessage.value = message || '账号登录成功，本地凭证已经保存。'
+  loginCancelPending.value = false
+  Object.assign(loginFailure, { code: '', message: '', action: '' })
+  stopLoginTimer()
+  closeEventSource()
+  fetchOverview()
+}
+
+const finishLoginWithReview = resolution => {
+  Object.assign(loginFailure, {
+    code: resolution.code || 'outcome_unknown',
+    message: resolution.message || '登录流程已结束，请刷新确认账号状态。',
+    action: resolution.action || '查看媒体账号列表确认当前状态。'
+  })
+  loginCancelPending.value = false
+  loginStage.value = 'review'
+  stopLoginTimer()
+  closeEventSource()
+  fetchOverview()
+}
+
+const applyLoginEvent = rawValue => {
+  const loginEvent = parseLoginSessionEvent(rawValue)
+  if (loginEvent.kind === 'stage') {
+    loginStage.value = loginEvent.stage
+    loginEventMessage.value = loginEvent.message || ''
+    return
+  }
+  if (loginEvent.kind === 'qr_code') {
+    qrCodeData.value = loginEvent.dataUrl
+    loginStage.value = 'manual'
+    loginEventMessage.value = loginEvent.message || ''
+    return
+  }
+  if (loginEvent.kind === 'success') {
+    finishLoginWithSuccess(loginEvent.message)
+    return
+  }
+  if (loginEvent.kind === 'failure') {
+    finishLoginWithFailure(loginEvent)
+    return
+  }
+  // Do not echo unknown server payloads: they may contain HTML, diagnostics or
+  // other data that must not be mistaken for a QR code or shown to operators.
+  console.warn('忽略无法识别的登录状态事件')
 }
 
 const startLogin = () => {
@@ -413,38 +613,118 @@ const startLogin = () => {
   closeEventSource()
   loginStage.value = 'connecting'
   qrCodeData.value = ''
-  const url = apiUrl(`/login?type=${loginForm.platformType}&id=${encodeURIComponent(loginForm.accountName.trim())}`)
-  eventSource = new EventSource(url, { withCredentials: true })
-  eventSource.onmessage = event => {
-    const data = event.data
-    if (data === 'MANUAL_LOGIN') {
-      loginStage.value = 'manual'
-      return
+  loginEventMessage.value = ''
+  loginCancelPending.value = false
+  Object.assign(loginFailure, { code: '', message: '', action: '' })
+  startLoginTimer()
+  const existingAccountId = Number(loginForm.existingAccountId)
+  const existingAccountQuery = Number.isInteger(existingAccountId) && existingAccountId > 0
+    ? `&existing_account_id=${existingAccountId}`
+    : ''
+  const url = apiUrl(`/login?type=${loginForm.platformType}&id=${encodeURIComponent(loginForm.accountName.trim())}&protocol=2${existingAccountQuery}`)
+  const source = (() => {
+    try {
+      return new EventSource(url, { withCredentials: true })
+    } catch {
+      return null
     }
-    if (data === '200') {
-      loginStage.value = 'success'
-      closeEventSource()
-      fetchOverview()
-      return
-    }
-    if (data === '500') {
-      loginStage.value = 'failed'
-      closeEventSource()
-      return
-    }
-    if (data.length > 100) {
-      qrCodeData.value = data.startsWith('data:image') ? data : `data:image/png;base64,${data}`
-    }
+  })()
+  if (!source) {
+    finishLoginWithFailure(buildStreamFailure())
+    return
   }
-  eventSource.onerror = () => {
-    if (!['success', 'failed'].includes(loginStage.value)) loginStage.value = 'failed'
-    closeEventSource()
+  eventSource = source
+  source.onopen = () => {
+    if (eventSource !== source) return
+    if (loginStage.value === 'connecting') loginStage.value = 'opening'
+  }
+  source.onmessage = event => {
+    if (eventSource !== source) return
+    applyLoginEvent(event.data)
+  }
+  source.onerror = () => {
+    if (eventSource !== source) return
+    if (!['success', 'failed'].includes(loginStage.value)) {
+      finishLoginWithFailure(buildStreamFailure())
+    }
   }
 }
 
 const retryLogin = () => {
+  closeEventSource()
+  stopLoginTimer()
   loginStage.value = 'idle'
   qrCodeData.value = ''
+  loginEventMessage.value = ''
+  loginElapsedSeconds.value = 0
+  loginCancelPending.value = false
+  Object.assign(loginFailure, { code: '', message: '', action: '' })
+}
+
+const cancelLogin = async () => {
+  try {
+    await ElMessageBox.confirm(
+      '软件将请求结束本次登录，并以后台返回的最终结果为准；若 Chrome 登录窗口仍然打开，请手动关闭。',
+      '结束本次登录？',
+      {
+        confirmButtonText: '结束本次登录',
+        cancelButtonText: '继续等待',
+        type: 'warning'
+      }
+    )
+  } catch {
+    return
+  }
+  await requestLoginCancellation()
+}
+
+const applyCancellationResponse = response => {
+  const resolution = resolveLoginCancellation(response)
+  if (resolution.kind === 'success') {
+    finishLoginWithSuccess(resolution.message)
+    return
+  }
+  if (resolution.kind === 'cancelled') {
+    finishLoginWithFailure(resolution)
+    return
+  }
+  if (resolution.kind === 'pending') {
+    finishLoginWithFailure({
+      ...resolution,
+      action: `${resolution.action} 然后点击“检查关闭状态”。`
+    })
+    return
+  }
+  if (resolution.kind === 'failure') {
+    finishLoginWithFailure(resolution)
+    return
+  }
+  finishLoginWithReview(resolution)
+}
+
+const requestLoginCancellation = async () => {
+  loginCancelPending.value = true
+  loginEventMessage.value = '正在结束后台登录并关闭 Chrome 窗口…'
+  try {
+    const response = await accountApi.cancelMediaLogin({
+      type: loginForm.platformType,
+      id: loginForm.accountName.trim()
+    })
+    applyCancellationResponse(response)
+  } catch (error) {
+    loginCancelPending.value = false
+    loginEventMessage.value = '结束请求没有送达，当前登录仍在等待平台结果。'
+    ElMessage.error(error?.response?.data?.msg || '结束登录失败，请继续等待或稍后重试')
+  }
+}
+
+const checkLoginCancellation = async () => {
+  await requestLoginCancellation()
+}
+
+const refreshLoginStatus = async () => {
+  await fetchOverview()
+  ElMessage.success('账号状态已刷新，请核对媒体账号列表')
 }
 
 const completeLogin = async () => {
@@ -457,22 +737,31 @@ const completeLogin = async () => {
   }
 }
 
-const closeEventSource = () => {
-  if (eventSource) eventSource.close()
-  eventSource = null
+const closeEventSource = (source = eventSource) => {
+  if (!source) return
+  source.close()
+  if (eventSource === source) eventSource = null
 }
 
 const resetLoginDialog = () => {
   closeEventSource()
+  stopLoginTimer()
   loginStage.value = 'idle'
   qrCodeData.value = ''
+  loginEventMessage.value = ''
+  loginElapsedSeconds.value = 0
+  loginCancelPending.value = false
+  Object.assign(loginFailure, { code: '', message: '', action: '' })
   loginForm.platformType = null
   loginForm.accountName = ''
   loginForm.existingAccountId = null
 }
 
 onMounted(fetchOverview)
-onBeforeUnmount(closeEventSource)
+onBeforeUnmount(() => {
+  closeEventSource()
+  stopLoginTimer()
+})
 </script>
 
 <style lang="scss" scoped>
@@ -567,15 +856,53 @@ onBeforeUnmount(closeEventSource)
 .load-state p { color: var(--muted); }
 .dialog-heading h2 { margin: 4px 0 0; color: var(--ink); font-size: 23px; }
 .login-dialog :deep(.el-select) { width: 100%; }
+.login-session-context { display: grid; grid-template-columns: 1fr 1fr; margin-bottom: 10px; border: 1px solid var(--rule); background: white; }
+.login-session-context > div { display: grid; gap: 4px; min-width: 0; padding: 10px 12px; border-right: 1px solid var(--rule); }
+.login-session-context > div:last-child { border-right: 0; }
+.login-session-context span { color: #718689; font: 700 8px "Cascadia Mono", monospace; letter-spacing: .12em; }
+.login-session-context strong { overflow: hidden; color: var(--ink); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
 .login-consent { display: flex; gap: 10px; padding: 13px; color: #74552d; background: #fbf2e5; }
 .login-consent p { margin: 0; font-size: 12px; line-height: 1.6; }
-.login-progress { display: grid; justify-items: center; min-height: 220px; padding: 18px; text-align: center; border: 1px solid var(--rule); background: #f5f8f7; }
-.login-progress img { width: 180px; height: 180px; object-fit: contain; background: white; }
-.login-progress strong { margin-top: 12px; }
-.login-progress p { max-width: 360px; margin: 5px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
-.progress-symbol { display: grid; place-items: center; width: 82px; height: 82px; margin-top: 26px; color: white; background: var(--ink); font: 700 18px "Cascadia Mono", monospace; }
+.login-progress { min-height: 290px; padding: 18px; border: 1px solid var(--rule); background: #f5f8f7; }
+.login-stage-rail { display: grid; grid-template-columns: repeat(3, 1fr); gap: 0; width: 100%; margin: 0 0 22px; padding: 0; list-style: none; }
+.login-stage-rail li { position: relative; display: grid; gap: 4px; padding-top: 9px; color: #8b999b; border-top: 2px solid #ccd7d5; font-size: 10px; }
+.login-stage-rail li span { font: 700 9px "Cascadia Mono", monospace; letter-spacing: .08em; }
+.login-stage-rail li.active { color: #087f81; border-top-color: var(--teal); font-weight: 700; }
+.login-stage-rail li.complete { color: #496b6d; border-top-color: #78aaa6; }
+.login-stage-rail li.failed { color: #9b3e36; border-top-color: #bd594f; }
+.login-visual { display: grid; place-items: center; }
+.login-visual img { width: 180px; height: 180px; padding: 8px; object-fit: contain; border: 1px solid #d2ddda; background: white; }
+.login-status-copy { margin: 15px auto 0; max-width: 390px; text-align: left; }
+.login-status-meta { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 7px; color: #087f81; font: 700 9px "Cascadia Mono", monospace; letter-spacing: .1em; }
+.login-status-meta time { color: #728689; letter-spacing: 0; }
+.login-status-copy > strong { display: block; color: var(--ink); font-size: 15px; }
+.login-status-copy > p { margin: 5px 0 0; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.progress-symbol { display: grid; place-items: center; width: 82px; height: 82px; color: white; background: var(--ink); font: 700 18px "Cascadia Mono", monospace; }
 .progress-symbol.success { background: #168f87; font-size: 34px; }
 .progress-symbol.failed { background: #bd594f; font-size: 34px; }
+.progress-symbol.review { background: #b27b32; font-size: 30px; }
+.progress-symbol.connecting span, .progress-symbol.opening span, .progress-symbol.manual span { animation: login-pulse 1.2s ease-in-out infinite; }
+.login-window-tip, .login-error-detail, .login-review-detail { max-width: 390px; margin: 14px auto 0; padding: 12px 13px; text-align: left; }
+.login-window-tip { color: #315b5d; border-left: 3px solid var(--teal); background: #e4f2f0; }
+.login-window-tip strong { font-size: 11px; }
+.login-window-tip p { margin: 4px 0 0; color: #537174; font-size: 11px; line-height: 1.55; }
+.login-error-detail { border: 1px solid #dfb3ae; background: #fff3f1; }
+.login-error-detail > span { color: #a3473e; font: 700 9px "Cascadia Mono", monospace; letter-spacing: .08em; text-transform: uppercase; }
+.login-error-detail > strong { display: block; margin-top: 7px; color: #72342e; font-size: 12px; line-height: 1.55; }
+.login-error-detail p { margin: 7px 0 0; color: #79504c; font-size: 11px; line-height: 1.55; }
+.login-review-detail { border: 1px solid #ddc49d; background: #fff9ef; }
+.login-review-detail > span { color: #8b632d; font: 700 9px "Cascadia Mono", monospace; letter-spacing: .08em; }
+.login-review-detail > strong { display: block; margin-top: 7px; color: #65491f; font-size: 12px; }
+.login-review-detail p { margin: 7px 0 0; color: #735f43; font-size: 11px; line-height: 1.55; }
+
+@keyframes login-pulse {
+  0%, 100% { opacity: .35; letter-spacing: .08em; }
+  50% { opacity: 1; letter-spacing: .2em; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-symbol.connecting span, .progress-symbol.opening span, .progress-symbol.manual span { animation: none; }
+}
 
 @media (max-width: 860px) {
   .page-hero { align-items: flex-start; flex-direction: column; }
@@ -599,5 +926,11 @@ onBeforeUnmount(closeEventSource)
   :deep(.account-entry) { align-items: flex-start; flex-direction: column; }
   :deep(.account-actions) { width: 100%; }
   :deep(.account-actions .el-button) { flex: 1; }
+  .login-progress { padding: 14px; }
+  .login-stage-rail li { font-size: 9px; }
+  .login-status-meta { align-items: flex-start; flex-direction: column; gap: 3px; }
+  .login-session-context { grid-template-columns: 1fr; }
+  .login-session-context > div { border-right: 0; border-bottom: 1px solid var(--rule); }
+  .login-session-context > div:last-child { border-bottom: 0; }
 }
 </style>
