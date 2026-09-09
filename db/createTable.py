@@ -114,6 +114,30 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
             )
             cursor.execute(
                 '''
+                CREATE TABLE IF NOT EXISTS ai_visibility_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL,
+                    prompt TEXT NOT NULL CHECK (length(trim(prompt)) > 0),
+                    input_samples_json TEXT NOT NULL,
+                    coverage_items_json TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    algorithm_version TEXT NOT NULL
+                        CHECK (length(trim(algorithm_version)) > 0),
+                    created_at TEXT NOT NULL DEFAULT (
+                        strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                    ),
+                    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+                )
+                '''
+            )
+            cursor.execute(
+                '''
+                CREATE INDEX IF NOT EXISTS idx_ai_visibility_runs_project_created
+                ON ai_visibility_runs(project_id, created_at DESC, id DESC)
+                '''
+            )
+            cursor.execute(
+                '''
                 CREATE TABLE IF NOT EXISTS content_generation_runs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     request_id TEXT NOT NULL UNIQUE,

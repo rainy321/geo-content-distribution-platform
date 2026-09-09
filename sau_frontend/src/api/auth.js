@@ -13,6 +13,25 @@ export const authApi = {
     )
   },
 
+  setup(password) {
+    return http.post(
+      '/api/auth/setup',
+      { password },
+      { suppressGlobalError: true }
+    )
+  },
+
+  changePassword(currentPassword, newPassword) {
+    return http.post(
+      '/api/auth/change-password',
+      {
+        current_password: currentPassword,
+        new_password: newPassword
+      },
+      { suppressGlobalError: true }
+    )
+  },
+
   logout() {
     return http.post('/api/auth/logout')
   }

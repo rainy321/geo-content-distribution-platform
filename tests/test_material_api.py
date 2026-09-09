@@ -2,6 +2,7 @@ import io
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 
 from db.createTable import initialize_database
@@ -74,7 +75,7 @@ class MaterialApiTests(unittest.TestCase):
 
         self.assertEqual(deleted.status_code, 200)
         self.assertFalse((self.media_root / filepath).exists())
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn:
             remaining = conn.execute("SELECT COUNT(*) FROM file_records").fetchone()[0]
         self.assertEqual(remaining, 0)
 

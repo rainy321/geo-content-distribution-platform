@@ -10,34 +10,37 @@
       </div>
 
       <div class="brand-thesis">
-        <span class="eyebrow">OPERATOR BOUNDARY</span>
-        <h1><span>内容可以公开，</span><span>操作权限不能。</span></h1>
-        <p>输入运营访问口令后，才会开放模型调用、项目修改和媒体发布控制。</p>
+        <span class="eyebrow">{{ setupRequired ? 'FIRST-RUN SECURITY' : 'OPERATOR BOUNDARY' }}</span>
+        <h1 v-if="setupRequired"><span>先锁好工作区，</span><span>再开始运营。</span></h1>
+        <h1 v-else><span>内容可以公开，</span><span>操作权限不能。</span></h1>
+        <p v-if="setupRequired">这是本机第一次启动。请建立管理员口令，用于保护项目、分析历史与模型额度。</p>
+        <p v-else>输入管理员口令后，才会开放项目修改、本地分析历史和已配置的模型调用。</p>
       </div>
 
       <ol class="workflow-rail" aria-label="受保护的内容流程">
-        <li><span>01</span><strong>生成</strong><small>模型额度</small></li>
-        <li><span>02</span><strong>优化</strong><small>品牌资产</small></li>
-        <li><span>03</span><strong>分发</strong><small>媒体账号</small></li>
+        <li><span>01</span><strong>品牌</strong><small>事实底稿</small></li>
+        <li><span>02</span><strong>观察</strong><small>可见度证据</small></li>
+        <li><span>03</span><strong>内容</strong><small>生成与优化</small></li>
       </ol>
     </section>
 
     <section class="entry-panel">
       <div class="entry-card">
         <header>
-          <span class="eyebrow">AUTHORIZED OPERATOR</span>
-          <h2>进入运营工作区</h2>
-          <p>访问口令由部署环境校验，不会保存到浏览器本地存储。</p>
+          <span class="eyebrow">{{ setupRequired ? 'CREATE LOCAL ADMIN' : 'AUTHORIZED OPERATOR' }}</span>
+          <h2>{{ setupRequired ? '设置管理员口令' : '进入运营工作区' }}</h2>
+          <p v-if="setupRequired">口令仅在本机生成加盐哈希，不会写入浏览器，也不会发送到外部服务。</p>
+          <p v-else>访问口令由本机安全配置校验，不会保存到浏览器本地存储。</p>
         </header>
 
         <el-form @submit.prevent="unlock">
-          <el-form-item label="运营访问口令">
+          <el-form-item :label="setupRequired ? '新管理员口令' : '管理员口令'">
             <el-input
               ref="passwordInput"
               v-model="password"
               type="password"
-              autocomplete="current-password"
-              placeholder="输入访问口令"
+              :autocomplete="setupRequired ? 'new-password' : 'current-password'"
+              :placeholder="setupRequired ? '至少 12 个字符' : '输入管理员口令'"
               show-password
               :disabled="submitting"
               @keyup.enter="unlock"
@@ -45,6 +48,21 @@
               <template #prefix><el-icon><Key /></el-icon></template>
             </el-input>
           </el-form-item>
+          <el-form-item v-if="setupRequired" label="再次确认口令">
+            <el-input
+              ref="confirmInput"
+              v-model="confirmation"
+              type="password"
+              autocomplete="new-password"
+              placeholder="再次输入相同口令"
+              show-password
+              :disabled="submitting"
+              @keyup.enter="unlock"
+            >
+              <template #prefix><el-icon><Key /></el-icon></template>
+            </el-input>
+          </el-form-item>
+          <p v-if="setupRequired" class="password-policy">12–15 位需至少包含大小写字母、数字或符号中的三类；16 位以上可使用中文口令短语。</p>
           <p v-if="errorMessage" class="entry-error" role="alert">
             {{ errorMessage }}
           </p>
@@ -52,16 +70,16 @@
             type="primary"
             native-type="submit"
             :loading="submitting"
-            :disabled="!password.trim()"
+            :disabled="!canSubmit"
             @click="unlock"
           >
-            验证并进入
+            {{ setupRequired ? '保存口令并进入' : '验证并进入' }}
           </el-button>
         </el-form>
 
         <footer>
           <el-icon><Lock /></el-icon>
-          <span>会话使用 HttpOnly 安全 Cookie；退出或过期后需要重新验证。</span>
+          <span>{{ setupRequired ? '请妥善保存口令；软件不会保存可找回的明文副本。' : '会话使用 HttpOnly Cookie；退出或过期后需要重新验证。' }}</span>
         </footer>
       </div>
     </section>
@@ -69,26 +87,48 @@
 </template>
 
 <script setup>
-import { nextTick, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, ref } from 'vue'
 import { Key, Lock } from '@element-plus/icons-vue'
 import { authApi } from '@/api/auth'
 
 const emit = defineEmits(['authenticated'])
+const props = defineProps({
+  setupRequired: {
+    type: Boolean,
+    default: false
+  }
+})
 const password = ref('')
+const confirmation = ref('')
 const passwordInput = ref(null)
+const confirmInput = ref(null)
 const submitting = ref(false)
 const errorMessage = ref('')
+const setupRequired = computed(() => props.setupRequired)
+const canSubmit = computed(() => (
+  Boolean(password.value)
+  && (!setupRequired.value || Boolean(confirmation.value))
+))
 
 const unlock = async () => {
-  if (!password.value.trim() || submitting.value) return
+  if (!canSubmit.value || submitting.value) return
+  if (setupRequired.value && password.value !== confirmation.value) {
+    errorMessage.value = '两次输入的管理员口令不一致'
+    await nextTick()
+    confirmInput.value?.focus()
+    return
+  }
   submitting.value = true
   errorMessage.value = ''
   try {
-    const response = await authApi.login(password.value)
+    const response = setupRequired.value
+      ? await authApi.setup(password.value)
+      : await authApi.login(password.value)
     if (!response.data?.authenticated) {
       throw new Error('访问口令校验失败')
     }
     password.value = ''
+    confirmation.value = ''
     emit('authenticated')
   } catch (error) {
     errorMessage.value = error?.response?.data?.msg || error?.message || '访问口令校验失败'
@@ -293,6 +333,13 @@ onMounted(() => passwordInput.value?.focus())
   margin: -4px 0 10px;
   color: #b42318;
   font-size: 12px;
+}
+
+.password-policy {
+  margin: -5px 0 13px;
+  color: #78878d;
+  font-size: 11px;
+  line-height: 1.55;
 }
 
 @media (max-width: 880px) {

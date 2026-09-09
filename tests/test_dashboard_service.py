@@ -100,6 +100,7 @@ class DashboardServiceTests(unittest.TestCase):
         self.assertEqual(
             overview["summary"],
             {
+                "project_count": 1,
                 "today_generated": 1,
                 "today_published": 3,
                 "today_success": 1,
@@ -137,6 +138,15 @@ class DashboardServiceTests(unittest.TestCase):
         overview = get_dashboard_overview(self.db_path, now=now)
 
         self.assertEqual(overview["summary"]["today_generated"], 2)
+
+    def test_empty_workspace_reports_zero_projects_for_onboarding(self):
+        empty_db_path = Path(self.temp_dir.name) / "empty-dashboard.db"
+        initialize_database(empty_db_path)
+
+        overview = get_dashboard_overview(empty_db_path)
+
+        self.assertEqual(overview["summary"]["project_count"], 0)
+        self.assertEqual(overview["recent_jobs"], [])
 
     def test_rejects_invalid_recent_limit(self):
         with self.assertRaisesRegex(ValueError, "recent_limit"):

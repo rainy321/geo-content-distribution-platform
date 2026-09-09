@@ -31,6 +31,9 @@ def get_dashboard_overview(
     lower_bound_utc = first_day_start.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
 
     with closing(_connect(database_path)) as conn:
+        project_count = int(
+            conn.execute("SELECT COUNT(*) FROM projects").fetchone()[0]
+        )
         article_rows = conn.execute(
             "SELECT created_at FROM articles WHERE created_at >= ?",
             (lower_bound_utc,),
@@ -85,6 +88,7 @@ def get_dashboard_overview(
 
     return {
         "summary": {
+            "project_count": project_count,
             "today_generated": generated_by_date[today],
             "today_published": published_by_date[today],
             "today_success": success_by_date[today],

@@ -2,6 +2,7 @@ import io
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from queue import Queue
 from unittest.mock import ANY, AsyncMock, patch
@@ -44,7 +45,7 @@ class LoginStorageConfigTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result)
         self.assertEqual(status_queue.get_nowait(), "MANUAL_LOGIN")
         self.assertEqual(status_queue.get_nowait(), "200")
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn:
             account = conn.execute(
                 "SELECT type, filePath, userName, status FROM user_info"
             ).fetchone()
@@ -128,7 +129,7 @@ class LegacyStorageConfigTests(unittest.TestCase):
         self.cookies_directory.mkdir()
         self.media_root.mkdir()
         initialize_database(self.db_path)
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection:
             cursor = connection.execute(
                 """
                 INSERT INTO user_info (type, filePath, userName, status)
@@ -137,6 +138,7 @@ class LegacyStorageConfigTests(unittest.TestCase):
                 (9, "account.json", "isolated-account", 1),
             )
             self.account_id = cursor.lastrowid
+            connection.commit()
 
         self.original_config = {
             "DATABASE_PATH": app.config["DATABASE_PATH"],
@@ -194,7 +196,7 @@ class LegacyStorageConfigTests(unittest.TestCase):
         )
         self.assertEqual(deleted.status_code, 200)
         self.assertFalse(cookie_path.exists())
-        with sqlite3.connect(self.db_path) as connection:
+        with closing(sqlite3.connect(self.db_path)) as connection:
             count = connection.execute(
                 "SELECT COUNT(*) FROM user_info WHERE id = ?",
                 (self.account_id,),

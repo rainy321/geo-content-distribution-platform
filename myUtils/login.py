@@ -1,5 +1,6 @@
 import asyncio
 import sqlite3
+from contextlib import closing
 
 from playwright.async_api import async_playwright
 
@@ -156,7 +157,7 @@ async def douyin_cookie_gen(
         await page.close()
         await context.close()
         await browser.close()
-        with sqlite3.connect(_login_database_path(database_path)) as conn:
+        with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
             cursor = conn.cursor()
             cursor.execute('''
                                 INSERT INTO user_info (type, filePath, userName, status)
@@ -234,7 +235,7 @@ async def get_tencent_cookie(
         await context.close()
         await browser.close()
 
-        with sqlite3.connect(_login_database_path(database_path)) as conn:
+        with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
             cursor = conn.cursor()
             cursor.execute('''
                                 INSERT INTO user_info (type, filePath, userName, status)
@@ -308,7 +309,7 @@ async def get_ks_cookie(
         await context.close()
         await browser.close()
 
-        with sqlite3.connect(_login_database_path(database_path)) as conn:
+        with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
             cursor = conn.cursor()
             cursor.execute('''
                                         INSERT INTO user_info (type, filePath, userName, status)
@@ -345,7 +346,7 @@ async def xiaohongshu_cookie_gen(
             status_queue.put("500")
             return None
 
-        with sqlite3.connect(_login_database_path(database_path)) as conn:
+        with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
             cursor = conn.cursor()
             cursor.execute(
                 """
@@ -409,7 +410,7 @@ async def baijiahao_cookie_gen(
             if not result:
                 print("⚠️ cookie 即时校验未通过，仍保存账号，请稍后刷新验证")
 
-            with sqlite3.connect(_login_database_path(database_path)) as conn:
+            with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     INSERT INTO user_info (type, filePath, userName, status)
@@ -489,7 +490,7 @@ async def toutiao_cookie_gen(
             if not result:
                 print("⚠️ cookie 即时校验未通过，仍保存账号，请稍后刷新验证")
 
-            with sqlite3.connect(_login_database_path(database_path)) as conn:
+            with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     INSERT INTO user_info (type, filePath, userName, status)
@@ -573,7 +574,7 @@ async def sohu_cookie_gen(
             if not result:
                 print("⚠️ cookie 即时校验未通过，仍保存账号，请稍后刷新验证")
 
-            with sqlite3.connect(_login_database_path(database_path)) as conn:
+            with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     INSERT INTO user_info (type, filePath, userName, status)
@@ -651,7 +652,7 @@ async def zhihu_cookie_gen(
             if not result:
                 print("⚠️ cookie 即时校验未通过，仍保存账号，请稍后刷新验证")
 
-            with sqlite3.connect(_login_database_path(database_path)) as conn:
+            with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
                 cursor = conn.cursor()
                 cursor.execute('''
                     INSERT INTO user_info (type, filePath, userName, status)
@@ -731,7 +732,7 @@ async def bilibili_cookie_gen(
             result = run_biliup_command(["-u", str(account_file), "renew"])
             if result.returncode == 0:
                 print("✅ Bilibili登录成功")
-                with sqlite3.connect(_login_database_path(database_path)) as conn:
+                with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
                     conn.cursor().execute(
                         'INSERT INTO user_info (type, filePath, userName, status) VALUES (?, ?, ?, ?)',
                         (6, f"bilibili_{id}.json", id, 1))
@@ -797,7 +798,7 @@ async def tiktok_cookie_gen(
                 await browser.close()
 
         result = await check_cookie(10, file_name, cookies_directory=cookies_dir)
-        with sqlite3.connect(_login_database_path(database_path)) as conn:
+        with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
             conn.execute(
                 """
                 INSERT INTO user_info (type, filePath, userName, status)

@@ -1,5 +1,8 @@
+import builtins
 import sqlite3
+import sys
 import tempfile
+import types
 import unittest
 from contextlib import closing
 from pathlib import Path
@@ -11,6 +14,20 @@ from services.publish_job_service import create_publish_job, get_publish_job
 
 
 class RealPublishApiTests(unittest.TestCase):
+    LEGACY_PUBLISHER_NAMES = (
+        "post_article_baijiahao",
+        "post_article_sohu",
+        "post_article_toutiao",
+        "post_article_zhihu",
+        "post_video_DouYin",
+        "post_video_baijiahao",
+        "post_video_bilibili",
+        "post_video_ks",
+        "post_video_tencent",
+        "post_video_toutiao",
+        "post_video_xhs",
+    )
+
     def setUp(self):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp_dir.name) / "real-publish.db"
@@ -57,6 +74,118 @@ class RealPublishApiTests(unittest.TestCase):
             platform=platform,
             demo=demo,
         )
+
+    def _legacy_publisher_module(self):
+        module = types.ModuleType("myUtils.postVideo")
+        publishers = {
+            name: Mock(name=name) for name in self.LEGACY_PUBLISHER_NAMES
+        }
+        for name, publisher in publishers.items():
+            setattr(module, name, publisher)
+        return module, publishers
+
+    def _assert_legacy_route_blocked_before_publishers(self, route, payload):
+        module, publishers = self._legacy_publisher_module()
+        original_import = builtins.__import__
+
+        app.config["ALLOW_REAL_PUBLISHING"] = False
+        with patch.dict(sys.modules, {"myUtils.postVideo": module}), patch(
+            "builtins.__import__", wraps=original_import
+        ) as import_mock, patch("sau_backend.threading.Thread") as thread_class:
+            response = self.client.post(route, json=payload)
+
+        self.assertEqual(response.status_code, 403)
+        self.assertIn("ALLOW_REAL_PUBLISHING", response.get_json()["msg"])
+        self.assertFalse(
+            any(
+                call.args and call.args[0] == "myUtils.postVideo"
+                for call in import_mock.call_args_list
+            ),
+            "publisher module must not be imported while the global gate is closed",
+        )
+        thread_class.assert_not_called()
+        for publisher in publishers.values():
+            publisher.assert_not_called()
+
+    def test_legacy_single_publish_is_blocked_before_import_or_thread(self):
+        self._assert_legacy_route_blocked_before_publishers(
+            "/postVideo",
+            {
+                "type": 9,
+                "title": "不会发布的测试文章",
+                "articleBody": "仅用于验证总闸门，不会发送到任何平台。",
+                "accountList": ["synthetic-account"],
+                "dryRun": False,
+            },
+        )
+
+    def test_legacy_batch_publish_is_blocked_before_import_or_publishers(self):
+        self._assert_legacy_route_blocked_before_publishers(
+            "/postVideoBatch",
+            [
+                {
+                    "type": 9,
+                    "title": "不会发布的批量测试文章",
+                    "articleBody": "仅用于验证总闸门，不会发送到任何平台。",
+                    "accountList": ["synthetic-account"],
+                    "dryRun": False,
+                }
+            ],
+        )
+
+    def test_legacy_single_publish_keeps_explicitly_authorized_path(self):
+        module, publishers = self._legacy_publisher_module()
+        app.config["ALLOW_REAL_PUBLISHING"] = True
+
+        with patch.dict(sys.modules, {"myUtils.postVideo": module}), patch(
+            "sau_backend.threading.Thread"
+        ) as thread_class, patch("builtins.print"):
+            response = self.client.post(
+                "/postVideo",
+                json={
+                    "type": 9,
+                    "title": "授权路径合成测试文章",
+                    "articleBody": "只调用 mock 发布器，绝不连接真实平台。",
+                    "accountList": ["synthetic-account"],
+                    "dryRun": False,
+                },
+            )
+
+            thread_class.return_value.start.assert_called_once_with()
+            publish_target = thread_class.call_args.kwargs["target"]
+            publish_target()
+
+        self.assertEqual(response.status_code, 200)
+        publishers["post_article_zhihu"].assert_called_once()
+        for name, publisher in publishers.items():
+            if name != "post_article_zhihu":
+                publisher.assert_not_called()
+
+    def test_legacy_batch_publish_keeps_explicitly_authorized_path(self):
+        module, publishers = self._legacy_publisher_module()
+        app.config["ALLOW_REAL_PUBLISHING"] = True
+
+        with patch.dict(sys.modules, {"myUtils.postVideo": module}), patch(
+            "builtins.print"
+        ):
+            response = self.client.post(
+                "/postVideoBatch",
+                json=[
+                    {
+                        "type": 9,
+                        "title": "授权批量路径合成测试文章",
+                        "articleBody": "只调用 mock 发布器，绝不连接真实平台。",
+                        "accountList": ["synthetic-account"],
+                        "dryRun": False,
+                    }
+                ],
+            )
+
+        self.assertEqual(response.status_code, 200)
+        publishers["post_article_zhihu"].assert_called_once()
+        for name, publisher in publishers.items():
+            if name != "post_article_zhihu":
+                publisher.assert_not_called()
 
     def test_requires_all_feature_and_request_confirmation_gates(self):
         job = self._create_job()

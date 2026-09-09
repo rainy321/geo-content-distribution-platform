@@ -1,0 +1,799 @@
+"""Windows desktop host for the GEO content platform.
+
+The executable keeps the existing Vue/Flask product boundary intact: Vue is
+served from the bundled build, Flask owns business rules and persistence, and
+the desktop host only manages lifecycle, local paths and the native window.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ctypes
+import hashlib
+import json
+import logging
+import os
+import socket
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+from dataclasses import dataclass
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+from typing import Any, Mapping, MutableMapping, Sequence
+
+
+APP_VERSION = "1.0.0"
+BUILD_INFO_SCHEMA_VERSION = 1
+APP_TITLE = "GEO 智能内容分发平台"
+APP_DIRECTORY_NAME = "GEOContentPlatform"
+LOOPBACK_HOST = "127.0.0.1"
+STARTUP_TIMEOUT_SECONDS = 30.0
+_WINDOWS_ALREADY_EXISTS = 183
+
+
+@dataclass(frozen=True)
+class DesktopPaths:
+    """Persistent paths owned by one Windows user."""
+
+    root: Path
+    database: Path
+    media: Path
+    cookies: Path
+    auth_config: Path
+    backups: Path
+    logs: Path
+    webview: Path
+
+    @classmethod
+    def from_root(cls, root: str | Path) -> "DesktopPaths":
+        resolved_root = Path(root).expanduser().resolve()
+        return cls(
+            root=resolved_root,
+            database=resolved_root / "data" / "geo.db",
+            media=resolved_root / "media",
+            cookies=resolved_root / "accounts",
+            auth_config=resolved_root / "config" / "auth.json",
+            backups=resolved_root / "backups",
+            logs=resolved_root / "logs",
+            webview=resolved_root / "webview",
+        )
+
+    def create(self) -> None:
+        self.database.parent.mkdir(parents=True, exist_ok=True)
+        self.media.mkdir(parents=True, exist_ok=True)
+        self.cookies.mkdir(parents=True, exist_ok=True)
+        self.auth_config.parent.mkdir(parents=True, exist_ok=True)
+        self.backups.mkdir(parents=True, exist_ok=True)
+        self.logs.mkdir(parents=True, exist_ok=True)
+        self.webview.mkdir(parents=True, exist_ok=True)
+
+
+def resolve_data_root(environ: Mapping[str, str] | None = None) -> Path:
+    """Resolve a stable per-user data directory without touching the repo."""
+
+    values = os.environ if environ is None else environ
+    configured = str(values.get("GEO_DESKTOP_DATA_DIR", "")).strip()
+    if configured:
+        return Path(configured).expanduser().resolve()
+
+    local_app_data = str(values.get("LOCALAPPDATA", "")).strip()
+    if local_app_data:
+        return (Path(local_app_data) / APP_DIRECTORY_NAME).resolve()
+
+    return (Path.home() / ".geo-content-platform").resolve()
+
+
+def resolve_resource_root() -> Path:
+    """Return the PyInstaller extraction root or the source checkout root."""
+
+    frozen_root = getattr(sys, "_MEIPASS", None)
+    if frozen_root:
+        return Path(frozen_root).resolve()
+    return Path(__file__).resolve().parent
+
+
+def load_build_info(resource_root: str | Path | None = None) -> dict[str, Any]:
+    """Load non-sensitive provenance embedded by the release build.
+
+    Source runs intentionally fall back to an explicit development marker;
+    packaged releases must contain ``desktop-build-info.json`` and the build
+    smoke test verifies its contents.
+    """
+
+    root = (
+        Path(resource_root).expanduser().resolve()
+        if resource_root is not None
+        else resolve_resource_root()
+    )
+    candidates = (
+        root / "desktop-build-info.json",
+        root / ".build" / "desktop-build-info.json",
+    )
+    for candidate in candidates:
+        if not candidate.is_file():
+            continue
+        try:
+            payload = json.loads(candidate.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"桌面构建信息无法读取：{candidate}") from exc
+        if not isinstance(payload, dict):
+            raise RuntimeError(f"桌面构建信息格式无效：{candidate}")
+        if payload.get("schema_version") != BUILD_INFO_SCHEMA_VERSION:
+            raise RuntimeError(f"桌面构建信息版本不受支持：{candidate}")
+        if payload.get("version") != APP_VERSION:
+            raise RuntimeError("桌面程序版本与构建信息不一致")
+        return {
+            "schema_version": BUILD_INFO_SCHEMA_VERSION,
+            "version": APP_VERSION,
+            "source_commit": str(payload.get("source_commit") or "unknown"),
+            "source_branch": str(payload.get("source_branch") or "unknown"),
+            "built_at_utc": str(payload.get("built_at_utc") or "unknown"),
+            "source_dirty": bool(payload.get("source_dirty", False)),
+        }
+    return {
+        "schema_version": BUILD_INFO_SCHEMA_VERSION,
+        "version": APP_VERSION,
+        "source_commit": "development",
+        "source_branch": "development",
+        "built_at_utc": "development",
+        "source_dirty": True,
+    }
+
+
+def resolve_frontend_dir(resource_root: str | Path) -> Path:
+    """Find a complete Vue build in frozen and source layouts."""
+
+    root = Path(resource_root).resolve()
+    candidates = (root / "frontend", root / "sau_frontend" / "dist")
+    for candidate in candidates:
+        if (candidate / "index.html").is_file():
+            return candidate
+    raise FileNotFoundError(
+        "未找到桌面前端构建。请先运行 npm run build，或重新构建 EXE。"
+    )
+
+
+def reserve_loopback_socket() -> socket.socket:
+    """Bind an ephemeral loopback socket and retain ownership until Waitress."""
+
+    listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        listener.bind((LOOPBACK_HOST, 0))
+    except Exception:
+        listener.close()
+        raise
+    return listener
+
+
+def reserve_loopback_port() -> int:
+    """Return a transient port number for diagnostics and compatibility tests."""
+
+    with reserve_loopback_socket() as listener:
+        return int(listener.getsockname()[1])
+
+
+def apply_desktop_environment(
+    paths: DesktopPaths,
+    frontend_dir: str | Path,
+    port: int,
+    *,
+    environ: MutableMapping[str, str] | None = None,
+) -> MutableMapping[str, str]:
+    """Apply the desktop storage boundary before importing ``sau_backend``.
+
+    The two real-publishing flags are assigned, rather than defaulted, so a
+    globally configured developer shell cannot accidentally unlock a packaged
+    desktop build.
+    """
+
+    if not 1 <= int(port) <= 65535:
+        raise ValueError("桌面服务端口必须在 1 到 65535 之间")
+
+    target = os.environ if environ is None else environ
+    paths.create()
+    from services.local_auth_service import LocalAuthService
+
+    auth_service = LocalAuthService(paths.auth_config)
+    session_secret = auth_service.get_session_secret()
+    # A machine-wide shell variable must never override the per-user desktop
+    # credential store.  The browser deployment keeps its existing env-password
+    # path because GEO_DESKTOP_MODE is only assigned by this native host.
+    target.pop("APP_ACCESS_PASSWORD", None)
+    target.update(
+        {
+            "DATABASE_PATH": str(paths.database),
+            "MEDIA_ROOT": str(paths.media),
+            "COOKIES_DIRECTORY": str(paths.cookies),
+            "FRONTEND_BUILD_DIR": str(Path(frontend_dir).resolve()),
+            "SERVER_HOST": LOOPBACK_HOST,
+            "SERVER_PORT": str(port),
+            "SESSION_COOKIE_SECURE": "false",
+            "APP_SESSION_SECRET": session_secret,
+            "GEO_DESKTOP_MODE": "true",
+            "GEO_DESKTOP_AUTH_PATH": str(paths.auth_config),
+            "DEMO_MODE": "false",
+            "SEED_DEMO_DATA": "false",
+            "ALLOW_REAL_PUBLISHING": "false",
+            "ENABLE_BILIBILI_RUNTIME": "false",
+            "RUN_PUBLISH_SCHEDULER": "true",
+        }
+    )
+    return target
+
+
+def configure_logging(paths: DesktopPaths) -> logging.Logger:
+    logger = logging.getLogger("geo.desktop")
+    logger.setLevel(logging.INFO)
+    if logger.handlers:
+        return logger
+
+    handler = RotatingFileHandler(
+        paths.logs / "desktop.log",
+        maxBytes=2 * 1024 * 1024,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    handler.setFormatter(
+        logging.Formatter("%(asctime)s %(levelname)s %(message)s")
+    )
+    logger.addHandler(handler)
+    return logger
+
+
+class SingleInstanceMutex:
+    """A named Windows mutex scoped to one data directory."""
+
+    def __init__(self, data_root: str | Path):
+        identity = str(Path(data_root).resolve()).casefold().encode("utf-8")
+        suffix = hashlib.sha256(identity).hexdigest()[:16]
+        self.name = f"Local\\GEOContentPlatform-{suffix}"
+        self._handle: int | None = None
+
+    def acquire(self) -> bool:
+        if os.name != "nt":
+            return True
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.CreateMutexW(None, False, self.name)
+        if not handle:
+            raise OSError("无法创建桌面单实例锁")
+        self._handle = handle
+        return kernel32.GetLastError() != _WINDOWS_ALREADY_EXISTS
+
+    def release(self) -> None:
+        if self._handle is not None and os.name == "nt":
+            ctypes.windll.kernel32.CloseHandle(self._handle)
+        self._handle = None
+
+
+class DesktopServer:
+    """Lifecycle wrapper around Waitress's stoppable WSGI server."""
+
+    def __init__(self, application: Any, listener: socket.socket):
+        from waitress.server import create_server
+
+        self._server = create_server(
+            application,
+            sockets=[listener],
+            threads=8,
+            channel_timeout=180,
+            ident="GEO Desktop",
+        )
+        self._thread = threading.Thread(
+            target=self._server.run,
+            name="geo-desktop-http",
+            daemon=True,
+        )
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._server.close()
+        self._server.task_dispatcher.shutdown(cancel_pending=True, timeout=5)
+        self._thread.join(timeout=6)
+
+
+class DesktopApi:
+    """Small, non-sensitive native bridge exposed to the Vue shell."""
+
+    def __init__(
+        self,
+        paths: DesktopPaths,
+        *,
+        build_info: Mapping[str, Any] | None = None,
+    ):
+        self.paths = paths
+        self.build_info = dict(build_info or load_build_info())
+
+    def get_runtime_status(self) -> dict[str, Any]:
+        from services.local_auth_service import LocalAuthService
+
+        auth_status = LocalAuthService(self.paths.auth_config).status()
+        return {
+            "desktop": True,
+            "version": APP_VERSION,
+            "data_directory": str(self.paths.root),
+            "content_engine": str(os.getenv("CONTENT_ENGINE", "qwen")),
+            "fallback_engine": str(
+                os.getenv("CONTENT_ENGINE_FALLBACK", "disabled")
+            ),
+            "real_publishing_enabled": False,
+            "bilibili_runtime_enabled": False,
+            "authentication_required": True,
+            "setup_required": auth_status.setup_required,
+            "backup_directory": str(self.paths.backups),
+            "build": dict(self.build_info),
+        }
+
+    def open_data_directory(self) -> dict[str, Any]:
+        try:
+            if os.name == "nt":
+                os.startfile(str(self.paths.root))  # type: ignore[attr-defined]
+            else:
+                return {
+                    "ok": False,
+                    "message": "此构建仅支持在 Windows 中打开数据目录",
+                }
+        except OSError as exc:
+            return {"ok": False, "message": str(exc)}
+        return {"ok": True, "message": "已打开数据目录"}
+
+    def create_database_backup(self) -> dict[str, Any]:
+        from services.desktop_backup_service import (
+            DesktopBackupError,
+            create_verified_database_backup,
+        )
+
+        try:
+            result = create_verified_database_backup(
+                self.paths.database,
+                self.paths.backups,
+            )
+        except DesktopBackupError as exc:
+            return {"ok": False, "message": str(exc)}
+        return {
+            "ok": True,
+            "message": "数据库备份已创建并通过完整性检查",
+            "backup": result.to_dict(),
+        }
+
+
+def wait_until_ready(
+    base_url: str,
+    *,
+    timeout_seconds: float = STARTUP_TIMEOUT_SECONDS,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    last_error = ""
+    while time.monotonic() < deadline:
+        try:
+            with urllib.request.urlopen(
+                f"{base_url}/api/health",
+                timeout=2,
+            ) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+            if response.status == 200 and payload.get("data", {}).get("status") == "ok":
+                return payload
+            last_error = f"健康检查返回 HTTP {response.status}"
+        except (OSError, ValueError, urllib.error.URLError) as exc:
+            last_error = str(exc)
+        time.sleep(0.15)
+    raise TimeoutError(f"桌面服务启动超时：{last_error or '未收到健康响应'}")
+
+
+def fetch_json_endpoint(base_url: str, path: str) -> dict[str, Any]:
+    """Fetch a local JSON endpoint used by packaged smoke tests."""
+
+    with urllib.request.urlopen(f"{base_url}{path}", timeout=3) as response:
+        payload = json.loads(response.read().decode("utf-8"))
+    if response.status != 200 or not isinstance(payload, dict):
+        raise RuntimeError(f"本地端点 {path} 返回无效响应")
+    return payload
+
+
+def write_health_report(
+    report_path: str | Path | None,
+    payload: Mapping[str, Any],
+) -> None:
+    if report_path is None:
+        return
+    destination = Path(report_path).expanduser().resolve()
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+
+
+def show_native_error(message: str, *, title: str = APP_TITLE) -> None:
+    if os.name == "nt":
+        ctypes.windll.user32.MessageBoxW(None, message, title, 0x10)
+    else:
+        print(f"{title}: {message}", file=sys.stderr)
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="GEO-Content-Platform")
+    parser.add_argument(
+        "--data-dir",
+        help="覆盖桌面运行数据目录，主要用于隔离测试",
+    )
+    smoke_mode = parser.add_mutually_exclusive_group()
+    smoke_mode.add_argument(
+        "--health-check",
+        action="store_true",
+        help="启动内置服务并完成一次健康检查后退出",
+    )
+    smoke_mode.add_argument(
+        "--ui-smoke",
+        action="store_true",
+        help="在隐藏 WebView2 中完成合成数据产品流程后退出",
+    )
+    parser.add_argument(
+        "--health-report",
+        help="将健康检查 JSON 写入指定路径",
+    )
+    return parser
+
+
+def _wait_for_webview_value(
+    window: Any,
+    expression: str,
+    *,
+    timeout_seconds: float = 20.0,
+) -> Any:
+    deadline = time.monotonic() + timeout_seconds
+    last_error = ""
+    while time.monotonic() < deadline:
+        try:
+            value = window.evaluate_js(expression)
+            if value:
+                return value
+        except Exception as exc:  # the native bridge may still be attaching
+            last_error = str(exc)
+        time.sleep(0.15)
+    raise TimeoutError(f"WebView2 页面等待超时：{last_error or expression}")
+
+
+def run_native_ui_smoke(
+    base_url: str,
+    paths: DesktopPaths,
+    build_info: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Exercise the packaged WebView and native bridge with synthetic data.
+
+    This is deliberately local-only.  It configures the first-run password,
+    creates a fictional project, runs the deterministic visibility endpoint,
+    persists and reopens its route, then invokes the native SQLite backup
+    bridge.  It never calls a model or a publishing platform.
+    """
+
+    import webview
+
+    outcome: dict[str, Any] = {"ok": False}
+    window = webview.create_window(
+        f"{APP_TITLE} - UI Smoke",
+        base_url,
+        js_api=DesktopApi(paths, build_info=build_info),
+        width=1200,
+        height=760,
+        min_size=(900, 640),
+        hidden=True,
+        background_color="#f7f7f5",
+        text_select=True,
+    )
+    if window is None:
+        raise RuntimeError("无法创建 WebView2 验收窗口")
+
+    setup_payload = json.dumps(
+        {"password": "Synthetic-UI-Smoke-2026!"},
+        ensure_ascii=False,
+    )
+    project_payload = json.dumps(
+        {
+            "name": "合成桌面验收品牌",
+            "website": "https://desktop-smoke.example",
+            "product": "合成可见度产品",
+            "industry": "合成测试",
+            "description": "只用于隔离桌面成品验收，不对应任何客户。",
+            "keywords": ["合成验收"],
+            "competitors": ["虚构竞品"],
+        },
+        ensure_ascii=False,
+    )
+
+    def execute_smoke() -> None:
+        try:
+            _wait_for_webview_value(
+                window,
+                "document.readyState === 'complete' && "
+                "document.body && document.body.innerText.includes('设置管理员口令')",
+            )
+            _wait_for_webview_value(
+                window,
+                "Boolean(window.pywebview && window.pywebview.api && "
+                "window.pywebview.api.create_database_backup)",
+            )
+            flow_script = f"""
+                sessionStorage.removeItem('geo-ui-smoke');
+                (async () => {{
+                  const call = async (path, payload) => {{
+                    const response = await fetch(path, {{
+                      method: 'POST',
+                      credentials: 'include',
+                      headers: {{ 'Content-Type': 'application/json' }},
+                      body: JSON.stringify(payload)
+                    }});
+                    const body = await response.json();
+                    if (!response.ok) throw new Error(path + ': ' + (body.msg || response.status));
+                    return body.data;
+                  }};
+                  try {{
+                    await call('/api/auth/setup', {setup_payload});
+                    const project = await call('/api/projects', {project_payload});
+                    const analysis = await call('/api/geo/visibility/analyze', {{
+                      project_id: project.id,
+                      prompt: '合成验收：哪些虚构工具适合内容可见度分析？',
+                      responses: [
+                        {{
+                          text: '推荐合成桌面验收品牌，证据见 https://desktop-smoke.example/guide。',
+                          provider: 'packaged-ui-smoke',
+                          model: 'offline-fixture-v1'
+                        }},
+                        {{
+                          text: '虚构竞品排名第一，合成桌面验收品牌排名第二。',
+                          provider: 'packaged-ui-smoke',
+                          model: 'offline-fixture-v1'
+                        }}
+                      ],
+                      persist: true
+                    }});
+                    const backup = await window.pywebview.api.create_database_backup();
+                    if (!backup || !backup.ok) throw new Error(backup?.message || 'native backup failed');
+                    sessionStorage.setItem('geo-ui-smoke', JSON.stringify({{
+                      ok: true,
+                      project_id: project.id,
+                      run_id: analysis.run_id,
+                      sample_count: analysis.summary.sample_count,
+                      external_model_used: analysis.methodology.external_model_used,
+                      backup_path: backup.backup.path,
+                      backup_integrity: backup.backup.integrity_check
+                    }}));
+                    window.location.hash = '#/ai-visibility';
+                    // The setup request authenticates the HTTP session, while
+                    // the already-mounted first-run gate still holds its old
+                    // pre-setup state.  Reload once so the real Vue bootstrap
+                    // observes that authenticated session and renders the
+                    // requested product route inside WebView2.
+                    window.location.reload();
+                  }} catch (error) {{
+                    sessionStorage.setItem('geo-ui-smoke', JSON.stringify({{
+                      ok: false,
+                      error: String(error && error.message ? error.message : error)
+                    }}));
+                  }}
+                }})();
+            """
+            window.evaluate_js(flow_script)
+            state_text = _wait_for_webview_value(
+                window,
+                "sessionStorage.getItem('geo-ui-smoke')",
+                timeout_seconds=30.0,
+            )
+            state = json.loads(str(state_text))
+            if not state.get("ok"):
+                raise RuntimeError(str(state.get("error") or "WebView2 合成流程失败"))
+            _wait_for_webview_value(
+                window,
+                "window.location.hash === '#/ai-visibility' && "
+                "document.body && document.body.innerText.includes('AI 可见度')",
+                timeout_seconds=20.0,
+            )
+            backup_path = Path(str(state.get("backup_path", ""))).resolve()
+            if not backup_path.is_file() or backup_path.parent != paths.backups:
+                raise RuntimeError("WebView2 原生备份没有写入隔离备份目录")
+            if state.get("external_model_used") is not False:
+                raise RuntimeError("合成可见度验收意外声明使用了外部模型")
+            outcome.update(
+                {
+                    "ok": True,
+                    "native_gui": "edgechromium",
+                    "first_run_setup": "passed",
+                    "route": "#/ai-visibility",
+                    "project_id": state.get("project_id"),
+                    "run_id": state.get("run_id"),
+                    "sample_count": state.get("sample_count"),
+                    "history_persisted": bool(state.get("run_id")),
+                    "backup_integrity": state.get("backup_integrity"),
+                    "synthetic_data_only": True,
+                    "external_model_used": False,
+                    "real_publishing_attempted": False,
+                }
+            )
+        except Exception as exc:
+            diagnostic = ""
+            try:
+                diagnostic = str(
+                    window.evaluate_js(
+                        "JSON.stringify({path: window.location.pathname, "
+                        "hash: window.location.hash, "
+                        "text: document.body ? document.body.innerText.slice(0, 500) : ''})"
+                    )
+                    or ""
+                )
+            except Exception:
+                pass
+            outcome.update(
+                {"ok": False, "error": str(exc), "diagnostic": diagnostic}
+            )
+        finally:
+            window.destroy()
+
+    webview.start(
+        execute_smoke,
+        gui="edgechromium",
+        debug=False,
+        private_mode=True,
+        storage_path=str(paths.webview),
+    )
+    return outcome
+
+
+def _start_safe_scheduler(paths: DesktopPaths):
+    from services.publish_scheduler_runtime import create_publish_scheduler
+
+    scheduler = create_publish_scheduler(
+        paths.database,
+        interval_seconds=15,
+        allow_real=False,
+        media_root=paths.media,
+    )
+    scheduler.start()
+    return scheduler
+
+
+def _create_startup_backup(paths: DesktopPaths, logger: logging.Logger) -> None:
+    if not paths.database.is_file():
+        return
+    if paths.database.stat().st_size == 0:
+        raise RuntimeError(
+            f"本地数据库是 0 字节文件，已停止启动以避免覆盖：{paths.database}。"
+            "请从 backups 目录恢复，或在确认无数据后移走该文件。"
+        )
+    from services.desktop_backup_service import create_verified_database_backup
+
+    result = create_verified_database_backup(paths.database, paths.backups)
+    logger.info("startup database backup path=%s bytes=%s", result.path, result.bytes)
+
+
+def run(argv: Sequence[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    data_root = Path(args.data_dir).resolve() if args.data_dir else resolve_data_root()
+    paths = DesktopPaths.from_root(data_root)
+    paths.create()
+    logger = configure_logging(paths)
+    mutex = SingleInstanceMutex(paths.root)
+
+    if not mutex.acquire():
+        show_native_error("GEO 桌面版已在运行，请切换到现有窗口。")
+        return 2
+
+    server: DesktopServer | None = None
+    scheduler = None
+    listener: socket.socket | None = None
+    try:
+        resource_root = resolve_resource_root()
+        build_info = load_build_info(resource_root)
+        frontend_dir = resolve_frontend_dir(resource_root)
+        listener = reserve_loopback_socket()
+        port = int(listener.getsockname()[1])
+        _create_startup_backup(paths, logger)
+        apply_desktop_environment(paths, frontend_dir, port)
+        logger.info(
+            "starting version=%s data_root=%s port=%s",
+            APP_VERSION,
+            paths.root,
+            port,
+        )
+
+        # Import only after the desktop paths and safety flags are frozen.
+        from sau_backend import app
+
+        server = DesktopServer(app, listener)
+        listener = None  # Waitress now owns the reserved socket.
+        server.start()
+        base_url = f"http://{LOOPBACK_HOST}:{port}"
+        health = wait_until_ready(base_url)
+
+        if args.health_check:
+            auth = fetch_json_endpoint(base_url, "/api/auth/status")
+            report = {
+                "ok": True,
+                "version": APP_VERSION,
+                "build": build_info,
+                "frontend": (frontend_dir / "index.html").is_file(),
+                "health": health.get("data", {}),
+                "auth": auth.get("data", {}),
+                "data_directory": str(paths.root),
+            }
+            write_health_report(args.health_report, report)
+            logger.info("health check passed")
+            return 0
+
+        if args.ui_smoke:
+            ui_report = run_native_ui_smoke(base_url, paths, build_info)
+            report = {
+                "ok": bool(ui_report.get("ok")),
+                "version": APP_VERSION,
+                "build": build_info,
+                "health": health.get("data", {}),
+                "ui": ui_report,
+                "data_directory": str(paths.root),
+            }
+            write_health_report(args.health_report, report)
+            if report["ok"]:
+                logger.info("native UI smoke passed")
+            else:
+                logger.error(
+                    "native UI smoke failed error=%s diagnostic=%s",
+                    ui_report.get("error"),
+                    ui_report.get("diagnostic"),
+                )
+            # A hidden Python.NET/WebView2 run can retain CLR helper threads.
+            # This dedicated smoke path owns only a disposable data directory;
+            # the report is fully flushed, so end the process and let Windows
+            # release its socket/mutex handles instead of hanging the build.
+            logging.shutdown()
+            os._exit(0 if report["ok"] else 1)
+
+        scheduler = _start_safe_scheduler(paths)
+
+        import webview
+
+        webview.create_window(
+            APP_TITLE,
+            base_url,
+            js_api=DesktopApi(paths, build_info=build_info),
+            width=1440,
+            height=900,
+            min_size=(1080, 700),
+            background_color="#f7f7f5",
+            text_select=True,
+        )
+        webview.start(
+            gui="edgechromium",
+            debug=False,
+            private_mode=False,
+            storage_path=str(paths.webview),
+        )
+        return 0
+    except Exception as exc:
+        logger.exception("desktop startup failed")
+        write_health_report(
+            args.health_report,
+            {"ok": False, "error": str(exc), "data_directory": str(paths.root)},
+        )
+        if not args.health_check:
+            show_native_error(
+                f"GEO 桌面版启动失败。\n\n{exc}\n\n日志：{paths.logs / 'desktop.log'}"
+            )
+        return 1
+    finally:
+        if scheduler is not None:
+            scheduler.shutdown(wait=False)
+        if server is not None:
+            server.stop()
+        elif listener is not None:
+            listener.close()
+        mutex.release()
+
+
+def main() -> None:
+    raise SystemExit(run())
+
+
+if __name__ == "__main__":
+    main()

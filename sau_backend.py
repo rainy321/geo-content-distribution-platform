@@ -31,6 +31,18 @@ from services.ai_service import (
     generate_geo_content,
     optimize_geo_content,
 )
+from services.ai_visibility_service import (
+    VisibilityAnalysisError,
+    analyze_ai_visibility,
+)
+from services.ai_visibility_run_service import (
+    VisibilityRunDataError,
+    VisibilityRunNotFoundError,
+    VisibilityRunValidationError,
+    get_ai_visibility_run,
+    list_ai_visibility_runs,
+    save_ai_visibility_run,
+)
 from services.article_service import (
     ARTICLE_STATUSES,
     ArticleNotFoundError,
@@ -62,6 +74,13 @@ from services.cover_image_service import (
 from services.geo_score_service import score_geo_content
 from services.dashboard_service import get_dashboard_overview
 from services.demo_seed_service import seed_demo_data
+from services.local_auth_service import (
+    InvalidCurrentPasswordError,
+    LocalAuthConfigurationError,
+    LocalAuthService,
+    PasswordAlreadyConfiguredError,
+    PasswordPolicyError,
+)
 from services.media_account_service import (
     MediaAccountCheckError,
     MediaAccountNotFoundError,
@@ -232,14 +251,26 @@ app.config["ENABLE_BILIBILI_RUNTIME"] = _environment_flag(
 )
 access_password = str(os.getenv("APP_ACCESS_PASSWORD", "")).strip()
 session_secret = str(os.getenv("APP_SESSION_SECRET", "")).strip()
+desktop_mode = _environment_flag("GEO_DESKTOP_MODE")
+local_auth_service = None
+if desktop_mode:
+    local_auth_path = str(os.getenv("GEO_DESKTOP_AUTH_PATH", "")).strip()
+    if not local_auth_path:
+        raise RuntimeError("桌面模式缺少 GEO_DESKTOP_AUTH_PATH")
+    local_auth_service = LocalAuthService(local_auth_path)
+    # The persisted per-user secret is authoritative for the desktop session.
+    session_secret = local_auth_service.get_session_secret()
+    access_password = ""
 if access_password and not session_secret:
     raise RuntimeError(
         "配置 APP_ACCESS_PASSWORD 时必须同时配置 APP_SESSION_SECRET"
     )
 rate_limiter = create_rate_limiter_from_environment()
 app.config.update(
-    ACCESS_CONTROL_ENABLED=bool(access_password),
+    ACCESS_CONTROL_ENABLED=bool(access_password or local_auth_service),
     ACCESS_PASSWORD=access_password,
+    DESKTOP_MODE=desktop_mode,
+    LOCAL_AUTH_SERVICE=local_auth_service,
     SECRET_KEY=session_secret or os.urandom(32),
     SESSION_COOKIE_NAME="geo_operator_session",
     SESSION_COOKIE_HTTPONLY=True,
@@ -341,6 +372,7 @@ _PUBLIC_ENDPOINTS = {
     "index",
     "login_operator",
     "logout_operator",
+    "setup_local_operator",
     "vite_svg",
 }
 
@@ -363,17 +395,32 @@ def _operator_is_authenticated():
     return session.get("operator_authenticated") is True
 
 
+def _local_auth_setup_required():
+    service = app.config.get("LOCAL_AUTH_SERVICE")
+    return bool(service is not None and service.status().setup_required)
+
+
+def _mark_operator_authenticated():
+    session.clear()
+    session.permanent = True
+    session["operator_authenticated"] = True
+
+
 @app.before_request
 def require_operator_access():
     if request.method == "OPTIONS" or request.endpoint in _PUBLIC_ENDPOINTS:
         return None
     if _operator_is_authenticated():
         return None
+    setup_required = _local_auth_setup_required()
     return jsonify(
         {
             "code": 401,
-            "msg": "需要输入运营访问口令",
-            "data": {"authentication_required": True},
+            "msg": "需要先设置管理员口令" if setup_required else "需要输入管理员口令",
+            "data": {
+                "authentication_required": True,
+                "setup_required": setup_required,
+            },
         }
     ), 401
 
@@ -415,14 +462,22 @@ def vite_svg():
 @app.route('/api/auth/status', methods=['GET'])
 def get_auth_status():
     required = bool(app.config.get("ACCESS_CONTROL_ENABLED", False))
+    setup_required = _local_auth_setup_required()
     return jsonify(
         {
             "code": 200,
             "msg": "success",
             "data": {
                 "required": required,
+                "setup_required": setup_required,
+                "mode": (
+                    "desktop_local"
+                    if app.config.get("LOCAL_AUTH_SERVICE") is not None
+                    else ("environment" if required else "disabled")
+                ),
                 "authenticated": bool(
-                    not required or _operator_is_authenticated()
+                    not required
+                    or (not setup_required and _operator_is_authenticated())
                 ),
                 "session_hours": int(
                     app.config["PERMANENT_SESSION_LIFETIME"].total_seconds()
@@ -469,29 +524,158 @@ def login_operator():
 
     data = request.get_json(silent=True)
     password = data.get("password") if isinstance(data, dict) else None
-    candidate = str(password or "")
+    candidate = password if isinstance(password, str) else ""
+    local_auth = app.config.get("LOCAL_AUTH_SERVICE")
+    if local_auth is not None and local_auth.status().setup_required:
+        return jsonify(
+            {
+                "code": 409,
+                "msg": "请先设置本机管理员口令",
+                "data": {
+                    "authenticated": False,
+                    "required": True,
+                    "setup_required": True,
+                },
+            }
+        ), 409
     expected = str(app.config.get("ACCESS_PASSWORD", ""))
-    if (
-        not candidate
-        or len(candidate) > 512
-        or not hmac.compare_digest(candidate, expected)
-    ):
+    accepted = (
+        local_auth.verify_password(candidate)
+        if local_auth is not None
+        else bool(candidate)
+        and len(candidate) <= 512
+        and hmac.compare_digest(candidate, expected)
+    )
+    if not accepted:
         return jsonify(
             {
                 "code": 401,
-                "msg": "访问口令不正确",
-                "data": {"authenticated": False, "required": True},
+                "msg": "管理员口令不正确",
+                "data": {
+                    "authenticated": False,
+                    "required": True,
+                    "setup_required": False,
+                },
             }
         ), 401
 
-    session.clear()
-    session.permanent = True
-    session["operator_authenticated"] = True
+    _mark_operator_authenticated()
     return jsonify(
         {
             "code": 200,
             "msg": "success",
-            "data": {"authenticated": True, "required": True},
+            "data": {
+                "authenticated": True,
+                "required": True,
+                "setup_required": False,
+            },
+        }
+    ), 200
+
+
+@app.route('/api/auth/setup', methods=['POST'])
+def setup_local_operator():
+    """Create the desktop administrator password exactly once."""
+
+    local_auth = app.config.get("LOCAL_AUTH_SERVICE")
+    if local_auth is None:
+        return jsonify(
+            {"code": 404, "msg": "此部署不支持本机口令初始化", "data": None}
+        ), 404
+
+    decision = app.config["AUTH_RATE_LIMITER"].consume(
+        f"setup:{_client_rate_key()}",
+        limit=app.config["AUTH_LOGIN_ATTEMPTS_PER_MINUTE"],
+    )
+    if not decision.allowed:
+        response = jsonify(
+            {"code": 429, "msg": "设置尝试过于频繁，请稍后再试", "data": None}
+        )
+        response.headers["Retry-After"] = str(decision.retry_after_seconds)
+        return response, 429
+
+    data = request.get_json(silent=True)
+    password = data.get("password") if isinstance(data, dict) else None
+    try:
+        local_auth.set_initial_password(password)
+    except PasswordPolicyError as exc:
+        return jsonify(
+            {
+                "code": 400,
+                "msg": str(exc),
+                "data": {"policy_code": exc.code, "setup_required": True},
+            }
+        ), 400
+    except PasswordAlreadyConfiguredError:
+        return jsonify(
+            {
+                "code": 409,
+                "msg": "管理员口令已经设置，请直接登录",
+                "data": {"setup_required": False},
+            }
+        ), 409
+    except LocalAuthConfigurationError:
+        return jsonify(
+            {"code": 500, "msg": "本地认证配置不可用", "data": None}
+        ), 500
+
+    _mark_operator_authenticated()
+    return jsonify(
+        {
+            "code": 200,
+            "msg": "success",
+            "data": {
+                "authenticated": True,
+                "required": True,
+                "setup_required": False,
+            },
+        }
+    ), 200
+
+
+@app.route('/api/auth/change-password', methods=['POST'])
+def change_local_operator_password():
+    """Rotate the desktop password after current-session authentication."""
+
+    local_auth = app.config.get("LOCAL_AUTH_SERVICE")
+    if local_auth is None:
+        return jsonify(
+            {"code": 404, "msg": "此部署不支持修改本机口令", "data": None}
+        ), 404
+    decision = app.config["AUTH_RATE_LIMITER"].consume(
+        f"change-password:{_client_rate_key()}",
+        limit=app.config["AUTH_LOGIN_ATTEMPTS_PER_MINUTE"],
+    )
+    if not decision.allowed:
+        response = jsonify(
+            {"code": 429, "msg": "修改尝试过于频繁，请稍后再试", "data": None}
+        )
+        response.headers["Retry-After"] = str(decision.retry_after_seconds)
+        return response, 429
+
+    data = request.get_json(silent=True)
+    current_password = data.get("current_password") if isinstance(data, dict) else None
+    new_password = data.get("new_password") if isinstance(data, dict) else None
+    try:
+        local_auth.change_password(current_password, new_password)
+    except PasswordPolicyError as exc:
+        return jsonify(
+            {"code": 400, "msg": str(exc), "data": {"policy_code": exc.code}}
+        ), 400
+    except InvalidCurrentPasswordError:
+        return jsonify(
+            {"code": 401, "msg": "当前管理员口令不正确", "data": None}
+        ), 401
+    except LocalAuthConfigurationError:
+        return jsonify(
+            {"code": 500, "msg": "本地认证配置不可用", "data": None}
+        ), 500
+
+    return jsonify(
+        {
+            "code": 200,
+            "msg": "success",
+            "data": {"authenticated": True, "setup_required": False},
         }
     ), 200
 
@@ -1268,6 +1452,126 @@ def _normalize_string_list(values):
         if item and item not in result:
             result.append(item)
     return result
+
+
+@app.route('/api/geo/visibility/analyze', methods=['POST'])
+def analyze_geo_visibility():
+    """Analyze user-supplied AI answers without invoking an external model."""
+
+    maximum_request_bytes = 2 * 1024 * 1024
+    if (
+        request.content_length is not None
+        and request.content_length > maximum_request_bytes
+    ):
+        return jsonify(
+            {
+                "code": 413,
+                "msg": "AI 可见度分析请求不能超过 2 MB",
+                "data": None,
+            }
+        ), 413
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
+    persist = data.get("persist", False)
+    if not isinstance(persist, bool):
+        return jsonify({"code": 400, "msg": "persist 必须是布尔值", "data": None}), 400
+
+    raw_project_id = data.get("project_id")
+    if isinstance(raw_project_id, bool):
+        return jsonify({"code": 400, "msg": "project_id 必须是正整数", "data": None}), 400
+    try:
+        project_id = int(raw_project_id)
+    except (TypeError, ValueError):
+        return jsonify({"code": 400, "msg": "project_id 必须是正整数", "data": None}), 400
+    if project_id <= 0 or str(raw_project_id).strip() != str(project_id):
+        return jsonify({"code": 400, "msg": "project_id 必须是正整数", "data": None}), 400
+
+    project = _get_project(project_id)
+    if project is None:
+        return jsonify({"code": 404, "msg": "品牌项目不存在", "data": None}), 404
+
+    try:
+        result = analyze_ai_visibility(
+            project_id=project_id,
+            project_name=project.get("name") or "",
+            project_product=project.get("product") or "",
+            project_website=project.get("website") or "",
+            stored_competitors=project.get("competitors") or [],
+            prompt=data.get("prompt"),
+            responses=data.get("responses"),
+            aliases=data.get("aliases") if "aliases" in data else None,
+            competitors=data.get("competitors") if "competitors" in data else None,
+        )
+    except VisibilityAnalysisError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    if persist:
+        try:
+            saved = save_ai_visibility_run(
+                app.config["DATABASE_PATH"],
+                project_id=project_id,
+                prompt=result["prompt"],
+                input_samples=data.get("responses"),
+                coverage_items={
+                    "aliases": data.get("aliases") if "aliases" in data else None,
+                    "competitors": (
+                        data.get("competitors") if "competitors" in data else None
+                    ),
+                },
+                result=result,
+                algorithm_version=result["algorithm_versions"]["integration"],
+            )
+        except (VisibilityRunValidationError, ProjectNotFoundError) as exc:
+            return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+        result = {
+            **result,
+            "run_id": saved["id"],
+            "created_at": saved["created_at"],
+        }
+    return jsonify({"code": 200, "msg": "success", "data": result}), 200
+
+
+@app.route('/api/geo/visibility/runs', methods=['GET'])
+def list_geo_visibility_runs():
+    try:
+        project_id = int(str(request.args.get("project_id", "")).strip())
+        limit = int(str(request.args.get("limit", "20")).strip())
+        if project_id <= 0:
+            raise ValueError
+        rows = list_ai_visibility_runs(
+            app.config["DATABASE_PATH"],
+            project_id=project_id,
+            limit=limit,
+        )
+    except VisibilityRunValidationError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    except ValueError:
+        return jsonify(
+            {"code": 400, "msg": "project_id 和 limit 必须是正整数", "data": None}
+        ), 400
+    except ProjectNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except VisibilityRunDataError:
+        return jsonify(
+            {"code": 500, "msg": "本地分析历史无法读取", "data": None}
+        ), 500
+    return jsonify({"code": 200, "msg": "success", "data": rows}), 200
+
+
+@app.route('/api/geo/visibility/runs/<int:run_id>', methods=['GET'])
+def get_geo_visibility_run(run_id):
+    try:
+        row = get_ai_visibility_run(app.config["DATABASE_PATH"], run_id)
+    except (VisibilityRunNotFoundError, ProjectNotFoundError) as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except VisibilityRunValidationError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    except VisibilityRunDataError:
+        return jsonify(
+            {"code": 500, "msg": "本地分析历史无法读取", "data": None}
+        ), 500
+    return jsonify({"code": 200, "msg": "success", "data": row}), 200
 
 
 @app.route('/api/geo/score', methods=['POST'])
@@ -2241,7 +2545,10 @@ def upload_save():
         upload_tags = _normalize_string_list(
             re.split(r"[,，;；]", str(request.form.get("tags") or ""))
         )[:20]
-        with sqlite3.connect(app.config["DATABASE_PATH"]) as conn:
+        # sqlite3.Connection's context manager commits/rolls back but does not
+        # close the handle.  Explicit closing is required on Windows so the
+        # desktop database can be backed up, moved, or removed after upload.
+        with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
             cursor = conn.cursor()
             cursor.execute('''
                 INSERT INTO file_records (
@@ -2277,8 +2584,10 @@ def upload_save():
 @app.route('/getFiles', methods=['GET'])
 def get_all_files():
     try:
-        # 使用 with 自动管理数据库连接
-        with sqlite3.connect(app.config["DATABASE_PATH"]) as conn:
+        # sqlite3's transaction context does not close the Windows file
+        # handle.  Material browsing is part of the desktop product, so close
+        # explicitly to keep backups, upgrades and test cleanup reliable.
+        with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
             conn.row_factory = sqlite3.Row  # 允许通过列名访问结果
             cursor = conn.cursor()
 
@@ -2319,7 +2628,7 @@ def get_all_files():
 def getAccounts():
     """快速获取所有账号信息，不进行cookie验证"""
     try:
-        with sqlite3.connect(app.config["DATABASE_PATH"]) as conn:
+        with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute('''
@@ -2350,7 +2659,7 @@ def getAccounts():
 async def getValidAccounts():
     from myUtils.auth import check_cookie
 
-    with sqlite3.connect(app.config["DATABASE_PATH"]) as conn:
+    with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
         cursor = conn.cursor()
         cursor.execute('''
         SELECT * FROM user_info''')
@@ -2400,8 +2709,9 @@ def delete_file():
         }), 400
 
     try:
-        # 获取数据库连接
-        with sqlite3.connect(app.config["DATABASE_PATH"]) as conn:
+        # Close explicitly; sqlite3.Connection.__exit__ only ends the
+        # transaction and otherwise leaves the database handle open.
+        with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
@@ -2430,13 +2740,17 @@ def delete_file():
             file_path = _media_root() / stored_filename
             if file_path.exists():
                 try:
-                    file_path.unlink()  # 删除文件
-                    print(f"✅ 实际文件已删除: {file_path}")
+                    file_path.unlink()
+                    app.logger.info("material file deleted path=%s", file_path)
                 except Exception as e:
-                    print(f"⚠️ 删除实际文件失败: {e}")
+                    app.logger.warning(
+                        "material file delete failed path=%s error=%s",
+                        file_path,
+                        e,
+                    )
                     # 即使删除文件失败，也要继续删除数据库记录，避免数据不一致
             else:
-                print(f"⚠️ 实际文件不存在: {file_path}")
+                app.logger.warning("material file missing path=%s", file_path)
 
             # 删除数据库记录
             cursor.execute("DELETE FROM file_records WHERE id = ?", (file_id,))
@@ -2451,7 +2765,8 @@ def delete_file():
             }
         }), 200
 
-    except Exception as e:
+    except Exception:
+        app.logger.exception("delete_file failed")
         return jsonify({
             "code": 500,
             "msg": str("delete failed!"),
@@ -2473,7 +2788,7 @@ def delete_account():
 
     try:
         # 获取数据库连接
-        with sqlite3.connect(app.config["DATABASE_PATH"]) as conn:
+        with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
@@ -2592,6 +2907,20 @@ def login():
 
 @app.route('/postVideo', methods=['POST'])
 def postVideo():
+    # This legacy endpoint directly imports and starts browser publishers. Keep
+    # the process-wide real-publishing switch as its outermost guard so a
+    # disabled deployment cannot even load publisher runtimes or create a
+    # background publish thread. Safe job preparation and demo execution remain
+    # available through the /api/publish endpoints above.
+    if not app.config.get("ALLOW_REAL_PUBLISHING", False):
+        return jsonify(
+            {
+                "code": 403,
+                "msg": "真实发布总开关未开启，请设置 ALLOW_REAL_PUBLISHING=true",
+                "data": None,
+            }
+        ), 403
+
     # 获取JSON数据
     data = request.get_json()
 
@@ -2885,7 +3214,7 @@ def updateUserinfo():
     userName = data.get('userName')
     try:
         # 获取数据库连接
-        with sqlite3.connect(app.config["DATABASE_PATH"]) as conn:
+        with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
@@ -2913,6 +3242,18 @@ def updateUserinfo():
 
 @app.route('/postVideoBatch', methods=['POST'])
 def postVideoBatch():
+    # Match /postVideo: reject before parsing work or importing any browser
+    # publisher. This endpoint executes items synchronously after the import, so
+    # the feature gate must stay before both operations.
+    if not app.config.get("ALLOW_REAL_PUBLISHING", False):
+        return jsonify(
+            {
+                "code": 403,
+                "msg": "真实发布总开关未开启，请设置 ALLOW_REAL_PUBLISHING=true",
+                "data": None,
+            }
+        ), 403
+
     data_list = request.get_json()
 
     if not isinstance(data_list, list):
@@ -3144,7 +3485,7 @@ def upload_cookie():
             }), 400
 
         # 从数据库获取账号的文件路径
-        with sqlite3.connect(app.config["DATABASE_PATH"]) as conn:
+        with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute('SELECT filePath FROM user_info WHERE id = ?', (account_id,))

@@ -4,16 +4,17 @@
       <div class="heading-copy">
         <p class="eyebrow">OPERATIONS BRIEF / {{ todayLabel }}</p>
         <h1>今日运营简报</h1>
-        <p>把内容生产、渠道连接和发布结果放在同一张工作台上，优先处理真正阻塞分发的事项。</p>
+        <p>先观察品牌在 AI 回答中如何出现，再把证据转成内容行动；渠道分发始终是可控的后续步骤。</p>
       </div>
       <div class="heading-actions">
         <span v-if="overview.generated_at" class="sync-time">数据更新 {{ formatTime(overview.generated_at) }}</span>
         <el-button :icon="Refresh" :loading="loading" @click="fetchOverview">刷新数据</el-button>
-        <el-button type="primary" :icon="MagicStick" @click="router.push('/content-create')">生成新内容</el-button>
+        <el-button v-if="hasProjects" type="primary" :icon="View" @click="router.push('/ai-visibility')">开始可见度分析</el-button>
+        <el-button v-else-if="hasLoaded" type="primary" :icon="Plus" @click="router.push('/projects')">创建品牌项目</el-button>
       </div>
     </header>
 
-    <section class="metric-ledger" aria-label="今日核心指标">
+    <section v-if="!showOnboarding && !loadError" class="metric-ledger" aria-label="今日核心指标">
       <article v-for="metric in metrics" :key="metric.key" :class="['metric-cell', metric.tone]">
         <div class="metric-index">{{ metric.index }}</div>
         <div class="metric-value">{{ metric.value }}</div>
@@ -31,6 +32,44 @@
         <p>检查后端服务后重新加载，已有文章和发布任务不会受到影响。</p>
       </div>
       <el-button type="primary" @click="fetchOverview">重新加载</el-button>
+    </section>
+
+    <section v-else-if="showOnboarding" class="onboarding-panel" aria-labelledby="onboarding-title">
+      <div class="onboarding-intro">
+        <p class="eyebrow">FIRST RUN / LOCAL WORKSPACE</p>
+        <h2 id="onboarding-title"><span>从一个真实</span><span>品牌问题开始</span></h2>
+        <p>先建立品牌项目，固定名称、产品、官网与竞品口径；然后粘贴已有 AI 回答，在本机分析品牌提及、声量和引用证据。</p>
+        <div class="onboarding-actions">
+          <el-button type="primary" size="large" :icon="Plus" @click="router.push('/projects')">创建第一个品牌项目</el-button>
+          <span>无需先连接媒体账号，也不会触发真实发布。</span>
+        </div>
+      </div>
+
+      <ol class="onboarding-path" aria-label="首次使用的两个步骤">
+        <li class="current-step">
+          <div class="step-index"><span>01</span><i /></div>
+          <div class="step-copy">
+            <small>NOW / 现在</small>
+            <h3>建立品牌项目</h3>
+            <p>填写品牌事实、产品、关键词与竞品，形成后续分析共用的稳定口径。</p>
+            <button type="button" @click="router.push('/projects')">打开品牌项目 <span>→</span></button>
+          </div>
+        </li>
+        <li class="next-step">
+          <div class="step-index"><span>02</span><i /></div>
+          <div class="step-copy">
+            <small>NEXT / 下一步</small>
+            <h3>运行 AI 可见度分析</h3>
+            <p>每条粘贴回答作为一个样本，本地规则会给出提及率、SOV、位次、引用与逐条证据。</p>
+            <span class="step-locked">创建项目后即可使用</span>
+          </div>
+        </li>
+      </ol>
+
+      <footer class="onboarding-boundary">
+        <span class="boundary-dot" aria-hidden="true" />
+        <p><strong>本机数据边界</strong>　品牌项目、可见度回答和分析历史保存在当前 Windows 用户的数据目录中。</p>
+      </footer>
     </section>
 
     <div v-else class="dashboard-grid" v-loading="loading && !hasLoaded">
@@ -95,7 +134,7 @@
       </aside>
     </div>
 
-    <section v-if="!loadError" class="recent-panel" aria-labelledby="recent-title">
+    <section v-if="!loadError && !showOnboarding" class="recent-panel" aria-labelledby="recent-title">
       <div class="panel-heading recent-heading">
         <div>
           <span>RECENT / 03</span>
@@ -134,17 +173,17 @@
       </div>
     </section>
 
-    <nav class="workflow-shortcuts" aria-label="内容工作流快捷入口">
+    <nav v-if="!loadError && !showOnboarding" class="workflow-shortcuts" aria-label="核心工作流快捷入口">
       <button type="button" @click="router.push('/projects')">
         <span>01</span><strong>品牌底稿</strong><small>维护事实和关键词</small>
       </button>
       <i>→</i>
-      <button type="button" @click="router.push('/content-create')">
-        <span>02</span><strong>内容生产</strong><small>生成、评分与保存</small>
+      <button type="button" @click="router.push('/ai-visibility')">
+        <span>02</span><strong>AI 可见度</strong><small>分析回答和引用证据</small>
       </button>
       <i>→</i>
-      <button type="button" @click="router.push('/publish-center')">
-        <span>03</span><strong>渠道分发</strong><small>追踪状态和重试</small>
+      <button type="button" @click="router.push('/content-create')">
+        <span>03</span><strong>内容生产</strong><small>基于洞察生成和优化</small>
       </button>
     </nav>
   </main>
@@ -153,7 +192,7 @@
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { MagicStick, Promotion, Refresh } from '@element-plus/icons-vue'
+import { Plus, Promotion, Refresh, View } from '@element-plus/icons-vue'
 import { dashboardApi } from '@/api/dashboard'
 
 const router = useRouter()
@@ -163,6 +202,7 @@ const hasLoaded = ref(false)
 
 const overview = reactive({
   summary: {
+    project_count: 0,
     today_generated: 0,
     today_published: 0,
     today_success: 0,
@@ -182,6 +222,9 @@ const todayLabel = new Intl.DateTimeFormat('zh-CN', {
   day: '2-digit',
   weekday: 'short'
 }).format(new Date())
+
+const hasProjects = computed(() => Number(overview.summary.project_count || 0) > 0)
+const showOnboarding = computed(() => hasLoaded.value && !hasProjects.value)
 
 const metrics = computed(() => [
   { key: 'generated', index: '01', label: '今日生成文章', value: overview.summary.today_generated, note: '进入内容资产库', tone: 'teal' },
@@ -474,6 +517,82 @@ onMounted(fetchOverview)
   p { margin: 7px 0 0; color: var(--muted); font-size: 11px; }
 }
 
+.onboarding-panel {
+  display: grid;
+  grid-template-columns: minmax(0, 1.08fr) minmax(390px, 0.92fr);
+  margin-top: 22px;
+  border: 1px solid var(--rule);
+  background: #fff;
+  box-shadow: 0 16px 44px rgba(16, 43, 49, 0.06);
+}
+
+.onboarding-intro {
+  display: flex;
+  min-height: 390px;
+  flex-direction: column;
+  justify-content: center;
+  padding: clamp(34px, 5vw, 66px);
+  .eyebrow { margin: 0 0 13px; color: #318f8b; font: 700 10px/1 "Cascadia Mono", monospace; letter-spacing: 0.13em; }
+  h2 { max-width: 560px; margin: 0; color: var(--harbor); font: 700 clamp(34px, 4vw, 52px)/0.98 "Bahnschrift SemiCondensed", "Microsoft YaHei", sans-serif; letter-spacing: -0.035em; }
+  h2 span { display: block; }
+  > p { max-width: 620px; margin: 20px 0 0; color: var(--muted); font-size: 13px; line-height: 1.9; }
+}
+
+.onboarding-actions {
+  display: flex;
+  align-items: center;
+  gap: 17px;
+  margin-top: 30px;
+  :deep(.el-button) { min-width: 190px; border-radius: 3px; background: var(--harbor); border-color: var(--harbor); }
+  > span { max-width: 190px; color: #788987; font-size: 9px; line-height: 1.55; }
+}
+
+.onboarding-path {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  margin: 0;
+  padding: 42px 38px;
+  background: var(--harbor);
+  color: #eaf6f4;
+  list-style: none;
+  li { display: grid; grid-template-columns: 42px 1fr; gap: 15px; }
+  li + li { margin-top: 4px; }
+}
+
+.step-index {
+  display: flex;
+  align-items: center;
+  flex-direction: column;
+  span { display: grid; width: 31px; height: 31px; flex: 0 0 auto; place-items: center; border: 1px solid #56817e; border-radius: 50%; color: #7ca19d; font: 700 9px/1 "Cascadia Mono", monospace; }
+  i { width: 1px; min-height: 104px; flex: 1; background: rgba(137, 190, 184, 0.24); }
+}
+.current-step .step-index span { border-color: var(--signal); background: var(--signal); color: #0d3034; }
+.next-step .step-index i { display: none; }
+
+.step-copy {
+  padding: 4px 0 30px;
+  small { color: #73cfc8; font: 700 8px/1 "Cascadia Mono", monospace; letter-spacing: 0.1em; }
+  h3 { margin: 8px 0 0; color: #f0f8f7; font-size: 16px; }
+  p { margin: 9px 0 0; color: rgba(225, 241, 238, 0.58); font-size: 10px; line-height: 1.7; }
+  button { display: flex; align-items: center; gap: 13px; margin-top: 14px; padding: 8px 0; border: 0; border-bottom: 1px solid rgba(114, 210, 202, 0.45); background: transparent; color: #8ce1da; cursor: pointer; font-size: 10px; }
+  button:hover { color: #c4f3ef; border-bottom-color: #9ce6e0; }
+}
+.step-locked { display: inline-block; margin-top: 14px; color: rgba(225, 241, 238, 0.38); font: 600 8px/1 "Cascadia Mono", monospace; }
+
+.onboarding-boundary {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 11px;
+  padding: 15px 22px;
+  border-top: 1px solid var(--rule);
+  background: #f1f7f5;
+  p { margin: 0; color: #667b79; font-size: 9px; line-height: 1.55; }
+  strong { color: #315d5a; }
+}
+.boundary-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--signal); box-shadow: 0 0 0 4px rgba(57, 184, 178, 0.13); }
+
 .workflow-shortcuts {
   display: grid;
   grid-template-columns: 1fr auto 1fr auto 1fr;
@@ -500,6 +619,9 @@ onMounted(fetchOverview)
   .recent-row { grid-template-columns: 82px 1fr 100px; padding: 12px 0; }
   .recent-row p { grid-column: 2; }
   .recent-row > time { grid-column: 3; grid-row: 2; }
+  .onboarding-panel { grid-template-columns: 1fr; }
+  .onboarding-intro { min-height: 320px; }
+  .onboarding-path { min-height: 340px; }
 }
 
 @media (max-width: 760px) {
@@ -518,6 +640,11 @@ onMounted(fetchOverview)
   .recent-platform { grid-column: 1; }
   .recent-row p, .recent-row > time { grid-column: 2; grid-row: auto; text-align: left; }
   .recent-empty, .dashboard-error { align-items: flex-start; flex-direction: column; padding: 24px; }
+  .onboarding-intro { min-height: 0; padding: 34px 24px; }
+  .onboarding-actions { align-items: flex-start; flex-direction: column; }
+  .onboarding-actions :deep(.el-button) { width: 100%; }
+  .onboarding-path { min-height: 0; padding: 34px 24px; }
+  .onboarding-boundary { align-items: flex-start; }
   .workflow-shortcuts { grid-template-columns: 1fr; }
   .workflow-shortcuts > i { display: none; }
 }

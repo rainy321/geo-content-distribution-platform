@@ -12,6 +12,7 @@
     </div>
     <AccessGate
       v-else-if="authState.required && !authState.authenticated"
+      :setup-required="authState.setupRequired"
       @authenticated="handleAuthenticated"
     />
     <el-container v-else>
@@ -37,7 +38,7 @@
               <el-icon><HomeFilled /></el-icon>
               <span>首页</span>
             </el-menu-item>
-            <el-menu-item index="/account-management">
+            <el-menu-item v-if="!desktopMode" index="/account-management">
               <el-icon><User /></el-icon>
               <span>媒体账号</span>
             </el-menu-item>
@@ -57,11 +58,15 @@
               <el-icon><Aim /></el-icon>
               <span>GEO 优化</span>
             </el-menu-item>
+            <el-menu-item index="/ai-visibility">
+              <el-icon><View /></el-icon>
+              <span>AI 可见度</span>
+            </el-menu-item>
             <el-menu-item index="/material-management">
               <el-icon><Picture /></el-icon>
               <span>素材管理</span>
             </el-menu-item>
-            <el-menu-item index="/publish-center">
+            <el-menu-item v-if="!desktopMode" index="/publish-center">
               <el-icon><Upload /></el-icon>
               <span>发布中心</span>
             </el-menu-item>
@@ -86,7 +91,22 @@
               <span class="workspace-label">内容运营工作区</span>
             </div>
             <div class="header-right">
-              <!-- 账号信息已移除 -->
+              <DesktopStatusBar @status="handleDesktopStatus" />
+              <el-dropdown v-if="authState.required" trigger="click" @command="handleOperatorCommand">
+                <button class="operator-button" type="button" aria-label="管理员账户菜单">
+                  <el-icon><UserFilled /></el-icon>
+                  <span>管理员</span>
+                  <el-icon class="operator-chevron"><ArrowDown /></el-icon>
+                </button>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item v-if="authState.mode === 'desktop_local'" command="change-password">
+                      修改本机口令
+                    </el-dropdown-item>
+                    <el-dropdown-item command="logout" divided>退出工作区</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
             </div>
           </div>
         </el-header>
@@ -95,17 +115,65 @@
         </el-main>
       </el-container>
     </el-container>
+
+    <el-dialog
+      v-model="passwordDialog.visible"
+      title="修改本机管理员口令"
+      width="min(460px, calc(100vw - 32px))"
+      destroy-on-close
+      @closed="resetPasswordDialog"
+    >
+      <el-form label-position="top" @submit.prevent="changePassword">
+        <el-form-item label="当前口令">
+          <el-input
+            v-model="passwordDialog.current"
+            type="password"
+            autocomplete="current-password"
+            show-password
+          />
+        </el-form-item>
+        <el-form-item label="新口令">
+          <el-input
+            v-model="passwordDialog.next"
+            type="password"
+            autocomplete="new-password"
+            placeholder="至少 12 个字符"
+            show-password
+          />
+        </el-form-item>
+        <el-form-item label="确认新口令">
+          <el-input
+            v-model="passwordDialog.confirmation"
+            type="password"
+            autocomplete="new-password"
+            show-password
+            @keyup.enter="changePassword"
+          />
+        </el-form-item>
+        <p class="password-dialog-hint">软件只更新本机加盐哈希，不保存可找回的明文口令。</p>
+        <p v-if="passwordDialog.error" class="password-dialog-error" role="alert">{{ passwordDialog.error }}</p>
+      </el-form>
+      <template #footer>
+        <el-button @click="passwordDialog.visible = false">取消</el-button>
+        <el-button type="primary" :loading="passwordDialog.submitting" :disabled="!canChangePassword" @click="changePassword">
+          更新口令
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
 import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
+import { ElMessage } from 'element-plus'
 import AccessGate from '@/components/AccessGate.vue'
+import DesktopStatusBar from '@/components/DesktopStatusBar.vue'
 import { authApi } from '@/api/auth'
 import {
   HomeFilled, User, DataAnalysis,
-  Fold, Picture, Upload, CollectionTag, MagicStick, DocumentCopy, Aim, Setting
+  Fold, Picture, Upload, CollectionTag, MagicStick, DocumentCopy, Aim, Setting,
+  View, UserFilled, ArrowDown
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
@@ -113,8 +181,25 @@ const authState = reactive({
   loading: true,
   required: false,
   authenticated: false,
+  setupRequired: false,
+  mode: 'disabled',
   error: ''
 })
+const passwordDialog = reactive({
+  visible: false,
+  current: '',
+  next: '',
+  confirmation: '',
+  submitting: false,
+  error: ''
+})
+const canChangePassword = computed(() => Boolean(
+  passwordDialog.current
+  && passwordDialog.next
+  && passwordDialog.confirmation
+  && !passwordDialog.submitting
+))
+const desktopMode = ref(false)
 
 // 当前激活的菜单项
 const activeMenu = computed(() => {
@@ -144,6 +229,9 @@ const loadAuthStatus = async () => {
     const response = await authApi.getStatus()
     authState.required = Boolean(response.data?.required)
     authState.authenticated = Boolean(response.data?.authenticated)
+    authState.setupRequired = Boolean(response.data?.setup_required)
+    authState.mode = String(response.data?.mode || 'disabled')
+    desktopMode.value = desktopMode.value || authState.mode === 'desktop_local'
   } catch (error) {
     authState.error = error?.response?.data?.msg || error?.message || '检查后端服务后重试'
   } finally {
@@ -154,6 +242,7 @@ const loadAuthStatus = async () => {
 const handleAuthenticated = () => {
   authState.required = true
   authState.authenticated = true
+  authState.setupRequired = false
   authState.error = ''
 }
 
@@ -161,6 +250,52 @@ const handleAuthRequired = () => {
   authState.loading = false
   authState.required = true
   authState.authenticated = false
+}
+
+const handleDesktopStatus = (status) => {
+  desktopMode.value = Boolean(status?.desktop)
+}
+
+const resetPasswordDialog = () => {
+  passwordDialog.current = ''
+  passwordDialog.next = ''
+  passwordDialog.confirmation = ''
+  passwordDialog.submitting = false
+  passwordDialog.error = ''
+}
+
+const handleOperatorCommand = async (command) => {
+  if (command === 'change-password') {
+    passwordDialog.visible = true
+    return
+  }
+  if (command !== 'logout') return
+  try {
+    await authApi.logout()
+    authState.authenticated = false
+    authState.setupRequired = false
+  } catch (error) {
+    ElMessage.error(error?.response?.data?.msg || error?.message || '退出失败')
+  }
+}
+
+const changePassword = async () => {
+  if (!canChangePassword.value) return
+  if (passwordDialog.next !== passwordDialog.confirmation) {
+    passwordDialog.error = '两次输入的新口令不一致'
+    return
+  }
+  passwordDialog.submitting = true
+  passwordDialog.error = ''
+  try {
+    await authApi.changePassword(passwordDialog.current, passwordDialog.next)
+    ElMessage.success('本机管理员口令已更新')
+    passwordDialog.visible = false
+  } catch (error) {
+    passwordDialog.error = error?.response?.data?.msg || error?.message || '口令更新失败'
+  } finally {
+    passwordDialog.submitting = false
+  }
 }
 
 onMounted(() => {
@@ -373,6 +508,10 @@ onBeforeUnmount(() => {
     }
     
     .header-right {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+
       .user-dropdown {
         display: flex;
         align-items: center;
@@ -388,9 +527,49 @@ onBeforeUnmount(() => {
           color: $text-secondary;
         }
       }
+
+      .operator-button {
+        display: inline-flex;
+        height: 42px;
+        align-items: center;
+        gap: 6px;
+        padding: 0 11px;
+        border: 1px solid var(--geo-line);
+        border-radius: 10px;
+        background: #fff;
+        color: var(--geo-ink);
+        cursor: pointer;
+        font-size: 12px;
+
+        &:hover,
+        &:focus-visible {
+          border-color: #a9b5b5;
+          background: var(--geo-soft);
+        }
+
+        &:focus-visible {
+          outline: 2px solid rgba(13, 92, 99, 0.25);
+          outline-offset: 2px;
+        }
+
+        .operator-chevron {
+          color: var(--geo-muted);
+          font-size: 10px;
+        }
+      }
     }
   }
 }
+
+.password-dialog-hint,
+.password-dialog-error {
+  margin: -2px 0 0;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.password-dialog-hint { color: var(--geo-muted); }
+.password-dialog-error { margin-top: 9px; color: #b42318; }
 
 .el-main {
   width: 100%;
@@ -408,6 +587,11 @@ onBeforeUnmount(() => {
 
   .workspace-label {
     font-size: 12px !important;
+  }
+
+  .operator-button span,
+  .operator-chevron {
+    display: none;
   }
 
   .el-main {

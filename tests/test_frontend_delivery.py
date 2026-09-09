@@ -131,8 +131,11 @@ class FrontendDeliveryTests(unittest.TestCase):
         )
 
         self.assertIn("<AccessGate", app)
-        self.assertIn("运营访问口令", gate)
-        self.assertIn('autocomplete="current-password"', gate)
+        self.assertIn("管理员口令", gate)
+        self.assertIn("authApi.setup(password.value)", gate)
+        self.assertIn("authApi.login(password.value)", gate)
+        self.assertIn("'new-password' : 'current-password'", gate)
+        self.assertIn('autocomplete="new-password"', gate)
         self.assertNotIn("localStorage", gate)
         self.assertIn("withCredentials: true", request)
         self.assertIn("geo-auth-required", request)

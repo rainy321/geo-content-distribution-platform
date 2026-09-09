@@ -9,6 +9,7 @@ import ContentCreation from '../views/ContentCreation.vue'
 import ContentLibrary from '../views/ContentLibrary.vue'
 import GeoOptimization from '../views/GeoOptimization.vue'
 import SystemSettings from '../views/SystemSettings.vue'
+import AiVisibility from '../views/AiVisibility.vue'
 
 const routes = [
   {
@@ -40,6 +41,11 @@ const routes = [
     path: '/geo-optimize',
     name: 'GeoOptimization',
     component: GeoOptimization
+  },
+  {
+    path: '/ai-visibility',
+    name: 'AiVisibility',
+    component: AiVisibility
   },
   {
     path: '/material-management',

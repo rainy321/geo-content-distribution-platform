@@ -43,6 +43,7 @@ class DashboardApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         data = response.get_json()["data"]
+        self.assertEqual(data["summary"]["project_count"], 1)
         self.assertIn("today_generated", data["summary"])
         self.assertEqual(len(data["trend"]), 7)
         self.assertEqual(len(data["platforms"]), 10)
