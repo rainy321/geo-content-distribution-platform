@@ -53,6 +53,7 @@ test('reference-led dashboard keeps real data language and wired product routes'
   assert.match(source, /router\.push\('\/ai-visibility'\)/)
   assert.match(source, /创建第一个品牌项目/)
   assert.match(source, /无需先连接媒体账号，也不会触发真实发布/)
+  assert.match(source, /@media \(max-width:1600px\)/)
   assert.match(chart, /<canvas/)
   assert.match(chart, /ResizeObserver/)
 })

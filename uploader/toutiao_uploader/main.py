@@ -1009,10 +1009,10 @@ class TouTiaoArticle(object):
                             const t = (node.innerText || node.textContent || '').replace(/\\s+/g, ' ').trim();
                             if (!t || t.length > 50) continue;
                             const normalize = (value) => String(value || '')
-                                .replace(/\s+/g, '')
+                                .replace(/\\s+/g, '')
                                 .replace(/^#+|#+$/g, '')
                                 .toLowerCase();
-                            const match = t.match(/#\s*([^#]+?)\s*#/);
+                            const match = t.match(/#\\s*([^#]+?)\\s*#/);
                             const topicName = match ? match[1] : t;
                             if (normalize(topicName) !== normalize(needle)) continue;
                             const cls = String(node.className || '');

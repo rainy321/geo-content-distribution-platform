@@ -33,7 +33,7 @@ The existing repository logo asset is used rather than recreating the reference 
 
 ## Responsive and revision history
 
-The first 1536 x 1024 pass matched the reference hierarchy without actionable visual defects. A separate narrow-window review identified that the original two-column breakpoint could make the hero/card relationship too tight at common EXE widths. The breakpoint was moved to 1320 px. The subsequent 1280 x 800 capture verifies a clean single-column stack with no horizontal clipping. This P2 layout risk is fixed.
+The first browser-based 1536 x 1024 pass matched the reference hierarchy. The packaged EXE review then exposed an important desktop-shell difference: the persistent sidebar leaves less usable content width than a standalone browser viewport, so a 1320 px page breakpoint could still clip the signal card on a 1550 px Windows desktop. The final breakpoint is therefore 1600 px. At ordinary laptop widths the hero and live-signal card form a clean single-column stack; wider desktop windows retain the reference's two-column relationship. This packaged-window clipping risk is fixed.
 
 ## Remaining visual differences
 
