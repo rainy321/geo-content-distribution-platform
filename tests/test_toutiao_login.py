@@ -1,12 +1,19 @@
 import ast
 import inspect
+import json
+import sqlite3
 import sys
+import tempfile
+import threading
 import unittest
+from contextlib import closing
+from pathlib import Path
 from queue import Queue
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import myUtils.login as login_module
+from db.createTable import initialize_database
 from myUtils.login import (
     _safe_login_log,
     toutiao_cookie_gen,
@@ -64,6 +71,59 @@ class _FakePage:
             self._index += 1
 
 
+class _CancelablePage:
+    def __init__(self, cancel_event):
+        self.url = "https://mp.toutiao.com/auth/page/login"
+        self.cancel_event = cancel_event
+        self.closed = False
+
+    async def goto(self, *_args, **_kwargs):
+        return None
+
+    async def wait_for_timeout(self, _milliseconds):
+        self.cancel_event.set()
+
+    async def close(self):
+        self.closed = True
+
+
+class _CancelableContext:
+    def __init__(self, page):
+        self.page = page
+        self.closed = False
+        self.storage_state_calls = []
+
+    async def new_page(self):
+        return self.page
+
+    async def storage_state(self, **kwargs):
+        self.storage_state_calls.append(kwargs)
+
+    async def close(self):
+        self.closed = True
+
+
+class _CancelableBrowser:
+    def __init__(self, context):
+        self.context = context
+        self.closed = False
+
+    async def new_context(self):
+        return self.context
+
+    async def close(self):
+        self.closed = True
+
+
+class _CancellableQueue(Queue):
+    protocol_version = 2
+    existing_account_id = None
+
+    def __init__(self):
+        super().__init__()
+        self.cancel_event = threading.Event()
+
+
 class ToutiaoLoginWaiterTests(unittest.IsolatedAsyncioTestCase):
     def test_manual_login_default_is_ten_minutes(self):
         waiter_timeout = inspect.signature(
@@ -114,6 +174,70 @@ class ToutiaoLoginWaiterTests(unittest.IsolatedAsyncioTestCase):
                 page,
                 timeout_seconds=-1,
             )
+
+    async def test_cancel_signal_stops_waiter_without_waiting_for_timeout(self):
+        cancel_event = threading.Event()
+        page = _CancelablePage(cancel_event)
+
+        result = await wait_for_toutiao_creator_backend(
+            page,
+            timeout_seconds=600,
+            cancel_event=cancel_event,
+        )
+
+        self.assertFalse(result)
+        self.assertTrue(cancel_event.is_set())
+
+    async def test_cancel_closes_browser_and_never_saves_cookie_or_account(self):
+        temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary_directory.cleanup)
+        root = Path(temporary_directory.name)
+        database_path = root / "geo.db"
+        cookies_directory = root / "cookies"
+        initialize_database(database_path)
+        status_queue = _CancellableQueue()
+        page = _CancelablePage(status_queue.cancel_event)
+        context = _CancelableContext(page)
+        browser = _CancelableBrowser(context)
+        launch = AsyncMock(return_value=browser)
+        playwright = SimpleNamespace(chromium=SimpleNamespace(launch=launch))
+
+        with patch(
+            "myUtils.login.async_playwright",
+            return_value=_FakePlaywrightContext(playwright),
+        ), patch(
+            "myUtils.login.set_init_script",
+            new=AsyncMock(return_value=context),
+        ), patch(
+            "myUtils.login.check_cookie",
+            new=AsyncMock(),
+        ) as check_cookie:
+            result = await toutiao_cookie_gen(
+                "cancelled-account",
+                status_queue,
+                database_path=database_path,
+                cookies_directory=cookies_directory,
+                timeout_seconds=600,
+            )
+
+        self.assertIsNone(result)
+        self.assertTrue(page.closed)
+        self.assertTrue(context.closed)
+        self.assertTrue(browser.closed)
+        self.assertEqual(context.storage_state_calls, [])
+        check_cookie.assert_not_awaited()
+        with closing(sqlite3.connect(database_path)) as connection:
+            self.assertEqual(
+                connection.execute("SELECT COUNT(*) FROM user_info").fetchone()[0],
+                0,
+            )
+        self.assertFalse(cookies_directory.exists())
+        events = []
+        while not status_queue.empty():
+            events.append(status_queue.get_nowait())
+        self.assertEqual(events[0], "MANUAL_LOGIN")
+        self.assertEqual(json.loads(events[1])["code"], "operator_cancelled")
+        self.assertEqual(events[2], "500")
 
 
 class LoginDiagnosticSafetyTests(unittest.IsolatedAsyncioTestCase):

@@ -10,7 +10,6 @@ from utils.base_social_media import set_init_script
 import uuid
 from pathlib import Path
 from conf import BASE_DIR, LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
-from uploader.bilibili_uploader.runtime import run_biliup_command
 
 
 _ZHIHU_LOGIN_ERROR_MESSAGES = {
@@ -134,6 +133,7 @@ def _safe_login_log(
         "login_started",
         "login_timeout",
         "navigation_retry",
+        "operator_cancelled",
         "qr_loaded",
         "session_id_created",
         "terminal_open_failed",
@@ -165,6 +165,83 @@ def _safe_login_log(
         # replace the actual browser, database, or platform outcome.
         return
 
+
+def _login_cancelled(status_queue) -> bool:
+    cancel_event = getattr(status_queue, "cancel_event", None)
+    return bool(cancel_event is not None and cancel_event.is_set())
+
+
+def _queue_login_cancelled(status_queue, platform: str) -> None:
+    """Finish a cooperatively cancelled login without storing credentials."""
+
+    _safe_login_log(platform, "operator_cancelled", level="warning")
+    _queue_login_event(
+        status_queue,
+        "error",
+        code="operator_cancelled",
+        message="已结束本次登录等待",
+        action="无需操作",
+    )
+    status_queue.put("500")
+
+
+def _discard_unregistered_login_file(account_file) -> None:
+    """Remove a credential file that was created by the current login attempt."""
+
+    if account_file is None:
+        return
+    try:
+        Path(account_file).unlink(missing_ok=True)
+    except OSError as exc:
+        # The database must still remain untouched.  Log only the exception type;
+        # credential paths and contents are deliberately excluded.
+        _safe_login_log("unknown", "login_failed", level="error", error=exc)
+
+
+def _terminate_owned_login_process(process) -> None:
+    """Best-effort stop of exactly the child process started for this login."""
+
+    if process is None:
+        return
+    try:
+        if process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except Exception:
+                # Escalation still targets only the Popen handle created above.
+                if process.poll() is None:
+                    process.kill()
+    except Exception:
+        # Never fall back to process-name based termination: that could close an
+        # unrelated browser or another account owner's login window.
+        return
+
+
+async def _wait_for_owned_login_process(
+    process,
+    *,
+    cancel_event=None,
+    timeout_seconds=30,
+    poll_interval_seconds=0.1,
+):
+    """Wait for one owned child without blocking cooperative cancellation."""
+
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + max(0.1, float(timeout_seconds))
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            _terminate_owned_login_process(process)
+            return None
+        returncode = process.poll()
+        if returncode is not None:
+            return int(returncode)
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            _terminate_owned_login_process(process)
+            return None
+        await asyncio.sleep(min(float(poll_interval_seconds), remaining))
+
 # 统一获取浏览器启动配置（防风控+引入本地浏览器）
 def get_browser_options():
     options = {
@@ -190,6 +267,7 @@ async def wait_for_toutiao_creator_backend(
     *,
     timeout_seconds=600,
     poll_interval_seconds=1,
+    cancel_event=None,
 ):
     """Detect Toutiao's SPA login transition without waiting for page load."""
 
@@ -198,8 +276,37 @@ async def wait_for_toutiao_creator_backend(
     loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout_seconds
     while True:
+        if cancel_event is not None and cancel_event.is_set():
+            return False
         current_url = str(page.url or "")
         if "/profile_v4" in current_url and "/auth/page/login" not in current_url:
+            return True
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            return False
+        await page.wait_for_timeout(
+            max(1, int(min(poll_interval_seconds, remaining) * 1000))
+        )
+
+
+async def _wait_for_url_condition(
+    page,
+    predicate,
+    *,
+    timeout_seconds=200,
+    poll_interval_seconds=0.5,
+    cancel_event=None,
+):
+    """Poll a headed login URL so an operator cancel closes Chrome promptly."""
+
+    if timeout_seconds < 0 or poll_interval_seconds <= 0:
+        raise ValueError("等待时间必须为非负数，轮询间隔必须大于 0")
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout_seconds
+    while True:
+        if cancel_event is not None and cancel_event.is_set():
+            return False
+        if predicate(str(page.url or "")):
             return True
         remaining = deadline - loop.time()
         if remaining <= 0:
@@ -217,6 +324,7 @@ async def _wait_for_interactive_login(
     authenticated_cookie_names=(),
     authenticated_url_fragments=(),
     timeout_seconds=600,
+    cancel_event=None,
 ):
     """Wait for a headed login without relying on a single navigation event."""
 
@@ -224,12 +332,16 @@ async def _wait_for_interactive_login(
     deadline = loop.time() + max(30, int(timeout_seconds))
     cookie_markers = {str(name) for name in authenticated_cookie_names}
     while loop.time() < deadline:
+        if cancel_event is not None and cancel_event.is_set():
+            return False
         current_url = str(page.url or "")
         if any(fragment in current_url for fragment in authenticated_url_fragments):
             return True
         cookie_names = {
             str(item.get("name") or "") for item in await context.cookies()
         }
+        if cancel_event is not None and cancel_event.is_set():
+            return False
         if cookie_markers.intersection(cookie_names):
             return True
         # Some creator centers complete login via an SPA route that does not emit
@@ -247,65 +359,112 @@ async def douyin_cookie_gen(
     id, status_queue, *, database_path=None, cookies_directory=None,
     timeout_seconds=600,
 ):
-    async with async_playwright() as playwright:
-        options = get_browser_options()
-        options["headless"] = False
-        # Login must stay visible so the account owner can complete QR/security checks.
-        browser = await playwright.chromium.launch(**options)
-        # Setup context however you like.
-        context = await browser.new_context()  # Pass any options
-        context = await set_init_script(context)
-        # Pause the page, and start recording manually.
-        page = await context.new_page()
-        await page.goto("https://creator.douyin.com/")
-        original_url = page.url
-        img_locator = page.get_by_role("img", name="二维码")
-        # 获取 src 属性值
-        src = await img_locator.get_attribute("src")
-        _safe_login_log("douyin", "qr_loaded", level="success")
-        status_queue.put(src)
-        authenticated = await _wait_for_interactive_login(
-            page,
-            context,
-            original_url=original_url,
-            authenticated_cookie_names=("sessionid", "sessionid_ss", "sid_guard"),
-            authenticated_url_fragments=("/creator-micro/",),
-            timeout_seconds=timeout_seconds,
-        )
-        if not authenticated:
-            _safe_login_log("douyin", "login_timeout", level="warning")
-            await page.close()
-            await context.close()
-            await browser.close()
-            status_queue.put("500")
+    browser = None
+    context = None
+    page = None
+    account_file = None
+    database_saved = False
+    try:
+        if _login_cancelled(status_queue):
+            _queue_login_cancelled(status_queue, "douyin")
             return None
-        uuid_v1 = uuid.uuid1()
-        _safe_login_log("douyin", "session_id_created")
-        # 确保cookiesFile目录存在
-        cookies_dir = _login_cookies_directory(cookies_directory)
-        cookies_dir.mkdir(parents=True, exist_ok=True)
-        await context.storage_state(path=cookies_dir / f"{uuid_v1}.json")
-        result = await check_cookie(
-            3, f"{uuid_v1}.json", cookies_directory=cookies_dir
-        )
-        if not result:
-            status_queue.put("500")
-            await page.close()
-            await context.close()
-            await browser.close()
-            return None
-        await page.close()
-        await context.close()
-        await browser.close()
-        with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                                INSERT INTO user_info (type, filePath, userName, status)
-                                VALUES (?, ?, ?, ?)
-                                ''', (3, f"{uuid_v1}.json", id, 1))
-            conn.commit()
-            _safe_login_log("douyin", "account_saved", level="success")
-        status_queue.put("200")
+        async with async_playwright() as playwright:
+            options = get_browser_options()
+            options["headless"] = False
+            browser = await playwright.chromium.launch(**options)
+            context = await browser.new_context()
+            context = await set_init_script(context)
+            page = await context.new_page()
+            await page.goto("https://creator.douyin.com/")
+            original_url = page.url
+            img_locator = page.get_by_role("img", name="二维码")
+            src = await img_locator.get_attribute("src")
+            _safe_login_log("douyin", "qr_loaded", level="success")
+            status_queue.put(src)
+            authenticated = await _wait_for_interactive_login(
+                page,
+                context,
+                original_url=original_url,
+                authenticated_cookie_names=("sessionid", "sessionid_ss", "sid_guard"),
+                authenticated_url_fragments=("/creator-micro/",),
+                timeout_seconds=timeout_seconds,
+                cancel_event=getattr(status_queue, "cancel_event", None),
+            )
+            if not authenticated:
+                if _login_cancelled(status_queue):
+                    _queue_login_cancelled(status_queue, "douyin")
+                else:
+                    _safe_login_log("douyin", "login_timeout", level="warning")
+                    status_queue.put("500")
+                return None
+            if _login_cancelled(status_queue):
+                _queue_login_cancelled(status_queue, "douyin")
+                return None
+
+            uuid_v1 = uuid.uuid1()
+            file_name = f"{uuid_v1}.json"
+            _safe_login_log("douyin", "session_id_created")
+            cookies_dir = _login_cookies_directory(cookies_directory)
+            cookies_dir.mkdir(parents=True, exist_ok=True)
+            account_file = cookies_dir / file_name
+            if _login_cancelled(status_queue):
+                _queue_login_cancelled(status_queue, "douyin")
+                return None
+            await context.storage_state(path=account_file)
+            if _login_cancelled(status_queue):
+                _queue_login_cancelled(status_queue, "douyin")
+                return None
+
+            result = await check_cookie(
+                3, file_name, cookies_directory=cookies_dir
+            )
+            if _login_cancelled(status_queue):
+                _queue_login_cancelled(status_queue, "douyin")
+                return None
+            if not result:
+                status_queue.put("500")
+                return None
+
+            with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                if _login_cancelled(status_queue):
+                    conn.rollback()
+                    _queue_login_cancelled(status_queue, "douyin")
+                    return None
+                conn.execute(
+                    """
+                    INSERT INTO user_info (type, filePath, userName, status)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (3, file_name, id, 1),
+                )
+                if _login_cancelled(status_queue):
+                    conn.rollback()
+                    _queue_login_cancelled(status_queue, "douyin")
+                    return None
+                conn.commit()
+                database_saved = True
+                _safe_login_log("douyin", "account_saved", level="success")
+            status_queue.put("200")
+            return True
+    finally:
+        if account_file is not None and not database_saved:
+            _discard_unregistered_login_file(account_file)
+        try:
+            if page:
+                await page.close()
+        except Exception:
+            pass
+        try:
+            if context:
+                await context.close()
+        except Exception:
+            pass
+        try:
+            if browser:
+                await browser.close()
+        except Exception:
+            pass
 
 
 # 视频号登录
@@ -313,145 +472,234 @@ async def get_tencent_cookie(
     id, status_queue, *, database_path=None, cookies_directory=None,
     timeout_seconds=600,
 ):
-    async with async_playwright() as playwright:
-        options = get_browser_options()
-        options['args'] = ['--lang=en-GB']
-        options['headless'] = False
-        # Make sure to run headed.
-        browser = await playwright.chromium.launch(**options)
-        # Setup context however you like.
-        context = await browser.new_context()  # Pass any options
-        # Pause the page, and start recording manually.
-        context = await set_init_script(context)
-        page = await context.new_page()
-        await page.goto("https://channels.weixin.qq.com")
-        original_url = page.url
-
-        # 等待 iframe 出现（最多等 60 秒）
-        iframe_locator = page.frame_locator("iframe").first
-
-        # 获取 iframe 中的第一个 img 元素
-        img_locator = iframe_locator.get_by_role("img").first
-
-        # 获取 src 属性值
-        src = await img_locator.get_attribute("src")
-        _safe_login_log("weixin_channels", "qr_loaded", level="success")
-        status_queue.put(src)
-
-        authenticated = await _wait_for_interactive_login(
-            page,
-            context,
-            original_url=original_url,
-            authenticated_cookie_names=("wxuin", "data_ticket", "ticket"),
-            authenticated_url_fragments=("/platform/",),
-            timeout_seconds=timeout_seconds,
-        )
-        if not authenticated:
-            status_queue.put("500")
-            _safe_login_log("weixin_channels", "login_timeout", level="warning")
-            await page.close()
-            await context.close()
-            await browser.close()
+    browser = None
+    context = None
+    page = None
+    account_file = None
+    database_saved = False
+    try:
+        if _login_cancelled(status_queue):
+            _queue_login_cancelled(status_queue, "weixin_channels")
             return None
-        uuid_v1 = uuid.uuid1()
-        _safe_login_log("weixin_channels", "session_id_created")
-        # 确保cookiesFile目录存在
-        cookies_dir = _login_cookies_directory(cookies_directory)
-        cookies_dir.mkdir(parents=True, exist_ok=True)
-        await context.storage_state(path=cookies_dir / f"{uuid_v1}.json")
-        result = await check_cookie(
-            2, f"{uuid_v1}.json", cookies_directory=cookies_dir
-        )
-        if not result:
-            status_queue.put("500")
-            await page.close()
-            await context.close()
-            await browser.close()
-            return None
-        await page.close()
-        await context.close()
-        await browser.close()
+        async with async_playwright() as playwright:
+            options = get_browser_options()
+            options['args'] = ['--lang=en-GB']
+            options['headless'] = False
+            browser = await playwright.chromium.launch(**options)
+            context = await browser.new_context()
+            context = await set_init_script(context)
+            page = await context.new_page()
+            await page.goto("https://channels.weixin.qq.com")
+            original_url = page.url
+            iframe_locator = page.frame_locator("iframe").first
+            img_locator = iframe_locator.get_by_role("img").first
+            src = await img_locator.get_attribute("src")
+            _safe_login_log("weixin_channels", "qr_loaded", level="success")
+            status_queue.put(src)
 
-        with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                                INSERT INTO user_info (type, filePath, userName, status)
-                                VALUES (?, ?, ?, ?)
-                                ''', (2, f"{uuid_v1}.json", id, 1))
-            conn.commit()
-            _safe_login_log("weixin_channels", "account_saved", level="success")
-        status_queue.put("200")
+            authenticated = await _wait_for_interactive_login(
+                page,
+                context,
+                original_url=original_url,
+                authenticated_cookie_names=("wxuin", "data_ticket", "ticket"),
+                authenticated_url_fragments=("/platform/",),
+                timeout_seconds=timeout_seconds,
+                cancel_event=getattr(status_queue, "cancel_event", None),
+            )
+            if not authenticated:
+                if _login_cancelled(status_queue):
+                    _queue_login_cancelled(status_queue, "weixin_channels")
+                else:
+                    status_queue.put("500")
+                    _safe_login_log(
+                        "weixin_channels", "login_timeout", level="warning"
+                    )
+                return None
+            if _login_cancelled(status_queue):
+                _queue_login_cancelled(status_queue, "weixin_channels")
+                return None
+
+            uuid_v1 = uuid.uuid1()
+            file_name = f"{uuid_v1}.json"
+            _safe_login_log("weixin_channels", "session_id_created")
+            cookies_dir = _login_cookies_directory(cookies_directory)
+            cookies_dir.mkdir(parents=True, exist_ok=True)
+            account_file = cookies_dir / file_name
+            if _login_cancelled(status_queue):
+                _queue_login_cancelled(status_queue, "weixin_channels")
+                return None
+            await context.storage_state(path=account_file)
+            if _login_cancelled(status_queue):
+                _queue_login_cancelled(status_queue, "weixin_channels")
+                return None
+
+            result = await check_cookie(
+                2, file_name, cookies_directory=cookies_dir
+            )
+            if _login_cancelled(status_queue):
+                _queue_login_cancelled(status_queue, "weixin_channels")
+                return None
+            if not result:
+                status_queue.put("500")
+                return None
+
+            with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                if _login_cancelled(status_queue):
+                    conn.rollback()
+                    _queue_login_cancelled(status_queue, "weixin_channels")
+                    return None
+                conn.execute(
+                    """
+                    INSERT INTO user_info (type, filePath, userName, status)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (2, file_name, id, 1),
+                )
+                if _login_cancelled(status_queue):
+                    conn.rollback()
+                    _queue_login_cancelled(status_queue, "weixin_channels")
+                    return None
+                conn.commit()
+                database_saved = True
+                _safe_login_log(
+                    "weixin_channels", "account_saved", level="success"
+                )
+            status_queue.put("200")
+            return True
+    finally:
+        if account_file is not None and not database_saved:
+            _discard_unregistered_login_file(account_file)
+        try:
+            if page:
+                await page.close()
+        except Exception:
+            pass
+        try:
+            if context:
+                await context.close()
+        except Exception:
+            pass
+        try:
+            if browser:
+                await browser.close()
+        except Exception:
+            pass
 
 # 快手登录
 async def get_ks_cookie(
     id, status_queue, *, database_path=None, cookies_directory=None,
     timeout_seconds=600,
 ):
-    async with async_playwright() as playwright:
-        options = get_browser_options()
-        options['args'] = ['--lang=en-GB']
-        options['headless'] = False
-        # Make sure to run headed.
-        browser = await playwright.chromium.launch(**options)
-        # Setup context however you like.
-        context = await browser.new_context()  # Pass any options
-        context = await set_init_script(context)
-        # Pause the page, and start recording manually.
-        page = await context.new_page()
-        await page.goto("https://cp.kuaishou.com")
-
-        # 定位并点击“立即登录”按钮（类型为 link）
-        await page.get_by_role("link", name="立即登录").click()
-        await page.get_by_text("扫码登录").click()
-        img_locator = page.get_by_role("img", name="qrcode")
-        # 获取 src 属性值
-        src = await img_locator.get_attribute("src")
-        original_url = page.url
-        _safe_login_log("kuaishou", "qr_loaded", level="success")
-        status_queue.put(src)
-        authenticated = await _wait_for_interactive_login(
-            page,
-            context,
-            original_url=original_url,
-            authenticated_cookie_names=("userId", "kuaishou.server.web_st"),
-            authenticated_url_fragments=("/profile", "/article/", "/dashboard"),
-            timeout_seconds=timeout_seconds,
-        )
-        if not authenticated:
-            status_queue.put("500")
-            _safe_login_log("kuaishou", "login_timeout", level="warning")
-            await page.close()
-            await context.close()
-            await browser.close()
+    browser = None
+    context = None
+    page = None
+    account_file = None
+    database_saved = False
+    try:
+        if _login_cancelled(status_queue):
+            _queue_login_cancelled(status_queue, "kuaishou")
             return None
-        uuid_v1 = uuid.uuid1()
-        _safe_login_log("kuaishou", "session_id_created")
-        # 确保cookiesFile目录存在
-        cookies_dir = _login_cookies_directory(cookies_directory)
-        cookies_dir.mkdir(parents=True, exist_ok=True)
-        await context.storage_state(path=cookies_dir / f"{uuid_v1}.json")
-        result = await check_cookie(
-            4, f"{uuid_v1}.json", cookies_directory=cookies_dir
-        )
-        if not result:
-            status_queue.put("500")
-            await page.close()
-            await context.close()
-            await browser.close()
-            return None
-        await page.close()
-        await context.close()
-        await browser.close()
+        async with async_playwright() as playwright:
+            options = get_browser_options()
+            options['args'] = ['--lang=en-GB']
+            options['headless'] = False
+            browser = await playwright.chromium.launch(**options)
+            context = await browser.new_context()
+            context = await set_init_script(context)
+            page = await context.new_page()
+            await page.goto("https://cp.kuaishou.com")
+            await page.get_by_role("link", name="立即登录").click()
+            await page.get_by_text("扫码登录").click()
+            img_locator = page.get_by_role("img", name="qrcode")
+            src = await img_locator.get_attribute("src")
+            original_url = page.url
+            _safe_login_log("kuaishou", "qr_loaded", level="success")
+            status_queue.put(src)
+            authenticated = await _wait_for_interactive_login(
+                page,
+                context,
+                original_url=original_url,
+                authenticated_cookie_names=("userId", "kuaishou.server.web_st"),
+                authenticated_url_fragments=("/profile", "/article/", "/dashboard"),
+                timeout_seconds=timeout_seconds,
+                cancel_event=getattr(status_queue, "cancel_event", None),
+            )
+            if not authenticated:
+                if _login_cancelled(status_queue):
+                    _queue_login_cancelled(status_queue, "kuaishou")
+                else:
+                    status_queue.put("500")
+                    _safe_login_log("kuaishou", "login_timeout", level="warning")
+                return None
+            if _login_cancelled(status_queue):
+                _queue_login_cancelled(status_queue, "kuaishou")
+                return None
 
-        with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                                        INSERT INTO user_info (type, filePath, userName, status)
-                                        VALUES (?, ?, ?, ?)
-                                        ''', (4, f"{uuid_v1}.json", id, 1))
-            conn.commit()
-            _safe_login_log("kuaishou", "account_saved", level="success")
-        status_queue.put("200")
+            uuid_v1 = uuid.uuid1()
+            file_name = f"{uuid_v1}.json"
+            _safe_login_log("kuaishou", "session_id_created")
+            cookies_dir = _login_cookies_directory(cookies_directory)
+            cookies_dir.mkdir(parents=True, exist_ok=True)
+            account_file = cookies_dir / file_name
+            if _login_cancelled(status_queue):
+                _queue_login_cancelled(status_queue, "kuaishou")
+                return None
+            await context.storage_state(path=account_file)
+            if _login_cancelled(status_queue):
+                _queue_login_cancelled(status_queue, "kuaishou")
+                return None
+
+            result = await check_cookie(
+                4, file_name, cookies_directory=cookies_dir
+            )
+            if _login_cancelled(status_queue):
+                _queue_login_cancelled(status_queue, "kuaishou")
+                return None
+            if not result:
+                status_queue.put("500")
+                return None
+
+            with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                if _login_cancelled(status_queue):
+                    conn.rollback()
+                    _queue_login_cancelled(status_queue, "kuaishou")
+                    return None
+                conn.execute(
+                    """
+                    INSERT INTO user_info (type, filePath, userName, status)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (4, file_name, id, 1),
+                )
+                if _login_cancelled(status_queue):
+                    conn.rollback()
+                    _queue_login_cancelled(status_queue, "kuaishou")
+                    return None
+                conn.commit()
+                database_saved = True
+                _safe_login_log("kuaishou", "account_saved", level="success")
+            status_queue.put("200")
+            return True
+    finally:
+        if account_file is not None and not database_saved:
+            _discard_unregistered_login_file(account_file)
+        try:
+            if page:
+                await page.close()
+        except Exception:
+            pass
+        try:
+            if context:
+                await context.close()
+        except Exception:
+            pass
+        try:
+            if browser:
+                await browser.close()
+        except Exception:
+            pass
 
 # 小红书登录
 async def xiaohongshu_cookie_gen(
@@ -469,27 +717,43 @@ async def xiaohongshu_cookie_gen(
     cookies_dir = _login_cookies_directory(cookies_directory)
     cookies_dir.mkdir(parents=True, exist_ok=True)
     account_file = cookies_dir / file_name
+    database_saved = False
 
     try:
+        if _login_cancelled(status_queue):
+            _queue_login_cancelled(status_queue, "xiaohongshu")
+            return None
         result = await run_xiaohongshu_login(
             str(account_file),
             headless=False,
         )
+        if _login_cancelled(status_queue):
+            _queue_login_cancelled(status_queue, "xiaohongshu")
+            return None
         if not result.get("success"):
             _safe_login_log("xiaohongshu", "login_rejected", level="warning")
             status_queue.put("500")
             return None
 
         with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
+            conn.execute("BEGIN IMMEDIATE")
+            if _login_cancelled(status_queue):
+                conn.rollback()
+                _queue_login_cancelled(status_queue, "xiaohongshu")
+                return None
+            conn.execute(
                 """
                 INSERT INTO user_info (type, filePath, userName, status)
                 VALUES (?, ?, ?, ?)
                 """,
                 (1, file_name, id, 1),
             )
+            if _login_cancelled(status_queue):
+                conn.rollback()
+                _queue_login_cancelled(status_queue, "xiaohongshu")
+                return None
             conn.commit()
+            database_saved = True
             _safe_login_log("xiaohongshu", "account_saved", level="success")
         status_queue.put("200")
         return True
@@ -497,16 +761,23 @@ async def xiaohongshu_cookie_gen(
         _safe_login_log("xiaohongshu", "login_failed", level="error", error=exc)
         status_queue.put("500")
         return None
+    finally:
+        if not database_saved:
+            _discard_unregistered_login_file(account_file)
 
 # 百家号登录（手动登录，非二维码）
 async def baijiahao_cookie_gen(
-    id, status_queue, *, database_path=None, cookies_directory=None
+    id, status_queue, *, database_path=None, cookies_directory=None,
+    timeout_seconds=200,
 ):
     browser = None
     context = None
     page = None
     try:
         status_queue.put("MANUAL_LOGIN")
+        if _login_cancelled(status_queue):
+            _queue_login_cancelled(status_queue, "baijiahao")
+            return None
         _safe_login_log("baijiahao", "login_started")
         async with async_playwright() as playwright:
             options = get_browser_options()
@@ -521,22 +792,39 @@ async def baijiahao_cookie_gen(
                 wait_until="domcontentloaded",
             )
             _safe_login_log("baijiahao", "login_page_opened")
-            try:
-                await page.wait_for_url(
-                    "https://baijiahao.baidu.com/builder/rc/**",
-                    timeout=200_000,
-                )
+            authenticated = await _wait_for_url_condition(
+                page,
+                lambda url: (
+                    "baijiahao.baidu.com/builder/rc/" in url
+                    and "/login" not in url.lower()
+                ),
+                timeout_seconds=timeout_seconds,
+                cancel_event=getattr(status_queue, "cancel_event", None),
+            )
+            if authenticated:
                 _safe_login_log("baijiahao", "identity_confirmed", level="success")
-            except asyncio.TimeoutError:
+            else:
+                if _login_cancelled(status_queue):
+                    _queue_login_cancelled(status_queue, "baijiahao")
+                    return None
                 _safe_login_log("baijiahao", "login_timeout", level="warning")
                 status_queue.put("500")
+                return None
+
+            if _login_cancelled(status_queue):
+                _queue_login_cancelled(status_queue, "baijiahao")
                 return None
 
             uuid_v1 = uuid.uuid1()
             _safe_login_log("baijiahao", "session_id_created")
             cookies_dir = _login_cookies_directory(cookies_directory)
             cookies_dir.mkdir(parents=True, exist_ok=True)
-            await context.storage_state(path=cookies_dir / f"{uuid_v1}.json")
+            account_file = cookies_dir / f"{uuid_v1}.json"
+            await context.storage_state(path=account_file)
+            if _login_cancelled(status_queue):
+                account_file.unlink(missing_ok=True)
+                _queue_login_cancelled(status_queue, "baijiahao")
+                return None
 
             result = await check_cookie(
                 5, f"{uuid_v1}.json", cookies_directory=cookies_dir
@@ -545,8 +833,16 @@ async def baijiahao_cookie_gen(
                 _safe_login_log(
                     "baijiahao", "cookie_validation_failed", level="warning"
                 )
+            if _login_cancelled(status_queue):
+                account_file.unlink(missing_ok=True)
+                _queue_login_cancelled(status_queue, "baijiahao")
+                return None
 
             with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
+                if _login_cancelled(status_queue):
+                    account_file.unlink(missing_ok=True)
+                    _queue_login_cancelled(status_queue, "baijiahao")
+                    return None
                 cursor = conn.cursor()
                 cursor.execute('''
                     INSERT INTO user_info (type, filePath, userName, status)
@@ -592,6 +888,9 @@ async def toutiao_cookie_gen(
     try:
         # 尽早通知前端进入「手动登录」态，避免浏览器启动慢时一直转圈
         status_queue.put("MANUAL_LOGIN")
+        if _login_cancelled(status_queue):
+            _queue_login_cancelled(status_queue, "toutiao")
+            return None
         _safe_login_log("toutiao", "login_started")
         async with async_playwright() as playwright:
             # 登录必须有头模式，方便用户扫码
@@ -608,18 +907,31 @@ async def toutiao_cookie_gen(
             if await wait_for_toutiao_creator_backend(
                 page,
                 timeout_seconds=timeout_seconds,
+                cancel_event=getattr(status_queue, "cancel_event", None),
             ):
                 _safe_login_log("toutiao", "identity_confirmed", level="success")
             else:
+                if _login_cancelled(status_queue):
+                    _queue_login_cancelled(status_queue, "toutiao")
+                    return None
                 _safe_login_log("toutiao", "login_timeout", level="warning")
                 status_queue.put("500")
+                return None
+
+            if _login_cancelled(status_queue):
+                _queue_login_cancelled(status_queue, "toutiao")
                 return None
 
             uuid_v1 = uuid.uuid1()
             _safe_login_log("toutiao", "session_id_created")
             cookies_dir = _login_cookies_directory(cookies_directory)
             cookies_dir.mkdir(parents=True, exist_ok=True)
-            await context.storage_state(path=cookies_dir / f"{uuid_v1}.json")
+            account_file = cookies_dir / f"{uuid_v1}.json"
+            await context.storage_state(path=account_file)
+            if _login_cancelled(status_queue):
+                account_file.unlink(missing_ok=True)
+                _queue_login_cancelled(status_queue, "toutiao")
+                return None
 
             # cookie 校验失败也不要卡死前端；仍写入账号，状态后续可再验证
             result = await check_cookie(
@@ -629,8 +941,16 @@ async def toutiao_cookie_gen(
                 _safe_login_log(
                     "toutiao", "cookie_validation_failed", level="warning"
                 )
+            if _login_cancelled(status_queue):
+                account_file.unlink(missing_ok=True)
+                _queue_login_cancelled(status_queue, "toutiao")
+                return None
 
             with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
+                if _login_cancelled(status_queue):
+                    account_file.unlink(missing_ok=True)
+                    _queue_login_cancelled(status_queue, "toutiao")
+                    return None
                 cursor = conn.cursor()
                 cursor.execute('''
                     INSERT INTO user_info (type, filePath, userName, status)
@@ -666,13 +986,17 @@ async def toutiao_cookie_gen(
 
 
 async def sohu_cookie_gen(
-    id, status_queue, *, database_path=None, cookies_directory=None
+    id, status_queue, *, database_path=None, cookies_directory=None,
+    timeout_seconds=200,
 ):
     browser = None
     context = None
     page = None
     try:
         status_queue.put("MANUAL_LOGIN")
+        if _login_cancelled(status_queue):
+            _queue_login_cancelled(status_queue, "sohu")
+            return None
         _safe_login_log("sohu", "login_started")
         async with async_playwright() as playwright:
             options = get_browser_options()
@@ -685,34 +1009,56 @@ async def sohu_cookie_gen(
             _safe_login_log("sohu", "login_page_navigation_started")
             await page.goto("https://mp.sohu.com/mpfe/v4/login", timeout=60000, wait_until="domcontentloaded")
             _safe_login_log("sohu", "login_page_opened")
-            try:
-                await page.wait_for_url(
-                    lambda url: (
-                        "mp.sohu.com" in str(url)
-                        and "/login" not in str(url).lower()
-                        and "passport.sohu.com" not in str(url).lower()
-                    ),
-                    timeout=200_000,
-                )
+            authenticated = await _wait_for_url_condition(
+                page,
+                lambda url: (
+                    "mp.sohu.com" in url
+                    and "/login" not in url.lower()
+                    and "passport.sohu.com" not in url.lower()
+                ),
+                timeout_seconds=timeout_seconds,
+                cancel_event=getattr(status_queue, "cancel_event", None),
+            )
+            if authenticated:
                 _safe_login_log("sohu", "identity_confirmed", level="success")
-            except asyncio.TimeoutError:
+            else:
+                if _login_cancelled(status_queue):
+                    _queue_login_cancelled(status_queue, "sohu")
+                    return None
                 _safe_login_log("sohu", "login_timeout", level="warning")
                 status_queue.put("500")
+                return None
+
+            if _login_cancelled(status_queue):
+                _queue_login_cancelled(status_queue, "sohu")
                 return None
 
             uuid_v1 = uuid.uuid1()
             _safe_login_log("sohu", "session_id_created")
             cookies_dir = _login_cookies_directory(cookies_directory)
             cookies_dir.mkdir(parents=True, exist_ok=True)
-            await context.storage_state(path=cookies_dir / f"{uuid_v1}.json")
+            account_file = cookies_dir / f"{uuid_v1}.json"
+            await context.storage_state(path=account_file)
+            if _login_cancelled(status_queue):
+                account_file.unlink(missing_ok=True)
+                _queue_login_cancelled(status_queue, "sohu")
+                return None
 
             result = await check_cookie(
                 8, f"{uuid_v1}.json", cookies_directory=cookies_dir
             )
             if not result:
                 _safe_login_log("sohu", "cookie_validation_failed", level="warning")
+            if _login_cancelled(status_queue):
+                account_file.unlink(missing_ok=True)
+                _queue_login_cancelled(status_queue, "sohu")
+                return None
 
             with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
+                if _login_cancelled(status_queue):
+                    account_file.unlink(missing_ok=True)
+                    _queue_login_cancelled(status_queue, "sohu")
+                    return None
                 cursor = conn.cursor()
                 cursor.execute('''
                     INSERT INTO user_info (type, filePath, userName, status)
@@ -826,6 +1172,11 @@ async def zhihu_cookie_gen(
             cookies_dir.mkdir(parents=True, exist_ok=True)
             new_cookie_path = cookies_dir / f"{uuid_v1}.json"
             await context.storage_state(path=new_cookie_path)
+            if _login_cancelled(status_queue):
+                raise ZhihuLoginControlError(
+                    "知乎登录已由操作者取消",
+                    code="operator_cancelled",
+                )
 
             # The session was just verified in this live context using z_c0 or
             # Zhihu's account-bound identity endpoint.  Starting a second
@@ -844,6 +1195,11 @@ async def zhihu_cookie_gen(
                 cursor = conn.cursor()
                 conn.execute("BEGIN IMMEDIATE")
                 try:
+                    if _login_cancelled(status_queue):
+                        raise ZhihuLoginControlError(
+                            "知乎登录已由操作者取消",
+                            code="operator_cancelled",
+                        )
                     if existing_account_id is not None:
                         existing_account = cursor.execute(
                             """
@@ -879,6 +1235,11 @@ async def zhihu_cookie_gen(
                             ) VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
                             """,
                             (9, new_cookie_path.name, id, 1),
+                        )
+                    if _login_cancelled(status_queue):
+                        raise ZhihuLoginControlError(
+                            "知乎登录已由操作者取消",
+                            code="operator_cancelled",
                         )
                     conn.commit()
                 except Exception:
@@ -975,50 +1336,112 @@ async def bilibili_cookie_gen(
     import sys
     from uploader.bilibili_uploader.runtime import ensure_biliup_binary
 
-    account_dir = _login_cookies_directory(cookies_directory)
-    account_dir.mkdir(parents=True, exist_ok=True)
-    account_file = account_dir / f"bilibili_{id}.json"
-
-    # 获取正确的biliup二进制路径（不是pip安装的Python版）
-    biliup_path = str(ensure_biliup_binary(force_check=False))
-
-    # 通知前端已打开终端，请手动登录
+    process = None
+    renew_process = None
+    database_saved = False
+    account_file = None
     status_queue.put("MANUAL_LOGIN")
-
     try:
-        # 在新终端窗口中运行 biliup login
+        if _login_cancelled(status_queue):
+            _queue_login_cancelled(status_queue, "bilibili")
+            return None
+
+        account_dir = _login_cookies_directory(cookies_directory)
+        account_dir.mkdir(parents=True, exist_ok=True)
+        file_name = f"bilibili_{uuid.uuid1()}.json"
+        account_file = account_dir / file_name
+        # 获取正确的biliup二进制路径（不是pip安装的Python版）
+        biliup_path = str(ensure_biliup_binary(force_check=False))
+
+        # 在新终端窗口中运行 biliup login；只保留本次子进程句柄。
         if sys.platform == 'win32':
-            subprocess.Popen(
+            process = subprocess.Popen(
                 [biliup_path, '-u', str(account_file), 'login'],
                 creationflags=subprocess.CREATE_NEW_CONSOLE
             )
         else:
-            subprocess.Popen(
+            process = subprocess.Popen(
                 ['x-terminal-emulator', '-e', biliup_path, '-u', str(account_file), 'login']
             )
         _safe_login_log("bilibili", "terminal_opened", level="success")
-    except Exception as e:
-        _safe_login_log("bilibili", "terminal_open_failed", level="error", error=e)
+
+        # 轮询等待凭证生成；每次轮询都允许前端结束本次登录。
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + max(30, int(timeout_seconds))
+        while loop.time() < deadline:
+            if _login_cancelled(status_queue):
+                _queue_login_cancelled(status_queue, "bilibili")
+                return None
+            await asyncio.sleep(min(2, max(0.01, deadline - loop.time())))
+            if _login_cancelled(status_queue):
+                _queue_login_cancelled(status_queue, "bilibili")
+                return None
+            if not account_file.exists():
+                continue
+
+            renew_options = {
+                "stdout": subprocess.DEVNULL,
+                "stderr": subprocess.DEVNULL,
+            }
+            if sys.platform == "win32":
+                renew_options["creationflags"] = subprocess.CREATE_NO_WINDOW
+            renew_process = subprocess.Popen(
+                [biliup_path, "-u", str(account_file), "renew"],
+                **renew_options,
+            )
+            renew_returncode = await _wait_for_owned_login_process(
+                renew_process,
+                cancel_event=getattr(status_queue, "cancel_event", None),
+                timeout_seconds=min(30, max(1, deadline - loop.time())),
+            )
+            if _login_cancelled(status_queue):
+                _queue_login_cancelled(status_queue, "bilibili")
+                return None
+            if renew_returncode is None:
+                _safe_login_log(
+                    "bilibili", "cookie_validation_failed", level="warning"
+                )
+                status_queue.put("500")
+                return None
+            if renew_returncode != 0:
+                continue
+
+            _safe_login_log("bilibili", "identity_confirmed", level="success")
+            with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
+                conn.execute("BEGIN IMMEDIATE")
+                if _login_cancelled(status_queue):
+                    conn.rollback()
+                    _queue_login_cancelled(status_queue, "bilibili")
+                    return None
+                conn.execute(
+                    """
+                    INSERT INTO user_info (type, filePath, userName, status)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (6, file_name, id, 1),
+                )
+                if _login_cancelled(status_queue):
+                    conn.rollback()
+                    _queue_login_cancelled(status_queue, "bilibili")
+                    return None
+                conn.commit()
+                database_saved = True
+            status_queue.put("200")
+            return True
+
+        _safe_login_log("bilibili", "login_timeout", level="warning")
         status_queue.put("500")
-        return
-
-    # 轮询等待cookie文件生成（用户在终端完成扫码后biliup会创建文件）
-    for _ in range(max(15, int(timeout_seconds / 2))):
-        await asyncio.sleep(2)
-        if account_file.exists():
-            result = run_biliup_command(["-u", str(account_file), "renew"])
-            if result.returncode == 0:
-                _safe_login_log("bilibili", "identity_confirmed", level="success")
-                with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
-                    conn.cursor().execute(
-                        'INSERT INTO user_info (type, filePath, userName, status) VALUES (?, ?, ?, ?)',
-                        (6, f"bilibili_{id}.json", id, 1))
-                    conn.commit()
-                status_queue.put("200")
-                return
-
-    _safe_login_log("bilibili", "login_timeout", level="warning")
-    status_queue.put("500")
+        return None
+    except Exception as exc:
+        event = "terminal_open_failed" if process is None else "login_failed"
+        _safe_login_log("bilibili", event, level="error", error=exc)
+        status_queue.put("500")
+        return None
+    finally:
+        _terminate_owned_login_process(renew_process)
+        _terminate_owned_login_process(process)
+        if account_file is not None and not database_saved:
+            _discard_unregistered_login_file(account_file)
 
 
 async def tiktok_cookie_gen(
@@ -1027,13 +1450,21 @@ async def tiktok_cookie_gen(
 ):
     """Open a headed TikTok login and persist the browser session for Web use."""
 
+    browser = None
+    context = None
+    page = None
+    account_file = None
+    database_saved = False
     status_queue.put("MANUAL_LOGIN")
-    cookies_dir = _login_cookies_directory(cookies_directory)
-    cookies_dir.mkdir(parents=True, exist_ok=True)
-    file_name = f"tiktok_{uuid.uuid1()}.json"
-    account_file = cookies_dir / file_name
-
     try:
+        if _login_cancelled(status_queue):
+            _queue_login_cancelled(status_queue, "tiktok")
+            return None
+        cookies_dir = _login_cookies_directory(cookies_directory)
+        cookies_dir.mkdir(parents=True, exist_ok=True)
+        file_name = f"tiktok_{uuid.uuid1()}.json"
+        account_file = cookies_dir / file_name
+
         async with async_playwright() as playwright:
             options = get_browser_options()
             options["headless"] = False
@@ -1041,41 +1472,67 @@ async def tiktok_cookie_gen(
             context = await browser.new_context()
             context = await set_init_script(context)
             page = await context.new_page()
-            try:
-                navigation_error = None
-                for attempt in range(1, 4):
-                    try:
-                        await page.goto(
-                            "https://www.tiktok.com/login?lang=en",
-                            timeout=60_000,
-                            wait_until="domcontentloaded",
-                        )
-                        navigation_error = None
-                        break
-                    except Exception as exc:
-                        navigation_error = exc
-                        _safe_login_log("tiktok", "navigation_retry", level="warning")
-                        await page.wait_for_timeout(2000)
-                if navigation_error is not None:
-                    raise RuntimeError("TikTok 登录页连续三次连接失败") from navigation_error
-                authenticated = False
-                for _ in range(max(30, int(timeout_seconds))):
-                    cookies = await context.cookies()
-                    cookie_names = {str(item.get("name") or "") for item in cookies}
-                    if cookie_names.intersection({"sessionid", "sessionid_ss", "sid_tt"}):
-                        authenticated = True
-                        break
-                    await page.wait_for_timeout(1000)
-                if not authenticated:
-                    status_queue.put("500")
+            navigation_error = None
+            for _attempt in range(1, 4):
+                if _login_cancelled(status_queue):
+                    _queue_login_cancelled(status_queue, "tiktok")
                     return None
-                await context.storage_state(path=account_file)
-            finally:
-                await context.close()
-                await browser.close()
+                try:
+                    await page.goto(
+                        "https://www.tiktok.com/login?lang=en",
+                        timeout=60_000,
+                        wait_until="domcontentloaded",
+                    )
+                    navigation_error = None
+                    break
+                except Exception as exc:
+                    navigation_error = exc
+                    if _login_cancelled(status_queue):
+                        _queue_login_cancelled(status_queue, "tiktok")
+                        return None
+                    _safe_login_log("tiktok", "navigation_retry", level="warning")
+                    await page.wait_for_timeout(2000)
+            if navigation_error is not None:
+                raise RuntimeError("TikTok 登录页连续三次连接失败") from navigation_error
 
+            authenticated = False
+            for _ in range(max(30, int(timeout_seconds))):
+                if _login_cancelled(status_queue):
+                    _queue_login_cancelled(status_queue, "tiktok")
+                    return None
+                cookies = await context.cookies()
+                if _login_cancelled(status_queue):
+                    _queue_login_cancelled(status_queue, "tiktok")
+                    return None
+                cookie_names = {str(item.get("name") or "") for item in cookies}
+                if cookie_names.intersection({"sessionid", "sessionid_ss", "sid_tt"}):
+                    authenticated = True
+                    break
+                await page.wait_for_timeout(1000)
+            if not authenticated:
+                status_queue.put("500")
+                return None
+            if _login_cancelled(status_queue):
+                _queue_login_cancelled(status_queue, "tiktok")
+                return None
+            await context.storage_state(path=account_file)
+            if _login_cancelled(status_queue):
+                _queue_login_cancelled(status_queue, "tiktok")
+                return None
+
+        if _login_cancelled(status_queue):
+            _queue_login_cancelled(status_queue, "tiktok")
+            return None
         result = await check_cookie(10, file_name, cookies_directory=cookies_dir)
+        if _login_cancelled(status_queue):
+            _queue_login_cancelled(status_queue, "tiktok")
+            return None
         with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if _login_cancelled(status_queue):
+                conn.rollback()
+                _queue_login_cancelled(status_queue, "tiktok")
+                return None
             conn.execute(
                 """
                 INSERT INTO user_info (type, filePath, userName, status)
@@ -1083,13 +1540,36 @@ async def tiktok_cookie_gen(
                 """,
                 (10, file_name, id, 1 if result else 0),
             )
+            if _login_cancelled(status_queue):
+                conn.rollback()
+                _queue_login_cancelled(status_queue, "tiktok")
+                return None
             conn.commit()
+            database_saved = True
         status_queue.put("200" if result else "500")
         return bool(result)
     except Exception as exc:
         _safe_login_log("tiktok", "login_failed", level="error", error=exc)
         status_queue.put("500")
         return None
+    finally:
+        if account_file is not None and not database_saved:
+            _discard_unregistered_login_file(account_file)
+        try:
+            if page:
+                await page.close()
+        except Exception:
+            pass
+        try:
+            if context:
+                await context.close()
+        except Exception:
+            pass
+        try:
+            if browser:
+                await browser.close()
+        except Exception:
+            pass
 
 
 # a = asyncio.run(xiaohongshu_cookie_gen(4,None))

@@ -16,6 +16,7 @@ from sau_backend import (
     LoginStatusQueue,
     _finish_login_session,
     _run_login_coroutine,
+    active_account_checks,
     active_queues,
     active_queues_lock,
     app,
@@ -42,10 +43,12 @@ class LoginSseTests(unittest.TestCase):
         self.client = app.test_client()
         with active_queues_lock:
             active_queues.clear()
+            active_account_checks.clear()
 
     def tearDown(self):
         with active_queues_lock:
             active_queues.clear()
+            active_account_checks.clear()
         app.config["TESTING"] = self.original_testing
         app.config["ENABLE_BILIBILI_RUNTIME"] = self.original_bilibili_runtime
         app.config["ALLOW_REAL_PUBLISHING"] = self.original_real_publishing
@@ -229,6 +232,43 @@ class LoginSseTests(unittest.TestCase):
                 "existing_account_id": account_id,
             },
             {"type": 9, "id": "知乎主号", "existing_account_id": 99999},
+        ):
+            with self.subTest(query=query), patch(
+                "sau_backend.threading.Thread"
+            ) as thread:
+                response = self.client.get("/login", query_string=query)
+            self.assertEqual(response.status_code, 409)
+            thread.assert_not_called()
+
+    def test_disconnected_or_checking_existing_account_cannot_start_relogin(self):
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            disconnected_id = connection.execute(
+                """
+                INSERT INTO user_info (type, filePath, userName, status)
+                VALUES (9, '', '已解绑账号', -2)
+                """
+            ).lastrowid
+            checking_id = connection.execute(
+                """
+                INSERT INTO user_info (type, filePath, userName, status)
+                VALUES (9, 'checking.json', '检测中账号', 1)
+                """
+            ).lastrowid
+            connection.commit()
+        with active_queues_lock:
+            active_account_checks.add(checking_id)
+
+        for query in (
+            {
+                "type": 9,
+                "id": "已解绑账号",
+                "existing_account_id": disconnected_id,
+            },
+            {
+                "type": 9,
+                "id": "检测中账号",
+                "existing_account_id": checking_id,
+            },
         ):
             with self.subTest(query=query), patch(
                 "sau_backend.threading.Thread"

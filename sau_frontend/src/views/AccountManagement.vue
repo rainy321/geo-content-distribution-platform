@@ -43,7 +43,7 @@
       <div class="note-icon"><el-icon><Connection /></el-icon></div>
       <div>
         <strong>平台检测采用显式触发</strong>
-        <p>“刷新本地状态”不联网；只有点击某个账号的“检测登录”，才会打开本机浏览器访问该平台并更新最后检查时间。</p>
+        <p>“刷新本地状态”不联网；只有点击某个账号的“检测登录”，才会打开本机浏览器访问该平台。退出 / 解绑只移除本机凭证，不代表撤销平台网站上的其他设备会话。</p>
       </div>
     </section>
 
@@ -74,8 +74,10 @@
             :key="platform.key"
             :platform="platform"
             :checking-ids="checkingIds"
+            :disconnecting-ids="disconnectingIds"
             @check="checkAccount"
             @login="openLogin"
+            @disconnect="disconnectAccount"
           />
         </div>
       </section>
@@ -95,8 +97,10 @@
             :key="platform.key"
             :platform="platform"
             :checking-ids="checkingIds"
+            :disconnecting-ids="disconnectingIds"
             @check="checkAccount"
             @login="openLogin"
+            @disconnect="disconnectAccount"
           />
         </div>
       </section>
@@ -270,9 +274,10 @@ const PlatformCard = defineComponent({
   name: 'PlatformCard',
   props: {
     platform: { type: Object, required: true },
-    checkingIds: { type: Object, required: true }
+    checkingIds: { type: Object, required: true },
+    disconnectingIds: { type: Object, required: true }
   },
-  emits: ['check', 'login'],
+  emits: ['check', 'login', 'disconnect'],
   setup(props, { emit }) {
     const formatCheckedAt = value => {
       if (!value) return '尚未检测'
@@ -304,9 +309,12 @@ const PlatformCard = defineComponent({
             h('span', props.platform.unavailable_reason || '本机发布运行时尚未就绪')
           ])
         : null,
-      props.platform.accounts.length
+          props.platform.accounts.length
         ? h('div', { class: 'account-stack' }, props.platform.accounts.map(account => {
             const copy = statusCopy[account.status] || { label: account.status, note: '状态未知' }
+            const checking = props.checkingIds.has(account.id)
+            const disconnecting = props.disconnectingIds.has(account.id)
+            const lifecycleBusy = checking || disconnecting
             return h('section', { class: 'account-entry', key: account.id }, [
               h('div', { class: 'account-identity' }, [
                 h('strong', `${account.account_name} · ID ${account.id}`),
@@ -317,15 +325,21 @@ const PlatformCard = defineComponent({
               h('div', { class: 'account-actions' }, [
                 h(ElButton, {
                   size: 'small',
-                  loading: props.checkingIds.has(account.id),
-                  disabled: props.platform.login_available === false,
+                  loading: checking,
+                  disabled: props.platform.login_available === false || disconnecting,
                   onClick: () => emit('check', account, props.platform)
                 }, () => props.platform.login_available === false ? '检测不可用' : '检测登录'),
                 h(ElButton, {
                   size: 'small', type: 'primary', plain: true,
-                  disabled: props.platform.login_available === false,
+                  disabled: props.platform.login_available === false || lifecycleBusy,
                   onClick: () => emit('login', props.platform, account)
-                }, () => '重新登录')
+                }, () => '重新登录'),
+                h(ElButton, {
+                  size: 'small', type: 'danger', plain: true,
+                  loading: disconnecting,
+                  disabled: checking,
+                  onClick: () => emit('disconnect', account, props.platform)
+                }, () => '退出 / 解绑')
               ])
             ])
           }))
@@ -348,6 +362,7 @@ const loadError = ref(false)
 const capabilitiesLoadError = ref(false)
 const lastSyncedAt = ref(null)
 const checkingIds = ref(new Set())
+const disconnectingIds = ref(new Set())
 const loginDialogVisible = ref(false)
 const loginStage = ref('idle')
 const qrCodeData = ref('')
@@ -490,7 +505,7 @@ const checkAccount = async (account, platform) => {
     ElMessage.warning(platform?.unavailable_reason || '该平台登录运行时当前不可用')
     return
   }
-  if (checkingIds.value.has(account.id)) return
+  if (checkingIds.value.has(account.id) || disconnectingIds.value.has(account.id)) return
   checkingIds.value = new Set([...checkingIds.value, account.id])
   try {
     const response = await accountApi.checkMediaAccount(account.id)
@@ -514,6 +529,10 @@ const openLogin = (platform = null, account = null) => {
     ElMessage.warning('当前没有可用的平台登录运行时')
     return
   }
+  if (
+    account
+    && (checkingIds.value.has(account.id) || disconnectingIds.value.has(account.id))
+  ) return
   loginForm.platformType = platform?.type || null
   loginForm.accountName = account?.account_name || ''
   loginForm.existingAccountId = account?.id || null
@@ -523,6 +542,43 @@ const openLogin = (platform = null, account = null) => {
   loginCancelPending.value = false
   Object.assign(loginFailure, { code: '', message: '', action: '' })
   loginDialogVisible.value = true
+}
+
+const disconnectAccount = async (account, platform) => {
+  if (disconnectingIds.value.has(account.id) || checkingIds.value.has(account.id)) return
+  disconnectingIds.value = new Set([...disconnectingIds.value, account.id])
+  try {
+    try {
+      await ElMessageBox.confirm(
+        `将从本机移除“${account.account_name}”的登录凭证，并解除待发布任务的账号绑定。已完成和失败的发布历史仍保留账号名称。此操作不会注销${platform.name}网站上的其他设备会话。`,
+        `退出并解绑${platform.name}账号？`,
+        {
+          confirmButtonText: '退出并解绑',
+          cancelButtonText: '保留账号',
+          type: 'warning',
+          distinguishCancelAndClose: true
+        }
+      )
+    } catch {
+      return
+    }
+
+    try {
+      const response = await accountApi.disconnectMediaAccount(account.id)
+      if (response.data?.cleanup_pending) {
+        ElMessage.warning(response.msg || '账号已禁用，但本机凭证文件仍待清理')
+      } else {
+        ElMessage.success(response.msg || '已从本机退出并解绑媒体账号')
+      }
+      await fetchOverview()
+    } catch (error) {
+      ElMessage.error(error?.response?.data?.msg || '无法确认解绑结果，请刷新账号列表后重试')
+    }
+  } finally {
+    const next = new Set(disconnectingIds.value)
+    next.delete(account.id)
+    disconnectingIds.value = next
+  }
 }
 
 const stopLoginTimer = () => {
@@ -704,7 +760,7 @@ const applyCancellationResponse = response => {
 
 const requestLoginCancellation = async () => {
   loginCancelPending.value = true
-  loginEventMessage.value = '正在结束后台登录并关闭 Chrome 窗口…'
+  loginEventMessage.value = '正在请求后台结束登录并关闭 Chrome 窗口…'
   try {
     const response = await accountApi.cancelMediaLogin({
       type: loginForm.platformType,
@@ -848,7 +904,8 @@ onBeforeUnmount(() => {
 :deep(.status-chip.expired), :deep(.status-chip.missing_cookie) { color: #a06119; background: #f8ead7; }
 :deep(.account-identity p) { margin: 7px 0 2px; color: #5e7378; font-size: 11px; }
 :deep(.account-identity time) { color: #839194; font: 9px "Cascadia Mono", monospace; }
-:deep(.account-actions) { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+:deep(.account-actions) { display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex: 0 0 auto; flex-wrap: wrap; max-width: 250px; }
+:deep(.account-actions .el-button + .el-button) { margin-left: 0; }
 :deep(.platform-empty) { display: flex; align-items: center; justify-content: space-between; gap: 14px; min-height: 62px; padding: 13px 18px; }
 :deep(.platform-empty p) { margin: 0; color: var(--muted); font-size: 12px; }
 

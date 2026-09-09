@@ -17,6 +17,15 @@ export const accountApi = {
     return http.post('/api/media-login/cancel', data, { suppressGlobalError: true })
   },
 
+  // 仅移除本机账号绑定和凭证，不代表撤销平台上的其他登录会话。
+  disconnectMediaAccount(id) {
+    return http.post(
+      `/api/media-accounts/${id}/disconnect`,
+      { confirm_unbind: true },
+      { suppressGlobalError: true }
+    )
+  },
+
   // 获取有效账号列表（带验证）
   getValidAccounts() {
     return http.get('/getValidAccounts')
@@ -35,10 +44,5 @@ export const accountApi = {
   // 更新账号
   updateAccount(data) {
     return http.post('/updateUserinfo', data)
-  },
-
-  // 删除账号
-  deleteAccount(id) {
-    return http.get(`/deleteAccount?id=${id}`)
   }
 }

@@ -130,6 +130,10 @@ try {
             tests.test_publish_scheduler_service `
             tests.test_worker_entrypoint `
             tests.test_media_publisher_adapters `
+            tests.test_media_account_disconnect `
+            tests.test_all_platform_login_cancel `
+            tests.test_bilibili_runtime `
+            tests.test_sau_bilibili_cli `
             tests.test_login_storage_config `
             tests.test_login_qrcode `
             tests.test_login_sse `

@@ -47,7 +47,7 @@ def get_dashboard_overview(
             (lower_bound_utc, lower_bound_utc),
         ).fetchall()
         account_rows = conn.execute(
-            "SELECT type, status FROM user_info"
+            "SELECT type, status FROM user_info WHERE status != -2"
         ).fetchall()
         recent_rows = conn.execute(
             """

@@ -6,11 +6,16 @@ from contextlib import closing
 from pathlib import Path
 from queue import Queue
 from unittest.mock import ANY, AsyncMock, patch
+from werkzeug.datastructures import FileStorage
 
 from db.createTable import initialize_database
 from myUtils.auth import check_cookie
 from myUtils.login import xiaohongshu_cookie_gen
 from sau_backend import app, run_async_function
+from services.media_account_service import (
+    DISCONNECTED_ACCOUNT_STATUS,
+    disconnect_media_account,
+)
 
 
 class LoginStorageConfigTests(unittest.IsolatedAsyncioTestCase):
@@ -194,14 +199,14 @@ class LegacyStorageConfigTests(unittest.TestCase):
         deleted = self.client.get(
             "/deleteAccount", query_string={"id": self.account_id}
         )
-        self.assertEqual(deleted.status_code, 200)
-        self.assertFalse(cookie_path.exists())
+        self.assertEqual(deleted.status_code, 405)
+        self.assertTrue(cookie_path.exists())
         with closing(sqlite3.connect(self.db_path)) as connection:
             count = connection.execute(
                 "SELECT COUNT(*) FROM user_info WHERE id = ?",
                 (self.account_id,),
             ).fetchone()[0]
-        self.assertEqual(count, 0)
+        self.assertEqual(count, 1)
 
     def test_legacy_cookie_check_receives_runtime_cookie_root(self):
         with patch(
@@ -215,6 +220,64 @@ class LegacyStorageConfigTests(unittest.TestCase):
             9,
             "account.json",
             cookies_directory=self.cookies_directory,
+        )
+
+    def test_legacy_bulk_check_cannot_revive_concurrently_disconnected_account(self):
+        async def disconnect_during_check(_account_type, _filename, **_kwargs):
+            disconnect_media_account(
+                self.db_path,
+                self.account_id,
+                cookies_directory=self.cookies_directory,
+            )
+            return True
+
+        with patch(
+            "myUtils.auth.check_cookie",
+            new=AsyncMock(side_effect=disconnect_during_check),
+        ):
+            response = self.client.get("/getValidAccounts")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["data"], [])
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            row = connection.execute(
+                "SELECT status, filePath FROM user_info WHERE id = ?",
+                (self.account_id,),
+            ).fetchone()
+        self.assertEqual(row, (DISCONNECTED_ACCOUNT_STATUS, ""))
+
+    def test_cookie_upload_cannot_write_after_concurrent_disconnect(self):
+        original_save = FileStorage.save
+
+        def save_then_disconnect(storage, destination, buffer_size=16384):
+            original_save(storage, destination, buffer_size)
+            disconnect_media_account(
+                self.db_path,
+                self.account_id,
+                cookies_directory=self.cookies_directory,
+            )
+
+        with patch.object(
+            FileStorage,
+            "save",
+            autospec=True,
+            side_effect=save_then_disconnect,
+        ):
+            response = self.client.post(
+                "/uploadCookie",
+                data={
+                    "id": str(self.account_id),
+                    "platform": "zhihu",
+                    "file": (io.BytesIO(b'{"cookies": []}'), "account.json"),
+                },
+                content_type="multipart/form-data",
+            )
+
+        self.assertEqual(response.status_code, 404)
+        self.assertFalse((self.cookies_directory / "account.json").exists())
+        self.assertEqual(
+            list(self.cookies_directory.glob(".geo-cookie-upload-*.tmp")),
+            [],
         )
 
     def test_legacy_upload_uses_runtime_media_root_and_rejects_paths(self):

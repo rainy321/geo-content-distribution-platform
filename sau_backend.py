@@ -82,10 +82,16 @@ from services.local_auth_service import (
     PasswordPolicyError,
 )
 from services.media_account_service import (
+    DISCONNECTED_ACCOUNT_STATUS,
+    MediaAccountBusyError,
     MediaAccountCheckError,
+    MediaAccountDisconnectError,
+    MediaAccountInvalidCookiePathError,
     MediaAccountNotFoundError,
     MediaAccountRuntimeDisabledError,
     check_media_account,
+    cleanup_disconnected_account_files,
+    disconnect_media_account,
     get_media_accounts_overview,
 )
 from services.platform_capability_service import (
@@ -200,6 +206,7 @@ class LoginStatusQueue(Queue):
 
 active_queues = {}
 active_queues_lock = threading.Lock()
+active_account_checks = set()
 app = Flask(__name__)
 
 
@@ -1484,6 +1491,15 @@ def get_dashboard_data():
 
 @app.route('/api/media-accounts', methods=['GET'])
 def get_media_accounts():
+    cleanup_result = cleanup_disconnected_account_files(
+        app.config["DATABASE_PATH"],
+        app.config["COOKIES_DIRECTORY"]
+    )
+    if cleanup_result["remaining"]:
+        app.logger.warning(
+            "media account credential cleanup still pending count=%s",
+            cleanup_result["remaining"],
+        )
     overview = get_media_accounts_overview(
         app.config["DATABASE_PATH"],
         cookies_directory=app.config["COOKIES_DIRECTORY"],
@@ -1514,6 +1530,37 @@ async def check_media_account_status(account_id):
     from myUtils.auth import check_cookie
 
     try:
+        with active_queues_lock:
+            with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
+                account_identity = conn.execute(
+                    """
+                    SELECT type, userName, status
+                    FROM user_info
+                    WHERE id = ?
+                    """,
+                    (account_id,),
+                ).fetchone()
+            session_key = (
+                (str(account_identity[0]), str(account_identity[1]))
+                if account_identity is not None
+                else None
+            )
+            if session_key is not None and session_key in active_queues:
+                return jsonify(
+                    {"code": 409, "msg": "该账号正在登录，暂不能检测", "data": None}
+                ), 409
+            if account_id in active_account_checks:
+                return jsonify(
+                    {"code": 409, "msg": "该账号正在检测，请稍候", "data": None}
+                ), 409
+            active_account_checks.add(account_id)
+    except sqlite3.Error:
+        app.logger.exception("media account check identity lookup failed")
+        return jsonify(
+            {"code": 500, "msg": "无法读取媒体账号，请稍后重试", "data": None}
+        ), 500
+
+    try:
         account = await check_media_account(
             app.config["DATABASE_PATH"],
             account_id,
@@ -1533,7 +1580,100 @@ async def check_media_account_status(account_id):
         return jsonify({"code": 403, "msg": str(exc), "data": None}), 403
     except MediaAccountCheckError as exc:
         return jsonify({"code": 502, "msg": str(exc), "data": None}), 502
+    finally:
+        with active_queues_lock:
+            active_account_checks.discard(account_id)
     return jsonify({"code": 200, "msg": "success", "data": account}), 200
+
+
+@app.route('/api/media-accounts/<int:account_id>/disconnect', methods=['POST'])
+def disconnect_media_account_binding(account_id):
+    """Remove a local platform binding without contacting the platform."""
+
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict) or payload.get("confirm_unbind") is not True:
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "需要明确确认本机退出解绑",
+                "data": None,
+            }
+        ), 400
+
+    try:
+        # The same lifecycle mutex also guards check registration and existing-
+        # account login registration.  Keep validation and the durable disable
+        # in one critical section so neither operation can slip through a
+        # check-then-act window.
+        with active_queues_lock:
+            with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
+                account_identity = conn.execute(
+                    "SELECT type, userName, status FROM user_info WHERE id = ?",
+                    (account_id,),
+                ).fetchone()
+            if (
+                account_identity is None
+                or int(account_identity[2]) == DISCONNECTED_ACCOUNT_STATUS
+            ):
+                return jsonify(
+                    {"code": 404, "msg": "媒体账号不存在或已解绑", "data": None}
+                ), 404
+            session_key = (str(account_identity[0]), str(account_identity[1]))
+            if session_key in active_queues:
+                return jsonify(
+                    {
+                        "code": 409,
+                        "msg": "该账号正在登录，请先点击“结束本次登录”",
+                        "data": None,
+                    }
+                ), 409
+            if account_id in active_account_checks:
+                return jsonify(
+                    {
+                        "code": 409,
+                        "msg": "该账号正在检测，请等待检测结束后再退出解绑",
+                        "data": None,
+                    }
+                ), 409
+            result = disconnect_media_account(
+                app.config["DATABASE_PATH"],
+                account_id,
+                cookies_directory=app.config["COOKIES_DIRECTORY"],
+            )
+    except sqlite3.Error:
+        app.logger.exception("media account disconnect database failure")
+        return jsonify(
+            {"code": 500, "msg": "解绑未完成，请稍后重试", "data": None}
+        ), 500
+    except MediaAccountNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except (MediaAccountInvalidCookiePathError, MediaAccountBusyError) as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+    except (MediaAccountDisconnectError, OSError, sqlite3.Error):
+        app.logger.exception("media account disconnect failed account_id=%s", account_id)
+        return jsonify(
+            {
+                "code": 500,
+                "msg": "解绑未完成；软件未主动删除该账号凭证，请稍后重试",
+                "data": None,
+            }
+        ), 500
+
+    if result["cleanup_pending"]:
+        return jsonify(
+            {
+                "code": 202,
+                "msg": "账号已安全禁用，但本机凭证文件仍待清理；关闭占用程序后刷新页面，软件会继续清理",
+                "data": result,
+            }
+        ), 202
+    return jsonify(
+        {
+            "code": 200,
+            "msg": "已从本机退出并解绑媒体账号",
+            "data": result,
+        }
+    ), 200
 
 
 def _get_project(project_id):
@@ -2640,7 +2780,9 @@ def get_publish_platforms():
         if item["key"] == BILIBILI_PLATFORM_KEY and not app.config.get(
             "ENABLE_BILIBILI_RUNTIME", False
         ):
-            unavailable_reason = "Bilibili 运行时尚未完成固定版本与校验，当前不可用"
+            unavailable_reason = (
+                "Bilibili 第三方运行时尚未完成固定版本、哈希校验和商业授权，当前不可用"
+            )
         elif demo_available:
             unavailable_reason = "当前为演示模式，不会访问真实平台"
         elif not real_publishing_authorized:
@@ -2968,7 +3110,7 @@ def getAccounts():
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute('''
-            SELECT * FROM user_info''')
+            SELECT * FROM user_info WHERE status != -2''')
             rows = cursor.fetchall()
             rows_list = [list(row) for row in rows]
 
@@ -2997,41 +3139,63 @@ async def getValidAccounts():
 
     with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
         cursor = conn.cursor()
-        cursor.execute('''
-        SELECT * FROM user_info''')
+        cursor.execute(
+            "SELECT * FROM user_info WHERE status != ?",
+            (DISCONNECTED_ACCOUNT_STATUS,),
+        )
         rows = cursor.fetchall()
-        rows_list = [list(row) for row in rows]
-        print("\n📋 当前数据表内容：")
-        for row in rows:
-            print(row)
-        for row in rows_list:
+
+    for row in rows:
+        account_id = int(row[0])
+        if (
+            row[1] == BILIBILI_ACCOUNT_TYPE
+            and not app.config.get("ENABLE_BILIBILI_RUNTIME", False)
+        ):
+            continue
+        session_key = (str(row[1]), str(row[3]))
+        with active_queues_lock:
             if (
-                row[1] == BILIBILI_ACCOUNT_TYPE
-                and not app.config.get("ENABLE_BILIBILI_RUNTIME", False)
+                account_id in active_account_checks
+                or session_key in active_queues
             ):
                 continue
+            active_account_checks.add(account_id)
+        try:
             flag = await check_cookie(
                 row[1],
                 row[2],
                 cookies_directory=app.config["COOKIES_DIRECTORY"],
             )
             new_status = 1 if flag else 0
-            row[4] = new_status
-            cursor.execute('''
-            UPDATE user_info 
-            SET status = ? 
-            WHERE id = ?
-            ''', (new_status, row[0]))
-            conn.commit()
-            print(f"✅ 用户状态已更新 id={row[0]} status={new_status}")
-        for row in rows:
-            print(row)
-        return jsonify(
-                        {
-                            "code": 200,
-                            "msg": None,
-                            "data": rows_list
-                        }),200
+            with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
+                with conn:
+                    conn.execute(
+                        """
+                        UPDATE user_info
+                        SET status = ?
+                        WHERE id = ? AND status != ?
+                        """,
+                        (
+                            new_status,
+                            account_id,
+                            DISCONNECTED_ACCOUNT_STATUS,
+                        ),
+                    )
+        finally:
+            with active_queues_lock:
+                active_account_checks.discard(account_id)
+
+    # Build the response from a fresh snapshot so an account unbound while a
+    # platform check was awaiting I/O cannot reappear from the stale list.
+    with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
+        rows_list = [
+            list(row)
+            for row in conn.execute(
+                "SELECT * FROM user_info WHERE status != ?",
+                (DISCONNECTED_ACCOUNT_STATUS,),
+            ).fetchall()
+        ]
+    return jsonify({"code": 200, "msg": None, "data": rows_list}), 200
 
 @app.route('/deleteFile', methods=['GET'])
 def delete_file():
@@ -3111,72 +3275,16 @@ def delete_file():
 
 @app.route('/deleteAccount', methods=['GET'])
 def delete_account():
-    account_id = request.args.get('id')
-
-    if not account_id or not account_id.isdigit():
-        return jsonify({
-            "code": 400,
-            "msg": "Invalid or missing account ID",
-            "data": None
-        }), 400
-
-    account_id = int(account_id)
-
-    try:
-        # 获取数据库连接
-        with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-
-            # 查询要删除的记录
-            cursor.execute("SELECT * FROM user_info WHERE id = ?", (account_id,))
-            record = cursor.fetchone()
-
-            if not record:
-                return jsonify({
-                    "code": 404,
-                    "msg": "account not found",
-                    "data": None
-                }), 404
-
-            record = dict(record)
-
-            # 删除关联的cookie文件
-            if record.get('filePath'):
-                try:
-                    cookie_filename = _normalize_media_filename(
-                        record['filePath']
-                    )
-                except ValueError:
-                    return jsonify({
-                        "code": 409,
-                        "msg": "Stored cookie path is invalid",
-                        "data": None
-                    }), 409
-                cookie_file_path = _cookies_root() / cookie_filename
-                if cookie_file_path.exists():
-                    try:
-                        cookie_file_path.unlink()
-                        print(f"✅ Cookie文件已删除: {cookie_file_path}")
-                    except Exception as e:
-                        print(f"⚠️ 删除Cookie文件失败: {e}")
-
-            # 删除数据库记录
-            cursor.execute("DELETE FROM user_info WHERE id = ?", (account_id,))
-            conn.commit()
-
-        return jsonify({
-            "code": 200,
-            "msg": "account deleted successfully",
-            "data": None
-        }), 200
-
-    except Exception as e:
-        return jsonify({
-            "code": 500,
-            "msg": f"delete failed: {str(e)}",
-            "data": None
-        }), 500
+    # Destructive GET requests are vulnerable to accidental navigation and
+    # cross-site triggering.  Keep the legacy URL explicit but non-mutating;
+    # current clients use the confirmed POST endpoint above.
+    return jsonify(
+        {
+            "code": 405,
+            "msg": "旧版删除接口已停用，请使用媒体账号页的“退出 / 解绑”",
+            "data": None,
+        }
+    ), 405
 
 
 # SSE 登录接口
@@ -3240,29 +3348,6 @@ def login():
         return jsonify(
             {"code": 403, "msg": "媒体账号登录运行开关未开启", "data": None}
         ), 403
-    if existing_account_id is not None:
-        try:
-            with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
-                existing_account = conn.execute(
-                    "SELECT type, userName FROM user_info WHERE id = ?",
-                    (existing_account_id,),
-                ).fetchone()
-        except sqlite3.Error:
-            return jsonify(
-                {"code": 500, "msg": "无法校验已有账号", "data": None}
-            ), 500
-        if (
-            existing_account is None
-            or str(existing_account[0]) != login_type
-            or str(existing_account[1]) != account_id
-        ):
-            return jsonify(
-                {
-                    "code": 409,
-                    "msg": "已有账号与当前平台或备注名不匹配",
-                    "data": None,
-                }
-            ), 409
     login_logger.info(
         "媒体账号登录请求 platform_type={} protocol={}",
         login_type,
@@ -3276,6 +3361,38 @@ def login():
     )
     session_key = (login_type, account_id)
     with active_queues_lock:
+        if existing_account_id is not None:
+            try:
+                with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
+                    existing_account = conn.execute(
+                        """
+                        SELECT type, userName, status
+                        FROM user_info
+                        WHERE id = ?
+                        """,
+                        (existing_account_id,),
+                    ).fetchone()
+            except sqlite3.Error:
+                return jsonify(
+                    {"code": 500, "msg": "无法校验已有账号", "data": None}
+                ), 500
+            if (
+                existing_account is None
+                or int(existing_account[2]) == DISCONNECTED_ACCOUNT_STATUS
+                or str(existing_account[0]) != login_type
+                or str(existing_account[1]) != account_id
+            ):
+                return jsonify(
+                    {
+                        "code": 409,
+                        "msg": "已有账号不存在、已解绑，或与当前平台备注不匹配",
+                        "data": None,
+                    }
+                ), 409
+            if existing_account_id in active_account_checks:
+                return jsonify(
+                    {"code": 409, "msg": "该账号正在检测，请稍候再登录", "data": None}
+                ), 409
         if session_key in active_queues:
             return jsonify(
                 {"code": 409, "msg": "该账号已有登录会话进行中", "data": None}
@@ -3724,7 +3841,7 @@ def updateUserinfo():
                            UPDATE user_info
                            SET type     = ?,
                                userName = ?
-                           WHERE id = ?;
+                           WHERE id = ? AND status != -2;
                            ''', (type, userName, user_id))
             conn.commit()
 
@@ -3996,35 +4113,79 @@ def upload_cookie():
                 "data": None
             }), 400
 
-        # 从数据库获取账号的文件路径
-        with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            cursor.execute('SELECT filePath FROM user_info WHERE id = ?', (account_id,))
-            result = cursor.fetchone()
+        cookies_root = _cookies_root()
+        cookies_root.mkdir(parents=True, exist_ok=True)
+        temporary_path = cookies_root / f".geo-cookie-upload-{uuid.uuid4().hex}.tmp"
+        try:
+            # Receive into a private temporary file first.  The lifecycle lock
+            # is acquired only for the final account revalidation and atomic
+            # replace, so a concurrent disconnect cannot leave an orphaned
+            # credential after it has disabled the account.
+            file.save(str(temporary_path))
+            with active_queues_lock:
+                with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
+                    conn.row_factory = sqlite3.Row
+                    result = conn.execute(
+                        """
+                        SELECT id, type, filePath, userName, status
+                        FROM user_info
+                        WHERE id = ? AND status != ?
+                        """,
+                        (account_id, DISCONNECTED_ACCOUNT_STATUS),
+                    ).fetchone()
+                    if result is None:
+                        return jsonify(
+                            {"code": 404, "msg": "账号不存在或已解绑", "data": None}
+                        ), 404
+                    normalized_account_id = int(result["id"])
+                    session_key = (str(result["type"]), str(result["userName"]))
+                    if (
+                        normalized_account_id in active_account_checks
+                        or session_key in active_queues
+                    ):
+                        return jsonify(
+                            {"code": 409, "msg": "账号正在登录或检测，请稍后上传", "data": None}
+                        ), 409
+                    publishing = conn.execute(
+                        """
+                        SELECT 1
+                        FROM publish_jobs
+                        WHERE account_id = ? AND status = 'processing'
+                        LIMIT 1
+                        """,
+                        (normalized_account_id,),
+                    ).fetchone()
+                    if publishing is not None:
+                        return jsonify(
+                            {"code": 409, "msg": "账号正在发布，已拒绝替换凭证", "data": None}
+                        ), 409
+                    cookie_filename = _normalize_media_filename(result["filePath"])
+                    shared_reference = conn.execute(
+                        """
+                        SELECT 1
+                        FROM user_info
+                        WHERE id != ? AND status != ? AND filePath = ?
+                        LIMIT 1
+                        """,
+                        (
+                            normalized_account_id,
+                            DISCONNECTED_ACCOUNT_STATUS,
+                            cookie_filename,
+                        ),
+                    ).fetchone()
+                    if shared_reference is not None:
+                        return jsonify(
+                            {"code": 409, "msg": "多个账号共享该凭证文件，已拒绝覆盖", "data": None}
+                        ), 409
+                os.replace(temporary_path, cookies_root / cookie_filename)
 
-        if not result:
             return jsonify({
-                "code": 500,
-                "msg": "账号不存在",
+                "code": 200,
+                "msg": "Cookie文件上传成功",
                 "data": None
-            }), 404
-
-        # 保存上传的Cookie文件到对应路径
-        cookie_filename = _normalize_media_filename(result['filePath'])
-        cookie_file_path = _cookies_root() / cookie_filename
-        cookie_file_path.parent.mkdir(parents=True, exist_ok=True)
-
-        file.save(str(cookie_file_path))
-
-        # 更新数据库中的账号信息（可选，比如更新更新时间）
-        # 这里可以根据需要添加额外的处理逻辑
-
-        return jsonify({
-            "code": 200,
-            "msg": "Cookie文件上传成功",
-            "data": None
-        }), 200
+            }), 200
+        finally:
+            temporary_path.unlink(missing_ok=True)
 
     except Exception as e:
         print(f"上传Cookie文件时出错: {str(e)}")
