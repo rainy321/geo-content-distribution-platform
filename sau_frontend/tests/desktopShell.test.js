@@ -24,7 +24,7 @@ test('desktop shell exposes publishing navigation only to an authorized build', 
   assert.match(statusSource, /运行时未就绪/)
   assert.match(statusSource, /真实发布已开启/)
   assert.match(statusSource, /发布锁定/)
-  assert.match(statusSource, /@media \(max-width: 1400px\)/)
+  assert.match(statusSource, /@media \(max-width: 1600px\)/)
   assert.match(aboutSource, /publishingState/)
   assert.match(aboutSource, /安全构建锁定/)
   assert.match(aboutSource, /真实发布已开启/)

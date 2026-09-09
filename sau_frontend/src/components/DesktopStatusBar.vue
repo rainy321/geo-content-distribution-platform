@@ -231,7 +231,7 @@ onBeforeUnmount(() => {
 .spinning { animation: status-spin 0.9s linear infinite; }
 @keyframes status-spin { to { transform: rotate(360deg); } }
 
-@media (max-width: 1400px) {
+@media (max-width: 1600px) {
   .desktop-copy,
   .data-button span,
   .backup-button span {
