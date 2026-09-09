@@ -2,7 +2,10 @@
 
 ## 1. 能力边界
 
-当前 AI 可见度是“回答导入 + 本机确定性分析”，不是“调用模型并测量模型”。调用方必须先取得回答，再把回答和已有品牌项目 ID 传入接口。
+当前 Windows EXE 的 AI 可见度有两条彼此独立的入口：
+
+1. “回答导入 + 本机确定性分析”：操作员粘贴已经取得的回答，`POST /api/geo/visibility/analyze` 不访问外部模型。
+2. “当前配置模型受控采样 + 本机确定性分析”：操作员在 EXE 中预览并确认后，`POST /api/geo/visibility/sample` 对一个 OpenAI-compatible 模型顺序调用 1–5 次。每次外发的唯一自然语言内容都是操作员填写的 `prompt`；品牌项目、产品、官网、文章、别名、竞品、媒体账号、Cookie、凭据和发布任务不外发。
 
 已实现：
 
@@ -14,30 +17,41 @@
 - 基于样本证据的规则建议。
 - 可选本机 SQLite 历史、摘要列表和完整回放。
 - 上游交接包、源文件哈希和本机集成版本溯源。
+- 请求级当前模型配置、明确外发确认和逐次 1–5 次顺序采样。
+- 首次调用前持久化的请求 ID/幂等键、结果回放和模糊结果禁止自动重试。
+- 真实回答逐次 Token/成本凭据；provider 未返回 usage 或未配置价格时分别显示“未知”或“未定价”，不写成 0。
 
 未实现：
 
-- 自动登录千问、ChatGPT 或其他 provider。
-- 向任何外部模型发送问题或项目资料。
-- provider 失败率、跨 provider 权重、跨时间趋势和定时采样。
+- 自动登录千问、ChatGPT 或其他 provider 的网页账号。
+- 定时采样、后台无人值守采样、分布式 worker/队列和多 provider 并发突发。
+- 跨 provider 权重、跨时间趋势和包含全部失败执行的 provider 总体成功率。
 - 联网验证 URL、抓取页面内容、跟随重定向或判断页面真实性。
 - 多用户租户、云端同步和远程数据仓库。
 
-`responses[].provider` 和 `responses[].model` 仅作为来源标签原样保存和回显，不参与网络连接，也不证明该回答确实来自所标模型。
+手工导入接口中的 `responses[].provider` 和 `responses[].model` 仅作为来源标签原样保存和回显，不参与网络连接，也不证明该回答确实来自所标模型。受控采样接口中的 provider/model 来自本次实际连接配置与 provider 响应，但仍不等于该回答经过网页搜索、事实或引用核验。
 
 当前实现是经过独立标识的 Python 移植与本机临时统计口径。其结果不能与 provider grounding 运行、包含失败执行的总体，或历史 TypeScript 引擎序列直接拼接比较。
 
-不要混淆三条接口链路：本页的 `/api/geo/visibility/*` 是已实现的本机回答分析；内容创作适配层向同事服务约定的 `POST /api/v1/generate` 是另一条出站生成链路；未来用于自动取得千问等回答的 provider 采集契约目前尚未定义和接入。
+不要混淆三条接口链路：`/api/geo/visibility/analyze` 只做手工回答的本机分析；`/api/geo/visibility/sample` 只把明确确认的 `prompt` 发送给当前配置模型，再把回答交给同一确定性分析器；内容创作适配层向同事服务约定的 `POST /api/v1/generate` 是另一条出站生成链路。可见度采样不会调用媒体平台，也不是网页账号自动化。
+
+项目/内容五维诊断和 AI 调用成本台账是建立在这些边界之上的独立产品接口，不改变可见度样本语义。受控采样的详细外发、幂等与失败契约见 [当前配置模型真实采样契约](./visibility-live-sampling.md)；诊断、复测摘要和 Token/价格快照规则见 [GEO 诊断闭环与 AI 成本台账契约](./geo-diagnostic-cost-ledger.md)。
 
 ## 2. 组件关系
 
 ```text
 AI 可见度页面
-  └─ POST /api/geo/visibility/analyze
-       ├─ 读取本机 projects 品牌快照
-       ├─ services.ai_visibility_service（纯分析，无网络/数据库依赖）
-       └─ persist=true 时：services.ai_visibility_run_service
-            └─ SQLite ai_visibility_runs
+  ├─ POST /api/geo/visibility/analyze
+  │    ├─ 读取本机 projects 品牌快照
+  │    ├─ services.ai_visibility_service（纯分析，无网络/数据库依赖）
+  │    └─ persist=true 时：services.ai_visibility_run_service
+  │         └─ SQLite ai_visibility_runs
+  └─ POST /api/geo/visibility/sample
+       ├─ 明确确认 + 当前模型配置 + 稳定请求 ID/幂等键
+       ├─ services.ai_visibility_sampling_service（1–5 次顺序调用、失败即停）
+       ├─ SQLite ai_visibility_sample_requests（首次调用前落盘、防重复扣费）
+       ├─ AI 成本台账（逐个成功回答保存 usage/价格状态）
+       └─ 回答交给 services.ai_visibility_service；persist=true 时另存分析历史
 
 历史摘要：GET /api/geo/visibility/runs
 完整回放：GET /api/geo/visibility/runs/{run_id}
@@ -167,6 +181,20 @@ Content-Type: application/json
 
 比例字段在后端使用 `0..1`；桌面前端再显示为百分比。推荐位次只有在回答中识别到结构化推荐序列时才有值。少于 5 个样本时，95% 区间为 `null`。
 
+### 受控真实采样接口
+
+`POST /api/geo/visibility/sample` 只由 Windows EXE 中的操作员显式触发。请求必须包含 `confirm_external_call=true`、稳定的 `X-Request-ID`、`Idempotency-Key` 和 1–5 的 `sample_count`。EXE 会在调用前展示 prompt、服务地址、精确模型 ID、调用次数以及不发送的数据清单。
+
+- 每次 Chat Completions 请求只有一个 `user` 消息，其 `content` 为同一个 `prompt` 原文；模型标识、该 AI 服务自身的鉴权头、temperature 和 max tokens 只是传输元数据。
+- 项目名称、产品、介绍、官网、历史文章、别名、竞品、媒体账号、Cookie、媒体凭据和发布任务都不发送给模型，只在回答返回后参与本机分析。
+- 调用按序执行，最多 5 次，不并发。任意一次失败、限流、超时或协议异常都会停止后续样本；已完成部分返回 HTTP 207，首个样本失败返回 `need_action`。
+- 请求级 `ai_config` 缺一项即在联网前拒绝；完全省略时只允许使用本机完整的 `AI_BASE_URL`、`AI_API_KEY`、`AI_MODEL`。请求与本机都没有完整密钥配置时不会调用 provider。
+- 幂等记录在第一次外部调用前写入 SQLite。同键同参数只回放已保存结果；同键不同参数返回 409；进程中断、读取超时或结果不明确时标记需要人工处理，绝不自动重试或静默改用新键。
+- 接口没有传入网页搜索工具、检索上下文或引用材料，因此回答的时效性、事实与 URL 可达性均未被本接口核验。
+- 当前没有定时、后台无人值守或分布式采样入口。不同 provider 只能由操作员逐次选择配置并分别确认，不能并发发起。
+
+完整请求、响应、数据披露、费用凭据和失败语义见 [当前配置模型真实采样契约](./visibility-live-sampling.md)。
+
 ## 4. 历史接口
 
 ### 摘要列表
@@ -210,11 +238,17 @@ Content-Type: application/json
 
 | HTTP | 场景 |
 | --- | --- |
-| 200 | 分析、列表或详情成功 |
+| 200 | 分析、列表、详情、完整采样或同参数幂等回放成功 |
+| 207 | 受控采样已取得部分回答，后续样本因错误停止 |
 | 400 | JSON、字段类型、范围、长度、`limit` 或算法输入不合法 |
 | 401 | 缺少有效管理员会话 |
 | 404 | 项目或历史记录不存在 |
-| 413 | 分析请求超过 2 MiB |
+| 409 | 采样幂等键/请求 ID 冲突，或此前执行结果仍不明确 |
+| 413 | 分析请求超过 2 MiB，或采样请求超过 128 KiB |
+| 429 | 本机或 provider 对采样限流；不会自动重试 |
+| 502 | provider 协议/响应错误，或取得回答后的本机收口异常 |
+| 503 | 缺少完整模型配置、provider 不可连接，或本机采样状态无法可靠保存 |
+| 504 | provider 读取超时、远端结果不明确；不会自动重试 |
 | 500 | 已保存的本地历史无法按严格 JSON/时间契约读取 |
 
 错误仍使用 `{ "code", "msg", "data" }` 外层结构。调用方应同时判断 HTTP 状态和 `code`，不要只解析文案。
@@ -310,15 +344,15 @@ sqrt(sample_count / 5)（最大为 1）
 
 需要区分三个独立边界：
 
-1. AI 可见度本地分析：当前没有外部 provider，也没有 `AI_VISIBILITY_ENABLED` 运行时开关。出现回归时，先停止使用入口并回退到已验收旧 EXE；附加的 `ai_visibility_runs` 表可以保留，不会被旧版本主动执行。
+1. AI 可见度分析与受控采样：手工分析始终保持本机运行；真实采样只在操作员提供完整当前配置、核对外发内容并显式确认后按请求执行，没有后台开关、定时任务或分布式 worker。出现回归时停止使用采样入口并回退到已验收旧 EXE；`ai_visibility_runs` 和 `ai_visibility_sample_requests` 可以保留，旧版本不会主动重发。当前仍没有名为 `AI_VISIBILITY_ENABLED` 的运行时开关。
 2. AI 内容生成：由 `CONTENT_ENGINE` 和 `CONTENT_ENGINE_FALLBACK` 选择 `qwen` 或未来的 `colleague` 适配器。这些变量不控制 AI 可见度。外部同事服务未验收时保持 `CONTENT_ENGINE=qwen`，并避免配置同名重复 fallback。
-3. 真实发布：`safe` 桌面 profile 强制 `ALLOW_REAL_PUBLISHING=false`，调度器固定 `allow_real=False`；`authorized_real` profile 只有在 Google Chrome、Playwright 和 Patchright 的成品离线探针全部通过后，才在当前进程开放受控发布任务。两种 profile 均强制 `ENABLE_BILIBILI_RUNTIME=false`，旧版直接发布入口也保持关闭。这些是发布安全开关，不改变可见度算法。
+3. 真实发布：`safe` 桌面 profile 强制 `ALLOW_REAL_PUBLISHING=false`，调度器固定 `allow_real=False`；`authorized_real` profile 只有在 Google Chrome、Playwright 和 Patchright 的成品离线探针全部通过后，才在当前进程开放受控发布任务。Bilibili 视频兼容链路另需 EXE 外部固定版本运行时通过文件大小、SHA-256 与离线版本探针；桌面版不下载也不打包该运行时。旧版直接发布入口保持关闭。这些是发布安全开关，不改变可见度算法。
 
-未来接入自动回答采集时，应先增加一个默认关闭、可审计的独立采集开关；当前代码中尚无这一开关，不应在部署文档中伪造名称或状态。
+若未来增加定时、无人值守或分布式回答采集，应另建默认关闭、可审计的独立采集开关；当前代码中尚无这类能力和开关，不应在桌面交付文档中伪造名称或状态。
 
-## 10. 外部 provider 待接项
+## 10. 定时/分布式 provider 待接项
 
-在自动化采集上线前，需要一次性收齐并验收：
+当前操作员受控的 OpenAI-compatible 顺序采样已经实现。把它扩展为定时、无人值守、分布式采样，或接入同事的远程内容生成服务前，仍需要一次性收齐并验收：
 
 - provider 地址、认证方式、Token 归属和密钥轮换方式。
 - 固定模型 ID、版本或快照，及其许可和可商用边界。
@@ -327,7 +361,7 @@ sqrt(sample_count / 5)（最大为 1）
 - 问题、品牌、竞品、历史和客户数据中哪些字段允许发送。
 - 日志脱敏、审计记录、保留期限、删除机制和地域要求。
 - provider 失败也要形成样本状态，不能只把成功回答交给统计层后宣称成功率为 100%。
-- 使用纯合成项目完成受控验收；验收说明必须在请求前列出将发送的字段，禁止发送现有客户或项目数据。
+- 使用纯合成项目完成新 provider 的受控验收；验收说明必须在请求前列出将发送的字段，禁止发送现有客户或项目数据。
 - 交接 ZIP 缺少 `LICENSE`/`NOTICE`；对外分发前取得书面内部授权或补齐权利声明。
 
 推荐保持“采集器”和“确定性分析器”分离：采集器只产生 `{ text, provider, model, status, timing }` 等标准化样本，分析器继续无网络运行。这样 provider 变更不会改变算法证据语义，也便于关闭采集、保留本机手工导入作为回滚路径。
@@ -340,15 +374,18 @@ sqrt(sample_count / 5)（最大为 1）
 uv run python -m unittest `
   tests.test_ai_visibility_service `
   tests.test_ai_visibility_run_service `
-  tests.test_ai_visibility_api -v
+  tests.test_ai_visibility_api `
+  tests.test_ai_visibility_sampling_service `
+  tests.test_ai_visibility_sampling_database `
+  tests.test_ai_visibility_sampling_api -v
 ```
 
 前端：
 
 ```powershell
 Set-Location sau_frontend
-node --test tests/visibilityResult.test.js
+node --test tests/visibilityResult.test.js tests/visibilitySampling.test.js
 npm run build
 ```
 
-测试不得调用真实 provider 或执行真实发布。外部 provider 联调应使用另行审批的合成数据和隔离凭据。
+测试不得调用真实 provider 或执行真实发布。真实采样验收只能在 EXE 中由操作员先核对将外发的精确 prompt，再使用隔离凭据和合成测试项目显式确认；没有凭据时保持未执行状态。

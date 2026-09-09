@@ -25,9 +25,15 @@ other packages above but does not assert that their full license texts are
 embedded by PyInstaller. The executable uses an independently installed Google
 Chrome browser for publishing; Chrome is not redistributed in this release.
 
-Bilibili's biliup executable is not included or enabled by either desktop
-publishing profile. This notice does not authorize downloading or
-redistributing biliup.
+Bilibili's biliup executable is not included, downloaded, updated, or
+redistributed by the desktop package.  An authorized-real build can recognize
+one external compatibility-runtime version only after an exact executable
+size, SHA-256, and offline version probe all pass.  The safe profile never
+enables it.  This compatibility check is not a license grant and does not
+authorize downloading, operating for commercial customers, or redistributing
+biliup; those rights and Bilibili platform authorization require separate
+review.  The preferred commercial integration path is Bilibili's official
+Open Platform with approved application credentials.
 
 The colleague handoff archive used as a reference for the AI visibility port
 did not contain its own LICENSE or NOTICE. This inventory does not cure that

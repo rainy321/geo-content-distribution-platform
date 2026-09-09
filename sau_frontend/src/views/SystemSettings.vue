@@ -5,8 +5,8 @@
         <span class="eyebrow">SYSTEM / ENGINE ROUTING</span>
         <h1>系统设置</h1>
         <p>
-          查看当前内容引擎的运行状态，并为备用路径配置 OpenAI-compatible API。
-          浏览器配置不会改动服务器默认值。
+          查看当前内容引擎的运行状态，并为 Windows 软件配置 OpenAI-compatible API。
+          会话配置只影响这台电脑上当前打开的 GEO 软件。
         </p>
       </div>
       <div :class="['active-source', sourceTone]">
@@ -20,7 +20,7 @@
       <section class="config-card">
         <header class="section-heading">
           <div>
-            <span class="section-kicker">BROWSER OVERRIDE</span>
+            <span class="section-kicker">DESKTOP SESSION</span>
             <h2>自定义 AI API</h2>
           </div>
           <el-tag :type="customActive ? 'success' : 'info'" effect="plain">
@@ -59,7 +59,7 @@
               </el-input>
             </el-form-item>
 
-            <el-form-item label="API Key（仅当前标签页）" prop="apiKey">
+            <el-form-item label="API Key（仅当前软件会话）" prop="apiKey">
               <el-input
                 v-model="form.apiKey"
                 type="password"
@@ -78,7 +78,7 @@
           <el-icon><Timer /></el-icon>
           <div>
             <strong>密钥不会长期保存</strong>
-            <p>服务地址和模型名留在本浏览器；API Key 只保存在当前标签页会话，关闭标签页后自动清除。</p>
+            <p>服务地址和模型名保存在本机软件数据中；API Key 只保存在当前软件会话，关闭 GEO 后自动清除。</p>
           </div>
         </div>
 
@@ -146,16 +146,16 @@
             <article :class="['route-node', { active: customActive }]">
               <span class="node-index">01</span>
               <div>
-                <strong>浏览器自定义配置</strong>
-                <p>三项填写完整时优先使用，只影响这个浏览器会话。</p>
+                <strong>当前软件会话配置</strong>
+                <p>三项填写完整时优先使用，只影响本次打开的 GEO 软件。</p>
               </div>
               <el-icon><Monitor /></el-icon>
             </article>
             <article :class="['route-node', { active: !customActive && serverConfigured }]">
               <span class="node-index">02</span>
               <div>
-                <strong>服务器默认配置</strong>
-                <p>{{ serverConfigured ? 'Vercel Production 已配置，可作为默认连接。' : '服务器尚未配置完整的模型变量。' }}</p>
+                <strong>本机默认配置</strong>
+                <p>{{ serverConfigured ? '当前 EXE 运行环境已配置，可作为默认连接。' : '本机尚未配置完整的模型变量。' }}</p>
               </div>
               <el-icon><Cloudy /></el-icon>
             </article>
@@ -275,8 +275,8 @@ const rules = {
 const customActive = ref(Boolean(getCustomAIConfig()))
 const hasDraft = computed(() => Boolean(form.baseUrl || form.apiKey || form.model))
 const activeSourceLabel = computed(() => {
-  if (customActive.value) return '浏览器自定义'
-  if (serverConfigured.value) return '服务器默认'
+  if (customActive.value) return '当前软件会话'
+  if (serverConfigured.value) return '本机默认'
   return '尚未配置'
 })
 const activeSourceHint = computed(() => {
@@ -388,9 +388,9 @@ const saveConfig = async () => {
     saveCustomAIConfig(form)
     customActive.value = true
     activeCustomModel.value = form.model.trim()
-    ElMessage.success('自定义 AI API 已用于当前浏览器会话')
+    ElMessage.success('自定义 AI API 已用于当前软件会话')
   } catch (error) {
-    ElMessage.error(error.message || '浏览器无法保存当前配置')
+    ElMessage.error(error.message || '软件无法保存当前配置')
   } finally {
     saving.value = false
   }

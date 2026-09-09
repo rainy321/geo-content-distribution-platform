@@ -1153,7 +1153,7 @@ async def _default_baijiahao_publish_runner(
 
     publisher = BaiJiaHaoArticle(
         title=content.title,
-        body=_markdown_to_platform_text(content.content),
+        body=content.content,
         tags=list(content.tags),
         publish_date=0,
         account_file=account_file,
@@ -1203,15 +1203,14 @@ async def _default_xiaohongshu_publish_runner(
             )
         )
 
-    note_text = _markdown_to_platform_text(content.content, strip_hashes=True)
     publisher = XiaoHongShuNote(
         image_paths=list(content.images),
-        note=note_text,
+        note=content.content,
         tags=list(content.tags),
         publish_date=0,
         account_file=account_file,
         title=content.title,
-        desc=note_text,
+        desc=content.content,
         headless=False,
         dry_run=False,
         ai_generated=True,
@@ -1246,6 +1245,14 @@ def _validate_content_platform(content: PublishContent, platform: str) -> None:
         raise TypeError("content 必须是 PublishContent")
     if content.platform != platform:
         raise ValueError(f"内容平台 {content.platform} 与适配器 {platform} 不一致")
+    from services.publish_preflight_service import validate_platform_publish_variant
+
+    validate_platform_publish_variant(
+        platform=platform,
+        title=content.title,
+        content=content.content,
+        tags=content.tags,
+    )
 
 
 def _normalize_string_tuple(values: Sequence[Any] | str | None) -> tuple[str, ...]:

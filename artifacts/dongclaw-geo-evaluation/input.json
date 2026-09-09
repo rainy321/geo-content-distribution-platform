@@ -1,0 +1,73 @@
+{
+  "schema_version": "dongclaw-geo-evaluation-input-1.0.0",
+  "subject": {
+    "company": "北京同于野科技有限公司",
+    "product": "DongClaw 小龙虾",
+    "aliases": [
+      "DongClaw",
+      "DongClaw小龙虾"
+    ],
+    "competitor": "RanClaw",
+    "website": ""
+  },
+  "study": {
+    "study_id": "dongclaw-geo-pilot-20260910",
+    "evaluation_type": "short-horizon-observational-pilot",
+    "timezone": "Asia/Hong_Kong",
+    "optimized_at": null,
+    "notes": "只导入三个指定模型对固定问题的原始回答；不要放入账号、Cookie、API 密钥、其他项目或客户资料。"
+  },
+  "questions": [
+    {
+      "id": "cn-discovery",
+      "region": "中国大陆",
+      "intent": "品类发现",
+      "cohort": "unbranded",
+      "text": "中国中小企业想快速部署可持续运行的 AI 助手，有哪些产品或服务值得考虑？"
+    },
+    {
+      "id": "beijing-local-data",
+      "region": "北京",
+      "intent": "本地数据与部署",
+      "cohort": "unbranded",
+      "text": "北京的中小企业需要兼顾本地数据与远程运行时，应该如何选择 AI 助手部署方案？"
+    },
+    {
+      "id": "cn-low-ops",
+      "region": "中国大陆",
+      "intent": "低运维部署",
+      "cohort": "unbranded",
+      "text": "没有专职运维团队时，如何快速部署并长期运行一个 AI 助手？"
+    },
+    {
+      "id": "dongclaw-identity",
+      "region": "中国大陆",
+      "intent": "品牌实体认知",
+      "cohort": "branded",
+      "text": "DongClaw 小龙虾是什么产品，由哪家公司提供，适合解决什么问题？"
+    },
+    {
+      "id": "dongclaw-vs-ranclaw",
+      "region": "中国大陆",
+      "intent": "竞品比较",
+      "cohort": "branded_comparison",
+      "text": "DongClaw 小龙虾和 RanClaw 有什么区别，分别适合什么团队？"
+    },
+    {
+      "id": "beijing-chinese-support",
+      "region": "北京",
+      "intent": "中文与本地服务",
+      "cohort": "unbranded",
+      "text": "如果希望在中国使用、强调中文支持和本地化服务，AI 助手部署产品该怎么选？"
+    },
+    {
+      "id": "dongclaw-public-evidence",
+      "region": "北京",
+      "intent": "事实与来源核验",
+      "cohort": "branded",
+      "text": "北京同于野科技有限公司提供的 DongClaw 小龙虾有哪些可验证的公开信息？"
+    }
+  ],
+  "attempts": [],
+  "interventions": []
+}

@@ -579,6 +579,12 @@ class BaijiahaoPublisherAdapterTests(unittest.TestCase):
     def test_default_runner_uses_cover_and_ai_declaration(self, article_class):
         article = article_class.return_value
         observed = {"status": "processing", "message": "已提交"}
+        snapshot = PublishContent(
+            platform="baijiahao",
+            title="测试标题",
+            content="预检后的正文 **保持原样**",
+            images=("cover.png",),
+        )
 
         async def run_main():
             await article.publish(object())
@@ -589,12 +595,12 @@ class BaijiahaoPublisherAdapterTests(unittest.TestCase):
             new=AsyncMock(return_value=observed),
         ):
             result = asyncio.run(
-                _default_baijiahao_publish_runner(self.content, "account.json")
+                _default_baijiahao_publish_runner(snapshot, "account.json")
             )
 
         kwargs = article_class.call_args.kwargs
         self.assertEqual(kwargs["cover_path"], "cover.png")
-        self.assertEqual(kwargs["body"], "正文")
+        self.assertEqual(kwargs["body"], snapshot.content)
         self.assertTrue(kwargs["ai_generated"])
         self.assertEqual(result, observed)
 
@@ -647,6 +653,13 @@ class XiaohongshuPublisherAdapterTests(unittest.TestCase):
         note = note_class.return_value
         observed = {"status": "processing", "message": "已提交"}
         page = object()
+        snapshot = PublishContent(
+            platform="xiaohongshu",
+            title="GEO 内容测试",
+            content="预检后的正文 **保持原样**",
+            images=("note.png",),
+            tags=("GEO",),
+        )
 
         async def run_main():
             callback = note_class.call_args.kwargs["publish_callback"]
@@ -659,12 +672,13 @@ class XiaohongshuPublisherAdapterTests(unittest.TestCase):
             new=observer,
         ):
             result = asyncio.run(
-                _default_xiaohongshu_publish_runner(self.content, "account.json")
+                _default_xiaohongshu_publish_runner(snapshot, "account.json")
             )
 
         kwargs = note_class.call_args.kwargs
         self.assertEqual(kwargs["image_paths"], ["note.png"])
-        self.assertEqual(kwargs["desc"], "正文")
+        self.assertEqual(kwargs["note"], snapshot.content)
+        self.assertEqual(kwargs["desc"], snapshot.content)
         self.assertTrue(kwargs["ai_generated"])
         self.assertEqual(result, observed)
         observer.assert_awaited_once_with(

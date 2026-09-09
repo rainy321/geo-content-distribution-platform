@@ -1231,7 +1231,7 @@ class TencentNote(TencentBaseUploader):
         )
         self.image_paths = image_paths
         self.note = note or ""
-        self.title = title or (self.note[:30] if self.note else "")
+        self.title = title or self.note
         self.tags = tags or []
         self.is_draft = is_draft
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import re
 from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
@@ -128,6 +129,14 @@ class MediaPublisherAdapter(PublisherAdapter):
             raise ValueError(
                 f"内容平台 {content.platform} 与适配器 {self.platform} 不一致"
             )
+        from services.publish_preflight_service import validate_platform_publish_variant
+
+        validate_platform_publish_variant(
+            platform=self.platform,
+            title=content.title,
+            content=content.content,
+            tags=content.tags,
+        )
         if self.requires_images and not content.images:
             raise ValueError(f"{self.platform_name}图文发布至少需要一张图片")
         if self.requires_video and not content.video:
@@ -230,6 +239,7 @@ class BilibiliPublisherAdapter(MediaPublisherAdapter):
             requires_video=True,
             login_checker=overrides.pop("login_checker", _bilibili_login_checker),
             publish_runner=overrides.pop("publish_runner", _bilibili_publish_runner),
+            timeout_seconds=overrides.pop("timeout_seconds", 7200),
             **overrides,
         )
 
@@ -307,10 +317,20 @@ async def _kuaishou_publish_runner(content: PublishContent, account_file: str) -
 def _bilibili_login_checker(account_file: str) -> bool:
     from uploader.bilibili_uploader.runtime import run_biliup_command
 
-    return run_biliup_command(["-u", account_file, "renew"]).returncode == 0
+    try:
+        return run_biliup_command(
+            ["-u", account_file, "renew"],
+            timeout_seconds=60,
+        ).returncode == 0
+    except Exception:
+        # Exceptions such as TimeoutExpired can embed the full command, including
+        # the account-file path.  Never let that representation reach the API.
+        raise RuntimeError(
+            "Bilibili 登录状态检查不可用（错误码 BILIUP_LOGIN_CHECK_FAILED）"
+        ) from None
 
 
-def _bilibili_publish_runner(content: PublishContent, account_file: str) -> None:
+def _bilibili_publish_runner(content: PublishContent, account_file: str) -> dict[str, Any]:
     from uploader.bilibili_uploader.runtime import run_biliup_command
 
     arguments = [
@@ -321,7 +341,7 @@ def _bilibili_publish_runner(content: PublishContent, account_file: str) -> None
         "--title",
         content.title,
         "--desc",
-        content.content[:2000],
+        content.content,
         "--tid",
         "21",
         "--copyright",
@@ -332,9 +352,35 @@ def _bilibili_publish_runner(content: PublishContent, account_file: str) -> None
     arguments.extend(
         ["--extra-fields", '{"creation_statement":{"id":1}}']
     )
-    result = run_biliup_command(arguments)
+    try:
+        result = run_biliup_command(arguments, timeout_seconds=7200)
+    except Exception:
+        # A subprocess exception may embed title/body/path/cookie arguments.
+        # Preserve the truthful unknown-state workflow with a stable safe code.
+        raise RuntimeError(
+            "Bilibili 上传命令异常（错误码 BILIUP_RUNTIME_ERROR）"
+        ) from None
     if result.returncode != 0:
-        raise RuntimeError((result.stderr or result.stdout or "Bilibili 上传失败").strip())
+        # CLI output may contain local paths, account-file locations, cookies or
+        # request details.  It is intentionally not propagated to PublishResult,
+        # SQLite or the DOM.  The bounded tail remains internal to the invocation.
+        normalized_code = str(int(result.returncode)).replace("-", "N")
+        raise RuntimeError(f"Bilibili 上传命令失败（错误码 BILIUP_EXIT_{normalized_code}）")
+    output = f"{result.stdout or ''}\n{result.stderr or ''}"
+    bvid_match = re.search(r"(?<![0-9A-Za-z])(BV[0-9A-Za-z]{10})(?![0-9A-Za-z])", output)
+    if bvid_match:
+        return {
+            "status": "success",
+            "url": f"https://www.bilibili.com/video/{bvid_match.group(1)}",
+            "message": "Bilibili 已返回可核验的 BV 号",
+        }
+    return {
+        "status": "processing",
+        "message": (
+            "Bilibili 已接受上传，但未返回可核验 BV 链接；"
+            "请在稿件管理中核对后完成任务"
+        ),
+    }
 
 
 async def _channels_login_checker(account_file: str) -> bool:

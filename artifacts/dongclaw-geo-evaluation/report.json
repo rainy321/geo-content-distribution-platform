@@ -1,0 +1,462 @@
+{
+  "report_version": "dongclaw-geo-evaluation-report-1.0.0",
+  "input_schema_version": "dongclaw-geo-evaluation-input-1.0.0",
+  "study": {
+    "study_id": "dongclaw-geo-pilot-20260910",
+    "evaluation_type": "short-horizon-observational-pilot",
+    "timezone": "Asia/Hong_Kong",
+    "optimized_at": null,
+    "notes": "只导入三个指定模型对固定问题的原始回答；不要放入账号、Cookie、API 密钥、其他项目或客户资料。"
+  },
+  "subject": {
+    "company": "北京同于野科技有限公司",
+    "product": "DongClaw 小龙虾",
+    "aliases": [
+      "DongClaw",
+      "DongClaw小龙虾"
+    ],
+    "competitor": "RanClaw",
+    "website": ""
+  },
+  "status": "NOT_EXECUTED",
+  "claim_boundary": "未执行真实模型采样；不能报告任何 GEO 效果。",
+  "blocking_items": [
+    {
+      "id": "REAL_MODEL_OUTPUTS_MISSING",
+      "detail": "尚未从 Qwen、DeepSeek、豆包的已授权网页会话或 API 导入真实回答；评估器不会自行读取登录态或凭据。"
+    },
+    {
+      "id": "PROVIDER_COVERAGE_INCOMPLETE",
+      "detail": "缺少成功样本：['deepseek', 'doubao', 'qwen']。"
+    },
+    {
+      "id": "OFFICIAL_PRODUCT_SOURCE_UNVERIFIED",
+      "detail": "没有独立核验的 DongClaw 官方产品页/域名，无法计算可信的自有引用率或核对模型生成的产品事实。"
+    },
+    {
+      "id": "RANCLAW_ENTITY_UNVERIFIED",
+      "detail": "指定竞品 RanClaw 尚无精确、可信的公开实体来源；RunClaw 等相近拼写不会自动合并。"
+    }
+  ],
+  "readiness_snapshot": [
+    {
+      "id": "fixed-question-matrix",
+      "label": "固定问题矩阵",
+      "current": 7,
+      "target": 7,
+      "detail": "覆盖中国大陆/北京、发现、部署、品牌、竞品和事实核验。"
+    },
+    {
+      "id": "company-evidence",
+      "label": "公司主体辅助证据",
+      "current": 1,
+      "target": 1,
+      "detail": "仅第三方企业信息页，不等于官方产品归属证明。"
+    },
+    {
+      "id": "official-product-source",
+      "label": "官方产品来源",
+      "current": 0,
+      "target": 1,
+      "detail": "当前未核验，产品事实和自有引用无法可靠判定。"
+    },
+    {
+      "id": "exact-competitor-source",
+      "label": "精确竞品来源",
+      "current": 0,
+      "target": 1,
+      "detail": "RanClaw 精确实体未核验；不合并 RunClaw。"
+    },
+    {
+      "id": "baseline-provider-coverage",
+      "label": "基线模型覆盖",
+      "current": 0,
+      "target": 3,
+      "detail": "Qwen、DeepSeek、豆包分别统计。"
+    },
+    {
+      "id": "baseline-cell-coverage",
+      "label": "基线单元覆盖",
+      "current": 0,
+      "target": 21,
+      "detail": "三模型乘七问题；至少一条成功回答才算覆盖。"
+    },
+    {
+      "id": "baseline-sample-depth",
+      "label": "基线建议样本量",
+      "current": 0,
+      "target": 105,
+      "detail": "每单元建议五个独立新会话，失败另保留在尝试分母。"
+    },
+    {
+      "id": "post-cell-coverage",
+      "label": "复测单元覆盖",
+      "current": 0,
+      "target": 21,
+      "detail": "必须与基线精确配置配对。"
+    },
+    {
+      "id": "post-sample-depth",
+      "label": "复测建议样本量",
+      "current": 0,
+      "target": 105,
+      "detail": "不足 72 小时只做流程验收，建议持续 14–30 天。"
+    }
+  ],
+  "public_evidence_snapshot": {
+    "checked_at": "2026-09-10",
+    "search_scope": "公开网页精确名称检索",
+    "findings": [
+      {
+        "entity": "北京同于野科技有限公司",
+        "status": "THIRD_PARTY_REGISTRY_ONLY",
+        "finding": "检索到第三方企业信息页，可核对主体名称与一般经营范围；该页面不是企业官网，也未形成 DongClaw 产品归属的独立证明。",
+        "source": "https://www.shuididp.cn/yp-4c2d8440523800360ce008a135fc3b01.html"
+      },
+      {
+        "entity": "DongClaw 小龙虾",
+        "status": "NO_VERIFIED_OFFICIAL_PRODUCT_SOURCE",
+        "finding": "未找到可独立核验的官方产品页或权威第三方产品介绍。",
+        "source": null
+      },
+      {
+        "entity": "RanClaw",
+        "status": "EXACT_ENTITY_UNVERIFIED",
+        "finding": "未找到足以确认用户所指竞品的精确实体；搜索结果中的 RunClaw 拼写不同，不能并入 RanClaw 声量或引用。",
+        "source": "https://runclaw.sh/"
+      }
+    ]
+  },
+  "question_matrix": [
+    {
+      "id": "cn-discovery",
+      "region": "中国大陆",
+      "intent": "品类发现",
+      "cohort": "unbranded",
+      "text": "中国中小企业想快速部署可持续运行的 AI 助手，有哪些产品或服务值得考虑？"
+    },
+    {
+      "id": "beijing-local-data",
+      "region": "北京",
+      "intent": "本地数据与部署",
+      "cohort": "unbranded",
+      "text": "北京的中小企业需要兼顾本地数据与远程运行时，应该如何选择 AI 助手部署方案？"
+    },
+    {
+      "id": "cn-low-ops",
+      "region": "中国大陆",
+      "intent": "低运维部署",
+      "cohort": "unbranded",
+      "text": "没有专职运维团队时，如何快速部署并长期运行一个 AI 助手？"
+    },
+    {
+      "id": "dongclaw-identity",
+      "region": "中国大陆",
+      "intent": "品牌实体认知",
+      "cohort": "branded",
+      "text": "DongClaw 小龙虾是什么产品，由哪家公司提供，适合解决什么问题？"
+    },
+    {
+      "id": "dongclaw-vs-ranclaw",
+      "region": "中国大陆",
+      "intent": "竞品比较",
+      "cohort": "branded_comparison",
+      "text": "DongClaw 小龙虾和 RanClaw 有什么区别，分别适合什么团队？"
+    },
+    {
+      "id": "beijing-chinese-support",
+      "region": "北京",
+      "intent": "中文与本地服务",
+      "cohort": "unbranded",
+      "text": "如果希望在中国使用、强调中文支持和本地化服务，AI 助手部署产品该怎么选？"
+    },
+    {
+      "id": "dongclaw-public-evidence",
+      "region": "北京",
+      "intent": "事实与来源核验",
+      "cohort": "branded",
+      "text": "北京同于野科技有限公司提供的 DongClaw 小龙虾有哪些可验证的公开信息？"
+    }
+  ],
+  "provider_overviews": [],
+  "question_results": [],
+  "paired_comparison": {
+    "matched_pair_count": 0,
+    "matched_success_pair_count": 0,
+    "baseline_metrics_on_success_pairs": {
+      "attempt_count": 0,
+      "success_count": 0,
+      "success_rate": null,
+      "brand_mention_count": 0,
+      "mention_rate_success": null,
+      "mention_rate_all_attempts": null,
+      "competitor_mention_count": 0,
+      "competitor_mention_rate_success": null,
+      "first_position_rate_success": null,
+      "top3_rate_success": null,
+      "average_rank": null,
+      "ranked_answer_count": 0,
+      "citation_rate_success": null,
+      "owned_citation_rate_success": null,
+      "share_of_voice": null,
+      "sentiment_score": null,
+      "source_reference_coverage": null,
+      "error_counts": {}
+    },
+    "post_metrics_on_success_pairs": {
+      "attempt_count": 0,
+      "success_count": 0,
+      "success_rate": null,
+      "brand_mention_count": 0,
+      "mention_rate_success": null,
+      "mention_rate_all_attempts": null,
+      "competitor_mention_count": 0,
+      "competitor_mention_rate_success": null,
+      "first_position_rate_success": null,
+      "top3_rate_success": null,
+      "average_rank": null,
+      "ranked_answer_count": 0,
+      "citation_rate_success": null,
+      "owned_citation_rate_success": null,
+      "share_of_voice": null,
+      "sentiment_score": null,
+      "source_reference_coverage": null,
+      "error_counts": {}
+    },
+    "deltas": {
+      "mention_rate_success": null,
+      "mention_rate_all_attempts": null,
+      "first_position_rate_success": null,
+      "top3_rate_success": null,
+      "citation_rate_success": null,
+      "owned_citation_rate_success": null,
+      "share_of_voice": null,
+      "sentiment_score": null,
+      "average_rank_improvement": null
+    },
+    "pairs": [],
+    "by_cohort": [
+      {
+        "cohort": "branded",
+        "matched_pair_count": 0,
+        "matched_success_pair_count": 0,
+        "baseline_metrics_on_success_pairs": {
+          "attempt_count": 0,
+          "success_count": 0,
+          "success_rate": null,
+          "brand_mention_count": 0,
+          "mention_rate_success": null,
+          "mention_rate_all_attempts": null,
+          "competitor_mention_count": 0,
+          "competitor_mention_rate_success": null,
+          "first_position_rate_success": null,
+          "top3_rate_success": null,
+          "average_rank": null,
+          "ranked_answer_count": 0,
+          "citation_rate_success": null,
+          "owned_citation_rate_success": null,
+          "share_of_voice": null,
+          "sentiment_score": null,
+          "source_reference_coverage": null,
+          "error_counts": {}
+        },
+        "post_metrics_on_success_pairs": {
+          "attempt_count": 0,
+          "success_count": 0,
+          "success_rate": null,
+          "brand_mention_count": 0,
+          "mention_rate_success": null,
+          "mention_rate_all_attempts": null,
+          "competitor_mention_count": 0,
+          "competitor_mention_rate_success": null,
+          "first_position_rate_success": null,
+          "top3_rate_success": null,
+          "average_rank": null,
+          "ranked_answer_count": 0,
+          "citation_rate_success": null,
+          "owned_citation_rate_success": null,
+          "share_of_voice": null,
+          "sentiment_score": null,
+          "source_reference_coverage": null,
+          "error_counts": {}
+        },
+        "deltas": {
+          "mention_rate_success": null,
+          "mention_rate_all_attempts": null,
+          "first_position_rate_success": null,
+          "top3_rate_success": null,
+          "citation_rate_success": null,
+          "owned_citation_rate_success": null,
+          "share_of_voice": null,
+          "sentiment_score": null,
+          "average_rank_improvement": null
+        },
+        "pairs": []
+      },
+      {
+        "cohort": "branded_comparison",
+        "matched_pair_count": 0,
+        "matched_success_pair_count": 0,
+        "baseline_metrics_on_success_pairs": {
+          "attempt_count": 0,
+          "success_count": 0,
+          "success_rate": null,
+          "brand_mention_count": 0,
+          "mention_rate_success": null,
+          "mention_rate_all_attempts": null,
+          "competitor_mention_count": 0,
+          "competitor_mention_rate_success": null,
+          "first_position_rate_success": null,
+          "top3_rate_success": null,
+          "average_rank": null,
+          "ranked_answer_count": 0,
+          "citation_rate_success": null,
+          "owned_citation_rate_success": null,
+          "share_of_voice": null,
+          "sentiment_score": null,
+          "source_reference_coverage": null,
+          "error_counts": {}
+        },
+        "post_metrics_on_success_pairs": {
+          "attempt_count": 0,
+          "success_count": 0,
+          "success_rate": null,
+          "brand_mention_count": 0,
+          "mention_rate_success": null,
+          "mention_rate_all_attempts": null,
+          "competitor_mention_count": 0,
+          "competitor_mention_rate_success": null,
+          "first_position_rate_success": null,
+          "top3_rate_success": null,
+          "average_rank": null,
+          "ranked_answer_count": 0,
+          "citation_rate_success": null,
+          "owned_citation_rate_success": null,
+          "share_of_voice": null,
+          "sentiment_score": null,
+          "source_reference_coverage": null,
+          "error_counts": {}
+        },
+        "deltas": {
+          "mention_rate_success": null,
+          "mention_rate_all_attempts": null,
+          "first_position_rate_success": null,
+          "top3_rate_success": null,
+          "citation_rate_success": null,
+          "owned_citation_rate_success": null,
+          "share_of_voice": null,
+          "sentiment_score": null,
+          "average_rank_improvement": null
+        },
+        "pairs": []
+      },
+      {
+        "cohort": "unbranded",
+        "matched_pair_count": 0,
+        "matched_success_pair_count": 0,
+        "baseline_metrics_on_success_pairs": {
+          "attempt_count": 0,
+          "success_count": 0,
+          "success_rate": null,
+          "brand_mention_count": 0,
+          "mention_rate_success": null,
+          "mention_rate_all_attempts": null,
+          "competitor_mention_count": 0,
+          "competitor_mention_rate_success": null,
+          "first_position_rate_success": null,
+          "top3_rate_success": null,
+          "average_rank": null,
+          "ranked_answer_count": 0,
+          "citation_rate_success": null,
+          "owned_citation_rate_success": null,
+          "share_of_voice": null,
+          "sentiment_score": null,
+          "source_reference_coverage": null,
+          "error_counts": {}
+        },
+        "post_metrics_on_success_pairs": {
+          "attempt_count": 0,
+          "success_count": 0,
+          "success_rate": null,
+          "brand_mention_count": 0,
+          "mention_rate_success": null,
+          "mention_rate_all_attempts": null,
+          "competitor_mention_count": 0,
+          "competitor_mention_rate_success": null,
+          "first_position_rate_success": null,
+          "top3_rate_success": null,
+          "average_rank": null,
+          "ranked_answer_count": 0,
+          "citation_rate_success": null,
+          "owned_citation_rate_success": null,
+          "share_of_voice": null,
+          "sentiment_score": null,
+          "source_reference_coverage": null,
+          "error_counts": {}
+        },
+        "deltas": {
+          "mention_rate_success": null,
+          "mention_rate_all_attempts": null,
+          "first_position_rate_success": null,
+          "top3_rate_success": null,
+          "citation_rate_success": null,
+          "owned_citation_rate_success": null,
+          "share_of_voice": null,
+          "sentiment_score": null,
+          "average_rank_improvement": null
+        },
+        "pairs": []
+      }
+    ]
+  },
+  "quality_gates": [
+    {
+      "id": "all-three-providers",
+      "passed": false,
+      "detail": "已有成功样本 provider=[]；要求=['qwen', 'deepseek', 'doubao']。"
+    },
+    {
+      "id": "baseline-five-replicates",
+      "passed": false,
+      "detail": "达到每单元 5 个成功样本的基线单元 0/21。"
+    },
+    {
+      "id": "post-five-replicates",
+      "passed": false,
+      "detail": "达到每单元 5 个成功样本的复测单元 0/21。"
+    },
+    {
+      "id": "paired-successes",
+      "passed": false,
+      "detail": "成功配对 0/105；失败执行也必须保留。"
+    },
+    {
+      "id": "observation-window",
+      "passed": false,
+      "detail": "尚无优化后时间窗。"
+    },
+    {
+      "id": "raw-evidence-references",
+      "passed": false,
+      "detail": "每次执行都应保留截图、录屏、导出文件或请求 ID 的引用；报告本身不复制回答原文。"
+    },
+    {
+      "id": "official-product-source",
+      "passed": false,
+      "detail": "当前没有独立核验的 DongClaw 官方产品域名，自有引用率不可作为销售证明。"
+    }
+  ],
+  "measurement_records": [],
+  "interventions": [],
+  "methodology": {
+    "visibility_algorithm": "ai-visibility-python-port-1.1.0",
+    "external_model_called_by_evaluator": false,
+    "raw_answers_in_report": false,
+    "recommended_replicates_per_cell": 5,
+    "minimum_observation_hours": 72.0,
+    "comparison_unit": "same provider, exact model, surface, web-search setting, question, and replicate",
+    "rates": "success-denominator rates use successful answers; mention_rate_all_attempts also exposes failures in the denominator",
+    "cohort_policy": "Unbranded discovery, branded identity, and branded comparison prompts are reported separately so prompt-echo cannot inflate discovery metrics.",
+    "owned_citation_semantics": "Unavailable until an independently verified official DongClaw domain is entered into the authorized subject contract."
+  }
+}

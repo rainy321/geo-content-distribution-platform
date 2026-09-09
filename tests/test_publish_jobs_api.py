@@ -66,11 +66,95 @@ class PublishJobsApiTests(unittest.TestCase):
         self.assertEqual(detail_response.status_code, 200)
         detail = detail_response.get_json()["data"]
         snapshot = detail.pop("confirmation_snapshot")
+        publication_snapshot = detail.pop("publication_snapshot")
         self.assertEqual(detail, job)
         self.assertEqual(snapshot["article_id"], self.article_id)
         self.assertEqual(snapshot["title"], "AI Agent 指南")
         self.assertEqual(snapshot["content"], "文章正文")
         self.assertEqual(snapshot["tags"], ["AI"])
+        self.assertEqual(publication_snapshot["content"], "文章正文")
+        self.assertFalse(publication_snapshot["adapted"])
+
+    def test_preflight_builds_editable_kuaishou_copy_without_changing_article(self):
+        original = "完整原稿。" * 180
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE articles SET content = ?, tags = ? WHERE id = ?",
+                    (original, '["AI","产品化"]', self.article_id),
+                )
+
+        preview_response = self.client.post(
+            "/api/publish/preflight",
+            json={"article_id": self.article_id, "platforms": ["kuaishou"]},
+        )
+
+        self.assertEqual(preview_response.status_code, 200)
+        variant = preview_response.get_json()["data"]["variants"][0]
+        self.assertEqual(variant["original_content"], original)
+        self.assertEqual(variant["content_policy"]["hard_limit"], 500)
+        self.assertLessEqual(
+            variant["publish_length"], variant["content_policy"]["safe_limit"]
+        )
+        self.assertTrue(variant["adapted"])
+
+        created = self.client.post(
+            "/api/publish",
+            json={
+                "article_id": self.article_id,
+                "platform": "kuaishou",
+                "publish_title": "快手发布标题",
+                "publish_content": variant["publish_content"],
+            },
+        )
+        self.assertEqual(created.status_code, 201)
+        detail = self.client.get(
+            f"/api/publish/jobs/{created.get_json()['data']['job_id']}"
+        ).get_json()["data"]
+        self.assertEqual(
+            detail["publication_snapshot"]["content"],
+            variant["publish_content"],
+        )
+        self.assertEqual(
+            detail["publication_snapshot"]["title"],
+            "快手发布标题",
+        )
+        self.assertEqual(detail["confirmation_snapshot"]["content"], original)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            stored_original = conn.execute(
+                "SELECT content FROM articles WHERE id = ?", (self.article_id,)
+            ).fetchone()[0]
+        self.assertEqual(stored_original, original)
+
+    def test_create_rejects_manual_platform_copy_above_safe_limit(self):
+        response = self.client.post(
+            "/api/publish",
+            json={
+                "article_id": self.article_id,
+                "platform": "kuaishou",
+                "publish_content": "字" * 470,
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("470 字", response.get_json()["msg"])
+
+    def test_platform_capabilities_expose_limits_verification_and_non_official_frequency(self):
+        capabilities = self.client.get("/api/publish/platforms").get_json()["data"]
+        douyin = next(item for item in capabilities if item["key"] == "douyin")
+        kuaishou = next(item for item in capabilities if item["key"] == "kuaishou")
+
+        self.assertEqual(douyin["content_policy"]["hard_limit"], 1000)
+        self.assertEqual(kuaishou["content_policy"]["hard_limit"], 500)
+        self.assertIn("短信验证码", douyin["verification"]["methods"])
+        self.assertEqual(
+            douyin["frequency_guidance"]["source"],
+            "geo_conservative_default",
+        )
+        self.assertIn(
+            "不是平台官方",
+            douyin["frequency_guidance"]["disclaimer"],
+        )
 
     def test_executes_demo_job_through_full_state_flow(self):
         job = self._create_job()

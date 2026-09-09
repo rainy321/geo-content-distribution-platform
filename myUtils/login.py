@@ -34,6 +34,22 @@ _ZHIHU_LOGIN_ERROR_ACTIONS = {
     "unexpected_error": "重试；如仍失败，请查看本机日志",
 }
 
+_BILIBILI_LOGIN_ERROR_MESSAGES = {
+    "login_window_failed": "无法打开 Bilibili 扫码登录窗口",
+    "login_window_closed": "Bilibili 登录窗口已关闭，且没有生成有效登录凭证",
+    "credential_check_timeout": "Bilibili 登录凭证校验超时",
+    "login_timeout": "等待 Bilibili 登录超时",
+    "unexpected_error": "Bilibili 登录流程发生异常",
+}
+
+_BILIBILI_LOGIN_ERROR_ACTIONS = {
+    "login_window_failed": "检查本机兼容运行时后重试",
+    "login_window_closed": "重新打开登录，并在扫码完成前保持窗口开启",
+    "credential_check_timeout": "检查网络连接后重新登录",
+    "login_timeout": "重新登录并在十分钟内完成扫码及平台确认",
+    "unexpected_error": "关闭残留窗口后重试；如仍失败，请查看本机日志",
+}
+
 
 def _queue_login_event(status_queue, event_type: str, **fields) -> None:
     """Send a structured, secret-free event alongside the legacy SSE tokens."""
@@ -66,6 +82,20 @@ def _queue_zhihu_login_error(status_queue, code: str) -> None:
     )
     # Keep the original terminal token so older desktop frontends terminate
     # their EventSource instead of leaving a stale login session registered.
+    status_queue.put("500")
+
+
+def _queue_bilibili_login_error(status_queue, code: str) -> None:
+    normalized_code = (
+        code if code in _BILIBILI_LOGIN_ERROR_MESSAGES else "unexpected_error"
+    )
+    _queue_login_event(
+        status_queue,
+        "error",
+        code=normalized_code,
+        message=_BILIBILI_LOGIN_ERROR_MESSAGES[normalized_code],
+        action=_BILIBILI_LOGIN_ERROR_ACTIONS[normalized_code],
+    )
     status_queue.put("500")
 
 
@@ -1380,7 +1410,11 @@ async def bilibili_cookie_gen(
 ):
     import subprocess
     import sys
-    from uploader.bilibili_uploader.runtime import ensure_biliup_binary
+    from uploader.bilibili_uploader.runtime import (
+        ensure_biliup_binary,
+        spawn_biliup_process,
+        terminate_biliup_process,
+    )
 
     process = None
     renew_process = None
@@ -1401,8 +1435,9 @@ async def bilibili_cookie_gen(
 
         # 在新终端窗口中运行 biliup login；只保留本次子进程句柄。
         if sys.platform == 'win32':
-            process = subprocess.Popen(
-                [biliup_path, '-u', str(account_file), 'login'],
+            process = spawn_biliup_process(
+                ['-u', str(account_file), 'login'],
+                binary_path=biliup_path,
                 creationflags=subprocess.CREATE_NEW_CONSOLE
             )
         else:
@@ -1423,6 +1458,14 @@ async def bilibili_cookie_gen(
                 _queue_login_cancelled(status_queue, "bilibili")
                 return None
             if not account_file.exists():
+                if process.poll() is not None:
+                    _safe_login_log(
+                        "bilibili", "login_failed", level="warning"
+                    )
+                    _queue_bilibili_login_error(
+                        status_queue, "login_window_closed"
+                    )
+                    return None
                 continue
 
             renew_options = {
@@ -1431,8 +1474,9 @@ async def bilibili_cookie_gen(
             }
             if sys.platform == "win32":
                 renew_options["creationflags"] = subprocess.CREATE_NO_WINDOW
-            renew_process = subprocess.Popen(
-                [biliup_path, "-u", str(account_file), "renew"],
+            renew_process = spawn_biliup_process(
+                ["-u", str(account_file), "renew"],
+                binary_path=biliup_path,
                 **renew_options,
             )
             renew_returncode = await _wait_for_owned_login_process(
@@ -1447,7 +1491,9 @@ async def bilibili_cookie_gen(
                 _safe_login_log(
                     "bilibili", "cookie_validation_failed", level="warning"
                 )
-                status_queue.put("500")
+                _queue_bilibili_login_error(
+                    status_queue, "credential_check_timeout"
+                )
                 return None
             if renew_returncode != 0:
                 continue
@@ -1476,14 +1522,19 @@ async def bilibili_cookie_gen(
             return True
 
         _safe_login_log("bilibili", "login_timeout", level="warning")
-        status_queue.put("500")
+        _queue_bilibili_login_error(status_queue, "login_timeout")
         return None
     except Exception as exc:
         event = "terminal_open_failed" if process is None else "login_failed"
         _safe_login_log("bilibili", event, level="error", error=exc)
-        status_queue.put("500")
+        _queue_bilibili_login_error(
+            status_queue,
+            "login_window_failed" if process is None else "unexpected_error",
+        )
         return None
     finally:
+        terminate_biliup_process(renew_process)
+        terminate_biliup_process(process)
         _terminate_owned_login_process(renew_process)
         _terminate_owned_login_process(process)
         if account_file is not None and not database_saved:

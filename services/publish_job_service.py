@@ -14,6 +14,7 @@ from services.platform_capability_service import (
     PLATFORM_BY_KEY,
     SUPPORTED_PUBLISH_PLATFORMS,
 )
+from services.publish_preflight_service import build_platform_publish_variant
 
 
 PUBLISH_JOB_STATUSES = frozenset(
@@ -60,6 +61,8 @@ def create_publish_job(
     auto_execute: bool = False,
     demo: bool = False,
     account_id: int | None = None,
+    publish_title: str | None = None,
+    publish_content: str | None = None,
 ) -> dict[str, Any]:
     if not isinstance(auto_execute, bool):
         raise ValueError("auto_execute 必须是布尔值")
@@ -79,6 +82,14 @@ def create_publish_job(
                 raise ArticleNotFoundError("文章不存在")
             if article_row["status"] != "ready":
                 raise ValueError("文章必须先标记为待发布，才能创建发布任务")
+            variant = build_platform_publish_variant(
+                platform=normalized_platform,
+                title=article_row["title"],
+                content=article_row["content"],
+                tags=_normalize_authorization_tags(article_row["tags"]),
+                publish_title=publish_title,
+                publish_content=publish_content,
+            )
             resolved_account_id = _resolve_publish_account_id(
                 conn,
                 normalized_platform,
@@ -93,6 +104,9 @@ def create_publish_job(
                     video=normalized_video,
                     publish_at=normalized_publish_at,
                     account_id=resolved_account_id,
+                    publish_title=variant["title"],
+                    publish_content=variant["publish_content"],
+                    content_policy_version=variant["policy_version"],
                 )
                 if normalized_auto_execute
                 else ""
@@ -100,9 +114,10 @@ def create_publish_job(
             cursor = conn.execute(
                 """
                 INSERT INTO publish_jobs (
-                    article_id, account_id, platform, status, images, video, publish_at,
-                    authorization_fingerprint, auto_execute, demo
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    article_id, account_id, platform, status, images, video,
+                    publish_title, publish_content, content_policy_version,
+                    publish_at, authorization_fingerprint, auto_execute, demo
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     article_id,
@@ -111,6 +126,9 @@ def create_publish_job(
                     initial_status,
                     json.dumps(normalized_images, ensure_ascii=False),
                     normalized_video,
+                    variant["title"],
+                    variant["publish_content"],
+                    variant["policy_version"],
                     normalized_publish_at,
                     authorization_fingerprint,
                     int(normalized_auto_execute),
@@ -129,11 +147,14 @@ def build_publish_authorization_fingerprint(
     video: str | None = None,
     publish_at: str | datetime | None,
     account_id: int | None = None,
+    publish_title: str | None = None,
+    publish_content: str | None = None,
+    content_policy_version: str | None = None,
 ) -> str:
     """Bind automatic execution to the exact publishable payload."""
 
     canonical_payload = {
-        "schema": 3,
+        "schema": 4,
         "article_id": int(article["id"]),
         "title": str(article.get("title") or "").strip(),
         "content": str(article.get("content") or "").strip(),
@@ -143,6 +164,17 @@ def build_publish_authorization_fingerprint(
         "video": normalize_publish_video(video),
         "publish_at": _normalize_publish_at(publish_at),
         "account_id": _normalize_optional_account_id(account_id),
+        "publish_title": (
+            str(article.get("title") or "").strip()
+            if publish_title is None
+            else str(publish_title or "").strip()
+        ),
+        "publish_content": (
+            str(article.get("content") or "").strip()
+            if publish_content is None
+            else str(publish_content or "").strip()
+        ),
+        "content_policy_version": str(content_policy_version or "").strip(),
     }
     encoded = json.dumps(
         canonical_payload,
@@ -183,6 +215,9 @@ def build_publish_confirmation_fingerprint(
         video=job.get("video"),
         publish_at=job.get("publish_at"),
         account_id=job.get("account_id"),
+        publish_title=job.get("publish_title") or article.get("title"),
+        publish_content=job.get("publish_content") or article.get("content"),
+        content_policy_version=job.get("content_policy_version"),
     )
     encoded = json.dumps(
         {
@@ -212,6 +247,9 @@ def publish_authorization_matches(
         video=job.get("video"),
         publish_at=job.get("publish_at"),
         account_id=job.get("account_id"),
+        publish_title=job.get("publish_title") or article.get("title"),
+        publish_content=job.get("publish_content") or article.get("content"),
+        content_policy_version=job.get("content_policy_version"),
     )
     return hmac.compare_digest(expected, actual)
 
@@ -298,6 +336,7 @@ def claim_publish_job(
                 """
                 UPDATE publish_jobs
                 SET status = 'processing', message = ?, result_url = '',
+                    reconciliation_required = 0,
                     started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
                     finished_at = NULL,
                     state_version = state_version + 1
@@ -462,6 +501,7 @@ def transition_publish_job(
                     """
                     UPDATE publish_jobs
                     SET status = ?, message = ?, result_url = '',
+                        reconciliation_required = 0,
                         started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
                         finished_at = NULL,
                         state_version = state_version + 1
@@ -480,6 +520,7 @@ def transition_publish_job(
                     """
                     UPDATE publish_jobs
                     SET status = ?, message = ?, result_url = ?,
+                        reconciliation_required = 0,
                         finished_at = CURRENT_TIMESTAMP,
                         state_version = state_version + 1
                     WHERE id = ? AND status = ? AND state_version = ?
@@ -498,6 +539,7 @@ def transition_publish_job(
                     """
                     UPDATE publish_jobs
                     SET status = ?, message = ?, result_url = ?,
+                        reconciliation_required = 0,
                         state_version = state_version + 1
                     WHERE id = ? AND status = ? AND state_version = ?
                     """,
@@ -524,6 +566,110 @@ def transition_publish_job(
     return _serialize_job(updated_row)
 
 
+def mark_publish_job_awaiting_reconciliation(
+    database_path: str | Path,
+    job_id: int,
+    *,
+    message: str,
+    result_url: str = "",
+    expected_state_version: int | None = None,
+) -> dict[str, Any]:
+    """Finish one publisher attempt whose platform outcome is ambiguous.
+
+    ``processing`` is reserved for a publisher call that may still be running.
+    Only this explicit, finished state may be reconciled by an operator, which
+    prevents a page reload from closing and retrying a live attempt.
+    """
+
+    normalized_message = _normalize_text(message)
+    if not normalized_message:
+        raise ValueError("待核验任务必须提供平台结果说明")
+    with closing(_connect(database_path)) as conn:
+        with conn:
+            current_row = _fetch_job(conn, job_id)
+            if current_row is None:
+                raise PublishJobNotFoundError("发布任务不存在")
+            stale_row = _resolve_expected_state(
+                current_row,
+                expected_state_version,
+                operation="将发布任务标记为已提交待核验",
+            )
+            if stale_row is not None:
+                return _serialize_job(stale_row)
+            if current_row["status"] != "processing":
+                raise InvalidPublishJobTransitionError(
+                    f"状态为 {current_row['status']} 的发布任务不能标记为待核验"
+                )
+            current_version = _state_version(current_row)
+            cursor = conn.execute(
+                """
+                UPDATE publish_jobs
+                SET status = 'need_action', message = ?, result_url = ?,
+                    reconciliation_required = 1,
+                    finished_at = CURRENT_TIMESTAMP,
+                    state_version = state_version + 1
+                WHERE id = ? AND status = 'processing' AND state_version = ?
+                """,
+                (
+                    normalized_message,
+                    _normalize_text(result_url),
+                    job_id,
+                    current_version,
+                ),
+            )
+            if cursor.rowcount != 1:
+                latest_row = _resolve_cas_conflict(
+                    conn,
+                    job_id,
+                    expected_status="processing",
+                    expected_state_version=current_version,
+                    operation="将发布任务标记为已提交待核验",
+                )
+                return _serialize_job(latest_row)
+            _sync_article_status(conn, current_row["article_id"])
+            updated_row = _fetch_job(conn, job_id)
+    return _serialize_job(updated_row)
+
+
+def recover_interrupted_publish_jobs(database_path: str | Path) -> int:
+    """Move attempts left active by a previous desktop process to safe review.
+
+    The desktop host calls this before accepting requests, under its
+    single-instance mutex.  It never retries or contacts a platform.
+    """
+
+    with closing(_connect(database_path)) as conn:
+        with conn:
+            cursor = conn.execute(
+                """
+                UPDATE publish_jobs
+                SET status = 'need_action',
+                    message = CASE
+                        WHEN trim(message) = '' THEN
+                            '上次软件异常退出时发布仍在执行，平台结果未知；请先核验平台后台'
+                        ELSE message || '；上次软件异常退出，平台结果未知，请先核验平台后台'
+                    END,
+                    reconciliation_required = 1,
+                    finished_at = CURRENT_TIMESTAMP,
+                    state_version = state_version + 1
+                WHERE status = 'processing'
+                """
+            )
+            affected_article_ids = [
+                int(row[0])
+                for row in conn.execute(
+                    """
+                    SELECT DISTINCT article_id
+                    FROM publish_jobs
+                    WHERE status = 'need_action' AND reconciliation_required = 1
+                    """
+                ).fetchall()
+            ]
+            for article_id in affected_article_ids:
+                _sync_article_status(conn, article_id)
+    return int(cursor.rowcount)
+
+
 def retry_publish_job(
     database_path: str | Path,
     job_id: int,
@@ -546,12 +692,17 @@ def retry_publish_job(
                 raise InvalidPublishJobTransitionError(
                     f"状态为 {current_row['status']} 的发布任务不能重试"
                 )
+            if bool(current_row["reconciliation_required"]):
+                raise InvalidPublishJobTransitionError(
+                    "平台结果尚未核验；请先使用“核验平台结果”确认未发布，禁止直接重试"
+                )
             current_status = current_row["status"]
             current_version = _state_version(current_row)
             cursor = conn.execute(
                 """
                 UPDATE publish_jobs
                 SET status = 'queued', message = '', result_url = '',
+                    reconciliation_required = 0,
                     authorization_fingerprint = '', auto_execute = 0,
                     started_at = NULL, finished_at = NULL,
                     state_version = state_version + 1
@@ -600,16 +751,22 @@ def reconcile_publish_job_success(
                 return _serialize_job(stale_row)
             if current_row["status"] == "success":
                 return _serialize_job(current_row)
-            if current_row["status"] not in {"processing", "failed", "need_action"}:
+            if current_row["status"] not in {"failed", "need_action"}:
                 raise InvalidPublishJobTransitionError(
                     f"状态为 {current_row['status']} 的发布任务不能通过平台证据对账"
                 )
+            if (
+                current_row["status"] == "need_action"
+                and not bool(current_row["reconciliation_required"])
+            ):
+                raise InvalidPublishJobTransitionError("该任务没有待核验的平台提交结果")
             current_status = current_row["status"]
             current_version = _state_version(current_row)
             cursor = conn.execute(
                 """
                 UPDATE publish_jobs
                 SET status = 'success', message = ?, result_url = ?,
+                    reconciliation_required = 0,
                     finished_at = CURRENT_TIMESTAMP,
                     state_version = state_version + 1
                 WHERE id = ? AND status = ? AND state_version = ?
@@ -667,7 +824,10 @@ def reconcile_publish_job_platform_success(
                 return _serialize_job(stale_row)
             if current_row["status"] == "success":
                 return _serialize_job(current_row)
-            if current_row["status"] not in {"processing", "failed", "need_action"}:
+            if (
+                current_row["status"] != "need_action"
+                or not bool(current_row["reconciliation_required"])
+            ):
                 raise InvalidPublishJobTransitionError(
                     f"状态为 {current_row['status']} 的发布任务不能通过平台后台证据对账"
                 )
@@ -677,6 +837,7 @@ def reconcile_publish_job_platform_success(
                 """
                 UPDATE publish_jobs
                 SET status = 'success', message = ?, result_url = ?,
+                    reconciliation_required = 0,
                     finished_at = CURRENT_TIMESTAMP,
                     state_version = state_version + 1
                 WHERE id = ? AND status = ? AND state_version = ?
@@ -729,7 +890,10 @@ def reconcile_publish_job_failure(
                 return _serialize_job(stale_row)
             if current_row["status"] == "failed":
                 return _serialize_job(current_row)
-            if current_row["status"] not in {"processing", "need_action"}:
+            if (
+                current_row["status"] != "need_action"
+                or not bool(current_row["reconciliation_required"])
+            ):
                 raise InvalidPublishJobTransitionError(
                     f"状态为 {current_row['status']} 的发布任务不能通过平台证据结案"
                 )
@@ -739,6 +903,7 @@ def reconcile_publish_job_failure(
                 """
                 UPDATE publish_jobs
                 SET status = 'failed', message = ?, result_url = '',
+                    reconciliation_required = 0,
                     finished_at = CURRENT_TIMESTAMP,
                     state_version = state_version + 1
                 WHERE id = ? AND status = ? AND state_version = ?
@@ -899,6 +1064,9 @@ def _serialize_job(row: sqlite3.Row) -> dict[str, Any]:
     job = dict(row)
     job["demo"] = bool(job["demo"])
     job["auto_execute"] = bool(job.get("auto_execute", False))
+    job["reconciliation_required"] = bool(
+        job.get("reconciliation_required", False)
+    )
     job["authorization_bound"] = bool(
         str(job.get("authorization_fingerprint") or "").strip()
     )
@@ -907,6 +1075,11 @@ def _serialize_job(row: sqlite3.Row) -> dict[str, Any]:
         job["images"] = normalize_publish_images(raw_images)
     except (TypeError, json.JSONDecodeError, ValueError):
         job["images"] = []
+    job["publish_title"] = str(job.get("publish_title") or "").strip()
+    job["publish_content"] = str(job.get("publish_content") or "").strip()
+    job["content_policy_version"] = str(
+        job.get("content_policy_version") or ""
+    ).strip()
     return job
 
 

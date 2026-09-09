@@ -164,7 +164,7 @@ class RealPublisherFactoryTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             PublisherNotConfiguredError,
-            "ENABLE_BILIBILI_RUNTIME=true",
+            "Bilibili.*运行时",
         ):
             factory({"platform": "bilibili", "account_id": account_id})
 

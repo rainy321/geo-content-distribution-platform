@@ -271,8 +271,12 @@ class DouYinBaseUploader(BaseVideoUploader):
 
         title_input = description_section.locator('input[type="text"]').first
         await title_input.wait_for(state="visible", timeout=10000)
-        # 标题允许为空，空字符串时清空输入框即可
-        await title_input.fill((title or "")[:30])
+        # The task preflight owns shortening.  Never silently change a
+        # confirmed snapshot inside the executor.
+        title_text = str(title or "").strip()
+        if len(title_text) > 20:
+            raise ValueError("抖音图文发布标题不能超过 20 字，请返回平台预检编辑")
+        await title_input.fill(title_text)
 
         description_editor = description_section.locator('.zone-container[contenteditable="true"]').first
         await description_editor.wait_for(state="visible", timeout=10000)
@@ -1018,7 +1022,7 @@ class DouYinNote(DouYinBaseUploader):
         )
         self.image_paths = image_paths
         self.note = note or ""
-        self.title = title or (self.note[:30] if self.note else "")
+        self.title = title or self.note
         self.tags = tags or []
         self.dry_run = bool(dry_run)
         self.ai_generated = bool(ai_generated)
@@ -1027,6 +1031,8 @@ class DouYinNote(DouYinBaseUploader):
         await self.validate_base_args()
         if not self.title or not str(self.title).strip():
             raise ValueError("图文模式下，title 是必须的")
+        if len(str(self.title).strip()) > 20:
+            raise ValueError("抖音图文发布标题不能超过 20 字，请返回平台预检编辑")
         if not self.image_paths:
             raise ValueError("图文模式下，图片是必须的")
 

@@ -184,7 +184,7 @@
             role="status"
           >
             <strong>请查看桌面和任务栏</strong>
-            <p>软件会另外打开 Google Chrome。登录窗口可能被挡在本软件后面；请切换到浏览器完成{{ selectedPlatform?.name || '平台' }}验证，并保持该窗口打开。</p>
+            <p>软件会另外打开{{ loginWindowName }}。登录窗口可能被挡在本软件后面；请切换过去完成{{ selectedPlatform?.name || '平台' }}验证，并保持该窗口打开。</p>
           </aside>
 
           <aside v-if="loginStage === 'failed'" class="login-error-detail" role="alert">
@@ -251,6 +251,7 @@ import { apiUrl } from '@/config/api'
 import {
   buildStreamFailure,
   parseLoginSessionEvent,
+  planLoginStreamReconnect,
   resolveLoginCancellation
 } from '@/utils/loginSession'
 
@@ -369,10 +370,16 @@ const qrCodeData = ref('')
 const loginEventMessage = ref('')
 const loginElapsedSeconds = ref(0)
 const loginCancelPending = ref(false)
+const loginStreamReconnectAttempt = ref(0)
+const loginStreamRecovering = ref(false)
 const loginFailure = reactive({ code: '', message: '', action: '' })
 const loginForm = reactive({ platformType: null, accountName: '', existingAccountId: null })
 let eventSource = null
 let loginTimer = null
+let loginReconnectTimer = null
+let loginStreamBaseUrl = ''
+let loginClientSessionId = ''
+let lastLoginEventId = 0
 
 const primaryPlatforms = computed(() => overview.platforms.filter(item => ['P0', 'P1'].includes(item.priority)))
 const secondaryPlatforms = computed(() => overview.platforms.filter(item => !['P0', 'P1'].includes(item.priority)))
@@ -385,7 +392,11 @@ const hasLoginCapablePlatform = computed(() => (
 ))
 const returnToPublishCenter = computed(() => route.query.return_to === '/publish-center')
 const loginDialogTitle = computed(() => `${loginForm.existingAccountId ? '重新登录' : '连接'}${selectedPlatform.value ? ` · ${selectedPlatform.value.name}` : '媒体账号'}`)
+const loginWindowName = computed(() => (
+  selectedPlatform.value?.key === 'bilibili' ? ' Bilibili 扫码窗口' : ' Google Chrome'
+))
 const loginStageTitle = computed(() => {
+  if (loginStreamRecovering.value) return '登录状态连接正在恢复'
   if (loginStage.value === 'failed' && loginFailure.code === 'operator_cancelled') {
     return '已请求结束本次登录'
   }
@@ -399,6 +410,7 @@ const loginStageTitle = computed(() => {
   }[loginStage.value] || '准备登录')
 })
 const loginStageMessage = computed(() => {
+  if (loginStreamRecovering.value) return loginEventMessage.value
   if (loginStage.value === 'success') return loginEventMessage.value || '本地账号和登录凭证已经保存，可以继续发布流程。'
   if (loginStage.value === 'failed' && loginFailure.code === 'operator_cancelled') return '本次未完成的登录信息不会保存。'
   if (loginStage.value === 'review') return '结果无法可靠判定，软件已刷新本地账号列表。'
@@ -406,17 +418,26 @@ const loginStageMessage = computed(() => {
   if (qrCodeData.value) return '请使用对应平台 App 扫描二维码，并在平台侧完成确认。'
   if (loginEventMessage.value) return loginEventMessage.value
   if (loginStage.value === 'manual') return '系统正在等待浏览器中的扫码、验证码或人工确认结果。'
-  if (loginStage.value === 'opening') return '本机服务已连接，正在调用 Google Chrome 打开平台登录页。'
+  if (loginStage.value === 'opening') {
+    return selectedPlatform.value?.key === 'bilibili'
+      ? '本机服务已连接，正在打开 Bilibili 扫码登录窗口。完成扫码前软件会持续等待。'
+      : '本机服务已连接，正在调用 Google Chrome 打开平台登录页。'
+  }
   return '正在申请本机浏览器登录会话。'
 })
-const loginStageCode = computed(() => ({
-  connecting: 'SESSION / CONNECTING',
-  opening: 'BROWSER / OPENING',
-  manual: 'PLATFORM / WAITING',
-  success: 'ACCOUNT / SAVED',
-  failed: `LOGIN / ${loginFailure.code || 'FAILED'}`,
-  review: 'ACCOUNT / VERIFY'
-}[loginStage.value] || 'LOGIN / READY'))
+const loginStageCode = computed(() => {
+  if (loginStreamRecovering.value) {
+    return `STREAM / RETRY ${loginStreamReconnectAttempt.value}`
+  }
+  return ({
+    connecting: 'SESSION / CONNECTING',
+    opening: 'BROWSER / OPENING',
+    manual: 'PLATFORM / WAITING',
+    success: 'ACCOUNT / SAVED',
+    failed: `LOGIN / ${loginFailure.code || 'FAILED'}`,
+    review: 'ACCOUNT / VERIFY'
+  }[loginStage.value] || 'LOGIN / READY')
+})
 const loginElapsedLabel = computed(() => {
   const minutes = Math.floor(loginElapsedSeconds.value / 60)
   const seconds = loginElapsedSeconds.value % 60
@@ -540,6 +561,11 @@ const openLogin = (platform = null, account = null) => {
   qrCodeData.value = ''
   loginEventMessage.value = ''
   loginCancelPending.value = false
+  loginStreamReconnectAttempt.value = 0
+  loginStreamRecovering.value = false
+  loginStreamBaseUrl = ''
+  loginClientSessionId = ''
+  lastLoginEventId = 0
   Object.assign(loginFailure, { code: '', message: '', action: '' })
   loginDialogVisible.value = true
 }
@@ -595,6 +621,26 @@ const startLoginTimer = () => {
   }, 1000)
 }
 
+const clearLoginReconnectTimer = () => {
+  if (loginReconnectTimer) window.clearTimeout(loginReconnectTimer)
+  loginReconnectTimer = null
+}
+
+const createLoginClientSessionId = () => {
+  if (typeof window.crypto?.randomUUID === 'function') {
+    return window.crypto.randomUUID()
+  }
+  const bytes = new Uint8Array(16)
+  window.crypto.getRandomValues(bytes)
+  return Array.from(bytes, value => value.toString(16).padStart(2, '0')).join('')
+}
+
+const loginCancellationPayload = () => ({
+  type: loginForm.platformType,
+  id: loginForm.accountName.trim(),
+  ...(loginClientSessionId ? { session_id: loginClientSessionId } : {})
+})
+
 const finishLoginWithFailure = failure => {
   if (
     failure.code === 'login_not_completed'
@@ -607,6 +653,7 @@ const finishLoginWithFailure = failure => {
     action: failure.action || '关闭残留登录窗口后重新尝试。'
   })
   loginCancelPending.value = false
+  loginStreamRecovering.value = false
   loginStage.value = 'failed'
   stopLoginTimer()
   closeEventSource()
@@ -616,6 +663,7 @@ const finishLoginWithSuccess = message => {
   loginStage.value = 'success'
   loginEventMessage.value = message || '账号登录成功，本地凭证已经保存。'
   loginCancelPending.value = false
+  loginStreamRecovering.value = false
   Object.assign(loginFailure, { code: '', message: '', action: '' })
   stopLoginTimer()
   closeEventSource()
@@ -629,6 +677,7 @@ const finishLoginWithReview = resolution => {
     action: resolution.action || '查看媒体账号列表确认当前状态。'
   })
   loginCancelPending.value = false
+  loginStreamRecovering.value = false
   loginStage.value = 'review'
   stopLoginTimer()
   closeEventSource()
@@ -636,6 +685,8 @@ const finishLoginWithReview = resolution => {
 }
 
 const applyLoginEvent = rawValue => {
+  loginStreamReconnectAttempt.value = 0
+  loginStreamRecovering.value = false
   const loginEvent = parseLoginSessionEvent(rawValue)
   if (loginEvent.kind === 'stage') {
     loginStage.value = loginEvent.stage
@@ -661,6 +712,90 @@ const applyLoginEvent = rawValue => {
   console.warn('忽略无法识别的登录状态事件')
 }
 
+const finalizeDisconnectedLogin = async () => {
+  if (['success', 'failed', 'review'].includes(loginStage.value)) return
+  loginStreamRecovering.value = false
+  loginCancelPending.value = true
+  loginEventMessage.value = '状态连接多次重试仍未恢复，正在安全结束本次登录流程…'
+  const failure = buildStreamFailure()
+  try {
+    const response = await accountApi.cancelMediaLogin(loginCancellationPayload())
+    const resolution = resolveLoginCancellation(response)
+    if (resolution.kind === 'success') {
+      finishLoginWithSuccess(resolution.message)
+      return
+    }
+    if (resolution.kind === 'pending') {
+      failure.action = `${failure.action} ${resolution.action}`
+    } else {
+      failure.message = `${failure.message} 后台登录流程已结束。`
+    }
+  } catch {
+    failure.action = `${failure.action} 若${loginWindowName.value.trim()}仍打开，请手动关闭。`
+  }
+  finishLoginWithFailure(failure)
+}
+
+const scheduleLoginStreamReconnect = source => {
+  if (source && eventSource !== source) return
+  if (source) source.close()
+  if (eventSource === source) eventSource = null
+  if (['success', 'failed', 'review'].includes(loginStage.value)) return
+
+  const recovery = planLoginStreamReconnect(loginStreamReconnectAttempt.value)
+  if (recovery.exhausted) {
+    void finalizeDisconnectedLogin()
+    return
+  }
+
+  loginStreamReconnectAttempt.value = recovery.attempt
+  loginStreamRecovering.value = true
+  loginEventMessage.value = `状态连接短暂中断，${Math.ceil(recovery.delayMs / 1000)} 秒后进行第 ${recovery.attempt}/${recovery.maxAttempts} 次重连；平台登录窗口请保持打开。`
+  clearLoginReconnectTimer()
+  loginReconnectTimer = window.setTimeout(() => {
+    loginReconnectTimer = null
+    if (!['success', 'failed', 'review'].includes(loginStage.value)) {
+      connectLoginEventStream()
+    }
+  }, recovery.delayMs)
+}
+
+const connectLoginEventStream = () => {
+  const resumeQuery = lastLoginEventId > 0 ? `&last_event_id=${lastLoginEventId}` : ''
+  const url = `${loginStreamBaseUrl}&session_id=${encodeURIComponent(loginClientSessionId)}${resumeQuery}`
+  const source = (() => {
+    try {
+      return new EventSource(url, { withCredentials: true })
+    } catch {
+      return null
+    }
+  })()
+  if (!source) {
+    scheduleLoginStreamReconnect(null)
+    return
+  }
+  eventSource = source
+  source.onopen = () => {
+    if (eventSource !== source) return
+    if (loginStage.value === 'connecting') loginStage.value = 'opening'
+  }
+  source.onmessage = event => {
+    if (eventSource !== source) return
+    const receivedEventId = Number(event.lastEventId)
+    if (Number.isInteger(receivedEventId) && receivedEventId > lastLoginEventId) {
+      lastLoginEventId = receivedEventId
+    }
+    if (loginStreamRecovering.value) {
+      loginEventMessage.value = '状态连接已恢复，继续等待平台确认。'
+    }
+    applyLoginEvent(event.data)
+  }
+  source.onerror = () => {
+    if (eventSource !== source) return
+    scheduleLoginStreamReconnect(source)
+  }
+}
+
 const startLogin = () => {
   if (!selectedPlatform.value || selectedPlatform.value.login_available !== true) {
     ElMessage.warning(selectedPlatform.value?.unavailable_reason || '该平台登录运行时当前不可用')
@@ -671,39 +806,18 @@ const startLogin = () => {
   qrCodeData.value = ''
   loginEventMessage.value = ''
   loginCancelPending.value = false
+  loginStreamReconnectAttempt.value = 0
+  loginStreamRecovering.value = false
+  lastLoginEventId = 0
+  loginClientSessionId = createLoginClientSessionId()
   Object.assign(loginFailure, { code: '', message: '', action: '' })
   startLoginTimer()
   const existingAccountId = Number(loginForm.existingAccountId)
   const existingAccountQuery = Number.isInteger(existingAccountId) && existingAccountId > 0
     ? `&existing_account_id=${existingAccountId}`
     : ''
-  const url = apiUrl(`/login?type=${loginForm.platformType}&id=${encodeURIComponent(loginForm.accountName.trim())}&protocol=2${existingAccountQuery}`)
-  const source = (() => {
-    try {
-      return new EventSource(url, { withCredentials: true })
-    } catch {
-      return null
-    }
-  })()
-  if (!source) {
-    finishLoginWithFailure(buildStreamFailure())
-    return
-  }
-  eventSource = source
-  source.onopen = () => {
-    if (eventSource !== source) return
-    if (loginStage.value === 'connecting') loginStage.value = 'opening'
-  }
-  source.onmessage = event => {
-    if (eventSource !== source) return
-    applyLoginEvent(event.data)
-  }
-  source.onerror = () => {
-    if (eventSource !== source) return
-    if (!['success', 'failed'].includes(loginStage.value)) {
-      finishLoginWithFailure(buildStreamFailure())
-    }
-  }
+  loginStreamBaseUrl = apiUrl(`/login?type=${loginForm.platformType}&id=${encodeURIComponent(loginForm.accountName.trim())}&protocol=2${existingAccountQuery}`)
+  connectLoginEventStream()
 }
 
 const retryLogin = () => {
@@ -714,13 +828,18 @@ const retryLogin = () => {
   loginEventMessage.value = ''
   loginElapsedSeconds.value = 0
   loginCancelPending.value = false
+  loginStreamReconnectAttempt.value = 0
+  loginStreamRecovering.value = false
+  loginStreamBaseUrl = ''
+  loginClientSessionId = ''
+  lastLoginEventId = 0
   Object.assign(loginFailure, { code: '', message: '', action: '' })
 }
 
 const cancelLogin = async () => {
   try {
     await ElMessageBox.confirm(
-      '软件将请求结束本次登录，并以后台返回的最终结果为准；若 Chrome 登录窗口仍然打开，请手动关闭。',
+      `软件将请求结束本次登录，并以后台返回的最终结果为准；若${loginWindowName.value}仍然打开，请手动关闭。`,
       '结束本次登录？',
       {
         confirmButtonText: '结束本次登录',
@@ -759,13 +878,12 @@ const applyCancellationResponse = response => {
 }
 
 const requestLoginCancellation = async () => {
+  clearLoginReconnectTimer()
+  loginStreamRecovering.value = false
   loginCancelPending.value = true
-  loginEventMessage.value = '正在请求后台结束登录并关闭 Chrome 窗口…'
+  loginEventMessage.value = `正在请求后台结束登录并关闭${loginWindowName.value}…`
   try {
-    const response = await accountApi.cancelMediaLogin({
-      type: loginForm.platformType,
-      id: loginForm.accountName.trim()
-    })
+    const response = await accountApi.cancelMediaLogin(loginCancellationPayload())
     applyCancellationResponse(response)
   } catch (error) {
     loginCancelPending.value = false
@@ -794,6 +912,7 @@ const completeLogin = async () => {
 }
 
 const closeEventSource = (source = eventSource) => {
+  clearLoginReconnectTimer()
   if (!source) return
   source.close()
   if (eventSource === source) eventSource = null
@@ -807,6 +926,11 @@ const resetLoginDialog = () => {
   loginEventMessage.value = ''
   loginElapsedSeconds.value = 0
   loginCancelPending.value = false
+  loginStreamReconnectAttempt.value = 0
+  loginStreamRecovering.value = false
+  loginStreamBaseUrl = ''
+  loginClientSessionId = ''
+  lastLoginEventId = 0
   Object.assign(loginFailure, { code: '', message: '', action: '' })
   loginForm.platformType = null
   loginForm.accountName = ''
@@ -815,6 +939,9 @@ const resetLoginDialog = () => {
 
 onMounted(fetchOverview)
 onBeforeUnmount(() => {
+  if (['connecting', 'opening', 'manual'].includes(loginStage.value)) {
+    void accountApi.cancelMediaLogin(loginCancellationPayload()).catch(() => {})
+  }
   closeEventSource()
   stopLoginTimer()
 })

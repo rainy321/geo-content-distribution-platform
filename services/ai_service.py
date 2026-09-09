@@ -171,6 +171,16 @@ class AIGenerationResult:
     usage: Mapping[str, int] | None
 
 
+@dataclass(frozen=True)
+class AIOptimizationResult:
+    article: Mapping[str, Any]
+    provider: str
+    model: str
+    provider_request_id: str
+    elapsed_ms: int
+    usage: Mapping[str, int] | None
+
+
 def generate_geo_content(
     *,
     project: Mapping[str, Any],
@@ -253,21 +263,71 @@ def optimize_geo_content(
     score: Mapping[str, Any],
     settings: AISettings | None = None,
     http_post=None,
-) -> dict[str, Any]:
+    include_metadata: bool = False,
+) -> dict[str, Any] | AIOptimizationResult:
     """Improve one article from its rule score without saving it."""
     settings = settings or AISettings.from_environment()
     http_post = http_post or requests.post
     prompt = _build_optimization_prompt(article=article, score=score)
-    raw_content = _request_chat_completion(
+    completion = _request_chat_completion_detailed(
         settings=settings,
         prompt=prompt,
         temperature=0.45,
         http_post=http_post,
     )
-    return _parse_model_output(
-        raw_content,
+    optimized = _parse_model_output(
+        completion.content,
         fallback_tags=article.get("tags", []),
     )
+    if not include_metadata:
+        return optimized
+    return AIOptimizationResult(
+        article=optimized,
+        provider=_provider_label(settings),
+        model=completion.model,
+        provider_request_id=completion.provider_request_id,
+        elapsed_ms=completion.elapsed_ms,
+        usage=completion.usage,
+    )
+
+
+def sample_ai_prompt_detailed(
+    *,
+    prompt: str,
+    settings: AISettings | None = None,
+    http_post=None,
+) -> AICompletionResult:
+    """Send one operator-approved question without adding hidden text context.
+
+    Visibility sampling deliberately differs from content generation: the only
+    natural-language text placed in ``messages`` is the exact supplied prompt.
+    Project records, aliases, competitors and prior articles stay local and are
+    used only by the deterministic visibility analyzer after the response is
+    captured.
+    """
+
+    if not isinstance(prompt, str):
+        raise AIProtocolError("采样问题必须是字符串")
+    normalized_prompt = prompt.strip()
+    if not normalized_prompt or "\0" in normalized_prompt:
+        raise AIProtocolError("采样问题不能为空")
+    if len(normalized_prompt) > 8_000:
+        raise AIProtocolError("采样问题不能超过 8000 个字符")
+
+    settings = settings or AISettings.from_environment()
+    return _request_chat_completion_detailed(
+        settings=settings,
+        prompt=normalized_prompt,
+        temperature=0.2,
+        http_post=http_post or requests.post,
+        system_prompt=None,
+    )
+
+
+def provider_label_for_settings(settings: AISettings) -> str:
+    """Return a secret-free provider label for sampling and cost receipts."""
+
+    return _provider_label(settings)
 
 
 def _request_chat_completion(
@@ -293,20 +353,19 @@ def _request_chat_completion_detailed(
     prompt: str,
     temperature: float,
     http_post,
+    system_prompt: str | None = "你是一名 GEO / AEO 内容优化专家。",
 ) -> AICompletionResult:
     """Call the provider and retain non-secret response metadata."""
 
     endpoint = _chat_completions_url(settings.base_url)
     provider_host = (urlsplit(endpoint).hostname or "unknown").lower()
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": system_prompt})
+    messages.append({"role": "user", "content": prompt})
     request_body = {
         "model": settings.model,
-        "messages": [
-            {
-                "role": "system",
-                "content": "你是一名 GEO / AEO 内容优化专家。",
-            },
-            {"role": "user", "content": prompt},
-        ],
+        "messages": messages,
         "temperature": temperature,
         "max_tokens": settings.max_tokens,
     }
@@ -464,6 +523,27 @@ def _chat_completions_url(base_url: str) -> str:
     if normalized.endswith("/v1"):
         return f"{normalized}/chat/completions"
     return f"{normalized}/v1/chat/completions"
+
+
+def _provider_label(settings: AISettings) -> str:
+    """Return a secret-free provider label suitable for cost receipts."""
+
+    try:
+        hostname = (urlsplit(settings.base_url).hostname or "").lower()
+    except ValueError:
+        hostname = ""
+    if (
+        hostname.endswith(".aliyuncs.com")
+        and settings.model.casefold().startswith("qwen")
+    ):
+        return "qwen"
+    if hostname.endswith(".aliyuncs.com"):
+        return "dashscope"
+    if hostname == "api.openai.com":
+        return "openai"
+    if hostname == "generativelanguage.googleapis.com":
+        return "google"
+    return hostname[:120] or "openai-compatible"
 
 
 def _log_ai_provider_event(

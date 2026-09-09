@@ -63,7 +63,7 @@ test('real publishing UI binds capability, account, task version and fingerprint
   assert.match(distributionSource, /articleSnapshot = currentJob\?\.confirmation_snapshot/)
   assert.match(distributionSource, /Number\(articleSnapshot\.article_id\) !== Number\(currentJob\.article_id\)/)
   assert.doesNotMatch(distributionSource, /articleApi\.getArticle\(job\.article_id\)/)
-  assert.match(distributionSource, /bilibili: '禁用 · 运行时未开放'/)
+  assert.match(distributionSource, /bilibili: '兼容运行时 · 视频发布'/)
   assert.match(distributionSource, /仅演示 · 真实运行时未开放/)
   assert.match(distributionSource, /douyin: '实验性 · 可能转待人工'/)
 
@@ -94,4 +94,25 @@ test('first-run copy describes the local visibility workflow', () => {
   assert.match(gateSource, /<strong>观察<\/strong><small>可见度证据<\/small>/)
   assert.match(dashboardSource, /创建第一个品牌项目/)
   assert.match(dashboardSource, /无需先连接媒体账号，也不会触发真实发布/)
+})
+
+
+test('AI settings copy stays within the current EXE software session', () => {
+  const settingsSource = readFileSync(
+    new URL('../src/views/SystemSettings.vue', import.meta.url),
+    'utf8'
+  )
+  const configSource = readFileSync(
+    new URL('../src/utils/aiConfig.js', import.meta.url),
+    'utf8'
+  )
+
+  assert.match(settingsSource, /DESKTOP SESSION/)
+  assert.match(settingsSource, /当前软件会话/)
+  assert.match(settingsSource, /当前 EXE 运行环境/)
+  assert.doesNotMatch(settingsSource, /Vercel Production/)
+  assert.doesNotMatch(settingsSource, /仅当前标签页/)
+  assert.doesNotMatch(settingsSource, /浏览器配置/)
+  assert.match(configSource, /当前软件会话不支持安全密钥存储/)
+  assert.doesNotMatch(configSource, /当前浏览器会话/)
 })

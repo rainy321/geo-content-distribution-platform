@@ -152,7 +152,7 @@ class MediaAccountServiceTests(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(
             MediaAccountRuntimeDisabledError,
-            "ENABLE_BILIBILI_RUNTIME=true",
+            "Bilibili.*运行时",
         ):
             await check_media_account(
                 self.db_path,

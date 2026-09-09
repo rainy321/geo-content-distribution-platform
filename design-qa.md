@@ -1,27 +1,45 @@
-# GEO product UI visual QA
+# GEO Windows desktop UI design QA
+
+## Test target
+
+- Reference: `C:\Users\zack\AppData\Local\Temp\codex-clipboard-27ef9968-c8c3-4a95-8934-9fdf71f189ba.png`
+- Implementation: Vue interface embedded by the Windows EXE; no public-site delivery is implied.
+- Primary viewport: 1536 x 1024, DPR 1.
+- Responsive viewport: 1280 x 800, DPR 1.
+- Test state: authenticated local workspace, one real project available, no stored AI visibility run history. The chart therefore renders an explicit empty state instead of invented demonstration data.
 
 ## Evidence
 
-- Reference: `C:/Users/zack/AppData/Local/Temp/codex-clipboard-478675e1-b691-417a-a561-0c15093cf836.png`
-- Desktop product screen: `.tmp/visual-qa/content-create-1440-final.png`
-- Exact 390 px viewport: `.tmp/visual-qa/content-create-390-cdp.png`
-- Settings screen: `.tmp/visual-qa/settings-1440-final.png`
-- Browser: Microsoft Edge, the user-selected browser.
-
-The reference and the 1440 px prototype were inspected together in one comparison input.
+- Full reference/implementation comparison: `D:\CodexData\.codex\visualizations\2026\09\09\01a083cb-007a-7531-80c4-d5470fef5590\geo-reference-comparison.png` (3072 x 1100).
+- Dashboard at reference viewport: `D:\CodexData\.codex\visualizations\2026\09\09\01a083cb-007a-7531-80c4-d5470fef5590\geo-dashboard-reference-pass1.png` (1536 x 1024).
+- AI visibility and diagnostic workflow: `D:\CodexData\.codex\visualizations\2026\09\09\01a083cb-007a-7531-80c4-d5470fef5590\geo-ai-visibility-pass1.png` (1536 x 1024).
+- Dashboard responsive check: `D:\CodexData\.codex\visualizations\2026\09\09\01a083cb-007a-7531-80c4-d5470fef5590\geo-dashboard-1280.png` (1280 x 800).
 
 ## Visual comparison
 
-- Direction: the product carries over the reference's monochrome palette, oversized Chinese display type, compact uppercase English labels, thin gray rules, restrained radii and generous whitespace.
-- Product adaptation: the public landing-page header becomes a persistent operations sidebar while retaining the same logo, typography and black primary-state treatment.
-- Hierarchy: page title, workflow progress, Brief panel and editorial canvas have distinct emphasis; secondary metadata remains gray and does not compete with the primary task.
-- Controls: inputs, tabs and primary actions use real Element Plus controls and the repository's existing icon system; no placeholder or improvised visual assets were introduced.
+The implementation follows the reference's transferable design rules: oversized Chinese headline, restrained black/white palette, thin neutral borders, shallow radii, generous negative space, a data card opposite the headline, and a three-part GEO workflow below the fold. The desktop application's persistent sidebar is intentionally retained because it owns authenticated navigation, publishing state, account/logout controls, and the rest of the installed product. Replacing it with the reference's public landing-page header would remove required EXE functionality.
 
-## Responsive and interaction gates
+The existing repository logo asset is used rather than recreating the reference mark. The reference contains a demonstration trend; the implementation only plots actual visibility runs and shows a truthful empty state when none exist. Public marketing navigation and footer elements are intentionally absent because this is an installed desktop workspace, not a public website.
 
-- 1440 px and 1180 px: no horizontal overflow; Brief and editorial canvas remain legible side by side.
-- 390 px: document and body scroll widths equal the 390 px viewport; the 68 px collapsed navigation leaves a 322 px main region; progress steps wrap to two columns and the Brief form remains inside the viewport.
-- Content generation, cancellation, runtime receipt, source links, settings status and custom API controls are wired to working application state.
-- Desktop and mobile screenshots show no overlapping text, clipped cards, broken borders, missing icons or unintended color drift.
+## Functional and interaction checks
+
+- Dashboard data comes from existing dashboard, project, visibility, diagnosis, usage-cost, and publishing APIs.
+- AI visibility retains project selection, query/model input, analysis, stored history, evidence, diagnosis dimensions, action items, cost detail, and prior-run comparison.
+- Existing authentication, logout, real-publishing gate, publishing state/error, and platform-limit flows remain in the desktop shell.
+- Direct dashboard and `#/ai-visibility` route loads were checked in an isolated browser profile against a local QA API copy.
+- Project selection populated from the real QA database. Empty visibility history did not produce fabricated values.
+- Browser console contained only the Vite connection messages; no uncaught JavaScript, reference, or type errors appeared.
+- Automated tests cover dashboard presentation transforms, chronology, delta calculation, evidence extraction, diagnosis comparison, and preservation of the real AI visibility workflow.
+
+## Responsive and revision history
+
+The first 1536 x 1024 pass matched the reference hierarchy without actionable visual defects. A separate narrow-window review identified that the original two-column breakpoint could make the hero/card relationship too tight at common EXE widths. The breakpoint was moved to 1320 px. The subsequent 1280 x 800 capture verifies a clean single-column stack with no horizontal clipping. This P2 layout risk is fixed.
+
+## Remaining visual differences
+
+- P3, accepted: the existing GEO logo silhouette differs from the sample brand mark. Keeping the real product asset avoids an invented or CSS-drawn logo.
+- P3, accepted: the persistent desktop sidebar replaces the public-site top navigation.
+- P3, accepted: an empty real-data chart replaces the reference's fabricated demonstration series when no visibility history exists.
+- No open P0, P1, or P2 findings.
 
 final result: passed

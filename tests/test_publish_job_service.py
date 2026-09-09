@@ -21,10 +21,12 @@ from services.publish_job_service import (
     create_publish_job,
     get_publish_job,
     list_publish_jobs,
+    mark_publish_job_awaiting_reconciliation,
     publish_authorization_matches,
     reconcile_publish_job_failure,
     reconcile_publish_job_platform_success,
     reconcile_publish_job_success,
+    recover_interrupted_publish_jobs,
     retry_publish_job,
     transition_publish_job,
     update_publish_job_progress,
@@ -587,17 +589,23 @@ class PublishJobServiceTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(article_status, "published")
 
-    def test_reconciles_need_action_after_human_verification(self):
+    def test_reconciles_ambiguous_attempt_after_human_verification(self):
         job = create_publish_job(
             self.db_path,
             article_id=self.article_id,
             platform="baijiahao",
         )
-        transition_publish_job(
+        active = transition_publish_job(
             self.db_path,
             job["id"],
-            "need_action",
-            message="平台要求账号本人完成人机验证",
+            "processing",
+            message="平台正在提交",
+        )
+        mark_publish_job_awaiting_reconciliation(
+            self.db_path,
+            job["id"],
+            message="本人验证后已完成提交，但平台未返回公链",
+            expected_state_version=active["state_version"],
         )
 
         reconciled = reconcile_publish_job_success(
@@ -620,7 +628,13 @@ class PublishJobServiceTests(unittest.TestCase):
             article_id=self.article_id,
             platform="channels",
         )
-        transition_publish_job(self.db_path, job["id"], "processing")
+        active = transition_publish_job(self.db_path, job["id"], "processing")
+        mark_publish_job_awaiting_reconciliation(
+            self.db_path,
+            job["id"],
+            message="已提交，平台不返回 Web 公链",
+            expected_state_version=active["state_version"],
+        )
 
         reconciled = reconcile_publish_job_platform_success(
             self.db_path,
@@ -638,11 +652,17 @@ class PublishJobServiceTests(unittest.TestCase):
             article_id=self.article_id,
             platform="channels",
         )
-        transition_publish_job(
+        active = transition_publish_job(
             self.db_path,
             job["id"],
-            "need_action",
-            message="平台状态未知",
+            "processing",
+            message="平台正在提交",
+        )
+        mark_publish_job_awaiting_reconciliation(
+            self.db_path,
+            job["id"],
+            message="提交调用结束，平台结果未知",
+            expected_state_version=active["state_version"],
         )
 
         reconciled = reconcile_publish_job_failure(
@@ -654,6 +674,29 @@ class PublishJobServiceTests(unittest.TestCase):
         self.assertEqual(reconciled["status"], "failed")
         self.assertEqual(reconciled["result_url"], "")
         self.assertTrue(reconciled["finished_at"])
+
+    def test_recovers_interrupted_active_attempt_without_retrying(self):
+        job = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="channels",
+        )
+        active = transition_publish_job(
+            self.db_path,
+            job["id"],
+            "processing",
+            message="浏览器正在执行发布",
+        )
+
+        recovered_count = recover_interrupted_publish_jobs(self.db_path)
+        recovered = get_publish_job(self.db_path, active["id"])
+
+        self.assertEqual(recovered_count, 1)
+        self.assertEqual(recovered["status"], "need_action")
+        self.assertTrue(recovered["reconciliation_required"])
+        self.assertIn("异常退出", recovered["message"])
+        with self.assertRaises(InvalidPublishJobTransitionError):
+            retry_publish_job(self.db_path, recovered["id"])
 
     def test_failure_reconciliation_rejects_queued_job(self):
         job = create_publish_job(

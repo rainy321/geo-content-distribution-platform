@@ -369,6 +369,35 @@ class AIServiceTests(unittest.TestCase):
         self.assertEqual(result["title"], "企业 AI Agent 实施指南")
         self.assertEqual(result["content"], "## 实施步骤\n优化后的完整正文。")
 
+    def test_alibaba_qwen_optimization_uses_canonical_provider_label(self):
+        def fake_post(*args, **kwargs):
+            return FakeResponse(
+                {
+                    "id": "optimization-request-1",
+                    "model": "qwen-plus",
+                    "usage": {"prompt_tokens": 20, "completion_tokens": 10},
+                    "choices": [{"message": {"content": '{"content":"优化正文"}'}}],
+                }
+            )
+
+        result = optimize_geo_content(
+            article={"title": "原文", "content": "原始正文", "tags": []},
+            score={"score": 50, "suggestions": []},
+            settings=AISettings(
+                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+                api_key="test-key",
+                model="qwen-plus",
+                timeout_seconds=15,
+            ),
+            http_post=fake_post,
+            include_metadata=True,
+        )
+
+        self.assertEqual(result.provider, "qwen")
+        self.assertEqual(result.model, "qwen-plus")
+        self.assertEqual(result.usage["input_tokens"], 20)
+        self.assertEqual(result.usage["output_tokens"], 10)
+
 
 if __name__ == "__main__":
     unittest.main()

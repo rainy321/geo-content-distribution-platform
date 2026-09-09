@@ -43,7 +43,7 @@ export const getCustomAIConfig = () => {
 }
 
 export const saveCustomAIConfig = ({ baseUrl, apiKey, model }) => {
-  if (!browserStorageAvailable()) throw new Error('当前浏览器不支持会话存储')
+  if (!browserStorageAvailable()) throw new Error('当前软件会话不支持安全密钥存储')
   const publicConfig = {
     base_url: String(baseUrl || '').trim().replace(/\/$/, ''),
     model: String(model || '').trim()

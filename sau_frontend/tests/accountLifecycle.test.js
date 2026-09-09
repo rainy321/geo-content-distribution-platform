@@ -39,6 +39,7 @@ test('active login dialog exposes a cooperative end-login action', () => {
 
   assert.match(component, /结束本次登录/)
   assert.match(component, /accountApi\.cancelMediaLogin/)
-  assert.match(component, /正在请求后台结束登录并关闭 Chrome 窗口/)
+  assert.match(component, /正在请求后台结束登录并关闭\$\{loginWindowName\.value\}/)
+  assert.match(component, /selectedPlatform\.value\?\.key === 'bilibili' \? ' Bilibili 扫码窗口' : ' Google Chrome'/)
   assert.match(accountApi, /post\('\/api\/media-login\/cancel'/)
 })

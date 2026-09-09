@@ -479,7 +479,9 @@ class XiaoHongShuBaseUploader(BaseVideoUploader):
         if not title_text:
             return
         title_container = page.locator('input[placeholder*="填写标题"]')
-        await title_container.fill(title_text[:20])
+        if len(title_text) > 20:
+            raise ValueError("小红书发布标题不能超过 20 字，请返回平台预检编辑")
+        await title_container.fill(title_text)
 
     async def fill_desc(self, page: Page) -> None:
         if not getattr(self, "desc", ""):

@@ -73,7 +73,17 @@ class PublishJobExecutorTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def _create_job(self, *, demo=False, publish_at=None, images=None, video=None, platform="zhihu"):
+    def _create_job(
+        self,
+        *,
+        demo=False,
+        publish_at=None,
+        images=None,
+        video=None,
+        platform="zhihu",
+        publish_title=None,
+        publish_content=None,
+    ):
         return create_publish_job(
             self.db_path,
             article_id=self.article_id,
@@ -82,6 +92,8 @@ class PublishJobExecutorTests(unittest.TestCase):
             video=video,
             publish_at=publish_at,
             demo=demo,
+            publish_title=publish_title,
+            publish_content=publish_content,
         )
 
     def _article_status(self):
@@ -178,6 +190,75 @@ class PublishJobExecutorTests(unittest.TestCase):
         self.assertEqual(content.tags, ("AI", "Agent"))
         self.assertEqual(self._article_status(), "published")
 
+    def test_executor_sends_saved_platform_copy_instead_of_mutating_original(self):
+        platform_copy = "快手实际发布短版"
+        platform_title = "快手短标题"
+        job = self._create_job(
+            platform="kuaishou",
+            publish_title=platform_title,
+            publish_content=platform_copy,
+        )
+        publisher = StubPublisher(
+            "kuaishou",
+            PublishResult(True, "kuaishou", "success", message="发布成功"),
+        )
+
+        result = execute_publish_job(
+            self.db_path,
+            job["id"],
+            publisher_factory=lambda _job: publisher,
+        )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(publisher.calls[0].title, platform_title)
+        self.assertEqual(publisher.calls[0].content, platform_copy)
+        self.assertEqual(
+            get_article(self.db_path, self.article_id)["content"],
+            "这里是文章正文",
+        )
+
+    def test_executor_blocks_tampered_over_limit_copy_before_loading_publisher(self):
+        job = self._create_job(platform="kuaishou")
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE publish_jobs SET publish_content = ? WHERE id = ?",
+                    ("字" * 470, job["id"]),
+                )
+        publisher_factory = Mock(name="publisher_factory_must_not_be_called")
+
+        result = execute_publish_job(
+            self.db_path,
+            job["id"],
+            publisher_factory=publisher_factory,
+        )
+
+        publisher_factory.assert_not_called()
+        self.assertEqual(result["status"], "need_action")
+        self.assertIn("前置校验未通过", result["message"])
+        self.assertIn("未访问平台", result["message"])
+
+    def test_executor_blocks_tampered_title_before_loading_publisher(self):
+        job = self._create_job(platform="douyin")
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE publish_jobs SET publish_title = ? WHERE id = ?",
+                    ("字" * 31, job["id"]),
+                )
+        publisher_factory = Mock(name="publisher_factory_must_not_be_called")
+
+        result = execute_publish_job(
+            self.db_path,
+            job["id"],
+            publisher_factory=publisher_factory,
+        )
+
+        publisher_factory.assert_not_called()
+        self.assertEqual(result["status"], "need_action")
+        self.assertIn("发布标题当前 31 字", result["message"])
+        self.assertIn("未访问平台", result["message"])
+
     def test_resolves_job_images_from_media_root_before_publishing(self):
         media_root = Path(self.temp_dir.name) / "videoFile"
         media_root.mkdir()
@@ -217,8 +298,11 @@ class PublishJobExecutorTests(unittest.TestCase):
             media_root=media_root,
         )
 
-        self.assertEqual(result["status"], "processing")
+        self.assertEqual(result["status"], "need_action")
+        self.assertTrue(result["reconciliation_required"])
+        self.assertIsNotNone(result["finished_at"])
         self.assertEqual(publisher.calls[0].video, str(video_path.resolve()))
+        self.assertEqual(self._article_status(), "ready")
 
     def test_persists_need_action_result(self):
         job = self._create_job()
@@ -242,7 +326,7 @@ class PublishJobExecutorTests(unittest.TestCase):
         self.assertEqual(result["message"], "需要人工确认登录")
         self.assertEqual(self._article_status(), "ready")
 
-    def test_keeps_unconfirmed_platform_result_processing(self):
+    def test_finishes_unconfirmed_platform_result_as_reconciliation_required(self):
         job = self._create_job()
         publisher = StubPublisher(
             "zhihu",
@@ -260,10 +344,11 @@ class PublishJobExecutorTests(unittest.TestCase):
             publisher_factory=lambda _job: publisher,
         )
 
-        self.assertEqual(result["status"], "processing")
+        self.assertEqual(result["status"], "need_action")
+        self.assertTrue(result["reconciliation_required"])
         self.assertEqual(result["message"], "已点击发布，等待平台确认")
-        self.assertIsNone(result["finished_at"])
-        self.assertEqual(self._article_status(), "publishing")
+        self.assertIsNotNone(result["finished_at"])
+        self.assertEqual(self._article_status(), "ready")
 
     def test_manual_intervention_exception_needs_action(self):
         job = self._create_job()

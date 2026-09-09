@@ -1,651 +1,365 @@
 <template>
-  <main class="operations-dashboard">
-    <header class="dashboard-heading">
-      <div class="heading-copy">
-        <p class="eyebrow">OPERATIONS BRIEF / {{ todayLabel }}</p>
-        <h1>今日运营简报</h1>
-        <p>先观察品牌在 AI 回答中如何出现，再把证据转成内容行动；渠道分发始终是可控的后续步骤。</p>
-      </div>
-      <div class="heading-actions">
-        <span v-if="overview.generated_at" class="sync-time">数据更新 {{ formatTime(overview.generated_at) }}</span>
-        <el-button :icon="Refresh" :loading="loading" @click="fetchOverview">刷新数据</el-button>
-        <el-button v-if="hasProjects" type="primary" :icon="View" @click="router.push('/ai-visibility')">开始可见度分析</el-button>
-        <el-button v-else-if="hasLoaded" type="primary" :icon="Plus" @click="router.push('/projects')">创建品牌项目</el-button>
-      </div>
-    </header>
-
-    <section v-if="!showOnboarding && !loadError" class="metric-ledger" aria-label="今日核心指标">
-      <article v-for="metric in metrics" :key="metric.key" :class="['metric-cell', metric.tone]">
-        <div class="metric-index">{{ metric.index }}</div>
-        <div class="metric-value">{{ metric.value }}</div>
-        <div class="metric-copy">
-          <strong>{{ metric.label }}</strong>
-          <span>{{ metric.note }}</span>
-        </div>
-      </article>
-    </section>
-
-    <section v-if="loadError" class="dashboard-error" role="alert">
-      <span>!</span>
+  <main class="geo-home">
+    <section v-if="loadError" class="load-state error-state" role="alert">
+      <el-icon><Warning /></el-icon>
       <div>
-        <h2>运营数据没有载入</h2>
-        <p>检查后端服务后重新加载，已有文章和发布任务不会受到影响。</p>
+        <p class="eyebrow">WORKSPACE OFFLINE</p>
+        <h1>运营数据没有载入</h1>
+        <p>检查本机服务后重新加载；已有项目、文章和发布任务不会受到影响。</p>
       </div>
-      <el-button type="primary" @click="fetchOverview">重新加载</el-button>
+      <el-button type="primary" :icon="Refresh" @click="fetchOverview">重新加载</el-button>
     </section>
 
-    <section v-else-if="showOnboarding" class="onboarding-panel" aria-labelledby="onboarding-title">
-      <div class="onboarding-intro">
-        <p class="eyebrow">FIRST RUN / LOCAL WORKSPACE</p>
-        <h2 id="onboarding-title"><span>从一个真实</span><span>品牌问题开始</span></h2>
-        <p>先建立品牌项目，固定名称、产品、官网与竞品口径；然后粘贴已有 AI 回答，在本机分析品牌提及、声量和引用证据。</p>
-        <div class="onboarding-actions">
-          <el-button type="primary" size="large" :icon="Plus" @click="router.push('/projects')">创建第一个品牌项目</el-button>
-          <span>无需先连接媒体账号，也不会触发真实发布。</span>
+    <section v-else-if="showOnboarding" class="first-run" aria-labelledby="first-run-title">
+      <div class="first-run-copy">
+        <p class="eyebrow">GENERATIVE ENGINE OPTIMIZATION</p>
+        <h1 id="first-run-title">让品牌，<br>出现在 AI 的<br>答案里。</h1>
+        <p class="hero-summary">从一份真实品牌底稿开始，建立可复测的可见度基线，再把缺口变成内容行动。</p>
+        <div class="hero-actions">
+          <el-button type="primary" size="large" :icon="ArrowRight" @click="router.push('/projects')">创建第一个品牌项目</el-button>
+          <el-button size="large" @click="router.push('/ai-visibility')">了解诊断口径</el-button>
         </div>
+        <small>无需先连接媒体账号，也不会触发真实发布。</small>
       </div>
 
-      <ol class="onboarding-path" aria-label="首次使用的两个步骤">
-        <li class="current-step">
-          <div class="step-index"><span>01</span><i /></div>
-          <div class="step-copy">
-            <small>NOW / 现在</small>
-            <h3>建立品牌项目</h3>
-            <p>填写品牌事实、产品、关键词与竞品，形成后续分析共用的稳定口径。</p>
-            <button type="button" @click="router.push('/projects')">打开品牌项目 <span>→</span></button>
-          </div>
-        </li>
-        <li class="next-step">
-          <div class="step-index"><span>02</span><i /></div>
-          <div class="step-copy">
-            <small>NEXT / 下一步</small>
-            <h3>运行 AI 可见度分析</h3>
-            <p>每条粘贴回答作为一个样本，本地规则会给出提及率、SOV、位次、引用与逐条证据。</p>
-            <span class="step-locked">创建项目后即可使用</span>
-          </div>
-        </li>
-      </ol>
-
-      <footer class="onboarding-boundary">
-        <span class="boundary-dot" aria-hidden="true" />
-        <p><strong>本机数据边界</strong>　品牌项目、可见度回答和分析历史保存在当前 Windows 用户的数据目录中。</p>
-      </footer>
-    </section>
-
-    <div v-else class="dashboard-grid" v-loading="loading && !hasLoaded">
-      <section class="trend-panel" aria-labelledby="trend-title">
-        <div class="panel-heading">
-          <div>
-            <span>TREND / 01</span>
-            <h2 id="trend-title">最近 7 天发布趋势</h2>
-            <p>生成量反映内容供给，任务量反映分发动作，成功量反映最终闭环。</p>
-          </div>
-          <div class="chart-legend" aria-label="趋势图图例">
-            <span><i class="generated" />生成</span>
-            <span><i class="published" />任务</span>
-            <span><i class="success" />成功</span>
-          </div>
-        </div>
-
-        <div class="trend-chart">
-          <div class="chart-scale" aria-hidden="true">
-            <span>{{ trendMax }}</span>
-            <span>{{ Math.ceil(trendMax / 2) }}</span>
-            <span>0</span>
-          </div>
-          <div class="chart-days">
-            <div v-for="day in overview.trend" :key="day.date" class="day-column">
-              <div class="bar-stage" :aria-label="trendAriaLabel(day)">
-                <span class="grid-line top" />
-                <span class="grid-line middle" />
-                <div class="bar generated" :style="{ height: barHeight(day.generated) }"><i>{{ day.generated || '' }}</i></div>
-                <div class="bar published" :style="{ height: barHeight(day.published) }"><i>{{ day.published || '' }}</i></div>
-                <div class="bar success" :style="{ height: barHeight(day.success) }"><i>{{ day.success || '' }}</i></div>
-              </div>
-              <time :datetime="day.date">{{ day.label }}</time>
-            </div>
-          </div>
-        </div>
-      </section>
-
-      <aside class="platform-panel" aria-labelledby="platform-title">
-        <div class="panel-heading platform-heading">
-          <div>
-            <span>CHANNELS / 02</span>
-            <h2 id="platform-title">媒体连接</h2>
-            <p>仅统计 Cookie 状态正常的账号。</p>
-          </div>
-        </div>
-
-        <div class="platform-list">
-          <article v-for="platform in overview.platforms" :key="platform.key" class="platform-row">
-            <div :class="['connection-dot', { connected: platform.connected }]" />
-            <div>
-              <strong>{{ platform.name }}</strong>
-              <span>{{ platform.connected ? `${platform.account_count} 个可用账号` : '尚未连接' }}</span>
-            </div>
-            <small>{{ platform.connected ? 'ONLINE' : 'OFFLINE' }}</small>
-          </article>
-        </div>
-
-        <button type="button" class="manage-link" @click="router.push('/account-management')">
-          管理媒体账号 <span>→</span>
-        </button>
-      </aside>
-    </div>
-
-    <section v-if="!loadError && !showOnboarding" class="recent-panel" aria-labelledby="recent-title">
-      <div class="panel-heading recent-heading">
-        <div>
-          <span>RECENT / 03</span>
-          <h2 id="recent-title">最近发布</h2>
-          <p>按最后活动时间排列；演示任务不会伪装成真实发布。</p>
-        </div>
-        <el-button text :icon="Promotion" @click="router.push('/publish-center')">打开发布中心</el-button>
-      </div>
-
-      <div v-if="overview.recent_jobs.length" class="recent-list">
-        <article v-for="job in overview.recent_jobs" :key="job.job_id" class="recent-row">
-          <div :class="['status-mark', job.status]">
-            <i />
-            <span>{{ statusLabel(job.status) }}</span>
-          </div>
-          <div class="recent-title">
-            <strong>{{ job.article_title }}</strong>
-            <small>JOB-{{ String(job.job_id).padStart(5, '0') }}</small>
-          </div>
-          <div class="recent-platform">
-            <span>{{ platformName(job.platform) }}</span>
-            <small v-if="job.demo">DEMO / 演示</small>
-          </div>
-          <p>{{ job.message || defaultStatusMessage(job.status) }}</p>
-          <time>{{ formatDate(job.finished_at || job.created_at) }}</time>
+      <div class="first-run-steps" aria-label="首次使用路径">
+        <article>
+          <span>01 / DEFINE</span>
+          <el-icon><CollectionTag /></el-icon>
+          <h2>固定品牌事实</h2>
+          <p>记录品牌、产品、官网、关键词与竞品，保证后续分析口径一致。</p>
+        </article>
+        <article>
+          <span>02 / MEASURE</span>
+          <el-icon><Search /></el-icon>
+          <h2>建立可见度基线</h2>
+          <p>按问题与回答样本量化提及率、声量、位次和引用来源。</p>
+        </article>
+        <article>
+          <span>03 / IMPROVE</span>
+          <el-icon><DocumentChecked /></el-icon>
+          <h2>按优先级优化</h2>
+          <p>先补 P0/P1 缺口，生产内容并用相同问题和版本复测。</p>
         </article>
       </div>
-
-      <div v-else class="recent-empty">
-        <div class="empty-route" aria-hidden="true"><span /></div>
-        <div>
-          <h3>还没有发布轨迹</h3>
-          <p>稿件标记就绪后，在发布中心选择渠道建立第一条任务。</p>
-        </div>
-        <el-button type="primary" @click="router.push('/content-library')">查看内容库</el-button>
-      </div>
     </section>
 
-    <nav v-if="!loadError && !showOnboarding" class="workflow-shortcuts" aria-label="核心工作流快捷入口">
-      <button type="button" @click="router.push('/projects')">
-        <span>01</span><strong>品牌底稿</strong><small>维护事实和关键词</small>
-      </button>
-      <i>→</i>
-      <button type="button" @click="router.push('/ai-visibility')">
-        <span>02</span><strong>AI 可见度</strong><small>分析回答和引用证据</small>
-      </button>
-      <i>→</i>
-      <button type="button" @click="router.push('/content-create')">
-        <span>03</span><strong>内容生产</strong><small>基于洞察生成和优化</small>
-      </button>
-    </nav>
+    <template v-else>
+      <section class="hero-grid" aria-labelledby="hero-title">
+        <div class="hero-copy">
+          <p class="eyebrow">GENERATIVE ENGINE OPTIMIZATION</p>
+          <h1 id="hero-title">让品牌，<br>出现在 AI 的<br>答案里。</h1>
+          <p class="hero-summary">洞察品牌在 AI 回答中的表现，持续优化内容与引用。</p>
+          <div class="hero-actions">
+            <el-button type="primary" size="large" :icon="ArrowRight" @click="router.push('/ai-visibility')">开始品牌诊断</el-button>
+            <el-button size="large" @click="router.push('/content-create')">创建优化内容</el-button>
+          </div>
+          <p class="hero-meta">
+            <span>{{ activeProject?.name || '品牌项目' }}</span><i />
+            <span>AI 可见度</span><i /><span>内容策略</span><i /><span>引用洞察</span>
+          </p>
+        </div>
+
+        <article class="visibility-card" v-loading="insightsLoading" aria-labelledby="visibility-card-title">
+          <header class="card-title-row">
+            <div>
+              <p class="eyebrow">LIVE PROJECT SIGNAL</p>
+              <h2 id="visibility-card-title">品牌可见度概览</h2>
+            </div>
+            <span class="data-badge">真实数据</span>
+          </header>
+
+          <section class="visibility-index">
+            <header>
+              <div>
+                <span>可见度指数 <el-icon title="来自最近一次可见度样本"><InfoFilled /></el-icon></span>
+                <div class="score-line">
+                  <strong>{{ formatScore(visibilityScore) }}</strong>
+                  <em v-if="visibilityChange != null" :class="{ negative: visibilityChange < 0 }">
+                    {{ visibilityChange >= 0 ? '↑' : '↓' }} {{ Math.abs(visibilityChange).toFixed(1) }} 较上次
+                  </em>
+                  <em v-else>等待可比记录</em>
+                </div>
+              </div>
+              <div class="range-control" aria-label="趋势口径"><span>最近</span><strong>{{ visibilitySeries.length || 0 }} 次</strong></div>
+            </header>
+            <VisibilityTrendCanvas
+              :values="visibilitySeries.map(item => item.value)"
+              :labels="visibilitySeries.map(item => shortDate(item.label))"
+              metric-label="品牌提及率"
+            />
+          </section>
+
+          <section class="citation-snapshot">
+            <header><h3>品牌引用追踪</h3><span>{{ citationEvidence ? '已识别证据' : '等待引用' }}</span></header>
+            <div v-if="citationEvidence" class="citation-content">
+              <el-icon><ChatDotRound /></el-icon>
+              <div>
+                <p>{{ citationEvidence.quote }}</p>
+                <footer>
+                  <span>来源：</span>
+                  <a v-if="citationEvidence.url" :href="citationEvidence.url" target="_blank" rel="noopener noreferrer"><el-icon><Link /></el-icon>{{ citationEvidence.domain }}</a>
+                  <strong v-else>{{ citationEvidence.domain }}</strong>
+                  <small>{{ formatDate(latestVisibility?.analyzedAt) }}</small>
+                </footer>
+              </div>
+            </div>
+            <div v-else class="citation-empty">
+              <el-icon><Link /></el-icon>
+              <p>最近记录还没有可识别引用。进入可见度分析查看缺口和下一步动作。</p>
+              <button type="button" @click="router.push('/ai-visibility')">打开分析 →</button>
+            </div>
+          </section>
+          <p v-if="insightError" class="insight-warning" role="status">{{ insightError }}</p>
+        </article>
+      </section>
+
+      <section class="discovery-section" aria-labelledby="discovery-title">
+        <header><p class="eyebrow">BUILT FOR AI DISCOVERY</p><h2 id="discovery-title">从被搜索，到被 AI 看见</h2></header>
+        <nav class="discovery-path" aria-label="GEO 核心工作流">
+          <button v-for="item in discoverySteps" :key="item.index" type="button" @click="router.push(item.route)">
+            <el-icon><component :is="item.icon" /></el-icon><span>{{ item.index }}</span>
+            <div><strong>{{ item.title }}</strong><small>{{ item.description }}</small></div>
+            <el-icon class="step-arrow"><ArrowRight /></el-icon>
+          </button>
+        </nav>
+      </section>
+
+      <section class="proof-ledger" aria-label="诊断与成本摘要">
+        <article>
+          <span>READINESS / 01</span><strong>{{ formatScore(latestDiagnostic?.score) }}</strong>
+          <div><h3>GEO 准备度</h3><p v-if="diagnosticChange != null" :class="{ negative: diagnosticChange < 0 }">{{ diagnosticChange >= 0 ? '提升' : '下降' }} {{ Math.abs(diagnosticChange).toFixed(1) }} 分，来自相邻两次诊断</p><p v-else>完成两次同口径诊断后显示复测变化</p></div>
+        </article>
+        <article>
+          <span>ACTION / 02</span><strong>{{ actionGapCount }}</strong>
+          <div><h3>优先行动</h3><p>P0 {{ latestDiagnostic?.gapCounts?.P0 || 0 }} · P1 {{ latestDiagnostic?.gapCounts?.P1 || 0 }}</p></div>
+        </article>
+        <article>
+          <span>AI COST / 03</span><strong>{{ costDisplay }}</strong>
+          <div><h3>模型成本凭证</h3><p>{{ costSummary?.knownTotalTokens || 0 }} 已知 Token · {{ costSummary?.unknownUsageCount || 0 }} 条用量未知</p></div>
+        </article>
+        <article>
+          <span>DISTRIBUTION / 04</span><strong>{{ overview.summary.today_success || 0 }}</strong>
+          <div><h3>今日发布成功</h3><p>{{ overview.summary.today_published || 0 }} 条任务 · {{ overview.summary.today_failed || 0 }} 条失败</p></div>
+        </article>
+      </section>
+
+      <section class="recent-section" aria-labelledby="recent-title">
+        <header class="section-heading">
+          <div><p class="eyebrow">RECENT DISTRIBUTION</p><h2 id="recent-title">最近发布轨迹</h2></div>
+          <button type="button" @click="router.push('/publish-center')">打开发布中心 <el-icon><ArrowRight /></el-icon></button>
+        </header>
+        <div v-if="overview.recent_jobs.length" class="recent-list">
+          <article v-for="job in overview.recent_jobs.slice(0, 5)" :key="job.job_id">
+            <span class="job-code">JOB-{{ String(job.job_id).padStart(5, '0') }}</span>
+            <div><strong>{{ job.article_title }}</strong><small>{{ platformName(job.platform) }} · {{ job.demo ? '演示任务' : '真实任务' }}</small></div>
+            <p>{{ job.message || defaultStatusMessage(job.status) }}</p>
+            <span :class="['job-status', job.status]">{{ statusLabel(job.status) }}</span>
+            <time>{{ formatDate(job.finished_at || job.created_at) }}</time>
+          </article>
+        </div>
+        <div v-else class="recent-empty">
+          <el-icon><Promotion /></el-icon><div><h3>还没有发布轨迹</h3><p>稿件就绪后，在发布中心选择渠道建立第一条任务。</p></div>
+          <el-button @click="router.push('/content-library')">查看内容库</el-button>
+        </div>
+      </section>
+    </template>
   </main>
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, markRaw, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { Plus, Promotion, Refresh, View } from '@element-plus/icons-vue'
+import { ArrowRight, ChatDotRound, CollectionTag, DataLine, DocumentChecked, InfoFilled, Link, Promotion, Refresh, Search, Warning } from '@element-plus/icons-vue'
+import VisibilityTrendCanvas from '@/components/VisibilityTrendCanvas.vue'
 import { dashboardApi } from '@/api/dashboard'
+import { diagnosticsApi } from '@/api/diagnostics'
+import { projectApi } from '@/api/project'
+import { visibilityApi } from '@/api/visibility'
+import { normalizeCommercialDiagnostic, normalizeCommercialDiagnosticHistory, normalizeProjectCostSummary } from '@/utils/commercialDiagnostic'
+import { normalizeVisibilityHistory, normalizeVisibilityResult } from '@/utils/visibilityResult'
+import { buildVisibilitySeries, diagnosticRetestDelta, latestCitationEvidence, visibilityDelta } from '@/utils/dashboardPresentation'
 
 const router = useRouter()
 const loading = ref(false)
 const loadError = ref(false)
 const hasLoaded = ref(false)
+const insightsLoading = ref(false)
+const insightError = ref('')
+const projects = ref([])
+const visibilityHistory = ref([])
+const diagnosticHistory = ref([])
+const latestVisibility = ref(null)
+const latestDiagnostic = ref(null)
+const costSummary = ref(null)
 
 const overview = reactive({
-  summary: {
-    project_count: 0,
-    today_generated: 0,
-    today_published: 0,
-    today_success: 0,
-    today_failed: 0,
-    connected_media: 0,
-    demo_jobs_today: 0
-  },
-  trend: [],
-  platforms: [],
-  recent_jobs: [],
-  generated_at: ''
+  summary: { project_count: 0, today_generated: 0, today_published: 0, today_success: 0, today_failed: 0, connected_media: 0, demo_jobs_today: 0 },
+  trend: [], platforms: [], recent_jobs: [], generated_at: ''
 })
 
-const todayLabel = new Intl.DateTimeFormat('zh-CN', {
-  year: 'numeric',
-  month: '2-digit',
-  day: '2-digit',
-  weekday: 'short'
-}).format(new Date())
-
-const hasProjects = computed(() => Number(overview.summary.project_count || 0) > 0)
+const activeProject = computed(() => projects.value[0] || null)
+const hasProjects = computed(() => projects.value.length > 0 || Number(overview.summary.project_count || 0) > 0)
 const showOnboarding = computed(() => hasLoaded.value && !hasProjects.value)
-
-const metrics = computed(() => [
-  { key: 'generated', index: '01', label: '今日生成文章', value: overview.summary.today_generated, note: '进入内容资产库', tone: 'teal' },
-  {
-    key: 'published', index: '02', label: '今日发布任务', value: overview.summary.today_published,
-    note: overview.summary.demo_jobs_today ? `其中 ${overview.summary.demo_jobs_today} 条演示任务` : '跨平台任务总量', tone: 'blue'
-  },
-  { key: 'success', index: '03', label: '发布成功', value: overview.summary.today_success, note: '按完成时间统计', tone: 'green' },
-  { key: 'failed', index: '04', label: '发布失败', value: overview.summary.today_failed, note: '可在发布中心重试', tone: 'red' },
-  { key: 'connected', index: '05', label: '已连接媒体', value: overview.summary.connected_media, note: 'Cookie 状态正常', tone: 'amber' }
-])
-
-const trendMax = computed(() => {
-  const values = overview.trend.flatMap(day => [day.generated, day.published, day.success])
-  return Math.max(1, ...values)
+const visibilitySeries = computed(() => buildVisibilitySeries(visibilityHistory.value))
+const visibilityScore = computed(() => latestVisibility.value?.summary?.mentionRate ?? visibilitySeries.value.at(-1)?.value ?? null)
+const visibilityChange = computed(() => visibilityDelta(visibilitySeries.value))
+const diagnosticChange = computed(() => diagnosticRetestDelta(diagnosticHistory.value))
+const citationEvidence = computed(() => latestCitationEvidence(latestVisibility.value))
+const actionGapCount = computed(() => Number(latestDiagnostic.value?.gapCounts?.P0 || 0) + Number(latestDiagnostic.value?.gapCounts?.P1 || 0))
+const costDisplay = computed(() => {
+  const costs = costSummary.value?.calculatedCosts || []
+  if (!costs.length) return '—'
+  return costs.map(item => `${item.currency} ${Number(item.amount).toFixed(4)}`).join(' + ')
 })
+
+const discoverySteps = [
+  { index: '01', title: 'AI 可见度监测', description: '了解品牌在 AI 回答中的呈现', route: '/ai-visibility', icon: markRaw(Search) },
+  { index: '02', title: '内容优化', description: '让内容更清晰、更容易被理解', route: '/geo-optimize', icon: markRaw(DocumentChecked) },
+  { index: '03', title: '引用来源分析', description: '追踪引用，发现下一轮优化机会', route: '/ai-visibility', icon: markRaw(DataLine) }
+]
+
+const loadProjectInsights = async projectId => {
+  insightsLoading.value = true
+  insightError.value = ''
+  visibilityHistory.value = []
+  diagnosticHistory.value = []
+  latestVisibility.value = null
+  latestDiagnostic.value = null
+  costSummary.value = null
+  const [visibilityRows, diagnosticRows, costs] = await Promise.allSettled([
+    visibilityApi.getRuns(projectId, 12, { suppressGlobalError: true }),
+    diagnosticsApi.getRuns(projectId, 12, { suppressGlobalError: true }),
+    diagnosticsApi.getProjectCostSummary(projectId, 30, { suppressGlobalError: true })
+  ])
+  const detailRequests = []
+  if (visibilityRows.status === 'fulfilled') {
+    visibilityHistory.value = normalizeVisibilityHistory(visibilityRows.value)
+    const latestRun = visibilityHistory.value[0]
+    if (latestRun) detailRequests.push(visibilityApi.getRun(latestRun.id, { suppressGlobalError: true }).then(response => { latestVisibility.value = normalizeVisibilityResult(response) }))
+  }
+  if (diagnosticRows.status === 'fulfilled') {
+    diagnosticHistory.value = normalizeCommercialDiagnosticHistory(diagnosticRows.value)
+    const latestRun = diagnosticHistory.value[0]
+    if (latestRun) detailRequests.push(diagnosticsApi.getRun(latestRun.id, { suppressGlobalError: true }).then(response => { latestDiagnostic.value = normalizeCommercialDiagnostic(response) }))
+  }
+  if (costs.status === 'fulfilled') costSummary.value = normalizeProjectCostSummary(costs.value)
+  const detailResults = await Promise.allSettled(detailRequests)
+  const failedParts = [visibilityRows, diagnosticRows, costs, ...detailResults].filter(item => item.status === 'rejected').length
+  if (failedParts) insightError.value = `${failedParts} 项项目凭证暂未载入；页面只展示已确认的数据。`
+  insightsLoading.value = false
+}
 
 const fetchOverview = async () => {
   loading.value = true
   loadError.value = false
-  try {
-    const response = await dashboardApi.getOverview()
-    Object.assign(overview, response.data)
-    hasLoaded.value = true
-  } catch (error) {
-    loadError.value = true
-    console.error('加载 Dashboard 失败:', error)
-  } finally {
-    loading.value = false
-  }
+  insightError.value = ''
+  const [overviewResult, projectResult] = await Promise.allSettled([dashboardApi.getOverview(), projectApi.getProjects()])
+  if (overviewResult.status === 'fulfilled') Object.assign(overview, overviewResult.value.data)
+  else loadError.value = true
+  if (projectResult.status === 'fulfilled') projects.value = Array.isArray(projectResult.value.data) ? projectResult.value.data : []
+  else insightError.value = '品牌项目暂未载入，诊断与引用概览不可用。'
+  hasLoaded.value = true
+  loading.value = false
+  if (activeProject.value) await loadProjectInsights(activeProject.value.id)
 }
-
-const barHeight = value => value ? `${Math.max(8, (value / trendMax.value) * 100)}%` : '0%'
-const trendAriaLabel = day => `${day.date}：生成 ${day.generated}，发布任务 ${day.published}，成功 ${day.success}`
-
-const platformLabels = {
-  zhihu: '知乎', toutiao: '今日头条', baijiahao: '百家号', sohu: '搜狐号', xiaohongshu: '小红书',
-  douyin: '抖音', kuaishou: '快手', bilibili: 'Bilibili', channels: '视频号', tiktok: 'TikTok'
-}
-const statusLabels = {
-  queued: '排队中', processing: '发布中', success: '成功', failed: '失败', need_action: '等待确认', scheduled: '计划中'
-}
-
-const platformName = key => platformLabels[key] || key
-const statusLabel = status => statusLabels[status] || status
-const defaultStatusMessage = status => ({
-  queued: '等待执行器领取', processing: '平台正在处理', success: '发布流程已完成',
-  failed: '发布流程失败', need_action: '需要人工确认后继续', scheduled: '等待计划时间'
-}[status] || '状态待确认')
 
 const parseDate = value => {
   if (!value) return null
   const text = String(value)
-  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(text)
-    ? `${text.replace(' ', 'T')}Z`
-    : text.includes(' ')
-      ? text.replace(' ', 'T')
-      : text
+  const normalized = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(text) ? `${text.replace(' ', 'T')}Z` : text.includes(' ') ? text.replace(' ', 'T') : text
   const date = new Date(normalized)
   return Number.isNaN(date.getTime()) ? null : date
 }
 const formatDate = value => {
   const date = parseDate(value)
-  if (!date) return '—'
-  return new Intl.DateTimeFormat('zh-CN', {
-    month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false
-  }).format(date)
+  return date ? new Intl.DateTimeFormat('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false }).format(date) : '时间未知'
 }
-const formatTime = value => {
-  const date = parseDate(value)
-  return date ? date.toLocaleTimeString('zh-CN', { hour12: false }) : '—'
-}
+const shortDate = value => { const date = parseDate(value); return date ? `${date.getMonth() + 1}/${date.getDate()}` : '记录' }
+const formatScore = value => value == null || !Number.isFinite(Number(value)) ? '—' : Number(value).toFixed(1)
+const platformLabels = { zhihu: '知乎', toutiao: '今日头条', baijiahao: '百家号', sohu: '搜狐号', xiaohongshu: '小红书', douyin: '抖音', kuaishou: '快手', bilibili: 'Bilibili', channels: '视频号', tiktok: 'TikTok' }
+const statusLabels = { queued: '排队中', processing: '发布中', success: '发布成功', failed: '发布失败', need_action: '等待确认', scheduled: '计划中' }
+const platformName = key => platformLabels[key] || key
+const statusLabel = status => statusLabels[status] || status
+const defaultStatusMessage = status => ({ queued: '等待执行器领取', processing: '平台正在处理', success: '发布流程已完成', failed: '发布流程失败', need_action: '需要人工确认后继续', scheduled: '等待计划时间' }[status] || '状态待确认')
 
-onMounted(fetchOverview)
+fetchOverview()
 </script>
 
 <style lang="scss" scoped>
-.operations-dashboard {
-  --harbor: #102b31;
-  --signal: #39b8b2;
-  --ink: #173038;
-  --muted: #6d7d82;
-  --rule: #d5dfdc;
-  --amber: #c9852d;
-  --red: #bf5a58;
-  color: var(--ink);
-  font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
-}
-
-.dashboard-heading {
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  gap: 30px;
-  padding: 8px 4px 20px;
-  border-bottom: 1px solid #cad6d2;
-}
-
-.heading-copy {
-  max-width: 700px;
-  .eyebrow { margin: 0 0 9px; color: #318f8b; font: 700 11px/1.2 "Cascadia Mono", monospace; letter-spacing: 0.13em; }
-  h1 { margin: 0; color: var(--harbor); font: 700 clamp(34px, 4vw, 50px)/0.98 "Bahnschrift SemiCondensed", "Microsoft YaHei", sans-serif; letter-spacing: -0.035em; }
-  > p:last-child { margin: 13px 0 0; color: var(--muted); font-size: 14px; line-height: 1.7; }
-}
-
-.heading-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
-  justify-content: flex-end;
-  .sync-time { width: 100%; color: var(--muted); font: 600 10px/1 "Cascadia Mono", monospace; text-align: right; }
-  :deep(.el-button) { border-radius: 3px; }
-  :deep(.el-button--primary) { background: var(--harbor); border-color: var(--harbor); }
-}
-
-.metric-ledger {
-  display: grid;
-  grid-template-columns: repeat(5, 1fr);
-  margin-top: 22px;
-  background: #fff;
-  border: 1px solid var(--rule);
-  box-shadow: 0 13px 36px rgba(20, 50, 57, 0.055);
-}
-
-.metric-cell {
-  position: relative;
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 6px 14px;
-  min-height: 116px;
-  padding: 20px;
-  border-right: 1px solid var(--rule);
-  box-sizing: border-box;
-  &:last-child { border-right: 0; }
-  &::after { content: ''; position: absolute; right: 20px; bottom: 0; left: 20px; height: 3px; background: #88aaa6; }
-  &.blue::after { background: #649bb9; }
-  &.green::after { background: var(--signal); }
-  &.red::after { background: var(--red); }
-  &.amber::after { background: var(--amber); }
-}
-
-.metric-index { padding-top: 5px; color: #61908d; font: 700 9px/1 "Cascadia Mono", monospace; }
-.metric-value { color: var(--harbor); font: 700 38px/0.9 "Bahnschrift SemiCondensed", sans-serif; text-align: right; }
-.metric-copy {
-  grid-column: 1 / -1;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  strong { font-size: 13px; }
-  span { color: var(--muted); font-size: 10px; }
-}
-
-.dashboard-grid { display: grid; grid-template-columns: minmax(0, 1.65fr) minmax(280px, 0.65fr); gap: 22px; margin-top: 22px; }
-.trend-panel, .platform-panel, .recent-panel { background: #fff; border: 1px solid var(--rule); }
-.trend-panel { min-height: 390px; padding: 26px; }
-.platform-panel { display: flex; flex-direction: column; padding: 26px; background: var(--harbor); color: #edf8f6; }
-
-.panel-heading {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 20px;
-  > div > span { color: #318f8b; font: 700 10px/1 "Cascadia Mono", monospace; letter-spacing: 0.12em; }
-  h2 { margin: 9px 0 0; color: var(--harbor); font: 700 24px/1.05 "Bahnschrift SemiCondensed", "Microsoft YaHei", sans-serif; }
-  p { margin: 7px 0 0; color: var(--muted); font-size: 11px; line-height: 1.55; }
-}
-
-.chart-legend {
-  display: flex;
-  gap: 13px;
-  color: var(--muted);
-  font-size: 10px;
-  span { display: flex; align-items: center; gap: 5px; }
-  i { width: 8px; height: 8px; background: #87aba8; }
-  i.published { background: #649bb9; }
-  i.success { background: var(--signal); }
-}
-
-.trend-chart { display: grid; grid-template-columns: 26px 1fr; gap: 12px; margin-top: 30px; }
-.chart-scale { height: 245px; display: flex; flex-direction: column; justify-content: space-between; color: #80908f; font: 600 9px/1 "Cascadia Mono", monospace; }
-.chart-days { display: grid; grid-template-columns: repeat(7, 1fr); gap: 12px; }
-.day-column {
-  min-width: 0;
-  text-align: center;
-  time { display: block; margin-top: 10px; color: #647579; font: 600 9px/1 "Cascadia Mono", monospace; }
-}
-.bar-stage { position: relative; height: 245px; display: flex; align-items: flex-end; justify-content: center; gap: clamp(3px, 0.7vw, 8px); border-bottom: 1px solid #bfcac8; }
-.grid-line { position: absolute; right: 0; left: 0; height: 1px; background: #e4eae8; }
-.grid-line.top { top: 0; }
-.grid-line.middle { top: 50%; }
-.bar {
-  position: relative;
-  z-index: 1;
-  width: clamp(7px, 1vw, 14px);
-  background: #87aba8;
-  transition: height 260ms ease;
-  &.published { background: #649bb9; }
-  &.success { background: var(--signal); }
-  i { position: absolute; top: -15px; left: 50%; color: #5d7075; font: 700 8px/1 "Cascadia Mono", monospace; font-style: normal; transform: translateX(-50%); }
-}
-
-.platform-heading {
-  padding-bottom: 18px;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.13);
-  > div > span { color: #79d8d1; }
-  h2 { color: #edf8f6; }
-  p { color: rgba(222, 240, 237, 0.58); }
-}
-.platform-list { margin-top: 13px; }
-.platform-row {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
-  gap: 11px;
-  align-items: center;
-  padding: 13px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-  > div:nth-child(2) { display: flex; flex-direction: column; gap: 4px; }
-  strong { font-size: 12px; }
-  span { color: rgba(222, 240, 237, 0.55); font-size: 9px; }
-  small { color: rgba(222, 240, 237, 0.38); font: 700 8px/1 "Cascadia Mono", monospace; }
-}
-.connection-dot {
-  width: 9px;
-  height: 9px;
-  border: 1px solid #849795;
-  border-radius: 50%;
-  &.connected { border-color: var(--signal); background: var(--signal); box-shadow: 0 0 0 4px rgba(57, 184, 178, 0.12); }
-}
-.manage-link { display: flex; justify-content: space-between; margin-top: auto; padding: 15px 0 0; border: 0; background: transparent; color: #8ce3dc; cursor: pointer; font-size: 11px; text-align: left; }
-
-.recent-panel { margin-top: 22px; padding: 0 26px; }
-.recent-heading { align-items: center; padding: 23px 0; border-bottom: 1px solid var(--rule); }
-.recent-row {
-  display: grid;
-  grid-template-columns: 92px minmax(180px, 1.25fr) 116px minmax(200px, 1.2fr) 100px;
-  gap: 18px;
-  align-items: center;
-  min-height: 72px;
-  border-bottom: 1px solid #e5ebe9;
-  &:last-child { border-bottom: 0; }
-  p { overflow: hidden; margin: 0; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
-  > time { color: #536d73; font: 600 9px/1.3 "Cascadia Mono", monospace; text-align: right; }
-}
-.status-mark {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--muted);
-  font-size: 10px;
-  i { width: 19px; height: 3px; background: #829593; }
-  &.success i { background: var(--signal); }
-  &.failed i { background: var(--red); }
-  &.need_action i, &.scheduled i { background: var(--amber); }
-  &.processing i, &.queued i { background: #649bb9; }
-}
-.recent-title, .recent-platform {
-  min-width: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  strong { overflow: hidden; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
-  small { color: #5a8784; font: 700 8px/1 "Cascadia Mono", monospace; }
-  > span { font-size: 11px; font-weight: 700; }
-}
-.recent-empty { min-height: 210px; display: flex; align-items: center; justify-content: center; gap: 20px; }
-.recent-empty h3 { margin: 0; font-size: 16px; }
-.recent-empty p { margin: 7px 0 0; color: var(--muted); font-size: 11px; }
-.empty-route {
-  width: 48px;
-  height: 48px;
-  display: grid;
-  place-items: center;
-  border: 1px solid #9db8b4;
-  border-radius: 50%;
-  span { width: 18px; height: 1px; background: var(--signal); box-shadow: 6px -5px 0 -2px var(--signal); }
-}
-
-.dashboard-error {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 20px;
-  min-height: 240px;
-  margin-top: 22px;
-  background: #fff;
-  border: 1px solid #dfc4c3;
-  > span { width: 48px; height: 48px; display: grid; place-items: center; border: 1px solid var(--red); color: var(--red); font: 700 22px/1 "Cascadia Mono", monospace; }
-  h2 { margin: 0; font-size: 17px; }
-  p { margin: 7px 0 0; color: var(--muted); font-size: 11px; }
-}
-
-.onboarding-panel {
-  display: grid;
-  grid-template-columns: minmax(0, 1.08fr) minmax(390px, 0.92fr);
-  margin-top: 22px;
-  border: 1px solid var(--rule);
-  background: #fff;
-  box-shadow: 0 16px 44px rgba(16, 43, 49, 0.06);
-}
-
-.onboarding-intro {
-  display: flex;
-  min-height: 390px;
-  flex-direction: column;
-  justify-content: center;
-  padding: clamp(34px, 5vw, 66px);
-  .eyebrow { margin: 0 0 13px; color: #318f8b; font: 700 10px/1 "Cascadia Mono", monospace; letter-spacing: 0.13em; }
-  h2 { max-width: 560px; margin: 0; color: var(--harbor); font: 700 clamp(34px, 4vw, 52px)/0.98 "Bahnschrift SemiCondensed", "Microsoft YaHei", sans-serif; letter-spacing: -0.035em; }
-  h2 span { display: block; }
-  > p { max-width: 620px; margin: 20px 0 0; color: var(--muted); font-size: 13px; line-height: 1.9; }
-}
-
-.onboarding-actions {
-  display: flex;
-  align-items: center;
-  gap: 17px;
-  margin-top: 30px;
-  :deep(.el-button) { min-width: 190px; border-radius: 3px; background: var(--harbor); border-color: var(--harbor); }
-  > span { max-width: 190px; color: #788987; font-size: 9px; line-height: 1.55; }
-}
-
-.onboarding-path {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  margin: 0;
-  padding: 42px 38px;
-  background: var(--harbor);
-  color: #eaf6f4;
-  list-style: none;
-  li { display: grid; grid-template-columns: 42px 1fr; gap: 15px; }
-  li + li { margin-top: 4px; }
-}
-
-.step-index {
-  display: flex;
-  align-items: center;
-  flex-direction: column;
-  span { display: grid; width: 31px; height: 31px; flex: 0 0 auto; place-items: center; border: 1px solid #56817e; border-radius: 50%; color: #7ca19d; font: 700 9px/1 "Cascadia Mono", monospace; }
-  i { width: 1px; min-height: 104px; flex: 1; background: rgba(137, 190, 184, 0.24); }
-}
-.current-step .step-index span { border-color: var(--signal); background: var(--signal); color: #0d3034; }
-.next-step .step-index i { display: none; }
-
-.step-copy {
-  padding: 4px 0 30px;
-  small { color: #73cfc8; font: 700 8px/1 "Cascadia Mono", monospace; letter-spacing: 0.1em; }
-  h3 { margin: 8px 0 0; color: #f0f8f7; font-size: 16px; }
-  p { margin: 9px 0 0; color: rgba(225, 241, 238, 0.58); font-size: 10px; line-height: 1.7; }
-  button { display: flex; align-items: center; gap: 13px; margin-top: 14px; padding: 8px 0; border: 0; border-bottom: 1px solid rgba(114, 210, 202, 0.45); background: transparent; color: #8ce1da; cursor: pointer; font-size: 10px; }
-  button:hover { color: #c4f3ef; border-bottom-color: #9ce6e0; }
-}
-.step-locked { display: inline-block; margin-top: 14px; color: rgba(225, 241, 238, 0.38); font: 600 8px/1 "Cascadia Mono", monospace; }
-
-.onboarding-boundary {
-  grid-column: 1 / -1;
-  display: flex;
-  align-items: center;
-  gap: 11px;
-  padding: 15px 22px;
-  border-top: 1px solid var(--rule);
-  background: #f1f7f5;
-  p { margin: 0; color: #667b79; font-size: 9px; line-height: 1.55; }
-  strong { color: #315d5a; }
-}
-.boundary-dot { width: 8px; height: 8px; flex: 0 0 auto; border-radius: 50%; background: var(--signal); box-shadow: 0 0 0 4px rgba(57, 184, 178, 0.13); }
-
-.workflow-shortcuts {
-  display: grid;
-  grid-template-columns: 1fr auto 1fr auto 1fr;
-  align-items: stretch;
-  gap: 10px;
-  margin-top: 22px;
-  > i { align-self: center; color: #75a29e; font-style: normal; }
-  button { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; padding: 15px 17px; border: 1px solid var(--rule); background: rgba(255, 255, 255, 0.7); color: var(--ink); cursor: pointer; text-align: left; }
-  button:hover { border-color: #78b9b5; background: #fff; }
-  button:focus-visible { outline: 3px solid rgba(57, 184, 178, 0.28); outline-offset: 2px; }
-  button span { grid-row: 1 / 3; color: #4c8d89; font: 700 9px/1 "Cascadia Mono", monospace; }
-  button strong { font-size: 12px; }
-  button small { color: var(--muted); font-size: 9px; }
-}
-
-@media (prefers-reduced-motion: reduce) { .bar { transition: none; } }
-
-@media (max-width: 1050px) {
-  .metric-ledger { grid-template-columns: repeat(3, 1fr); }
-  .metric-cell:nth-child(3) { border-right: 0; }
-  .metric-cell:nth-child(-n + 3) { border-bottom: 1px solid var(--rule); }
-  .dashboard-grid { grid-template-columns: 1fr; }
-  .platform-panel { min-height: 390px; }
-  .recent-row { grid-template-columns: 82px 1fr 100px; padding: 12px 0; }
-  .recent-row p { grid-column: 2; }
-  .recent-row > time { grid-column: 3; grid-row: 2; }
-  .onboarding-panel { grid-template-columns: 1fr; }
-  .onboarding-intro { min-height: 320px; }
-  .onboarding-path { min-height: 340px; }
-}
-
-@media (max-width: 760px) {
-  .dashboard-heading { align-items: flex-start; flex-direction: column; }
-  .heading-actions { width: 100%; justify-content: flex-start; }
-  .heading-actions .sync-time { text-align: left; }
-  .metric-ledger { grid-template-columns: repeat(2, 1fr); }
-  .metric-cell, .metric-cell:nth-child(3) { border-right: 1px solid var(--rule); border-bottom: 1px solid var(--rule); }
-  .metric-cell:nth-child(even) { border-right: 0; }
-  .metric-cell:last-child { grid-column: 1 / -1; border-right: 0; border-bottom: 0; }
-  .trend-panel, .platform-panel, .recent-panel { padding-left: 18px; padding-right: 18px; }
-  .panel-heading { align-items: flex-start; flex-direction: column; }
-  .chart-days { gap: 4px; }
-  .bar-stage { gap: 2px; }
-  .recent-row { grid-template-columns: 80px 1fr; gap: 9px; }
-  .recent-platform { grid-column: 1; }
-  .recent-row p, .recent-row > time { grid-column: 2; grid-row: auto; text-align: left; }
-  .recent-empty, .dashboard-error { align-items: flex-start; flex-direction: column; padding: 24px; }
-  .onboarding-intro { min-height: 0; padding: 34px 24px; }
-  .onboarding-actions { align-items: flex-start; flex-direction: column; }
-  .onboarding-actions :deep(.el-button) { width: 100%; }
-  .onboarding-path { min-height: 0; padding: 34px 24px; }
-  .onboarding-boundary { align-items: flex-start; }
-  .workflow-shortcuts { grid-template-columns: 1fr; }
-  .workflow-shortcuts > i { display: none; }
-}
+.geo-home { --ink:#111214; --secondary:#505257; --muted:#85878c; --line:#deded9; --soft:#f4f4f1; --paper:#fff; width:min(100%,1420px); margin:0 auto; color:var(--ink); font-family:"Segoe UI Variable Text","Microsoft YaHei UI","PingFang SC",sans-serif; }
+.eyebrow { margin:0; color:#77797e; font:600 11px/1.2 "Cascadia Mono",Consolas,monospace; letter-spacing:.16em; }
+.hero-grid { display:grid; grid-template-columns:minmax(420px,.92fr) minmax(560px,1.08fr); gap:clamp(40px,6vw,92px); align-items:center; min-height:590px; padding:42px 40px 46px; border-bottom:1px solid var(--line); }
+.hero-copy h1,.first-run-copy h1 { margin:22px 0 0; font-family:"Microsoft YaHei UI","PingFang SC",sans-serif; font-size:clamp(58px,5.25vw,84px); font-weight:900; line-height:1.06; letter-spacing:-.07em; }
+.hero-summary { max-width:560px; margin:24px 0 0; color:#74767b; font-size:clamp(18px,1.5vw,25px); line-height:1.55; letter-spacing:.01em; }
+.hero-actions { display:flex; gap:12px; margin-top:28px; flex-wrap:wrap; }
+.hero-actions :deep(.el-button) { min-width:174px; height:54px; margin:0; border-color:var(--ink); border-radius:8px; color:var(--ink); font-size:15px; font-weight:600; }
+.hero-actions :deep(.el-button--primary) { background:var(--ink); color:#fff; }
+.hero-meta { display:flex; align-items:center; gap:9px; margin:14px 0 0; color:#8b8d91; font-size:12px; }
+.hero-meta i { width:3px; height:3px; border-radius:50%; background:#b3b4b7; }
+.visibility-card { min-width:0; padding:22px; border:1px solid var(--line); border-radius:10px; background:rgba(255,255,255,.94); box-shadow:0 22px 58px rgba(17,18,20,.07); }
+.card-title-row,.visibility-index>header,.citation-snapshot>header,.section-heading { display:flex; align-items:flex-start; justify-content:space-between; gap:20px; }
+.card-title-row h2 { margin:8px 0 0; font-size:19px; letter-spacing:-.03em; }
+.data-badge,.citation-snapshot>header span { padding:7px 11px; border:1px solid #e3e3df; border-radius:7px; background:#f5f5f2; color:#6f7175; font-size:11px; white-space:nowrap; }
+.visibility-index,.citation-snapshot { margin-top:14px; padding:18px; border:1px solid #e4e4e0; border-radius:8px; background:#fff; }
+.visibility-index>header>div:first-child>span { display:flex; align-items:center; gap:5px; color:#5d5f64; font-size:12px; }
+.score-line { display:flex; align-items:baseline; gap:14px; margin-top:5px; }
+.score-line strong { font:800 42px/1 "Segoe UI Variable Display","Microsoft YaHei UI",sans-serif; letter-spacing:-.05em; }
+.score-line em,.proof-ledger article>div p { color:#66686d; font-size:11px; font-style:normal; }
+.score-line em.negative,.proof-ledger .negative { color:#9c433c; }
+.range-control { display:flex; align-items:center; border:1px solid #e5e5e2; border-radius:7px; overflow:hidden; }
+.range-control span,.range-control strong { padding:7px 9px; color:#7a7c81; font-size:10px; }
+.range-control strong { background:#f2f2ef; color:var(--ink); }
+.citation-snapshot h3 { margin:2px 0 0; font-size:16px; }
+.citation-content,.citation-empty { display:grid; grid-template-columns:40px minmax(0,1fr); gap:14px; align-items:start; margin-top:16px; }
+.citation-content>.el-icon,.citation-empty>.el-icon { width:40px; height:40px; border-radius:50%; background:#efefec; color:#4e5054; font-size:18px; }
+.citation-content p,.citation-empty p { margin:0; color:#424449; font-size:12px; line-height:1.75; }
+.citation-content footer { display:flex; align-items:center; gap:7px; margin-top:12px; color:#929499; font-size:10px; }
+.citation-content footer a { display:inline-flex; align-items:center; gap:4px; color:#1e63d6; font-weight:600; }
+.citation-content footer small { margin-left:auto; }
+.citation-empty button { grid-column:2; width:fit-content; color:var(--ink); font-size:11px; font-weight:700; }
+.insight-warning { margin:12px 0 0; color:#956725; font-size:10px; line-height:1.5; }
+.discovery-section { padding:34px 40px 0; }
+.discovery-section>header h2,.section-heading h2 { margin:9px 0 0; font-size:clamp(26px,2.5vw,36px); letter-spacing:-.045em; }
+.discovery-path { display:grid; grid-template-columns:repeat(3,1fr); margin-top:24px; border-top:1px solid var(--line); border-bottom:1px solid var(--line); }
+.discovery-path button { display:grid; grid-template-columns:48px 28px minmax(0,1fr) 20px; gap:14px; align-items:center; min-height:128px; padding:22px 24px; border-right:1px solid var(--line); color:var(--ink); text-align:left; transition:background 160ms ease,transform 160ms ease; }
+.discovery-path button:last-child { border-right:0; }
+.discovery-path button:hover { background:#f4f4f1; transform:translateY(-2px); }
+.discovery-path button>.el-icon:first-child { font-size:34px; }
+.discovery-path button>span { align-self:start; color:#8a8c91; font:500 11px/1 "Cascadia Mono",monospace; }
+.discovery-path button div { display:flex; flex-direction:column; gap:7px; }
+.discovery-path button strong { font-size:17px; }
+.discovery-path button small { color:#7b7d82; font-size:12px; line-height:1.5; }
+.discovery-path .step-arrow { justify-self:end; color:#9c9da0; }
+.proof-ledger { display:grid; grid-template-columns:repeat(4,1fr); margin:30px 40px 0; border:1px solid var(--line); border-radius:9px; background:#fff; overflow:hidden; }
+.proof-ledger article { display:grid; grid-template-columns:1fr; min-height:150px; padding:20px; border-right:1px solid var(--line); }
+.proof-ledger article:last-child { border-right:0; }
+.proof-ledger article>span { color:#8a8c91; font:600 9px/1 "Cascadia Mono",monospace; letter-spacing:.1em; }
+.proof-ledger article>strong { align-self:center; overflow-wrap:anywhere; font-size:clamp(28px,2.4vw,38px); letter-spacing:-.05em; }
+.proof-ledger article>div h3 { margin:0; font-size:13px; }
+.proof-ledger article>div p { margin:5px 0 0; line-height:1.45; }
+.recent-section { margin:30px 40px 54px; padding-top:30px; border-top:1px solid var(--line); }
+.section-heading button { display:inline-flex; align-items:center; gap:6px; padding:9px 0; color:var(--ink); font-size:12px; font-weight:700; }
+.recent-list { margin-top:22px; border-top:1px solid var(--line); }
+.recent-list article { display:grid; grid-template-columns:108px minmax(190px,.85fr) minmax(220px,1fr) 90px 92px; gap:18px; align-items:center; min-height:72px; border-bottom:1px solid var(--line); }
+.job-code { color:#77797e; font:600 9px/1 "Cascadia Mono",monospace; }
+.recent-list article>div { display:flex; min-width:0; flex-direction:column; gap:4px; }
+.recent-list article>div strong { overflow:hidden; font-size:12px; text-overflow:ellipsis; white-space:nowrap; }
+.recent-list article>div small,.recent-list article>p,.recent-list article>time { color:#7a7c81; font-size:10px; }
+.recent-list article>p { overflow:hidden; margin:0; text-overflow:ellipsis; white-space:nowrap; }
+.job-status { width:fit-content; padding:5px 7px; border:1px solid #cacbc8; border-radius:5px; color:#66686c; font-size:9px; }
+.job-status.success { border-color:#9fc0aa; color:#32674d; }.job-status.failed{border-color:#d7aaa7;color:#963e37}.job-status.need_action{border-color:#d7bd8f;color:#8a6424}
+.recent-empty { display:flex; align-items:center; gap:17px; min-height:130px; margin-top:22px; padding:22px; border:1px solid var(--line); border-radius:8px; background:#fff; }
+.recent-empty>.el-icon { font-size:30px; }.recent-empty div{flex:1}.recent-empty h3{margin:0;font-size:14px}.recent-empty p{margin:5px 0 0;color:#77797e;font-size:11px}
+.load-state { display:grid; grid-template-columns:52px minmax(0,1fr) auto; gap:20px; align-items:center; min-height:260px; margin:50px 40px; padding:34px; border:1px solid #d9b5b2; border-radius:10px; background:#fff8f7; }
+.load-state>.el-icon{font-size:40px;color:#963e37}.load-state h1{margin:8px 0 0;font-size:28px}.load-state div>p:last-child{margin:8px 0 0;color:#77797e;font-size:12px}
+.first-run { min-height:calc(100vh - 105px); padding:54px 40px; }.first-run-copy{max-width:720px}.first-run-copy>small{display:block;margin-top:14px;color:#85878c;font-size:11px}
+.first-run-steps{display:grid;grid-template-columns:repeat(3,1fr);margin-top:60px;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.first-run-steps article{display:grid;min-height:210px;grid-template-columns:1fr auto;padding:24px;border-right:1px solid var(--line)}.first-run-steps article:last-child{border-right:0}
+.first-run-steps span{color:#85878c;font:600 9px/1 "Cascadia Mono",monospace}.first-run-steps .el-icon{font-size:28px}.first-run-steps h2{grid-column:1/-1;align-self:end;margin:0;font-size:18px}.first-run-steps p{grid-column:1/-1;margin:10px 0 0;color:#77797e;font-size:12px;line-height:1.65}
+@media (prefers-reduced-motion:reduce){.discovery-path button{transition:none}}
+@media (max-width:1320px){.hero-grid{grid-template-columns:1fr}.hero-copy{max-width:760px}.visibility-card{width:100%}}
+@media (max-width:1180px){.proof-ledger{grid-template-columns:repeat(2,1fr)}.proof-ledger article:nth-child(2){border-right:0}.proof-ledger article:nth-child(-n+2){border-bottom:1px solid var(--line)}.recent-list article{grid-template-columns:100px minmax(180px,.8fr) minmax(200px,1fr) 90px}.recent-list article>time{display:none}}
+@media (max-width:820px){.hero-grid,.discovery-section,.first-run{padding-right:20px;padding-left:20px}.proof-ledger,.recent-section{margin-right:20px;margin-left:20px}.hero-grid{grid-template-columns:minmax(0,1fr);padding-top:30px}.hero-copy h1,.first-run-copy h1{font-size:clamp(48px,12vw,68px)}.discovery-path,.first-run-steps{grid-template-columns:1fr}.discovery-path button,.first-run-steps article{border-right:0;border-bottom:1px solid var(--line)}.discovery-path button:last-child,.first-run-steps article:last-child{border-bottom:0}.recent-list article{grid-template-columns:90px 1fr auto;gap:12px;padding:12px 0}.recent-list article>p{grid-column:2/-1;grid-row:2}}
+@media (max-width:560px){.hero-grid{padding-right:14px;padding-left:14px}.discovery-section,.first-run{padding-right:14px;padding-left:14px}.proof-ledger,.recent-section{margin-right:14px;margin-left:14px}.hero-actions{flex-direction:column}.hero-actions :deep(.el-button){width:100%}.hero-meta{align-items:flex-start;flex-direction:column}.hero-meta i{display:none}.visibility-card{padding:13px}.visibility-index,.citation-snapshot{padding:13px}.visibility-index>header{align-items:flex-start;flex-direction:column}.citation-content footer{align-items:flex-start;flex-direction:column}.citation-content footer small{margin-left:0}.proof-ledger{grid-template-columns:1fr}.proof-ledger article,.proof-ledger article:nth-child(2){border-right:0;border-bottom:1px solid var(--line)}.proof-ledger article:last-child{border-bottom:0}.recent-list article{grid-template-columns:1fr auto}.job-code{grid-column:1/-1}.recent-list article>p{grid-column:1/-1}.load-state{grid-template-columns:1fr;margin:20px 14px}}
 </style>

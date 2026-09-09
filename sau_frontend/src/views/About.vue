@@ -55,7 +55,7 @@
           </li>
           <li>
             <span>本机历史</span>
-            <p>按品牌项目保存分析批次，可恢复完整结果；回答不会为了分析而发送给外部模型。</p>
+            <p>手工导入回答只在本机分析；受控采样仅在你预览问题并明确确认后，把该问题原文发送给当前配置模型。</p>
           </li>
           <li>
             <span>内容资产</span>
@@ -146,7 +146,7 @@ const publishingLabel = computed(() => ({
 }[publishingState.value]))
 
 const publishingNote = computed(() => {
-  if (publishingState.value === 'enabled') return '逐任务绑定账号并强确认'
+  if (publishingState.value === 'enabled') return '绑定账号后进行单任务或明确批次强确认'
   if (publishingState.value === 'blocked') {
     const runtime = runtimeStatus.publishing_runtime || {}
     if (runtime.browser_ready === false) return '已授权，尚未检测到 Chrome'
@@ -159,7 +159,7 @@ const publishingNote = computed(() => {
 const releaseBoundaryCopy = computed(() => {
   const unsigned = 'Windows 可能显示来源或安全提示。只运行从可信渠道取得并核对校验值的安装包。'
   if (publishingState.value === 'enabled') {
-    return `${unsigned} 本机构建已开启真实发布；发布前必须核对目标平台、账号、正文与素材，并完成单任务强确认。平台接受内容后不能依靠本软件撤回。`
+    return `${unsigned} 本机构建已开启真实发布；发布前必须核对目标平台、账号、正文与素材，并完成单任务或明确批次强确认。批次会逐项执行且不会因单项失败停止；平台接受内容后不能依靠本软件撤回。`
   }
   if (publishingState.value === 'blocked') {
     return `${unsigned} 本机构建已授权真实发布，但 Chrome 或发布组件尚未通过探针；当前不能创建或执行真实发布任务。`

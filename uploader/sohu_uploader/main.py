@@ -201,7 +201,9 @@ class SoHuArticle(object):
         cover_paths=None,
         info_source=None,
     ):
-        self.title = (title or "").strip()[:72]
+        self.title = (title or "").strip()
+        if len(self.title) > 72:
+            raise ValueError("搜狐号文章标题不能超过 72 字，请返回平台预检编辑")
         if len(self.title) < 5:
             raise ValueError("搜狐号文章标题需 5-72 个字")
         self.body = body or ""

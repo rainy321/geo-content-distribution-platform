@@ -620,7 +620,11 @@ class BaiJiaHaoArticle(object):
         cover_path=None,
         ai_generated=False,
     ):
-        self.title = (title or "")[:64]
+        self.title = str(title or "").strip()
+        if len(self.title) < 2:
+            raise ValueError("百家号发布标题至少需要 2 字，请返回平台预检编辑")
+        if len(self.title) > 64:
+            raise ValueError("百家号发布标题不能超过 64 字，请返回平台预检编辑")
         self.body = body or ""
         self.tags = tags or []
         self.publish_date = publish_date

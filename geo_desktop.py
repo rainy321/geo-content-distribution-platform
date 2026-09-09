@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Mapping, MutableMapping, Sequence
 
 
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 BUILD_INFO_SCHEMA_VERSION = 1
 APP_TITLE = "GEO 智能内容分发平台"
 APP_DIRECTORY_NAME = "GEOContentPlatform"
@@ -297,6 +297,10 @@ def apply_desktop_environment(
             ),
         }
     )
+    # Never inherit an executable path or digest from a parent shell.  The
+    # desktop host repopulates both only after its own fixed-version probe.
+    target.pop("GEO_BILIUP_BINARY", None)
+    target.pop("GEO_BILIUP_SHA256", None)
     if browser_executable is not None:
         target["LOCAL_CHROME_PATH"] = str(browser_executable)
     else:
@@ -420,6 +424,21 @@ class DesktopApi:
         publishing_runtime["ready"] = bool(
             publishing_runtime["ready"] and real_publishing_enabled
         )
+        bilibili_runtime = dict(
+            publishing_runtime.get("bilibili_runtime")
+            or inspect_bilibili_runtime(
+                enabled=real_publishing_authorized,
+                probe=False,
+            )
+        )
+        bilibili_runtime_enabled = bool(
+            real_publishing_enabled
+            and bilibili_runtime.get("ready")
+            and str(os.getenv("ENABLE_BILIBILI_RUNTIME", "false")).lower()
+            == "true"
+        )
+        bilibili_runtime["ready"] = bilibili_runtime_enabled
+        publishing_runtime["bilibili_runtime"] = bilibili_runtime
         return {
             "desktop": True,
             "version": APP_VERSION,
@@ -432,7 +451,7 @@ class DesktopApi:
             "real_publishing_authorized": real_publishing_authorized,
             "real_publishing_enabled": real_publishing_enabled,
             "scheduled_real_publishing_enabled": False,
-            "bilibili_runtime_enabled": False,
+            "bilibili_runtime_enabled": bilibili_runtime_enabled,
             "publishing_runtime": publishing_runtime,
             "authentication_required": True,
             "setup_required": auth_status.setup_required,
@@ -594,6 +613,48 @@ def inspect_publishing_runtime(
         "reason": reason,
         "error": error,
     }
+
+
+def inspect_bilibili_runtime(
+    *,
+    enabled: bool,
+    probe: bool = True,
+) -> dict[str, Any]:
+    """Inspect the fixed, external Bilibili compatibility runtime offline."""
+
+    if not enabled:
+        return {
+            "ready": False,
+            "enabled": False,
+            "path": "",
+            "version": "",
+            "sha256": "",
+            "bytes": 0,
+            "packaged": False,
+            "source": "external_compatibility_runtime",
+            "reason": "当前桌面构建未授权真实发布",
+        }
+    try:
+        from uploader.bilibili_uploader.runtime import (
+            inspect_desktop_biliup_runtime,
+        )
+
+        report = inspect_desktop_biliup_runtime(probe=probe)
+    except Exception as exc:
+        return {
+            "ready": False,
+            "enabled": True,
+            "path": "",
+            "version": "",
+            "sha256": "",
+            "bytes": 0,
+            "packaged": False,
+            "source": "external_compatibility_runtime",
+            "reason": "Bilibili 兼容运行时探针失败",
+            "error": str(exc).strip() or exc.__class__.__name__,
+        }
+    report["enabled"] = True
+    return report
 
 
 def _probe_browser_automation(browser_executable: Path | None) -> None:
@@ -938,6 +999,11 @@ def run(argv: Sequence[str] | None = None) -> int:
             enabled=publishing_profile_allows_real(publishing_profile),
             probe_browser=publishing_profile_allows_real(publishing_profile),
         )
+        bilibili_runtime = inspect_bilibili_runtime(
+            enabled=publishing_profile_allows_real(publishing_profile),
+            probe=publishing_profile_allows_real(publishing_profile),
+        )
+        publishing_runtime["bilibili_runtime"] = bilibili_runtime
         runtime_ready = bool(publishing_runtime["ready"])
         os.environ["GEO_PUBLISHING_RUNTIME_READY"] = (
             "true" if runtime_ready else "false"
@@ -945,17 +1011,36 @@ def run(argv: Sequence[str] | None = None) -> int:
         os.environ["ALLOW_REAL_PUBLISHING"] = (
             "true" if runtime_ready else "false"
         )
+        bilibili_runtime_ready = bool(runtime_ready and bilibili_runtime["ready"])
+        os.environ["ENABLE_BILIBILI_RUNTIME"] = (
+            "true" if bilibili_runtime_ready else "false"
+        )
+        if bilibili_runtime_ready:
+            os.environ["GEO_BILIUP_BINARY"] = str(bilibili_runtime["path"])
+            os.environ["GEO_BILIUP_SHA256"] = str(bilibili_runtime["sha256"])
+        else:
+            os.environ.pop("GEO_BILIUP_BINARY", None)
+            os.environ.pop("GEO_BILIUP_SHA256", None)
         logger.info(
-            "starting version=%s profile=%s publishing_ready=%s data_root=%s port=%s",
+            "starting version=%s profile=%s publishing_ready=%s bilibili_ready=%s data_root=%s port=%s",
             APP_VERSION,
             publishing_profile,
             runtime_ready,
+            bilibili_runtime_ready,
             paths.root,
             port,
         )
 
         # Import only after the desktop paths and safety flags are frozen.
         from sau_backend import app
+        from services.publish_job_service import recover_interrupted_publish_jobs
+
+        recovered_jobs = recover_interrupted_publish_jobs(paths.database)
+        if recovered_jobs:
+            logger.warning(
+                "recovered interrupted publish jobs for manual reconciliation count=%s",
+                recovered_jobs,
+            )
 
         server = DesktopServer(app, listener)
         listener = None  # Waitress now owns the reserved socket.
@@ -1055,6 +1140,19 @@ def run(argv: Sequence[str] | None = None) -> int:
     finally:
         if scheduler is not None:
             scheduler.shutdown(wait=False)
+        try:
+            from uploader.bilibili_uploader.runtime import (
+                terminate_all_biliup_processes,
+            )
+
+            terminated_biliup_processes = terminate_all_biliup_processes()
+            if terminated_biliup_processes:
+                logger.info(
+                    "terminated owned Bilibili process trees count=%s",
+                    terminated_biliup_processes,
+                )
+        except Exception:
+            logger.exception("failed to terminate owned Bilibili process trees")
         if server is not None:
             server.stop()
         elif listener is not None:

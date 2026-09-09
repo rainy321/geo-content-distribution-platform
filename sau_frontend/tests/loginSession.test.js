@@ -4,7 +4,9 @@ import test from 'node:test'
 
 import {
   buildStreamFailure,
+  LOGIN_STREAM_RECONNECT_DELAYS_MS,
   parseLoginSessionEvent,
+  planLoginStreamReconnect,
   resolveLoginCancellation
 } from '../src/utils/loginSession.js'
 
@@ -82,8 +84,22 @@ test('arbitrary long server text is never treated as a QR image', () => {
 test('stream failures have a distinct diagnosis from platform rejection', () => {
   const failure = buildStreamFailure()
   assert.equal(failure.code, 'stream_disconnected')
-  assert.match(failure.message, /状态连接已中断/)
+  assert.match(failure.message, /多次重连后仍未恢复/)
   assert.match(failure.action, /软件仍在运行/)
+})
+
+
+test('stream reconnect policy is bounded and uses increasing delays', () => {
+  assert.deepEqual(LOGIN_STREAM_RECONNECT_DELAYS_MS, [800, 1600, 3000])
+  assert.deepEqual(planLoginStreamReconnect(0), {
+    exhausted: false, attempt: 1, maxAttempts: 3, delayMs: 800
+  })
+  assert.deepEqual(planLoginStreamReconnect(2), {
+    exhausted: false, attempt: 3, maxAttempts: 3, delayMs: 3000
+  })
+  assert.deepEqual(planLoginStreamReconnect(3), {
+    exhausted: true, attempt: 3, maxAttempts: 3, delayMs: 0
+  })
 })
 
 
@@ -106,7 +122,11 @@ test('account dialog routes every SSE payload through the guarded parser', () =>
   assert.ok((component.match(/if \(eventSource !== source\) return/g) || []).length >= 3)
   assert.match(component, /const closeEventSource = \(source = eventSource\)/)
   assert.match(component, /if \(eventSource === source\) eventSource = null/)
-  assert.match(component, /finishLoginWithFailure\(buildStreamFailure\(\)\)/)
+  assert.match(component, /planLoginStreamReconnect\(loginStreamReconnectAttempt\.value\)/)
+  assert.match(component, /last_event_id=\$\{lastLoginEventId\}/)
+  assert.match(component, /session_id=\$\{encodeURIComponent\(loginClientSessionId\)\}/)
+  assert.match(component, /状态连接短暂中断/)
+  assert.match(component, /void finalizeDisconnectedLogin\(\)/)
   assert.match(component, /请查看桌面和任务栏/)
   assert.match(component, /软件将请求结束本次登录/)
   assert.match(component, /accountApi\.cancelMediaLogin/)
@@ -114,6 +134,7 @@ test('account dialog routes every SSE payload through the guarded parser', () =>
   assert.match(component, /finishLoginWithSuccess\(resolution\.message\)/)
   assert.match(component, /finishLoginWithReview\(resolution\)/)
   assert.match(component, /检查关闭状态/)
+  assert.match(component, /若\$\{loginWindowName\.value\}仍然打开/)
   assert.match(accountApi, /post\('\/api\/media-login\/cancel'/)
   assert.doesNotMatch(component, /data\.length\s*>\s*100/)
 })

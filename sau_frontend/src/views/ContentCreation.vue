@@ -462,8 +462,8 @@
 
     <el-dialog v-model="batchDialogVisible" title="批量生成文章" width="620px" class="editorial-dialog">
       <div class="batch-intro">
-        <span>BATCH / 最多 5 篇</span>
-        <p>沿用当前品牌、关键词、长度、内容类型和模板。每行填写一个主题，生成后自动保存为草稿。</p>
+        <span>BATCH / 最多 {{ BATCH_GENERATION_LIMIT }} 篇 · 串行执行</span>
+        <p>沿用当前品牌、关键词、长度、内容类型和模板。每行一个主题，单篇失败不会卡住后续任务；模型按顺序调用，避免瞬时并发放大限流和费用。</p>
       </div>
       <el-input
         v-model="batchTopics"
@@ -472,9 +472,47 @@
         resize="none"
         placeholder="企业如何选择 AI Agent&#10;AI Agent 项目落地的常见误区"
       />
+      <div class="batch-count" :class="{ invalid: parsedBatchTopics.length > BATCH_GENERATION_LIMIT }">
+        <span>已识别 {{ parsedBatchTopics.length }} 个不重复主题</span>
+        <strong>{{ parsedBatchTopics.length }} / {{ BATCH_GENERATION_LIMIT }}</strong>
+      </div>
       <div v-if="batchResult" class="batch-result">
-        <strong>已保存 {{ batchResult.created_count }} 篇</strong>
-        <span v-if="batchResult.failed_count">{{ batchResult.failed_count }} 篇未完成</span>
+        <div class="batch-result-summary">
+          <strong>已保存 {{ batchResult.created_count }} 篇</strong>
+          <span v-if="batchResult.failed_count">{{ batchResult.failed_count }} 篇未完成，已继续处理其余主题</span>
+        </div>
+        <dl class="batch-cost-summary">
+          <div>
+            <dt>本批已知 Token</dt>
+            <dd>
+              {{ batchResult.cost_summary.knownTotalTokens == null ? '未提供' : batchResult.cost_summary.knownTotalTokens.toLocaleString('zh-CN') }}
+              <small v-if="batchResult.cost_summary.unknownUsageCount">另有 {{ batchResult.cost_summary.unknownUsageCount }} 次用量未知</small>
+            </dd>
+          </div>
+          <div>
+            <dt>本批估算成本</dt>
+            <dd>{{ formatBatchCost(batchResult.cost_summary) }}</dd>
+          </div>
+          <div>
+            <dt>成本覆盖</dt>
+            <dd>{{ batchResult.cost_summary.knownTokenRecordCount }} / {{ batchResult.cost_summary.operationCount }} 次有 Token 回执</dd>
+          </div>
+        </dl>
+        <details v-if="batchResult.items.length" class="batch-item-ledger">
+          <summary>查看逐篇 Token / 成本明细（{{ batchResult.items.length }} 项）</summary>
+          <div class="batch-item-list">
+            <article v-for="(item, index) in batchResult.items" :key="`${index}-${item.topic}`">
+              <span>{{ String(index + 1).padStart(2, '0') }}</span>
+              <div>
+                <strong>{{ item.topic || '未命名主题' }}</strong>
+                <small>{{ item.status === 'created' ? '草稿已保存' : (item.message || '未完成') }}</small>
+              </div>
+              <b>{{ formatBatchItemTokens(item.costReceipt) }}</b>
+              <em>{{ formatBatchItemCost(item.costReceipt) }}</em>
+            </article>
+          </div>
+        </details>
+        <p class="batch-cost-note">未返回 Token 或未配置单价时保持“未知”，不会伪装成 0；最终费用以模型供应商账单为准。</p>
       </div>
       <template #footer>
         <el-button v-if="batchResult?.created_count" @click="router.push('/content-library')">查看内容库</el-button>
@@ -540,6 +578,14 @@ import { articleApi } from '@/api/article'
 import { projectApi } from '@/api/project'
 import { normalizeGenerationReceipt } from '@/utils/generationReceipt'
 import { buildGeoScorePayload } from '@/utils/generationScore'
+import {
+  BATCH_GENERATION_LIMIT,
+  formatBatchCost,
+  formatBatchItemCost,
+  formatBatchItemTokens,
+  normalizeBatchGenerationResult,
+  parseBatchTopics
+} from '@/utils/batchGeneration'
 
 const router = useRouter()
 const route = useRoute()
@@ -633,15 +679,13 @@ const selectedTemplate = computed(() => (
   templates.value.find(item => item.id === brief.template_id) || null
 ))
 
-const parsedBatchTopics = computed(() => [...new Set(
-  batchTopics.value.split(/\r?\n/).map(item => item.trim()).filter(Boolean)
-)].slice(0, 6))
+const parsedBatchTopics = computed(() => parseBatchTopics(batchTopics.value))
 
 const canBatchGenerate = computed(() => Boolean(
   brief.project_id
   && brief.keywords.length
   && parsedBatchTopics.value.length > 0
-  && parsedBatchTopics.value.length <= 5
+  && parsedBatchTopics.value.length <= BATCH_GENERATION_LIMIT
   && !batchGenerating.value
 ))
 
@@ -892,7 +936,9 @@ const removeTemplate = async (item) => {
 
 const generateBatch = async () => {
   if (!canBatchGenerate.value) {
-    if (parsedBatchTopics.value.length > 5) ElMessage.warning('一次最多生成 5 篇')
+    if (parsedBatchTopics.value.length > BATCH_GENERATION_LIMIT) {
+      ElMessage.warning(`一次最多生成 ${BATCH_GENERATION_LIMIT} 篇，请删除多余主题后再提交`)
+    }
     return
   }
   batchGenerating.value = true
@@ -914,8 +960,8 @@ const generateBatch = async () => {
         'Idempotency-Key': batchRequestId
       }
     })
-    batchResult.value = response.data
-    ElMessage.success(`已保存 ${response.data.created_count} 篇批量草稿`)
+    batchResult.value = normalizeBatchGenerationResult(response.data)
+    ElMessage.success(`已保存 ${batchResult.value.created_count} 篇批量草稿`)
   } catch (error) {
     console.error('批量生成失败:', error)
   } finally {
@@ -2447,13 +2493,78 @@ onBeforeUnmount(() => {
 }
 
 .batch-result {
-  display: flex;
-  gap: 14px;
+  display: grid;
+  gap: 12px;
   margin-top: 14px;
-  color: var(--teal);
   font-size: 12px;
+}
+
+.batch-result-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  color: var(--teal);
 
   span { color: var(--amber); }
+}
+
+.batch-count {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+  color: #738186;
+  font-size: 11px;
+
+  strong { font-family: "Cascadia Mono", monospace; }
+  &.invalid { color: #b42318; }
+}
+
+.batch-cost-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  margin: 0;
+  border: 1px solid #dce5e4;
+  background: #fff;
+
+  > div { min-width: 0; padding: 11px 12px; border-right: 1px solid #dce5e4; }
+  > div:last-child { border-right: 0; }
+  dt { color: #7a888c; font-size: 9px; }
+  dd { margin: 5px 0 0; color: var(--ink); font-weight: 700; overflow-wrap: anywhere; }
+  small { display: block; float: none; margin-top: 3px; color: #a56608; font-weight: 500; }
+}
+
+.batch-cost-note { margin: 0; color: #718085; font-size: 10px; line-height: 1.55; }
+
+.batch-item-ledger {
+  border: 1px solid #dce5e4;
+  background: #fff;
+
+  summary { padding: 10px 12px; color: var(--ink); cursor: pointer; font-size: 11px; font-weight: 700; }
+}
+
+.batch-item-list {
+  max-height: 230px;
+  overflow: auto;
+  border-top: 1px solid #dce5e4;
+
+  article {
+    display: grid;
+    grid-template-columns: 26px minmax(0, 1fr) 86px 120px;
+    gap: 10px;
+    align-items: center;
+    padding: 9px 12px;
+    border-bottom: 1px solid #edf1f0;
+  }
+
+  article:last-child { border-bottom: 0; }
+  article > span { color: #819095; font: 700 9px/1 "Cascadia Mono", monospace; }
+  article > div { min-width: 0; }
+  strong, small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  strong { color: var(--ink); font-size: 11px; }
+  small { float: none; margin-top: 3px; color: #829095; font-size: 9px; }
+  b, em { color: #617075; font: 600 9px/1.35 "Cascadia Mono", monospace; text-align: right; }
+  em { font-style: normal; }
 }
 
 .template-registry {
@@ -2601,6 +2712,19 @@ onBeforeUnmount(() => {
   }
 
   .template-form-row { grid-template-columns: 1fr; }
+
+  .batch-cost-summary {
+    grid-template-columns: 1fr;
+
+    > div { border-right: 0; border-bottom: 1px solid #dce5e4; }
+    > div:last-child { border-bottom: 0; }
+  }
+
+  .batch-item-list article {
+    grid-template-columns: 24px minmax(0, 1fr);
+
+    > b, > em { grid-column: 2; text-align: left; }
+  }
 
   .editor-toolbar,
   .toolbar-buttons {

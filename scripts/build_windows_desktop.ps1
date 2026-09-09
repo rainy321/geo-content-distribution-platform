@@ -122,11 +122,20 @@ try {
             tests.test_ai_visibility_service `
             tests.test_ai_visibility_api `
             tests.test_ai_visibility_run_service `
+            tests.test_ai_visibility_sampling_service `
+            tests.test_ai_visibility_sampling_database `
+            tests.test_ai_visibility_sampling_api `
+            tests.test_ai_cost_ledger_service `
+            tests.test_geo_diagnostic_service `
+            tests.test_geo_diagnostic_cost_api `
+            tests.test_dongclaw_evaluation_service `
             tests.test_real_publish_api `
             tests.test_real_publisher_factory `
             tests.test_publish_job_executor `
             tests.test_publish_job_service `
             tests.test_publish_jobs_api `
+            tests.test_publish_preflight_service `
+            tests.test_publish_reconcile_api `
             tests.test_publish_scheduler_service `
             tests.test_worker_entrypoint `
             tests.test_media_publisher_adapters `
@@ -141,6 +150,7 @@ try {
             tests.test_zhihu_login `
             tests.test_tiktok_publish_safety `
             tests.test_material_api `
+            tests.test_p2_content_workflows `
             tests.test_dashboard_service `
             tests.test_dashboard_api `
             tests.test_projects_api `
@@ -219,16 +229,21 @@ try {
         $report = Get-Content -Raw -LiteralPath $reportPath | ConvertFrom-Json
         $lastHealthReportPath = Join-Path $projectRoot ".build\last-packaged-health.json"
         Copy-Item -LiteralPath $reportPath -Destination $lastHealthReportPath -Force
+        $expectedBilibiliRuntime = [bool](
+            $isRealPublishBuild -and
+            $report.publishing_runtime_probe.bilibili_runtime.ready
+        )
         if (
             -not $report.ok -or
             -not $report.frontend -or
             $report.health.status -ne "ok" -or
             $report.health.real_publishing_enabled -ne $isRealPublishBuild -or
-            $report.health.bilibili_runtime_enabled -ne $false -or
+            $report.health.bilibili_runtime_enabled -ne $expectedBilibiliRuntime -or
             $report.health.legacy_direct_publishing_enabled -ne $false -or
             $report.health.scheduled_real_publishing_enabled -ne $false -or
             $report.desktop.real_publishing_authorized -ne $isRealPublishBuild -or
             $report.desktop.real_publishing_enabled -ne $isRealPublishBuild -or
+            $report.desktop.bilibili_runtime_enabled -ne $expectedBilibiliRuntime -or
             $report.desktop.publishing_profile -ne $PublishingProfile -or
             -not $report.auth.required -or
             -not $report.auth.setup_required -or
@@ -370,6 +385,10 @@ try {
             browser_runtime_probe = $browserProbeStatus
             explicit_account_binding_required = $true
             job_state_confirmation_required = $true
+            batch_confirmation_required = $true
+            batch_continues_after_item_failure = $true
+            ambiguous_result_requires_human_reconciliation = $true
+            platform_content_preflight_required = $true
             external_model_called_during_tests = $false
             external_platform_called_during_tests = $false
             customer_data_used_during_tests = $false
@@ -381,13 +400,34 @@ try {
             patchright_packaged = [bool]$isRealPublishBuild
             playwright_and_patchright_offline_probe = $browserProbeStatus
             biliup_binary_packaged = $false
-            bilibili_blocked_reason = "untrusted_dynamic_runtime_not_shipped"
+            bilibili_runtime_mode = if ($report.health.bilibili_runtime_enabled) {
+                "external_fixed_version_sha256"
+            }
+            else {
+                "unavailable"
+            }
+            bilibili_runtime_version = [string]$report.publishing_runtime_probe.bilibili_runtime.version
+            bilibili_runtime_sha256 = [string]$report.publishing_runtime_probe.bilibili_runtime.sha256
+            bilibili_runtime_packaged = [bool]$report.publishing_runtime_probe.bilibili_runtime.packaged
+            bilibili_blocked_reason = if ($report.health.bilibili_runtime_enabled) {
+                ""
+            }
+            else {
+                [string]$report.publishing_runtime_probe.bilibili_runtime.reason
+            }
         }
         algorithm = [ordered]@{
             integration_version = "ai-visibility-python-port-1.1.0"
             handoff_archive_sha256 = "2ff20604dad3b68807c47d0f3aef3d59ce613bf927dcde0b90ad80bc4b96e96c"
             source_rights_status = "pending_written_authorization"
             directly_comparable_to_provider_grounding = $false
+        }
+        product_features = [ordered]@{
+            geo_diagnostic_version = "geo-commercial-diagnostic-1.0.1"
+            ai_cost_ledger_version = "ai-cost-ledger-1.1.0"
+            platform_content_policy_version = "2026-09-10.1"
+            per_call_token_and_cost_receipts = $true
+            non_model_publish_token_semantics = "not_applicable"
         }
         packaged_smoke = [ordered]@{
             health = "ok"
@@ -412,6 +452,8 @@ try {
         -Destination (Join-Path $stagingRoot "AI可见度接口契约.md") -Force
     Copy-Item -LiteralPath (Join-Path $projectRoot "docs\windows-desktop.md") `
         -Destination (Join-Path $stagingRoot "Windows桌面技术说明.md") -Force
+    Copy-Item -LiteralPath (Join-Path $projectRoot "docs\geo-diagnostic-cost-ledger.md") `
+        -Destination (Join-Path $stagingRoot "GEO诊断与成本台账.md") -Force
     Copy-Item -LiteralPath (Join-Path $projectRoot "LICENSE") `
         -Destination (Join-Path $stagingRoot "LICENSE.txt") -Force
     Copy-Item -LiteralPath (Join-Path $projectRoot "THIRD-PARTY-NOTICES.txt") `
@@ -428,6 +470,7 @@ try {
         (Join-Path $stagingRoot "首次使用.md"),
         (Join-Path $stagingRoot "AI可见度接口契约.md"),
         (Join-Path $stagingRoot "Windows桌面技术说明.md"),
+        (Join-Path $stagingRoot "GEO诊断与成本台账.md"),
         (Join-Path $stagingRoot "LICENSE.txt"),
         (Join-Path $stagingRoot "THIRD-PARTY-NOTICES.txt"),
         (Join-Path $stagingRoot "build-info.json")

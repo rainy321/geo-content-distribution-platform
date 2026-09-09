@@ -7,10 +7,11 @@ import sqlite3
 import threading
 import time
 import uuid
+import weakref
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from queue import Queue
+from queue import Empty, Full, Queue
 from flask_cors import CORS
 from flask import (
     Flask,
@@ -31,6 +32,13 @@ from services.ai_service import (
     generate_geo_content,
     optimize_geo_content,
 )
+from services.ai_cost_ledger_service import (
+    AIUsageLedgerError,
+    get_ai_usage_records_by_references,
+    get_project_ai_cost_summary,
+    record_ai_usage,
+    summarize_ai_usage_records,
+)
 from services.ai_visibility_service import (
     VisibilityAnalysisError,
     analyze_ai_visibility,
@@ -42,6 +50,12 @@ from services.ai_visibility_run_service import (
     get_ai_visibility_run,
     list_ai_visibility_runs,
     save_ai_visibility_run,
+)
+from services.ai_visibility_sampling_service import (
+    VisibilitySamplingConflictError,
+    VisibilitySamplingInProgressError,
+    VisibilitySamplingValidationError,
+    run_ai_visibility_sample,
 )
 from services.article_service import (
     ARTICLE_STATUSES,
@@ -72,6 +86,13 @@ from services.cover_image_service import (
     recommend_article_images,
 )
 from services.geo_score_service import score_geo_content
+from services.geo_diagnostic_service import (
+    GEODiagnosticError,
+    GEODiagnosticNotFoundError,
+    diagnose_geo_readiness,
+    get_geo_diagnostic_run,
+    list_geo_diagnostic_runs,
+)
 from services.dashboard_service import get_dashboard_overview
 from services.demo_seed_service import seed_demo_data
 from services.local_auth_service import (
@@ -151,7 +172,17 @@ from services.publish_job_service import (
     list_publish_jobs,
     normalize_publish_images,
     normalize_publish_video,
+    reconcile_publish_job_failure,
+    reconcile_publish_job_platform_success,
     retry_publish_job,
+)
+from services.publish_preflight_service import (
+    PublishContentLimitError,
+    build_platform_publish_variant,
+    get_platform_frequency_guidance,
+    get_publish_content_policy,
+    get_publish_title_policy,
+    get_platform_verification_policy,
 )
 from services.publish_scheduler_runtime import create_publish_scheduler
 from services.real_publisher_factory import (
@@ -164,17 +195,38 @@ from utils.log import login_logger
 class LoginStatusQueue(Queue):
     """SSE event queue with a cooperative browser-login cancellation signal."""
 
-    def __init__(self, *, protocol_version=1, existing_account_id=None):
-        super().__init__()
+    def __init__(
+        self,
+        *,
+        protocol_version=1,
+        existing_account_id=None,
+        client_session_id=None,
+    ):
         self.protocol_version = int(protocol_version)
+        super().__init__(
+            maxsize=(
+                LOGIN_COMPAT_QUEUE_MAX_COUNT if self.protocol_version >= 2 else 0
+            )
+        )
         self.existing_account_id = existing_account_id
+        self.client_session_id = str(client_session_id or "")
         self.cancel_event = threading.Event()
         self.finished_event = threading.Event()
         self._outcome_lock = threading.Lock()
         self._cancel_requested = False
         self._outcome = "pending"
+        # Protocol 2 streams can reconnect after a short desktop/network hop.
+        # Keep a tiny per-login journal so a resumed EventSource cannot miss the
+        # success/failure event that raced with its transport disconnect.
+        self._event_condition = threading.Condition()
+        self._event_log = []
+        self._event_log_bytes = 0
+        self._next_event_id = 1
+        self.finished_at = None
 
     def put(self, item, block=True, timeout=None):
+        if self.protocol_version >= 2:
+            item = _bounded_login_event_payload(item)
         terminal = str(item)
         with self._outcome_lock:
             if self._outcome == "pending" and terminal == "200":
@@ -183,7 +235,48 @@ class LoginStatusQueue(Queue):
                 self._outcome = (
                     "cancelled" if self._cancel_requested else "failed"
                 )
-        return super().put(item, block=block, timeout=timeout)
+        if self.protocol_version >= 2:
+            # Protocol 2 reads from the replay journal rather than consuming
+            # this compatibility Queue. Keep the latter bounded as well so a
+            # long-running headed login cannot accumulate producer output.
+            try:
+                result = super().put(item, block=False)
+            except Full:
+                try:
+                    super().get_nowait()
+                except Empty:
+                    pass
+                result = super().put(item, block=False)
+        else:
+            result = super().put(item, block=block, timeout=timeout)
+        with self._event_condition:
+            event_id = self._next_event_id
+            self._next_event_id += 1
+            self._event_log.append((event_id, item))
+            self._event_log_bytes += len(terminal.encode("utf-8"))
+            while (
+                len(self._event_log) > LOGIN_EVENT_MAX_COUNT
+                or self._event_log_bytes > LOGIN_EVENT_MAX_TOTAL_BYTES
+            ):
+                _removed_id, removed_item = self._event_log.pop(0)
+                self._event_log_bytes -= len(str(removed_item).encode("utf-8"))
+            self._event_condition.notify_all()
+        return result
+
+    def wait_for_events(self, after_event_id, *, timeout=0.5):
+        """Return replayable events after one SSE cursor without consuming them."""
+
+        cursor = max(0, int(after_event_id or 0))
+        with self._event_condition:
+            events = [event for event in self._event_log if event[0] > cursor]
+            if not events and not self.finished_event.is_set():
+                self._event_condition.wait(timeout=max(0.0, float(timeout)))
+                events = [event for event in self._event_log if event[0] > cursor]
+            return events
+
+    def wake_stream_waiters(self):
+        with self._event_condition:
+            self._event_condition.notify_all()
 
     def cancel(self):
         with self._outcome_lock:
@@ -196,7 +289,10 @@ class LoginStatusQueue(Queue):
                 self._outcome = (
                     "cancelled" if self._cancel_requested else "failed"
                 )
+            self.finished_at = time.monotonic()
         self.finished_event.set()
+        with self._event_condition:
+            self._event_condition.notify_all()
 
     @property
     def outcome(self):
@@ -207,7 +303,129 @@ class LoginStatusQueue(Queue):
 active_queues = {}
 active_queues_lock = threading.Lock()
 active_account_checks = set()
+recent_login_queues = {}
+LOGIN_SESSION_REPLAY_TTL_SECONDS = 60.0
+LOGIN_EVENT_MAX_COUNT = 128
+LOGIN_EVENT_MAX_ITEM_BYTES = 256 * 1024
+LOGIN_EVENT_MAX_TOTAL_BYTES = 1024 * 1024
+# Protocol 2 is served from the byte-bounded replay journal; this inherited
+# Queue exists only for helper/test compatibility.  Keep just a tiny tail so
+# QR payloads are not duplicated 128 times in memory.
+LOGIN_COMPAT_QUEUE_MAX_COUNT = 4
+# The desktop host has eight Waitress threads. Reserve at least half for API
+# requests and cancellation/status calls while headed logins are waiting.
+LOGIN_MAX_ACTIVE_STREAMS = 4
+active_login_stream_transports = {}
 app = Flask(__name__)
+
+
+def _bounded_login_event_payload(item):
+    text = str(item)
+    if len(text.encode("utf-8")) <= LOGIN_EVENT_MAX_ITEM_BYTES:
+        return item
+    return json.dumps(
+        {
+            "type": "error",
+            "code": "event_payload_too_large",
+            "message": "登录页面返回的数据过大，已停止在软件内展示，请关闭登录窗口后重试",
+            "action": "关闭登录窗口并重试；如持续出现，请查看本机登录日志",
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+
+def _acquire_login_stream_transport_locked(status_queue):
+    """Install one replaceable SSE lease while active_queues_lock is held."""
+
+    current = active_login_stream_transports.get(status_queue)
+    if (
+        current is None
+        and len(active_login_stream_transports) >= LOGIN_MAX_ACTIVE_STREAMS
+    ):
+        return None
+    token = object()
+    active_login_stream_transports[status_queue] = token
+    if current is not None:
+        wake_waiters = getattr(status_queue, "wake_stream_waiters", None)
+        if callable(wake_waiters):
+            wake_waiters()
+    return token
+
+
+def _is_login_stream_transport_current(status_queue, token):
+    with active_queues_lock:
+        return active_login_stream_transports.get(status_queue) is token
+
+
+def _release_login_stream_transport(status_queue, token):
+    with active_queues_lock:
+        if active_login_stream_transports.get(status_queue) is token:
+            active_login_stream_transports.pop(status_queue, None)
+
+
+def _normalize_login_client_session_id(value):
+    session_id = str(value or "").strip()
+    if not session_id:
+        return ""
+    if not re.fullmatch(r"[A-Za-z0-9_-]{16,64}", session_id):
+        raise ValueError("登录会话标识无效")
+    return session_id
+
+
+def _prune_recent_login_queues(now=None):
+    """Drop bounded protocol-2 replay state while holding active_queues_lock."""
+
+    current = time.monotonic() if now is None else float(now)
+    expired = [
+        key
+        for key, status_queue in recent_login_queues.items()
+        if status_queue.finished_at is None
+        or current - status_queue.finished_at > LOGIN_SESSION_REPLAY_TTL_SECONDS
+    ]
+    for key in expired:
+        recent_login_queues.pop(key, None)
+    if len(recent_login_queues) > 128:
+        oldest = sorted(
+            recent_login_queues,
+            key=lambda key: recent_login_queues[key].finished_at or 0.0,
+        )[: len(recent_login_queues) - 128]
+        for key in oldest:
+            recent_login_queues.pop(key, None)
+
+
+def _expire_recent_login_queue(replay_key, status_queue_ref, *, now=None):
+    """Expire one exact replay entry even when no later HTTP request arrives."""
+
+    status_queue = (
+        status_queue_ref()
+        if isinstance(status_queue_ref, weakref.ReferenceType)
+        else status_queue_ref
+    )
+    if status_queue is None:
+        return
+    current = time.monotonic() if now is None else float(now)
+    with active_queues_lock:
+        registered = recent_login_queues.get(replay_key)
+        finished_at = getattr(status_queue, "finished_at", None)
+        if (
+            registered is status_queue
+            and finished_at is not None
+            and current - finished_at >= LOGIN_SESSION_REPLAY_TTL_SECONDS
+        ):
+            recent_login_queues.pop(replay_key, None)
+
+
+def _schedule_recent_login_queue_expiry(replay_key, status_queue):
+    timer = threading.Timer(
+        LOGIN_SESSION_REPLAY_TTL_SECONDS,
+        _expire_recent_login_queue,
+        # Do not let an already-pruned queue stay alive merely because its
+        # expiry timer has not fired yet.
+        args=(replay_key, weakref.ref(status_queue)),
+    )
+    timer.daemon = True
+    timer.start()
 
 
 class BackendPrefixMiddleware:
@@ -860,6 +1078,7 @@ def frontend_history_fallback(frontend_path):
 
 
 ARTICLE_LENGTHS = {600, 1000, 1500}
+BATCH_GENERATION_LIMIT = 20
 ARTICLE_CONTENT_TYPES = {
     "行业科普",
     "品牌介绍",
@@ -1057,8 +1276,14 @@ def generate_article_batch():
     normalized_topics = _normalize_string_list(topics)
     if not normalized_topics:
         return jsonify({"code": 400, "msg": "至少提供一个文章主题", "data": None}), 400
-    if len(normalized_topics) > 5:
-        return jsonify({"code": 400, "msg": "一次最多批量生成 5 篇文章", "data": None}), 400
+    if len(normalized_topics) > BATCH_GENERATION_LIMIT:
+        return jsonify(
+            {
+                "code": 400,
+                "msg": f"一次最多批量生成 {BATCH_GENERATION_LIMIT} 篇文章",
+                "data": None,
+            }
+        ), 400
 
     generation, error = _prepare_generation_request(
         {**data, "topic": normalized_topics[0]}
@@ -1128,7 +1353,6 @@ def generate_article_batch():
             return rate_limit_response
 
     items = []
-    stopped = False
     service = None
     if unseen_request_count:
         try:
@@ -1141,15 +1365,6 @@ def generate_article_batch():
             )
     for content_request in content_requests:
         topic = content_request.topic
-        if stopped:
-            items.append(
-                {
-                    "topic": topic,
-                    "status": "skipped",
-                    "message": "前一个模型请求失败，未继续消耗额度",
-                }
-            )
-            continue
         try:
             outcome = existing_outcomes.get(content_request.idempotency_key)
             if outcome is not None:
@@ -1164,6 +1379,7 @@ def generate_article_batch():
                             "topic": topic,
                             "status": "created",
                             "replayed": True,
+                            "generation_run_id": int(current_run["id"]),
                             "article": article,
                         }
                     )
@@ -1187,6 +1403,7 @@ def generate_article_batch():
                     "topic": topic,
                     "status": "created",
                     "replayed": bool((draft.get("generation") or {}).get("replayed")),
+                    "generation_run_id": run_id,
                     "article": article,
                 }
             )
@@ -1204,9 +1421,48 @@ def generate_article_batch():
                         getattr(exc, "request_id", "") or content_request.request_id
                     ),
                     "run_id": getattr(exc, "run_id", None),
+                    "generation_run_id": getattr(exc, "run_id", None),
                 }
             )
-            stopped = True
+
+    run_reference_ids = [
+        item["generation_run_id"]
+        for item in items
+        if item.get("generation_run_id") is not None
+    ]
+    usage_by_run = get_ai_usage_records_by_references(
+        app.config["DATABASE_PATH"],
+        operation="generate",
+        reference_type="generation_run",
+        reference_ids=run_reference_ids,
+    )
+    usage_records = []
+    for item in items:
+        run_id = item.get("generation_run_id")
+        usage_record = usage_by_run.get(str(run_id)) if run_id is not None else None
+        if usage_record is not None:
+            item["cost_receipt"] = {"recorded": True, **usage_record}
+            usage_records.append(usage_record)
+        else:
+            item["cost_receipt"] = {
+                "recorded": False,
+                "usage_status": "unknown",
+                "cost_status": "not_recorded",
+                "input_tokens": None,
+                "output_tokens": None,
+                "total_tokens": None,
+                "cached_tokens": None,
+                "reasoning_tokens": None,
+                "estimated_cost": None,
+                "currency": "",
+                "reason": "no_ledger_receipt",
+                "message": "本项没有可用的模型用量回执，Token 与成本保持未知。",
+            }
+
+    cost_summary = summarize_ai_usage_records(
+        usage_records,
+        expected_item_count=len(items),
+    )
 
     created_count = sum(item["status"] == "created" for item in items)
     replayed_count = sum(
@@ -1221,6 +1477,9 @@ def generate_article_batch():
                 "created_count": created_count,
                 "failed_count": len(items) - created_count,
                 "replayed_count": replayed_count,
+                "batch_limit": BATCH_GENERATION_LIMIT,
+                "execution_mode": "sequential",
+                "cost_summary": cost_summary,
             },
         }
     )
@@ -1481,6 +1740,25 @@ def get_content_generation_run(run_id):
         "keywords": _normalize_string_list(keywords if isinstance(keywords, list) else []),
     }
     return jsonify({"code": 200, "msg": "success", "data": public_fields}), 200
+
+
+@app.route('/api/ai-usage/projects/<int:project_id>/summary', methods=['GET'])
+def get_project_ai_usage_summary(project_id):
+    """Return model-only token/cost totals; publishing is explicitly excluded."""
+
+    try:
+        limit = int(str(request.args.get("limit", "50")).strip())
+        summary = get_project_ai_cost_summary(
+            app.config["DATABASE_PATH"],
+            project_id=project_id,
+            limit=limit,
+        )
+    except AIUsageLedgerError as exc:
+        status = 404 if "不存在" in str(exc) else 400
+        return jsonify({"code": status, "msg": str(exc), "data": None}), status
+    except ValueError:
+        return jsonify({"code": 400, "msg": "limit 必须是正整数", "data": None}), 400
+    return jsonify({"code": 200, "msg": "success", "data": summary}), 200
 
 
 @app.route('/api/dashboard', methods=['GET'])
@@ -1788,6 +2066,212 @@ def analyze_geo_visibility():
     return jsonify({"code": 200, "msg": "success", "data": result}), 200
 
 
+@app.route('/api/geo/visibility/sample', methods=['POST'])
+def sample_geo_visibility():
+    """Run explicitly confirmed live samples against the configured AI model."""
+
+    maximum_request_bytes = 128 * 1024
+    if (
+        request.content_length is not None
+        and request.content_length > maximum_request_bytes
+    ):
+        return jsonify(
+            {
+                "code": 413,
+                "msg": "AI 可见度采样请求不能超过 128 KB",
+                "data": None,
+            }
+        ), 413
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
+    allowed_fields = {
+        "project_id",
+        "prompt",
+        "sample_count",
+        "aliases",
+        "competitors",
+        "persist",
+        "confirm_external_call",
+        "ai_config",
+        "idempotency_key",
+    }
+    unsupported_fields = sorted(set(data) - allowed_fields)
+    if unsupported_fields:
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "采样请求包含不支持的字段: " + ", ".join(unsupported_fields),
+                "data": None,
+            }
+        ), 400
+
+    raw_project_id = data.get("project_id")
+    if isinstance(raw_project_id, bool):
+        return jsonify({"code": 400, "msg": "project_id 必须是正整数", "data": None}), 400
+    try:
+        project_id = int(raw_project_id)
+    except (TypeError, ValueError):
+        return jsonify({"code": 400, "msg": "project_id 必须是正整数", "data": None}), 400
+    if project_id <= 0 or str(raw_project_id).strip() != str(project_id):
+        return jsonify({"code": 400, "msg": "project_id 必须是正整数", "data": None}), 400
+    project = _get_project(project_id)
+    if project is None:
+        return jsonify({"code": 404, "msg": "品牌项目不存在", "data": None}), 404
+
+    sample_count = data.get("sample_count", 1)
+    if (
+        isinstance(sample_count, bool)
+        or not isinstance(sample_count, int)
+        or not 1 <= sample_count <= 5
+    ):
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "sample_count 必须是 1 到 5 的整数",
+                "data": None,
+            }
+        ), 400
+
+    request_id = str(request.headers.get("X-Request-ID") or uuid.uuid4()).strip()
+    idempotency_key = str(
+        request.headers.get("Idempotency-Key")
+        or data.get("idempotency_key")
+        or ""
+    ).strip()
+    if not idempotency_key:
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "真实模型采样必须提供 Idempotency-Key，系统不会自动生成以免误重发",
+                "data": None,
+            }
+        ), 400
+    if len(request_id) > 128 or not re.fullmatch(
+        r"[A-Za-z0-9._:-]+", request_id
+    ):
+        return jsonify(
+            {"code": 400, "msg": "X-Request-ID 格式无效", "data": None}
+        ), 400
+    if len(idempotency_key) > 150 or not re.fullmatch(
+        r"[A-Za-z0-9._:-]+", idempotency_key
+    ):
+        return jsonify(
+            {"code": 400, "msg": "Idempotency-Key 格式无效", "data": None}
+        ), 400
+    if data.get("confirm_external_call", False) is not True:
+        return jsonify(
+            {
+                "code": 400,
+                "msg": (
+                    "必须设置 confirm_external_call=true，确认只把 prompt "
+                    "发送给当前配置模型"
+                ),
+                "data": None,
+            }
+        ), 400
+
+    try:
+        ai_settings = _request_ai_settings(data)
+    except AIConfigurationError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    if ai_settings is None:
+        try:
+            ai_settings = AISettings.from_environment()
+        except AIConfigurationError as exc:
+            return jsonify({"code": 503, "msg": str(exc), "data": None}), 503
+
+    rate_limit_response = _enforce_ai_rate_limit(cost=sample_count)
+    if rate_limit_response is not None:
+        response, status_code = rate_limit_response
+        response.headers["X-Request-ID"] = request_id
+        response.headers["Idempotency-Key"] = idempotency_key
+        response.headers["Idempotency-Replayed"] = "false"
+        return response, status_code
+
+    try:
+        sampling = run_ai_visibility_sample(
+            app.config["DATABASE_PATH"],
+            project=project,
+            prompt=data.get("prompt"),
+            sample_count=sample_count,
+            aliases=data.get("aliases") if "aliases" in data else None,
+            competitors=(
+                data.get("competitors") if "competitors" in data else None
+            ),
+            persist=data.get("persist", False),
+            confirm_external_call=data.get("confirm_external_call", False),
+            settings=ai_settings,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+        )
+    except VisibilitySamplingValidationError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    except VisibilitySamplingConflictError as exc:
+        response = jsonify({"code": 409, "msg": str(exc), "data": None})
+        response.headers["X-Request-ID"] = request_id
+        response.headers["Idempotency-Key"] = idempotency_key
+        response.headers["Idempotency-Replayed"] = "false"
+        return response, 409
+    except VisibilitySamplingInProgressError as exc:
+        record = exc.record
+        response = jsonify(
+            {
+                "code": 409,
+                "msg": str(exc),
+                "data": {
+                    "status": "need_action",
+                    "need_action": True,
+                    "request_id": record["request_id"],
+                    "idempotency_key": record["idempotency_key"],
+                    "created_at": record["created_at"],
+                    "retry_policy": {
+                        "automatic_retry": False,
+                        "action": "先核对模型账单与原请求；不要自动重发",
+                    },
+                },
+            }
+        )
+        response.headers["X-Request-ID"] = record["request_id"]
+        response.headers["Idempotency-Key"] = record["idempotency_key"]
+        response.headers["Idempotency-Replayed"] = "false"
+        return response, 409
+    except sqlite3.Error:
+        response = jsonify(
+            {
+                "code": 503,
+                "msg": "本地采样状态未能可靠保存；为避免重复扣费，系统不会自动重试",
+                "data": {
+                    "status": "need_action",
+                    "need_action": True,
+                    "request_id": request_id,
+                    "idempotency_key": idempotency_key,
+                    "retry_policy": {
+                        "automatic_retry": False,
+                        "action": "先核对模型账单和本机数据库状态，再决定是否新建请求",
+                    },
+                },
+            }
+        )
+        response.headers["X-Request-ID"] = request_id
+        response.headers["Idempotency-Key"] = idempotency_key
+        response.headers["Idempotency-Replayed"] = "false"
+        return response, 503
+
+    response = jsonify(sampling["payload"])
+    response.headers["X-Request-ID"] = sampling["request_id"]
+    response.headers["Idempotency-Key"] = sampling["idempotency_key"]
+    response.headers["Idempotency-Replayed"] = (
+        "true" if sampling["replayed"] else "false"
+    )
+    failure = (sampling["payload"].get("data") or {}).get("failure") or {}
+    retry_after = failure.get("retry_after_seconds")
+    if retry_after is not None:
+        response.headers["Retry-After"] = str(retry_after)
+    return response, sampling["http_status"]
+
+
 @app.route('/api/geo/visibility/runs', methods=['GET'])
 def list_geo_visibility_runs():
     try:
@@ -1828,6 +2312,53 @@ def get_geo_visibility_run(run_id):
             {"code": 500, "msg": "本地分析历史无法读取", "data": None}
         ), 500
     return jsonify({"code": 200, "msg": "success", "data": row}), 200
+
+
+@app.route('/api/geo/diagnostics', methods=['POST'])
+def create_geo_diagnostic():
+    """Measure a project's foundation or one content item without model calls."""
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
+    try:
+        result = diagnose_geo_readiness(
+            app.config["DATABASE_PATH"],
+            project_id=data.get("project_id"),
+            article_id=data.get("article_id"),
+            title=data.get("title") if "title" in data else None,
+            content=data.get("content") if "content" in data else None,
+            persist=data.get("persist", True),
+        )
+    except GEODiagnosticError as exc:
+        status = 404 if "不存在" in str(exc) else 400
+        return jsonify({"code": status, "msg": str(exc), "data": None}), status
+    return jsonify({"code": 200, "msg": "诊断完成", "data": result}), 200
+
+
+@app.route('/api/geo/diagnostics/runs', methods=['GET'])
+def get_geo_diagnostic_runs():
+    try:
+        rows = list_geo_diagnostic_runs(
+            app.config["DATABASE_PATH"],
+            project_id=request.args.get("project_id"),
+            limit=request.args.get("limit", 20),
+        )
+    except GEODiagnosticError as exc:
+        status = 404 if "不存在" in str(exc) else 400
+        return jsonify({"code": status, "msg": str(exc), "data": None}), status
+    return jsonify({"code": 200, "msg": "success", "data": rows}), 200
+
+
+@app.route('/api/geo/diagnostics/runs/<int:run_id>', methods=['GET'])
+def get_geo_diagnostic_run_detail(run_id):
+    try:
+        result = get_geo_diagnostic_run(app.config["DATABASE_PATH"], run_id)
+    except GEODiagnosticNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except GEODiagnosticError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    return jsonify({"code": 200, "msg": "success", "data": result}), 200
 
 
 @app.route('/api/geo/score', methods=['POST'])
@@ -2130,15 +2661,46 @@ def optimize_article(article_id):
     if rate_limit_response is not None:
         return rate_limit_response
     try:
-        optimized = optimize_geo_content(
+        optimized_result = optimize_geo_content(
             article=article,
             score=before_score,
             settings=ai_settings,
+            include_metadata=True,
         )
     except AIConfigurationError as exc:
         return jsonify({"code": 503, "msg": str(exc), "data": None}), 503
     except AIServiceError as exc:
         return jsonify({"code": 502, "msg": str(exc), "data": None}), 502
+
+    if isinstance(optimized_result, dict):
+        # Test doubles and compatibility adapters may still return the legacy
+        # article-only shape. No usage is invented for that shape.
+        optimized = dict(optimized_result)
+        ai_usage_record = None
+    else:
+        optimized = dict(optimized_result.article)
+        ai_usage_record = record_ai_usage(
+            app.config["DATABASE_PATH"],
+            operation="optimize",
+            provider=optimized_result.provider,
+            model=optimized_result.model,
+            usage=optimized_result.usage,
+            usage_status=(
+                "reported" if optimized_result.usage is not None else "unknown"
+            ),
+            project_id=article["project_id"],
+            article_id=article_id,
+            reference_type="optimization_request",
+            reference_id=(optimized_result.provider_request_id or str(uuid.uuid4())),
+            metadata={
+                "outcome": "succeeded",
+                "usage_origin": (
+                    "provider_response"
+                    if optimized_result.usage is not None
+                    else "not_reported"
+                ),
+            },
+        )
 
     after_score = score_geo_content(
         title=optimized["title"],
@@ -2154,6 +2716,7 @@ def optimize_article(article_id):
                 "optimized": optimized,
                 "before": before_score,
                 "after": after_score,
+                "ai_usage": ai_usage_record,
             },
         }
     ), 200
@@ -2216,6 +2779,73 @@ def _parse_positive_query_integer(name, *, default=None):
     return value, None
 
 
+@app.route('/api/publish/preflight', methods=['POST'])
+def preview_publish_variants():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
+
+    try:
+        article_id = int(data.get("article_id"))
+    except (TypeError, ValueError):
+        return jsonify({"code": 400, "msg": "article_id 必须是整数", "data": None}), 400
+    if article_id <= 0:
+        return jsonify({"code": 400, "msg": "article_id 必须是正整数", "data": None}), 400
+
+    requested_platforms = data.get("platforms")
+    if not isinstance(requested_platforms, list) or not requested_platforms:
+        return jsonify({"code": 400, "msg": "platforms 必须是非空数组", "data": None}), 400
+    if len(requested_platforms) > len(list_platform_capabilities()):
+        return jsonify({"code": 400, "msg": "platforms 数量超过支持范围", "data": None}), 400
+
+    overrides = data.get("overrides", {})
+    if not isinstance(overrides, dict):
+        return jsonify({"code": 400, "msg": "overrides 必须是对象", "data": None}), 400
+    try:
+        article = get_article(app.config["DATABASE_PATH"], article_id)
+    except ArticleNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+
+    variants = []
+    seen = set()
+    try:
+        for raw_platform in requested_platforms:
+            if not isinstance(raw_platform, str):
+                raise PublishContentLimitError("platforms 必须是字符串数组")
+            platform = normalize_platform_key(raw_platform)
+            if not platform or platform in seen:
+                if platform in seen:
+                    continue
+                raise PublishContentLimitError(f"暂不支持发布平台：{raw_platform}")
+            override = overrides.get(platform)
+            if override is not None and not isinstance(override, str):
+                raise PublishContentLimitError(f"{platform} 平台副本必须是字符串")
+            variants.append(
+                build_platform_publish_variant(
+                    platform=platform,
+                    title=article["title"],
+                    content=article["content"],
+                    tags=article.get("tags") or (),
+                    publish_content=override,
+                )
+            )
+            seen.add(platform)
+    except PublishContentLimitError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+
+    return jsonify(
+        {
+            "code": 200,
+            "msg": "平台发布副本已生成，原稿未修改",
+            "data": {
+                "article_id": article_id,
+                "article_updated_at": article.get("updated_at"),
+                "variants": variants,
+            },
+        }
+    ), 200
+
+
 @app.route('/api/publish', methods=['POST'])
 def create_publish_task():
     data = request.get_json(silent=True)
@@ -2256,6 +2886,18 @@ def create_publish_task():
         video = _validate_publish_video(data.get("video"))
     except ValueError as exc:
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+
+    publish_content = data.get("publish_content")
+    if publish_content is not None and not isinstance(publish_content, str):
+        return jsonify(
+            {"code": 400, "msg": "publish_content 必须是字符串", "data": None}
+        ), 400
+
+    publish_title = data.get("publish_title")
+    if publish_title is not None and not isinstance(publish_title, str):
+        return jsonify(
+            {"code": 400, "msg": "publish_title 必须是字符串", "data": None}
+        ), 400
 
     capability = get_platform_capability(platform)
     if capability is None:
@@ -2394,6 +3036,8 @@ def create_publish_task():
             auto_execute=auto_execute,
             demo=bool(app.config.get("DEMO_MODE", False)),
             account_id=account_id,
+            publish_title=publish_title,
+            publish_content=publish_content,
         )
     except ArticleNotFoundError as exc:
         return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
@@ -2474,6 +3118,138 @@ def retry_publish_task(job_id):
         return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
     return jsonify(
         {"code": 200, "msg": "发布任务已重新排队", "data": _publish_job_payload(job)}
+    ), 200
+
+
+@app.route('/api/publish/jobs/<int:job_id>/reconcile', methods=['POST'])
+def reconcile_publish_task(job_id):
+    """Close a platform-ambiguous result after an explicit human check.
+
+    This endpoint never calls a publisher.  It only applies a version-checked
+    ledger correction after the operator has inspected the platform backend.
+    """
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "对账请求不能为空", "data": None}), 400
+    if data.get("confirm") is not True or data.get("platform_checked") is not True:
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "必须明确确认已在平台后台核验发布结果",
+                "data": None,
+            }
+        ), 400
+
+    confirmed_job_id = data.get("job_id")
+    expected_state_version = data.get("state_version")
+    if (
+        isinstance(confirmed_job_id, bool)
+        or not isinstance(confirmed_job_id, int)
+        or isinstance(expected_state_version, bool)
+        or not isinstance(expected_state_version, int)
+        or expected_state_version < 0
+    ):
+        return jsonify(
+            {"code": 400, "msg": "对账任务或状态版本无效", "data": None}
+        ), 400
+    if confirmed_job_id != job_id:
+        return jsonify(
+            {"code": 409, "msg": "对账任务标识不一致，请刷新后重试", "data": None}
+        ), 409
+
+    decision = data.get("decision")
+    if decision not in {"published", "not_published"}:
+        return jsonify(
+            {"code": 400, "msg": "对账结论必须是已发布或未发布", "data": None}
+        ), 400
+    if (
+        decision == "not_published"
+        and data.get("execution_stopped_confirmed") is not True
+    ):
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "结案为未发布前，必须确认旧发布窗口和进程已结束并完成冷却核验",
+                "data": None,
+            }
+        ), 400
+    verification_note = data.get("verification_note")
+    if not isinstance(verification_note, str):
+        return jsonify(
+            {"code": 400, "msg": "必须填写平台后台核验说明", "data": None}
+        ), 400
+    verification_note = verification_note.strip()
+    if len(verification_note) < 4 or len(verification_note) > 500:
+        return jsonify(
+            {"code": 400, "msg": "平台后台核验说明须为 4 至 500 个字符", "data": None}
+        ), 400
+    result_url = data.get("result_url", "")
+    if not isinstance(result_url, str) or len(result_url.strip()) > 2048:
+        return jsonify(
+            {"code": 400, "msg": "公开链接格式无效或过长", "data": None}
+        ), 400
+    result_url = result_url.strip()
+
+    try:
+        current = get_publish_job(app.config["DATABASE_PATH"], job_id)
+    except PublishJobNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    if (
+        current["status"] != "need_action"
+        or not current.get("reconciliation_required", False)
+    ):
+        return jsonify(
+            {
+                "code": 409,
+                "msg": f"状态为 {current['status']} 的任务无需人工对账，请刷新任务列表",
+                "data": None,
+            }
+        ), 409
+    if int(current.get("state_version", -1)) != expected_state_version:
+        return jsonify(
+            {
+                "code": 409,
+                "msg": "任务状态已变化，对账未写入；请刷新后重新核验",
+                "data": None,
+            }
+        ), 409
+
+    try:
+        if decision == "published":
+            job = reconcile_publish_job_platform_success(
+                app.config["DATABASE_PATH"],
+                job_id,
+                message=f"人工核验已发布：{verification_note}",
+                result_url=result_url,
+                expected_state_version=expected_state_version,
+            )
+        else:
+            if result_url:
+                return jsonify(
+                    {
+                        "code": 400,
+                        "msg": "结论为未发布时不能填写公开链接",
+                        "data": None,
+                    }
+                ), 400
+            job = reconcile_publish_job_failure(
+                app.config["DATABASE_PATH"],
+                job_id,
+                message=f"人工核验未发布：{verification_note}",
+                expected_state_version=expected_state_version,
+            )
+    except ValueError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    except InvalidPublishJobTransitionError as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+
+    return jsonify(
+        {
+            "code": 200,
+            "msg": "平台结果已人工对账，未触发任何再次发布",
+            "data": _publish_job_payload(job),
+        }
     ), 200
 
 
@@ -2662,8 +3438,8 @@ def _publish_job_payload(
     include_confirmation_snapshot=False,
 ):
     confirmation_fingerprint = ""
+    article = confirmation_article
     if not job["demo"] and job.get("account_id") is not None:
-        article = confirmation_article
         if article is None:
             article = get_article(app.config["DATABASE_PATH"], job["article_id"])
         confirmation_fingerprint = build_publish_confirmation_fingerprint(
@@ -2676,6 +3452,9 @@ def _publish_job_payload(
         "account_id": job.get("account_id"),
         "account_name": str(job.get("account_name") or ""),
         "state_version": int(job.get("state_version", 0)),
+        "reconciliation_required": bool(
+            job.get("reconciliation_required", False)
+        ),
         "confirmation_fingerprint": confirmation_fingerprint,
         "platform": job["platform"],
         "status": job["status"],
@@ -2683,6 +3462,8 @@ def _publish_job_payload(
         "url": job["result_url"],
         "images": list(job.get("images") or ()),
         "video": str(job.get("video") or ""),
+        "publish_content_length": len(str(job.get("publish_content") or "")),
+        "content_policy_version": str(job.get("content_policy_version") or ""),
         "publish_at": job["publish_at"],
         "auto_execute": bool(job.get("auto_execute", False)),
         "authorization_bound": bool(job.get("authorization_bound", False)),
@@ -2708,7 +3489,7 @@ def _publish_job_payload(
     if "article_title" in job:
         payload["article_title"] = job["article_title"]
     if include_confirmation_snapshot:
-        snapshot = confirmation_article
+        snapshot = article
         if snapshot is None:
             snapshot = get_article(
                 app.config["DATABASE_PATH"],
@@ -2720,6 +3501,29 @@ def _publish_job_payload(
             "content": str(snapshot.get("content") or ""),
             "tags": list(snapshot.get("tags") or ()),
             "updated_at": snapshot.get("updated_at"),
+        }
+        publish_title = str(
+            job.get("publish_title") or snapshot.get("title") or ""
+        )
+        publish_content = str(
+            job.get("publish_content") or snapshot.get("content") or ""
+        )
+        payload["publication_snapshot"] = {
+            "title": publish_title,
+            "content": publish_content,
+            "original_title_length": len(str(snapshot.get("title") or "")),
+            "title_length": len(publish_title),
+            "title_adapted": publish_title != str(snapshot.get("title") or "").strip(),
+            "title_policy": get_publish_title_policy(job["platform"]),
+            "original_length": len(str(snapshot.get("content") or "")),
+            "publish_length": len(publish_content),
+            "adapted": publish_content != str(snapshot.get("content") or "").strip(),
+            "content_policy": get_publish_content_policy(
+                job["platform"],
+                tags=snapshot.get("tags") or (),
+            ),
+            "verification": get_platform_verification_policy(job["platform"]),
+            "frequency_guidance": get_platform_frequency_guidance(job["platform"]),
         }
     return payload
 
@@ -2781,7 +3585,7 @@ def get_publish_platforms():
             "ENABLE_BILIBILI_RUNTIME", False
         ):
             unavailable_reason = (
-                "Bilibili 第三方运行时尚未完成固定版本、哈希校验和商业授权，当前不可用"
+                "未找到通过固定版本与 SHA-256 校验的 Bilibili 本机兼容运行时"
             )
         elif demo_available:
             unavailable_reason = "当前为演示模式，不会访问真实平台"
@@ -2796,6 +3600,10 @@ def get_publish_platforms():
         capabilities.append(
             {
                 **item,
+                "content_policy": get_publish_content_policy(item["key"]),
+                "title_policy": get_publish_title_policy(item["key"]),
+                "verification": get_platform_verification_policy(item["key"]),
+                "frequency_guidance": get_platform_frequency_guidance(item["key"]),
                 "runtime_available": runtime_available,
                 "login_available": runtime_available,
                 "real_publishing_authorized": real_publishing_authorized,
@@ -3300,6 +4108,31 @@ def login():
             {"code": 400, "msg": "不支持的登录协议版本", "data": None}
         ), 400
     protocol_version = int(protocol_text)
+    try:
+        client_session_id = _normalize_login_client_session_id(
+            request.args.get("session_id")
+        )
+    except ValueError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    if protocol_version >= 2 and not client_session_id:
+        return jsonify(
+            {"code": 400, "msg": "登录协议 2 必须提供随机会话标识", "data": None}
+        ), 400
+    last_event_text = str(
+        request.args.get("last_event_id")
+        or request.headers.get("Last-Event-ID")
+        or "0"
+    ).strip()
+    try:
+        last_event_id = int(last_event_text)
+    except ValueError:
+        return jsonify(
+            {"code": 400, "msg": "登录事件游标无效", "data": None}
+        ), 400
+    if last_event_id < 0 or last_event_id > 1_000_000:
+        return jsonify(
+            {"code": 400, "msg": "登录事件游标无效", "data": None}
+        ), 400
     existing_account_text = str(
         request.args.get("existing_account_id") or ""
     ).strip()
@@ -3354,14 +4187,35 @@ def login():
         protocol_version,
     )
 
-    # 模拟一个用于异步通信的队列
-    status_queue = LoginStatusQueue(
-        protocol_version=protocol_version,
-        existing_account_id=existing_account_id,
-    )
     session_key = (login_type, account_id)
+    status_queue = None
+    resumed_session = False
+    created_session = False
     with active_queues_lock:
-        if existing_account_id is not None:
+        _prune_recent_login_queues()
+        active_status_queue = active_queues.get(session_key)
+        if active_status_queue is not None:
+            active_session_id = str(
+                getattr(active_status_queue, "client_session_id", "") or ""
+            )
+            if (
+                client_session_id
+                and active_session_id
+                and hmac.compare_digest(client_session_id, active_session_id)
+            ):
+                status_queue = active_status_queue
+                resumed_session = True
+            else:
+                return jsonify(
+                    {"code": 409, "msg": "该账号已有登录会话进行中", "data": None}
+                ), 409
+
+        if status_queue is None and client_session_id:
+            replay_key = (login_type, account_id, client_session_id)
+            status_queue = recent_login_queues.get(replay_key)
+            resumed_session = status_queue is not None
+
+        if status_queue is None and existing_account_id is not None:
             try:
                 with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
                     existing_account = conn.execute(
@@ -3393,54 +4247,82 @@ def login():
                 return jsonify(
                     {"code": 409, "msg": "该账号正在检测，请稍候再登录", "data": None}
                 ), 409
-        if session_key in active_queues:
+
+        if status_queue is None:
+            status_queue = LoginStatusQueue(
+                protocol_version=protocol_version,
+                existing_account_id=existing_account_id,
+                client_session_id=client_session_id,
+            )
+            created_session = True
+
+        transport_token = _acquire_login_stream_transport_locked(status_queue)
+        if transport_token is None:
             return jsonify(
-                {"code": 409, "msg": "该账号已有登录会话进行中", "data": None}
-            ), 409
-        active_queues[session_key] = status_queue
+                {
+                    "code": 503,
+                    "msg": "同时等待登录的平台过多，请先完成或关闭其他登录窗口",
+                    "data": None,
+                }
+            ), 503
+
+        if created_session:
+            active_queues[session_key] = status_queue
 
     def on_close():
-        # A closed dialog/EventSource must not leave its headed automation
-        # browser waiting for the full manual-login timeout.  Platform helpers
-        # opt into this cooperative signal; Zhihu checks it every second.
-        status_queue.cancel()
-        # The worker owns registry cleanup.  Keeping the entry until its
-        # ``finally`` block closes Playwright prevents an immediate retry from
-        # launching a second browser for the same local account.
+        _release_login_stream_transport(status_queue, transport_token)
+        # Protocol 2 clients cancel through the explicit endpoint.  A transport
+        # error must not be mistaken for operator intent because EventSource is
+        # designed to reconnect.  Legacy clients retain their close-to-cancel
+        # behavior so an old UI cannot strand a headed browser indefinitely.
+        if protocol_version < 2 or not client_session_id:
+            status_queue.cancel()
+
     # 启动异步任务线程
-    try:
-        thread = threading.Thread(
-            target=run_async_function,
-            args=(login_type, account_id, status_queue),
-            daemon=True,
-        )
-        thread.start()
-    except Exception as exc:
+    if not resumed_session:
         try:
-            _queue_login_runtime_error(status_queue, login_type)
-        except Exception:
-            pass
-        status_queue.cancel()
-        _finish_login_session(login_type, account_id, status_queue)
-        login_logger.exception(
-            "媒体账号登录线程启动失败 platform_type={} error_type={}",
-            login_type,
-            exc.__class__.__name__,
-        )
-        return jsonify(
-            {
-                "code": 500,
-                "msg": "登录服务未能启动，请重试并查看本机日志",
-                "data": None,
-            }
-        ), 500
+            thread = threading.Thread(
+                target=run_async_function,
+                args=(login_type, account_id, status_queue),
+                daemon=True,
+            )
+            thread.start()
+        except Exception as exc:
+            try:
+                _queue_login_runtime_error(status_queue, login_type)
+            except Exception:
+                pass
+            status_queue.cancel()
+            _finish_login_session(login_type, account_id, status_queue)
+            _release_login_stream_transport(status_queue, transport_token)
+            login_logger.exception(
+                "媒体账号登录线程启动失败 platform_type={} error_type={}",
+                login_type,
+                exc.__class__.__name__,
+            )
+            return jsonify(
+                {
+                    "code": 500,
+                    "msg": "登录服务未能启动，请重试并查看本机日志",
+                    "data": None,
+                }
+            ), 500
     response = Response(
-        sse_stream(status_queue, on_close=on_close),
+        sse_stream(
+            status_queue,
+            on_close=on_close,
+            after_event_id=last_event_id,
+            transport_token=transport_token,
+        ),
         mimetype='text/event-stream',
     )
-    response.headers['Cache-Control'] = 'no-cache'
+    response.headers['Cache-Control'] = 'private, no-store'
+    response.headers['Pragma'] = 'no-cache'
     response.headers['X-Accel-Buffering'] = 'no'  # 关键：禁用 Nginx 缓冲
     response.headers['Content-Type'] = 'text/event-stream'
+    response.call_on_close(
+        lambda: _release_login_stream_transport(status_queue, transport_token)
+    )
     return response
 
 
@@ -3455,6 +4337,12 @@ def cancel_media_login():
         ), 400
     login_type = str(payload.get("type") or "").strip()
     account_id = str(payload.get("id") or "").strip()
+    try:
+        client_session_id = _normalize_login_client_session_id(
+            payload.get("session_id")
+        )
+    except ValueError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
     if login_type not in {str(value) for value in range(1, 11)}:
         return jsonify(
             {"code": 400, "msg": "不支持的平台类型", "data": None}
@@ -3465,8 +4353,47 @@ def cancel_media_login():
         ), 400
 
     with active_queues_lock:
+        _prune_recent_login_queues()
         status_queue = active_queues.get((login_type, account_id))
+        if status_queue is not None:
+            active_session_id = str(
+                getattr(status_queue, "client_session_id", "") or ""
+            )
+            if active_session_id and (
+                not client_session_id
+                or not hmac.compare_digest(client_session_id, active_session_id)
+            ):
+                return jsonify(
+                    {"code": 409, "msg": "登录会话已变化，请刷新账号状态", "data": None}
+                ), 409
+            if client_session_id and not active_session_id:
+                return jsonify(
+                    {"code": 409, "msg": "登录会话已变化，请刷新账号状态", "data": None}
+                ), 409
+        completed_queue = (
+            recent_login_queues.get(
+                (login_type, account_id, client_session_id)
+            )
+            if status_queue is None and client_session_id
+            else None
+        )
     if status_queue is None:
+        if completed_queue is not None:
+            return jsonify(
+                {
+                    "code": 200,
+                    "msg": (
+                        "账号登录已完成"
+                        if completed_queue.outcome == "success"
+                        else "登录窗口已结束"
+                    ),
+                    "data": {
+                        "cancel_requested": False,
+                        "active": False,
+                        "outcome": completed_queue.outcome,
+                    },
+                }
+            ), 200
         return jsonify(
             {
                 "code": 200,
@@ -3488,10 +4415,16 @@ def cancel_media_login():
     )
     with active_queues_lock:
         still_registered = active_queues.get((login_type, account_id)) is status_queue
+        protocol_two_owned = (
+            int(getattr(status_queue, "protocol_version", 1)) >= 2
+            and bool(getattr(status_queue, "client_session_id", ""))
+        )
         # ``finished_event`` is set only after the login coroutine (including
         # browser/context cleanup) has returned.  Removing the exact same queue
-        # here closes a tiny race before the worker's own registry cleanup.
-        if finished and still_registered:
+        # here is retained only for legacy protocol 1. Protocol 2 must let the
+        # worker perform the atomic active -> replay-journal transfer; removing
+        # it here creates a reconnect window that can launch a duplicate worker.
+        if finished and still_registered and not protocol_two_owned:
             active_queues.pop((login_type, account_id), None)
             still_registered = False
     return jsonify(
@@ -3502,7 +4435,11 @@ def cancel_media_login():
                 if status_queue.outcome == "success"
                 else "登录窗口已结束"
                 if not still_registered
-                else "已发送结束登录请求，Chrome 正在关闭"
+                else (
+                    "已发送结束登录请求，Bilibili 扫码窗口正在关闭"
+                    if login_type == str(BILIBILI_ACCOUNT_TYPE)
+                    else "已发送结束登录请求，平台登录窗口正在关闭"
+                )
             ),
             "data": {
                 "cancel_requested": True,
@@ -4245,12 +5182,26 @@ def download_cookie():
 # 包装函数：在线程中运行异步函数
 def _finish_login_session(type, id, status_queue):
     mark_finished = getattr(status_queue, "mark_finished", None)
-    if callable(mark_finished):
-        mark_finished()
     session_key = (str(type), str(id))
+    replay_key = None
     with active_queues_lock:
+        # Finish notification and the active -> recent registry transfer are a
+        # single state change to reconnecting clients. They can observe either
+        # an active worker or a replay journal, never a gap that starts a second
+        # browser worker.
+        if callable(mark_finished):
+            mark_finished()
         if active_queues.get(session_key) is status_queue:
             active_queues.pop(session_key, None)
+        client_session_id = str(
+            getattr(status_queue, "client_session_id", "") or ""
+        )
+        if client_session_id:
+            replay_key = (session_key[0], session_key[1], client_session_id)
+            recent_login_queues[replay_key] = status_queue
+        _prune_recent_login_queues()
+    if replay_key is not None:
+        _schedule_recent_login_queue_expiry(replay_key, status_queue)
 
 
 def _load_login_helpers():
@@ -4360,7 +5311,52 @@ def run_async_function(type, id, status_queue):
         _finish_login_session(type, id, status_queue)
 
 # SSE 流生成器函数
-def sse_stream(status_queue, *, on_close=None):
+def sse_stream(
+    status_queue,
+    *,
+    on_close=None,
+    after_event_id=0,
+    transport_token=None,
+):
+    replay_reader = getattr(status_queue, "wait_for_events", None)
+    if callable(replay_reader) and int(
+        getattr(status_queue, "protocol_version", 1)
+    ) >= 2:
+        cursor = max(0, int(after_event_id or 0))
+        last_heartbeat = time.monotonic()
+        try:
+            while True:
+                if (
+                    transport_token is not None
+                    and not _is_login_stream_transport_current(
+                        status_queue, transport_token
+                    )
+                ):
+                    return
+                events = replay_reader(cursor, timeout=0.5)
+                for event_id, msg in events:
+                    if (
+                        transport_token is not None
+                        and not _is_login_stream_transport_current(
+                            status_queue, transport_token
+                        )
+                    ):
+                        return
+                    cursor = int(event_id)
+                    yield f"id: {cursor}\ndata: {msg}\n\n"
+                    if str(msg) in {"200", "500"}:
+                        return
+                if status_queue.finished_event.is_set() and not events:
+                    return
+                now = time.monotonic()
+                if now - last_heartbeat >= 15:
+                    yield ": keep-alive\n\n"
+                    last_heartbeat = now
+        finally:
+            if on_close is not None:
+                on_close()
+        return
+
     last_heartbeat = time.monotonic()
     try:
         while True:

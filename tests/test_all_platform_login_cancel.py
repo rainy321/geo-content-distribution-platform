@@ -536,7 +536,7 @@ class AllPlatformLoginCancelTests(unittest.IsolatedAsyncioTestCase):
         spawned_file = None
         popen_calls = 0
 
-        def fake_popen(arguments, **_kwargs):
+        def fake_spawn(arguments, **_kwargs):
             nonlocal spawned_file, popen_calls
             popen_calls += 1
             user_flag_index = arguments.index("-u")
@@ -556,9 +556,9 @@ class AllPlatformLoginCancelTests(unittest.IsolatedAsyncioTestCase):
             "uploader.bilibili_uploader.runtime.ensure_biliup_binary",
             return_value=self.root / "synthetic-biliup.exe",
         ), patch(
-            "subprocess.Popen",
-            side_effect=fake_popen,
-        ) as popen, patch(
+            "uploader.bilibili_uploader.runtime.spawn_biliup_process",
+            side_effect=fake_spawn,
+        ) as spawn, patch(
             "myUtils.login.asyncio.sleep",
             new=AsyncMock(side_effect=create_synthetic_credential),
         ):
@@ -570,7 +570,7 @@ class AllPlatformLoginCancelTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertIsNone(result)
-        self.assertEqual(popen.call_count, 2)
+        self.assertEqual(spawn.call_count, 2)
         login_process.terminate.assert_called_once_with()
         login_process.wait.assert_called_once_with(timeout=2)
         login_process.kill.assert_not_called()

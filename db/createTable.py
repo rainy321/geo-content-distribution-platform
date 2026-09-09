@@ -207,6 +207,161 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                 WHERE article_id IS NOT NULL
                 '''
             )
+            existing_ai_usage_ledger = cursor.execute(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type = 'table' AND name = 'ai_usage_ledger'"
+            ).fetchone()
+            migrate_ai_usage_operations = bool(
+                existing_ai_usage_ledger
+                and "visibility_sample" not in str(existing_ai_usage_ledger[0] or "")
+            )
+            if migrate_ai_usage_operations:
+                # SQLite cannot alter a CHECK constraint in place. Rebuild the
+                # local ledger transactionally so existing immutable receipts
+                # survive while the new visibility-sampling operation becomes
+                # valid. No other table references this append-only ledger.
+                cursor.execute("DROP INDEX IF EXISTS idx_ai_usage_reference")
+                cursor.execute("DROP INDEX IF EXISTS idx_ai_usage_project_created")
+                cursor.execute(
+                    "ALTER TABLE ai_usage_ledger RENAME TO ai_usage_ledger_legacy"
+                )
+            cursor.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS ai_usage_ledger (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER,
+                    article_id INTEGER,
+                    operation TEXT NOT NULL
+                        CHECK (operation IN (
+                            'generate', 'optimize', 'platform_adapt',
+                            'visibility_sample'
+                        )),
+                    provider TEXT NOT NULL DEFAULT 'unknown',
+                    model TEXT NOT NULL DEFAULT 'unknown',
+                    reference_type TEXT NOT NULL DEFAULT '',
+                    reference_id TEXT NOT NULL DEFAULT '',
+                    usage_status TEXT NOT NULL DEFAULT 'unknown'
+                        CHECK (usage_status IN ('reported', 'estimated', 'unknown')),
+                    input_tokens INTEGER CHECK (input_tokens IS NULL OR input_tokens >= 0),
+                    output_tokens INTEGER CHECK (output_tokens IS NULL OR output_tokens >= 0),
+                    total_tokens INTEGER CHECK (total_tokens IS NULL OR total_tokens >= 0),
+                    cached_tokens INTEGER CHECK (cached_tokens IS NULL OR cached_tokens >= 0),
+                    reasoning_tokens INTEGER CHECK (reasoning_tokens IS NULL OR reasoning_tokens >= 0),
+                    input_price_per_million TEXT,
+                    output_price_per_million TEXT,
+                    estimated_cost TEXT,
+                    currency TEXT NOT NULL DEFAULT '',
+                    cost_status TEXT NOT NULL DEFAULT 'unknown_usage'
+                        CHECK (cost_status IN (
+                            'calculated', 'unpriced', 'unknown_usage',
+                            'insufficient_usage'
+                        )),
+                    pricing_source TEXT NOT NULL DEFAULT 'unconfigured',
+                    metadata_json TEXT NOT NULL DEFAULT '{}',
+                    ledger_version TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (
+                        strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                    ),
+                    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE SET NULL,
+                    FOREIGN KEY (article_id) REFERENCES articles(id) ON DELETE SET NULL
+                )
+                '''
+            )
+            if migrate_ai_usage_operations:
+                cursor.execute(
+                    '''
+                    INSERT INTO ai_usage_ledger (
+                        id, project_id, article_id, operation, provider, model,
+                        reference_type, reference_id, usage_status,
+                        input_tokens, output_tokens, total_tokens,
+                        cached_tokens, reasoning_tokens,
+                        input_price_per_million, output_price_per_million,
+                        estimated_cost, currency, cost_status, pricing_source,
+                        metadata_json, ledger_version, created_at
+                    )
+                    SELECT
+                        id, project_id, article_id, operation, provider, model,
+                        reference_type, reference_id, usage_status,
+                        input_tokens, output_tokens, total_tokens,
+                        cached_tokens, reasoning_tokens,
+                        input_price_per_million, output_price_per_million,
+                        estimated_cost, currency, cost_status, pricing_source,
+                        metadata_json, ledger_version, created_at
+                    FROM ai_usage_ledger_legacy
+                    '''
+                )
+                cursor.execute("DROP TABLE ai_usage_ledger_legacy")
+            cursor.execute(
+                '''
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_ai_usage_reference
+                ON ai_usage_ledger(operation, reference_type, reference_id)
+                WHERE reference_type <> '' AND reference_id <> ''
+                '''
+            )
+            cursor.execute(
+                '''
+                CREATE INDEX IF NOT EXISTS idx_ai_usage_project_created
+                ON ai_usage_ledger(project_id, created_at DESC, id DESC)
+                '''
+            )
+            cursor.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS ai_visibility_sample_requests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL,
+                    request_id TEXT NOT NULL UNIQUE,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    request_fingerprint TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'started'
+                        CHECK (status IN (
+                            'started', 'completed', 'partial', 'need_action'
+                        )),
+                    http_status INTEGER,
+                    result_json TEXT,
+                    created_at TEXT NOT NULL DEFAULT (
+                        strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                    ),
+                    updated_at TEXT NOT NULL DEFAULT (
+                        strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                    ),
+                    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+                )
+                '''
+            )
+            cursor.execute(
+                '''
+                CREATE INDEX IF NOT EXISTS idx_visibility_sample_project_created
+                ON ai_visibility_sample_requests(
+                    project_id, created_at DESC, id DESC
+                )
+                '''
+            )
+            cursor.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS geo_diagnostic_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL,
+                    article_id INTEGER,
+                    scope TEXT NOT NULL CHECK (scope IN ('project', 'content')),
+                    source_type TEXT NOT NULL
+                        CHECK (source_type IN ('project', 'article', 'ad_hoc')),
+                    input_digest TEXT NOT NULL,
+                    result_json TEXT NOT NULL,
+                    diagnostic_version TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (
+                        strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                    ),
+                    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE,
+                    FOREIGN KEY (article_id) REFERENCES articles(id) ON DELETE SET NULL
+                )
+                '''
+            )
+            cursor.execute(
+                '''
+                CREATE INDEX IF NOT EXISTS idx_geo_diagnostic_project_created
+                ON geo_diagnostic_runs(project_id, created_at DESC, id DESC)
+                '''
+            )
             cursor.execute(
                 '''
                 CREATE TABLE IF NOT EXISTS content_templates (
@@ -275,6 +430,11 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                     result_url TEXT NOT NULL DEFAULT '',
                     images TEXT NOT NULL DEFAULT '[]',
                     video TEXT NOT NULL DEFAULT '',
+                    publish_title TEXT NOT NULL DEFAULT '',
+                    publish_content TEXT NOT NULL DEFAULT '',
+                    content_policy_version TEXT NOT NULL DEFAULT '',
+                    reconciliation_required INTEGER NOT NULL DEFAULT 0
+                        CHECK (reconciliation_required IN (0, 1)),
                     publish_at DATETIME,
                     authorization_fingerprint TEXT NOT NULL DEFAULT '',
                     auto_execute INTEGER NOT NULL DEFAULT 0
@@ -303,6 +463,27 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                 cursor.execute(
                     "ALTER TABLE publish_jobs "
                     "ADD COLUMN video TEXT NOT NULL DEFAULT ''"
+                )
+            if "publish_title" not in publish_job_columns:
+                cursor.execute(
+                    "ALTER TABLE publish_jobs "
+                    "ADD COLUMN publish_title TEXT NOT NULL DEFAULT ''"
+                )
+            if "publish_content" not in publish_job_columns:
+                cursor.execute(
+                    "ALTER TABLE publish_jobs "
+                    "ADD COLUMN publish_content TEXT NOT NULL DEFAULT ''"
+                )
+            if "content_policy_version" not in publish_job_columns:
+                cursor.execute(
+                    "ALTER TABLE publish_jobs "
+                    "ADD COLUMN content_policy_version TEXT NOT NULL DEFAULT ''"
+                )
+            if "reconciliation_required" not in publish_job_columns:
+                cursor.execute(
+                    "ALTER TABLE publish_jobs "
+                    "ADD COLUMN reconciliation_required INTEGER NOT NULL DEFAULT 0 "
+                    "CHECK (reconciliation_required IN (0, 1))"
                 )
             if "auto_execute" not in publish_job_columns:
                 cursor.execute(

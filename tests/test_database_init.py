@@ -181,9 +181,11 @@ class DatabaseInitializationTests(unittest.TestCase):
                 job = conn.execute(
                     """
                     SELECT article_id, platform, status, message, result_url,
-                           images, video, publish_at, authorization_fingerprint,
+                           images, video, publish_title, publish_content,
+                           content_policy_version, publish_at, authorization_fingerprint,
                            auto_execute, demo, state_version, account_id,
-                           created_at, started_at, finished_at
+                           created_at, started_at, finished_at,
+                           reconciliation_required
                     FROM publish_jobs
                     """
                 ).fetchone()
@@ -200,6 +202,10 @@ class DatabaseInitializationTests(unittest.TestCase):
                     "result_url",
                     "images",
                     "video",
+                    "publish_title",
+                    "publish_content",
+                    "content_policy_version",
+                    "reconciliation_required",
                     "publish_at",
                     "authorization_fingerprint",
                     "auto_execute",
@@ -211,7 +217,7 @@ class DatabaseInitializationTests(unittest.TestCase):
                 },
             )
             self.assertEqual(
-                job[:12],
+                job[:15],
                 (
                     article_id,
                     "zhihu",
@@ -220,6 +226,9 @@ class DatabaseInitializationTests(unittest.TestCase):
                     "",
                     "[]",
                     "",
+                    "",
+                    "",
+                    "",
                     None,
                     "",
                     0,
@@ -227,10 +236,11 @@ class DatabaseInitializationTests(unittest.TestCase):
                     0,
                 ),
             )
-            self.assertIsNone(job[12])
-            self.assertTrue(job[13])
-            self.assertIsNone(job[14])
             self.assertIsNone(job[15])
+            self.assertTrue(job[16])
+            self.assertIsNone(job[17])
+            self.assertIsNone(job[18])
+            self.assertEqual(job[19], 0)
 
     def test_reinitialization_adds_assets_to_existing_publish_jobs(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -264,21 +274,37 @@ class DatabaseInitializationTests(unittest.TestCase):
                 columns = {
                     row[1] for row in conn.execute("PRAGMA table_info(publish_jobs)")
                 }
-                images, video, fingerprint, state_version = conn.execute(
+                (
+                    images,
+                    video,
+                    publish_title,
+                    publish_content,
+                    policy_version,
+                    fingerprint,
+                    state_version,
+                ) = conn.execute(
                     """
-                    SELECT images, video, authorization_fingerprint, state_version
+                    SELECT images, video, publish_title, publish_content,
+                           content_policy_version, authorization_fingerprint,
+                           state_version
                     FROM publish_jobs
                     WHERE id = 1
                     """
                 ).fetchone()
             self.assertIn("images", columns)
             self.assertIn("video", columns)
+            self.assertIn("publish_title", columns)
+            self.assertIn("publish_content", columns)
+            self.assertIn("content_policy_version", columns)
             self.assertIn("auto_execute", columns)
             self.assertIn("authorization_fingerprint", columns)
             self.assertIn("account_id", columns)
             self.assertIn("state_version", columns)
             self.assertEqual(images, "[]")
             self.assertEqual(video, "")
+            self.assertEqual(publish_title, "")
+            self.assertEqual(publish_content, "")
+            self.assertEqual(policy_version, "")
             self.assertEqual(fingerprint, "")
             self.assertEqual(state_version, 0)
 

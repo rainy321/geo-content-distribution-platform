@@ -945,7 +945,7 @@ class KSNote(KSBaseUploader):
         )
         self.image_paths = image_paths
         self.note = note or ""
-        self.title = title or (self.note[:20] if self.note else "")
+        self.title = title or self.note
         self.tags = tags or []
         self.dry_run = bool(dry_run)
         self.ai_generated = bool(ai_generated)

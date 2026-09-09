@@ -90,7 +90,7 @@ PLATFORM_CAPABILITIES = (
         "requires_images": False,
         "requires_video": True,
         "supports_schedule": True,
-        "release_status": "disabled",
+        "release_status": "review_required",
     },
     {
         "key": "channels",
@@ -123,8 +123,8 @@ PLATFORM_BY_ACCOUNT_TYPE = {
 BILIBILI_PLATFORM_KEY = "bilibili"
 BILIBILI_ACCOUNT_TYPE = PLATFORM_BY_KEY[BILIBILI_PLATFORM_KEY]["account_type"]
 BILIBILI_RUNTIME_DISABLED_MESSAGE = (
-    "Bilibili 运行时默认关闭；完成固定版本、SHA-256 校验、安全解包和商业授权后，"
-    "才可设置 ENABLE_BILIBILI_RUNTIME=true"
+    "未找到通过固定版本与 SHA-256 校验的 Bilibili 本机兼容运行时；"
+    "当前不会下载或执行未知二进制文件"
 )
 SUPPORTED_PUBLISH_PLATFORMS = frozenset(PLATFORM_BY_KEY)
 PLATFORM_KEY_ALIASES = {

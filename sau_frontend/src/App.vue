@@ -19,10 +19,10 @@
       <el-aside :width="sidebarCollapsed ? '68px' : '224px'">
         <div class="sidebar">
           <div class="logo">
-            <div class="logo-mark" aria-hidden="true"><span /></div>
+            <img class="logo-mark" src="/geo-favicon.svg" alt="" aria-hidden="true">
             <div v-show="!sidebarCollapsed" class="logo-copy">
               <strong>GEO</strong>
-              <span>CONTENT ENGINE</span>
+              <span>VISIBILITY OS</span>
             </div>
           </div>
           <el-menu
@@ -88,7 +88,10 @@
               <button class="toggle-sidebar" type="button" aria-label="折叠或展开侧边导航" @click="toggleSidebar">
                 <el-icon><Fold /></el-icon>
               </button>
-              <span class="workspace-label">内容运营工作区</span>
+              <span class="workspace-label">
+                <small>GEO PRODUCT OS</small>
+                <strong>{{ currentPageTitle }}</strong>
+              </span>
             </div>
             <div class="header-right">
               <DesktopStatusBar @status="handleDesktopStatus" />
@@ -211,6 +214,21 @@ const publishingWorkspaceVisible = computed(() => (
 const activeMenu = computed(() => {
   return route.path
 })
+
+const pageTitles = {
+  '/': '品牌可见度工作台',
+  '/account-management': '媒体账号',
+  '/projects': '品牌项目',
+  '/content-create': 'AI 内容创作',
+  '/content-library': '内容库',
+  '/geo-optimize': 'GEO 优化',
+  '/ai-visibility': 'AI 可见度',
+  '/material-management': '素材管理',
+  '/publish-center': '发布中心',
+  '/settings': '系统设置',
+  '/about': '关于'
+}
+const currentPageTitle = computed(() => pageTitles[route.path] || '内容运营工作区')
 
 // 侧边栏折叠状态
 const isCollapse = ref(false)
@@ -389,7 +407,7 @@ onBeforeUnmount(() => {
   color: var(--geo-ink);
   height: 100vh;
   overflow: hidden;
-  transition: width 0.3s;
+  transition: width 180ms ease;
   
   .sidebar {
     display: flex;
@@ -397,8 +415,8 @@ onBeforeUnmount(() => {
     height: 100%;
     
     .logo {
-      height: 68px;
-      padding: 0 14px;
+      height: 72px;
+      padding: 0 17px;
       display: flex;
       align-items: center;
       background-color: var(--geo-surface);
@@ -406,50 +424,31 @@ onBeforeUnmount(() => {
       overflow: hidden;
       
       .logo-mark {
-        position: relative;
-        width: 38px;
-        height: 38px;
-        flex: 0 0 38px;
-
-        &::before,
-        span {
-          position: absolute;
-          left: 9px;
-          width: 13px;
-          height: 27px;
-          border-radius: 5px;
-          background: var(--geo-ink);
-          content: "";
-          transform: rotate(36deg);
-        }
-
-        &::before { top: 3px; }
-
-        span {
-          right: 8px;
-          bottom: 3px;
-          left: auto;
-          height: 21px;
-        }
+        width: 34px;
+        height: 34px;
+        flex: 0 0 34px;
+        border-radius: 9px;
+        filter: grayscale(1) contrast(1.25) brightness(0.75);
       }
 
       .logo-copy {
         display: flex;
         flex-direction: column;
-        margin-left: 11px;
+        margin-left: 10px;
         white-space: nowrap;
 
         strong {
           color: var(--geo-ink);
-          font-size: 19px;
+          font-size: 21px;
+          font-weight: 800;
           letter-spacing: -0.03em;
         }
 
         span {
           margin-top: 2px;
-          color: var(--geo-muted);
-          font: 600 9px/1.2 "Cascadia Mono", monospace;
-          letter-spacing: 0.15em;
+          color: #8b8d91;
+          font: 600 8px/1.2 "Cascadia Mono", monospace;
+          letter-spacing: 0.17em;
         }
       }
     }
@@ -457,21 +456,37 @@ onBeforeUnmount(() => {
     .sidebar-menu {
       border-right: none;
       flex: 1;
-      padding: 12px 8px;
+      padding: 14px 10px;
       
       .el-menu-item {
         display: flex;
         align-items: center;
+        height: 45px;
+        margin-bottom: 3px;
+        padding: 0 13px !important;
+        border-radius: 7px;
+        color: #56585d;
+        font-size: 13px;
         
         .el-icon {
           margin-right: 10px;
-          font-size: 18px;
+          font-size: 17px;
         }
 
         &.is-active {
           background: var(--geo-ink);
           color: #fff;
           box-shadow: none;
+
+          &::after {
+            position: absolute;
+            right: 9px;
+            width: 4px;
+            height: 4px;
+            border-radius: 50%;
+            background: #fff;
+            content: '';
+          }
         }
 
         &:not(.is-active):hover {
@@ -494,14 +509,14 @@ onBeforeUnmount(() => {
   border-bottom: 1px solid var(--geo-line);
   box-shadow: none;
   padding: 0;
-  height: 60px;
+  height: 72px;
   
   .header-content {
     display: flex;
     justify-content: space-between;
     align-items: center;
     height: 100%;
-    padding: 0 16px;
+    padding: 0 20px;
     
     .header-left {
       display: flex;
@@ -510,23 +525,38 @@ onBeforeUnmount(() => {
 
       .toggle-sidebar {
         display: grid;
-        width: 34px;
-        height: 34px;
+        width: 36px;
+        height: 36px;
         place-items: center;
-        border-radius: 8px;
+        border: 1px solid transparent;
+        border-radius: 7px;
         color: $text-regular;
         font-size: 20px;
         
         &:hover {
+          border-color: var(--geo-line);
           background: var(--geo-soft);
           color: $primary-color;
         }
       }
 
       .workspace-label {
-        color: var(--geo-muted);
-        font-size: 13px;
-        letter-spacing: 0.04em;
+        display: flex;
+        flex-direction: column;
+        gap: 4px;
+
+        small {
+          color: #96989c;
+          font: 600 8px/1 "Cascadia Mono", monospace;
+          letter-spacing: 0.14em;
+        }
+
+        strong {
+          color: var(--geo-ink);
+          font-size: 13px;
+          font-weight: 650;
+          letter-spacing: -0.01em;
+        }
       }
     }
     
@@ -558,7 +588,7 @@ onBeforeUnmount(() => {
         gap: 6px;
         padding: 0 11px;
         border: 1px solid var(--geo-line);
-        border-radius: 10px;
+        border-radius: 8px;
         background: #fff;
         color: var(--geo-ink);
         cursor: pointer;
@@ -566,12 +596,12 @@ onBeforeUnmount(() => {
 
         &:hover,
         &:focus-visible {
-          border-color: #a9b5b5;
+          border-color: #b7b8ba;
           background: var(--geo-soft);
         }
 
         &:focus-visible {
-          outline: 2px solid rgba(13, 92, 99, 0.25);
+          outline: 2px solid rgba(30, 99, 214, 0.25);
           outline-offset: 2px;
         }
 
@@ -598,7 +628,7 @@ onBeforeUnmount(() => {
   width: 100%;
   min-width: 0;
   background-color: $bg-color-page;
-  padding: 20px;
+  padding: 0;
   overflow-x: hidden;
   overflow-y: auto;
 }
@@ -609,7 +639,8 @@ onBeforeUnmount(() => {
   }
 
   .workspace-label {
-    font-size: 12px !important;
+    small { display: none !important; }
+    strong { font-size: 12px !important; }
   }
 
   .operator-button span,
@@ -618,7 +649,7 @@ onBeforeUnmount(() => {
   }
 
   .el-main {
-    padding: 12px;
+    padding: 0;
   }
 
   .el-aside + .el-container {

@@ -20,6 +20,7 @@ from geo_desktop import (
     _create_startup_backup,
     _start_publish_scheduler,
     apply_desktop_environment,
+    inspect_bilibili_runtime,
     inspect_publishing_runtime,
     load_build_info,
     publishing_profile_allows_real,
@@ -72,14 +73,14 @@ class DesktopEnvironmentTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             metadata = Path(directory) / "desktop-build-info.json"
             metadata.write_text(
-                """{
+                f"""{{
   "schema_version": 1,
-  "version": "1.0.0",
+  "version": "{APP_VERSION}",
   "source_commit": "abc123",
   "source_branch": "codex/test",
   "built_at_utc": "2026-09-09T00:00:00Z",
   "source_dirty": false
-}
+}}
 """,
                 encoding="utf-8",
             )
@@ -484,6 +485,28 @@ class DesktopApiTests(unittest.TestCase):
             "RuntimeError",
         )
 
+    def test_bilibili_runtime_inspection_is_offline_and_fail_closed(self):
+        expected = {
+            "ready": True,
+            "path": r"C:\fixed\biliup.exe",
+            "version": "1.2.4",
+            "sha256": "a" * 64,
+            "bytes": 123,
+            "packaged": False,
+            "source": "external_compatibility_runtime",
+            "reason": "ready",
+        }
+        with patch(
+            "uploader.bilibili_uploader.runtime.inspect_desktop_biliup_runtime",
+            return_value=dict(expected),
+        ) as inspect_runtime:
+            result = inspect_bilibili_runtime(enabled=True, probe=True)
+
+        self.assertTrue(result["ready"])
+        self.assertTrue(result["enabled"])
+        self.assertFalse(result["packaged"])
+        inspect_runtime.assert_called_once_with(probe=True)
+
     def test_desktop_scheduler_never_loads_or_enables_real_publishers(self):
         with tempfile.TemporaryDirectory() as directory:
             paths = DesktopPaths.from_root(directory)
@@ -586,6 +609,10 @@ class DesktopPackagingContractTests(unittest.TestCase):
         )
         self.assertIn("internal_authorized_real_publish", build_script)
         self.assertIn("THIRD-PARTY-NOTICES.txt", build_script)
+        self.assertIn(
+            'ai_cost_ledger_version = "ai-cost-ledger-1.1.0"',
+            build_script,
+        )
 
     def test_windowed_build_does_not_require_a_console_stream(self):
         logging_source = (self.project_root / "utils" / "log.py").read_text(

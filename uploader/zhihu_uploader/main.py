@@ -391,7 +391,11 @@ class ZhiHuArticle(object):
         cover_path=None,
         creation_statement=None,
     ):
-        self.title = (title or "").strip()[:TITLE_MAX_LEN]
+        self.title = (title or "").strip()
+        if len(self.title) > TITLE_MAX_LEN:
+            raise ValueError(
+                f"知乎文章标题不能超过 {TITLE_MAX_LEN} 字，请返回平台预检编辑"
+            )
         if not self.title:
             raise ValueError("知乎文章标题不能为空")
         self.body = (body or "").strip()

@@ -1,0 +1,798 @@
+{
+  "schema_version": "dongclaw-geo-acceptance-data-1.0.0",
+  "generated_at": "2026-09-10T02:23:42+08:00",
+  "timezone": "Asia/Hong_Kong",
+  "status": "PARTIAL_ACCEPTANCE",
+  "effect_claim_status": "NOT_EXECUTED",
+  "executive_summary": {
+    "local_product_flow": "DETERMINISTIC_BASELINE_COMPLETED",
+    "project_readiness_score": 61,
+    "project_grade": "C",
+    "article_geo_score": 88,
+    "article_grade": "B",
+    "real_model_sampling": "NOT_EXECUTED",
+    "short_horizon_effect_retest": "NOT_EXECUTED",
+    "verified_public_publication_count": 0,
+    "claim_boundary": "本地诊断与内容评分已执行；Qwen、DeepSeek、豆包真实采样和优化后配对回测均未执行，因此不能声称 GEO 已让主流 AI 采用、引用或提升 DongClaw。"
+  },
+  "evidence_snapshot": {
+    "database_copy": {
+      "path": ".build/dongclaw-eval-20260910T015241/geo-evaluation.db",
+      "bytes": 139264,
+      "last_write_time": "2026-09-10T01:52:41+08:00",
+      "sha256": "96e3cd7957338013979d8ec971abe6f62325582cfd9985490b150987edbc4b17",
+      "access_policy": "本报告只读取本地副本；未修改正式数据库。"
+    },
+    "evaluation_report": {
+      "path": "artifacts/dongclaw-geo-evaluation/report.json",
+      "report_version": "dongclaw-geo-evaluation-report-1.0.0",
+      "status": "NOT_EXECUTED"
+    },
+    "diagnostic_execution": {
+      "persist": false,
+      "network_used": false,
+      "media_platform_accessed": false,
+      "project_input_digest": "778875791b3e97aff58df2c33c521ac255fb70fb9166125c07d38e2ec71bb261",
+      "article_input_digest": "cf3582e21fcb2e3184ddeb2b9154cd3e3a438fa46254fd8cdaeb84d26da6b924"
+    },
+    "specialized_tests": {
+      "executed_at": "2026-09-10T02:20:00+08:00",
+      "command": "uv run --no-sync python -m unittest tests.test_geo_diagnostic_service tests.test_dongclaw_evaluation_service tests.test_ai_visibility_service tests.test_ai_cost_ledger_service tests.test_publish_preflight_service tests.test_publish_reconcile_api -q",
+      "tests_run": 49,
+      "passed": 49,
+      "failed": 0,
+      "skipped": 0,
+      "duration_seconds": 0.536,
+      "external_calls": false
+    },
+    "full_release_regression": {
+      "status": "SOURCE_REGRESSION_PASSED_PACKAGED_SMOKE_PENDING",
+      "backend": {
+        "passed": 697,
+        "failed": 0,
+        "skipped": 1
+      },
+      "frontend": {
+        "passed": 53,
+        "failed": 0
+      },
+      "other_passed_gates": [
+        "Vue production build",
+        "Python compileall",
+        "uv lock --check",
+        "git diff --check"
+      ],
+      "note": "授权 EXE 的成品健康与原生 UI 冒烟由清洁提交后的正式构建执行，最终以 release manifest 为准。"
+    }
+  },
+  "subject": {
+    "customer": "北京同于野科技有限公司",
+    "region": [
+      "中国大陆",
+      "北京"
+    ],
+    "product": "DongClaw小龙虾助手",
+    "evaluation_aliases": [
+      "DongClaw",
+      "DongClaw小龙虾"
+    ],
+    "configured_website": "https://tongyuye.com",
+    "industry": "人工智能",
+    "configured_competitors": [
+      "RanClaw"
+    ],
+    "data_scope": "只使用该公司、该产品、指定竞品和固定测试问题；未读取或发送其他客户数据。"
+  },
+  "project_diagnostic": {
+    "status": "EXECUTED_LOCAL_DETERMINISTIC",
+    "algorithm_version": "geo-commercial-diagnostic-1.0.1",
+    "visibility_integration_version": "ai-visibility-python-port-1.1.0",
+    "score": 61,
+    "grade": "C",
+    "target_score": 80,
+    "score_gap_to_target": 19,
+    "dimensions": [
+      {
+        "key": "positioning",
+        "label": "产品定位完整度",
+        "score": 100,
+        "weight": 20,
+        "status": "ready",
+        "evidence": {
+          "product_configured": true,
+          "industry_configured": true,
+          "description_characters": 166
+        }
+      },
+      {
+        "key": "discoverability",
+        "label": "可发现性基础",
+        "score": 100,
+        "weight": 20,
+        "status": "ready",
+        "evidence": {
+          "website_configured": true,
+          "keyword_count": 17,
+          "keyword_target": 5,
+          "warning": "此分仅检查项目字段是否配置，不代表官网已建立可索引的 DongClaw 产品证据。"
+        }
+      },
+      {
+        "key": "competition",
+        "label": "竞品参照完整度",
+        "score": 33,
+        "weight": 15,
+        "status": "critical",
+        "evidence": {
+          "competitor_count": 1,
+          "competitor_target": 3
+        }
+      },
+      {
+        "key": "content_readiness",
+        "label": "内容资产就绪度",
+        "score": 66,
+        "weight": 25,
+        "status": "attention",
+        "evidence": {
+          "article_count": 1,
+          "article_target": 3,
+          "average_geo_score": 88.0
+        }
+      },
+      {
+        "key": "ai_visibility",
+        "label": "AI 可见度基线",
+        "score": 0,
+        "weight": 20,
+        "status": "critical",
+        "evidence": {
+          "visibility_run_id": null,
+          "sample_count": null,
+          "mention_rate": null,
+          "owned_citation_rate": null,
+          "share_of_voice": null,
+          "confidence": null
+        }
+      }
+    ],
+    "engine_gaps": [
+      {
+        "priority": "P0",
+        "key": "visibility.baseline",
+        "title": "没有 AI 可见度基线",
+        "action": "仅在操作员预览并确认外发问题后，使用授权的 Qwen、DeepSeek、豆包配置完成固定矩阵采样；不发送项目正文、账号或 Cookie。",
+        "metric_target": "visibility_sample_count >= 5"
+      }
+    ]
+  },
+  "article_diagnostic": {
+    "status": "EXECUTED_LOCAL_DETERMINISTIC",
+    "algorithm_version": "geo-score-mvp-rules-1.0.0",
+    "article_id": 1,
+    "title": "OpenClaw安装配置太复杂？DongClaw龙虾U盘让AI智能体一键随身运行",
+    "title_characters": 40,
+    "content_characters": 2756,
+    "database_status": "published",
+    "score": 88,
+    "grade": "B",
+    "dimensions": [
+      {
+        "key": "entity",
+        "label": "品牌实体",
+        "score": 100,
+        "weight": 15
+      },
+      {
+        "key": "keywords",
+        "label": "关键词覆盖",
+        "score": 77,
+        "weight": 30
+      },
+      {
+        "key": "structure",
+        "label": "内容结构",
+        "score": 86,
+        "weight": 35
+      },
+      {
+        "key": "faq",
+        "label": "问答结构",
+        "score": 100,
+        "weight": 10
+      },
+      {
+        "key": "citation",
+        "label": "事实与引用",
+        "score": 100,
+        "weight": 10,
+        "warning": "规则分表示文本结构满足本地规则，不代表引用指向的 DongClaw 官方产品来源已被公开核验。"
+      }
+    ],
+    "gaps": [
+      {
+        "priority": "P1",
+        "key": "content.keywords",
+        "title": "核心关键词覆盖不足",
+        "metric_current": 77,
+        "metric_target": 80,
+        "action": "自然补充“本地AI助手”“AI办公助手”，同时降低核心词重复频率。"
+      }
+    ],
+    "rule_suggestions": [
+      "自然补充未覆盖的核心关键词：本地AI助手、AI办公助手。",
+      "增加总结或结语部分。",
+      "降低核心关键词重复频率，避免堆砌。"
+    ]
+  },
+  "public_evidence": {
+    "checked_at": "2026-09-10",
+    "status": "INSUFFICIENT_FOR_EFFECT_CLAIM",
+    "findings": [
+      {
+        "id": "company-registry",
+        "status": "THIRD_PARTY_REGISTRY_ONLY",
+        "finding": "公开精确名称检查发现第三方企业信息页；可辅助核对公司主体，但不是 DongClaw 官方产品归属证明。",
+        "source": "https://www.shuididp.cn/yp-4c2d8440523800360ce008a135fc3b01.html"
+      },
+      {
+        "id": "configured-site",
+        "status": "SITE_REACHABLE_PRODUCT_EVIDENCE_NOT_FOUND",
+        "finding": "已知只读检查中 https://tongyuye.com 可访问，页面标题为“懂AI · 国内模型聚合与中转站”；原始页面未发现 DongClaw 产品实体。",
+        "source": "https://tongyuye.com"
+      },
+      {
+        "id": "official-product-source",
+        "status": "NO_VERIFIED_OFFICIAL_PRODUCT_SOURCE",
+        "finding": "本次精确名称检查未找到可独立核验的 DongClaw 官方产品页或权威第三方产品介绍。",
+        "source": null
+      },
+      {
+        "id": "indexing-files",
+        "status": "MISSING_OR_INVALID",
+        "finding": "已知检查中 tongyuye.com 的 robots.txt 与 sitemap.xml 返回 404；geo.tongyuye.com 同路径返回 SPA HTML，而非有效 robots/sitemap 文件。",
+        "source": "https://tongyuye.com/robots.txt"
+      },
+      {
+        "id": "competitor-identity",
+        "status": "EXACT_ENTITY_UNVERIFIED",
+        "finding": "未找到足以确认用户所指 RanClaw 的精确公开实体；RunClaw 是不同拼写，不能自动计入 RanClaw 声量或引用。",
+        "source": null
+      }
+    ],
+    "owned_citation_rate": null,
+    "owned_citation_semantics": "在独立核验 DongClaw 官方产品域名前不可计算。"
+  },
+  "publishing_snapshot": {
+    "source": "本地数据库副本",
+    "total_jobs": 19,
+    "status_counts": {
+      "database_success": 1,
+      "processing_outcome_unknown": 5,
+      "queued_not_started": 13,
+      "failed": 0
+    },
+    "ratios_percent": {
+      "database_success": 5.26,
+      "processing_outcome_unknown": 26.32,
+      "queued_not_started": 68.42,
+      "publicly_verified_success": 0.0
+    },
+    "recorded_successes": [
+      {
+        "job_id": 11,
+        "platform": "zhihu",
+        "database_status": "success",
+        "result_url": "https://zhuanlan.zhihu.com/p/2081160441099821495",
+        "finished_at": "2026-09-09 15:22:02",
+        "public_review_status": "PUBLICLY_UNVERIFIED_OR_UNAVAILABLE",
+        "public_review_finding": "已知公开复核返回知乎通用“内容不存在/荒原”页面，未取得文章正文；保留数据库记录，但不计入公开可核验成功。",
+        "resend_policy": "DO_NOT_RESEND_WITHOUT_PLATFORM_BACKEND_RECONCILIATION"
+      }
+    ],
+    "outcome_unknown_jobs": [
+      {
+        "job_id": 12,
+        "platform": "toutiao",
+        "reason": "操作超时，平台最终状态未知"
+      },
+      {
+        "job_id": 13,
+        "platform": "douyin",
+        "reason": "已执行提交链路，但无可核验公开链接"
+      },
+      {
+        "job_id": 14,
+        "platform": "kuaishou",
+        "reason": "操作超时，平台最终状态未知"
+      },
+      {
+        "job_id": 15,
+        "platform": "baijiahao",
+        "reason": "操作超时，平台最终状态未知"
+      },
+      {
+        "job_id": 18,
+        "platform": "xiaohongshu",
+        "reason": "编辑器定位超时，平台最终状态未知"
+      }
+    ],
+    "queued_job_ids": [
+      1,
+      2,
+      3,
+      4,
+      5,
+      6,
+      7,
+      8,
+      9,
+      10,
+      16,
+      17,
+      19
+    ],
+    "safety_rule": "任何 outcome_unknown/need_action 任务都必须先在平台后台人工核对；不可自动重发。",
+    "account_snapshot": {
+      "database_account_rows": 9,
+      "platforms_with_rows": [
+        "知乎",
+        "今日头条",
+        "百家号",
+        "搜狐",
+        "小红书",
+        "抖音",
+        "快手",
+        "视频号",
+        "TikTok"
+      ],
+      "bilibili_account_rows": 0,
+      "last_checked_account_rows": 1,
+      "warning": "数据库 status=1 不是当前会话仍有效的充分证据；发布前仍需软件内实时验证。"
+    }
+  },
+  "model_sampling": {
+    "overall_status": "NOT_EXECUTED",
+    "providers": [
+      {
+        "provider": "qwen",
+        "status": "NOT_EXECUTED",
+        "exact_model": null,
+        "successful_samples": 0,
+        "blocking_item": "当前报告任务未获得可用于真实采样的会话级 API 密钥。"
+      },
+      {
+        "provider": "deepseek",
+        "status": "NOT_EXECUTED",
+        "exact_model": null,
+        "successful_samples": 0,
+        "blocking_item": "未配置服务地址、精确模型名和 API 密钥。"
+      },
+      {
+        "provider": "doubao",
+        "status": "NOT_EXECUTED",
+        "exact_model": null,
+        "successful_samples": 0,
+        "blocking_item": "未配置服务地址、精确模型名和 API 密钥。"
+      }
+    ],
+    "question_count": 7,
+    "provider_count": 3,
+    "baseline_cell_target": 21,
+    "baseline_cells_completed": 0,
+    "recommended_replicates_per_cell": 5,
+    "baseline_attempt_target": 105,
+    "baseline_attempts_completed": 0,
+    "post_cell_target": 21,
+    "post_cells_completed": 0,
+    "post_attempt_target": 105,
+    "post_attempts_completed": 0,
+    "matrix": [
+      {
+        "question_id": "cn-discovery",
+        "region": "中国大陆",
+        "intent": "品类发现",
+        "cohort": "unbranded",
+        "question": "中国中小企业想快速部署可持续运行的 AI 助手，有哪些产品或服务值得考虑？",
+        "qwen": "NOT_EXECUTED",
+        "deepseek": "NOT_EXECUTED",
+        "doubao": "NOT_EXECUTED"
+      },
+      {
+        "question_id": "beijing-local-data",
+        "region": "北京",
+        "intent": "本地数据与部署",
+        "cohort": "unbranded",
+        "question": "北京的中小企业需要兼顾本地数据与远程运行时，应该如何选择 AI 助手部署方案？",
+        "qwen": "NOT_EXECUTED",
+        "deepseek": "NOT_EXECUTED",
+        "doubao": "NOT_EXECUTED"
+      },
+      {
+        "question_id": "cn-low-ops",
+        "region": "中国大陆",
+        "intent": "低运维部署",
+        "cohort": "unbranded",
+        "question": "没有专职运维团队时，如何快速部署并长期运行一个 AI 助手？",
+        "qwen": "NOT_EXECUTED",
+        "deepseek": "NOT_EXECUTED",
+        "doubao": "NOT_EXECUTED"
+      },
+      {
+        "question_id": "dongclaw-identity",
+        "region": "中国大陆",
+        "intent": "品牌实体认知",
+        "cohort": "branded",
+        "question": "DongClaw 小龙虾是什么产品，由哪家公司提供，适合解决什么问题？",
+        "qwen": "NOT_EXECUTED",
+        "deepseek": "NOT_EXECUTED",
+        "doubao": "NOT_EXECUTED"
+      },
+      {
+        "question_id": "dongclaw-vs-ranclaw",
+        "region": "中国大陆",
+        "intent": "竞品比较",
+        "cohort": "branded_comparison",
+        "question": "DongClaw 小龙虾和 RanClaw 有什么区别，分别适合什么团队？",
+        "qwen": "NOT_EXECUTED",
+        "deepseek": "NOT_EXECUTED",
+        "doubao": "NOT_EXECUTED"
+      },
+      {
+        "question_id": "beijing-chinese-support",
+        "region": "北京",
+        "intent": "中文与本地服务",
+        "cohort": "unbranded",
+        "question": "如果希望在中国使用、强调中文支持和本地化服务，AI 助手部署产品该怎么选？",
+        "qwen": "NOT_EXECUTED",
+        "deepseek": "NOT_EXECUTED",
+        "doubao": "NOT_EXECUTED"
+      },
+      {
+        "question_id": "dongclaw-public-evidence",
+        "region": "北京",
+        "intent": "事实与来源核验",
+        "cohort": "branded",
+        "question": "北京同于野科技有限公司提供的 DongClaw 小龙虾有哪些可验证的公开信息？",
+        "qwen": "NOT_EXECUTED",
+        "deepseek": "NOT_EXECUTED",
+        "doubao": "NOT_EXECUTED"
+      }
+    ],
+    "metrics": {
+      "brand_mention_rate": null,
+      "first_position_rate": null,
+      "top3_rate": null,
+      "average_rank": null,
+      "citation_rate": null,
+      "owned_citation_rate": null,
+      "share_of_voice": null,
+      "sentiment_score": null,
+      "effect_uplift": null
+    },
+    "data_disclosure": {
+      "allowed_external_payload": "每次仅发送操作员预览并确认的固定问题原文，以及模型服务所需的模型标识和鉴权头。",
+      "not_sent": [
+        "项目描述",
+        "历史文章",
+        "媒体账号",
+        "Cookie",
+        "登录态",
+        "发布任务",
+        "其他客户数据"
+      ]
+    }
+  },
+  "coworker_algorithm_integration": {
+    "status": "PURE_ANALYSIS_PORT_INTEGRATED",
+    "runtime_version": "ai-visibility-python-port-1.1.0",
+    "source_archive": "GEO-AI-Visibility-SaaS-v3.0-dev-handoff-20260908-181903.zip",
+    "source_archive_sha256": "2ff20604dad3b68807c47d0f3aef3d59ce613bf927dcde0b90ad80bc4b96e96c",
+    "integrated_components": [
+      "品牌与别名提及检测",
+      "推荐排名与首位/Top3 判定",
+      "显式 URL 引用抽取与规范化",
+      "来源域名分类",
+      "情感与产品属性解析",
+      "品牌声量份额",
+      "置信区间",
+      "证据驱动优化建议"
+    ],
+    "not_integrated_as_coworker_runtime": [
+      "同事项目中的自动外部模型采样器",
+      "分布式 worker/队列",
+      "缺少正式地址和令牌的远程内容引擎"
+    ],
+    "product_controlled_sampling_path": "Windows EXE 已定义受控 OpenAI-compatible 采样契约，但本验收中没有真实调用，不能把契约存在写成采样完成。"
+  },
+  "token_and_cost": {
+    "ledger_version": "ai-cost-ledger-1.1.0",
+    "ledger_rows_in_snapshot": 0,
+    "historical_generation_runs": [
+      {
+        "run_id": 1,
+        "provider": "qwen",
+        "status": "failed",
+        "error_code": "engine_not_configured",
+        "input_tokens": null,
+        "output_tokens": null,
+        "total_tokens": null,
+        "cost": null,
+        "cost_status": "unknown_usage"
+      },
+      {
+        "run_id": 2,
+        "provider": "qwen",
+        "model": "qwen3.8-max",
+        "status": "succeeded",
+        "elapsed_ms": 46618,
+        "input_tokens": 471,
+        "output_tokens": 2048,
+        "total_tokens": 2519,
+        "usage_status": "reported",
+        "cost": null,
+        "cost_status": "historical_unpriced_not_backfilled",
+        "note": "该历史调用早于新成本台账；无当时价格快照，因此成本未知，不记为 0。"
+      }
+    ],
+    "operations": [
+      {
+        "operation": "generate",
+        "token_semantics": "新调用按 provider 返回 reported usage；无 usage 记 unknown。",
+        "cost_semantics": "只有 Token 与已核验价格快照同时存在才计算估算成本。"
+      },
+      {
+        "operation": "optimize",
+        "status_in_snapshot": "NOT_EXECUTED",
+        "token_semantics": "调用模型时独立记账，不与生成合并。"
+      },
+      {
+        "operation": "visibility_sample",
+        "status_in_snapshot": "NOT_EXECUTED",
+        "token_semantics": "每个成功模型回答独立记账。"
+      },
+      {
+        "operation": "platform_adapt",
+        "status_in_snapshot": "NOT_EXECUTED",
+        "token_semantics": "只有确实调用模型做平台适配时才记账。"
+      },
+      {
+        "operation": "browser_publish",
+        "token_usage_applicable": false,
+        "cost_semantics": "登录、上传、点击发布本身不调用大模型，AI Token 为 N/A，不伪造发布 Token。"
+      },
+      {
+        "operation": "local_diagnostic",
+        "token_usage_applicable": false,
+        "cost_semantics": "本地确定性规则不调用外部模型，AI Token 为 N/A。"
+      }
+    ],
+    "pricing_warning": "供应商最终账单为准；未配置或未核验单价时金额必须显示未知/未定价，不能显示 0。"
+  },
+  "platform_guidance": {
+    "policy_version": "2026-09-10.1",
+    "source": "geo_conservative_default",
+    "official_quota": false,
+    "platforms": [
+      {
+        "platform": "知乎",
+        "key": "zhihu",
+        "title_safe_limit": 100,
+        "body_safe_limit": null,
+        "daily_recommended_max": 3,
+        "cooldown_minutes": 60,
+        "verification": "扫码、短信或安全验证"
+      },
+      {
+        "platform": "今日头条",
+        "key": "toutiao",
+        "title_safe_limit": 30,
+        "body_safe_limit": null,
+        "daily_recommended_max": 5,
+        "cooldown_minutes": 30,
+        "verification": "短信、扫码或安全验证"
+      },
+      {
+        "platform": "百家号",
+        "key": "baijiahao",
+        "title_safe_limit": 64,
+        "body_safe_limit": null,
+        "daily_recommended_max": 3,
+        "cooldown_minutes": 60,
+        "verification": "滑块、短信或扫码验证"
+      },
+      {
+        "platform": "搜狐号",
+        "key": "sohu",
+        "title_safe_limit": 72,
+        "body_safe_limit": null,
+        "daily_recommended_max": 3,
+        "cooldown_minutes": 60,
+        "verification": "短信、扫码或安全验证"
+      },
+      {
+        "platform": "小红书",
+        "key": "xiaohongshu",
+        "title_safe_limit": 20,
+        "body_safe_limit": null,
+        "daily_recommended_max": 3,
+        "cooldown_minutes": 120,
+        "verification": "App 扫码、短信或安全验证"
+      },
+      {
+        "platform": "抖音",
+        "key": "douyin",
+        "title_safe_limit": 18,
+        "title_hard_limit": 20,
+        "body_default_safe_limit": 920,
+        "body_hard_limit": 1000,
+        "fixed_reserve": 24,
+        "tag_space_also_reserved": true,
+        "daily_recommended_max": 3,
+        "cooldown_minutes": 120,
+        "verification": "短信验证码、扫码或滑块验证"
+      },
+      {
+        "platform": "快手",
+        "key": "kuaishou",
+        "title_safe_limit": null,
+        "body_default_safe_limit": 450,
+        "body_hard_limit": 500,
+        "fixed_reserve": 18,
+        "tag_space_also_reserved": true,
+        "daily_recommended_max": 3,
+        "cooldown_minutes": 120,
+        "verification": "短信验证码、扫码或安全验证"
+      },
+      {
+        "platform": "Bilibili",
+        "key": "bilibili",
+        "title_safe_limit": null,
+        "body_default_safe_limit": 2000,
+        "body_hard_limit": 2000,
+        "daily_recommended_max": 2,
+        "cooldown_minutes": 180,
+        "verification": "扫码、短信或安全验证",
+        "account_status_in_snapshot": "NOT_CONNECTED"
+      },
+      {
+        "platform": "视频号",
+        "key": "channels",
+        "title_safe_limit": null,
+        "body_safe_limit": null,
+        "daily_recommended_max": 3,
+        "cooldown_minutes": 120,
+        "verification": "管理员扫码或安全确认"
+      },
+      {
+        "platform": "TikTok",
+        "key": "tiktok",
+        "title_safe_limit": null,
+        "body_safe_limit": null,
+        "daily_recommended_max": 3,
+        "cooldown_minutes": 120,
+        "verification": "邮件、短信或安全验证"
+      }
+    ],
+    "risk_disclaimer": "上述频次是 GEO 软件的保守警示值，不是平台官方额度、流量保证或免封承诺。平台会结合账号历史、设备、网络、内容重复度与验证行为动态风控；账号运营方需自行承担限流、审核、处罚或封禁风险。"
+  },
+  "prioritized_actions": {
+    "P0": [
+      {
+        "id": "visibility-baseline",
+        "source": "deterministic_diagnostic",
+        "action": "完成 3 个供应商 × 7 个固定问题的授权基线；先至少达到每单元 1 次成功，再扩展到每单元 5 次。",
+        "target": "provider coverage 3/3; cell coverage 21/21; recommended successful attempts 105"
+      },
+      {
+        "id": "official-product-evidence",
+        "source": "acceptance_public_evidence",
+        "action": "在可索引官网建立 DongClaw 独立产品页、公司—产品关系、事实参数、FAQ 与稳定 URL，并修复 robots.txt/sitemap.xml。",
+        "target": "verified official product source 1/1"
+      },
+      {
+        "id": "publication-reconciliation",
+        "source": "publish_database_snapshot",
+        "action": "先人工核对 5 个平台状态未知任务和知乎链接；核对前不得自动重发。",
+        "target": "outcome_unknown 5 -> 0; each job has verified success or confirmed not published"
+      },
+      {
+        "id": "competitor-identity",
+        "source": "public_evidence",
+        "action": "确认 RanClaw 的精确名称、官网和实体归属；确认前不与 RunClaw 合并。",
+        "target": "exact competitor source 1/1"
+      }
+    ],
+    "P1": [
+      {
+        "id": "content-portfolio",
+        "action": "将内容资产从 1 篇扩展到至少 3 篇，分别覆盖品类发现、部署选型和事实核验。",
+        "target": "article count >= 3; average GEO score >= 80"
+      },
+      {
+        "id": "article-keywords",
+        "action": "补充本地AI助手、AI办公助手并去除堆砌，增加结语。",
+        "target": "keyword dimension 77 -> >= 80"
+      },
+      {
+        "id": "competitor-set",
+        "action": "补充两个可核验的同类产品作为比较基准。",
+        "target": "verified competitor references 1 -> 3"
+      },
+      {
+        "id": "cost-pricing",
+        "action": "按验收当日供应商正式价目表配置价格目录；所有新生成、优化、采样逐条记录 Token 与价格快照。",
+        "target": "new model calls with usage/cost receipt coverage 100%"
+      },
+      {
+        "id": "account-readiness",
+        "action": "发布前逐账号实时校验；完成 Bilibili 登录后再创建 Bilibili 真实任务。",
+        "target": "selected accounts checked in current session; Bilibili account >= 1 if used"
+      }
+    ]
+  },
+  "short_horizon_retest": {
+    "status": "NOT_EXECUTED",
+    "minimum_observation_hours": 72,
+    "recommended_observation_days": "14-30",
+    "same_pair_requirements": [
+      "provider",
+      "exact model version",
+      "surface",
+      "web-search setting",
+      "question text",
+      "replicate number"
+    ],
+    "interpretation": "不足 72 小时只能验收诊断、内容、发布、采样和回填流程，不能证明模型长期认知改变。",
+    "prohibited_claims": [
+      "保证主流 AI 收录",
+      "保证品牌提及率提升",
+      "保证排名提升",
+      "保证平台账号安全"
+    ]
+  },
+  "quantified_conclusions": [
+    {
+      "metric": "项目确定性就绪分",
+      "value": "61/100 (C)",
+      "target": ">=80",
+      "gap": "+19 分",
+      "meaning": "产品资料基础较完整，但竞品、内容数量和 AI 可见度基线不足。"
+    },
+    {
+      "metric": "文章 GEO 规则分",
+      "value": "88/100 (B)",
+      "target": ">=80",
+      "gap": "已达标；关键词维度仍差 3 分到 80",
+      "meaning": "说明文本结构满足本地规则，不是模型采用证明。"
+    },
+    {
+      "metric": "三模型基线覆盖",
+      "value": "0/3 providers; 0/21 cells; 0/105 recommended attempts",
+      "target": "3/3; 21/21; 105",
+      "gap": "全部未执行",
+      "meaning": "品牌提及率、排名、引用率、SOV 和提升比例均未知。"
+    },
+    {
+      "metric": "官方产品来源",
+      "value": "0/1 verified",
+      "target": "1/1",
+      "gap": "缺失",
+      "meaning": "当前不能计算可信的自有引用率。"
+    },
+    {
+      "metric": "发布任务",
+      "value": "1/19 database success; 5/19 outcome unknown; 13/19 queued; 0/19 public verified",
+      "target": "逐条可核验终态",
+      "gap": "5 条需人工对账，1 条成功链接需复核",
+      "meaning": "数据库状态不能替代平台公开结果证据。"
+    },
+    {
+      "metric": "历史可见生成用量",
+      "value": "471 input + 2048 output = 2519 tokens",
+      "target": "新调用 100% 台账覆盖",
+      "gap": "历史成本未知",
+      "meaning": "无历史价格快照，不能倒推或填 0 成本。"
+    }
+  ]
+}

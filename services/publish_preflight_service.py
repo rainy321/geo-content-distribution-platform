@@ -1,0 +1,420 @@
+from __future__ import annotations
+
+import re
+from typing import Any, Iterable
+
+from services.platform_capability_service import normalize_platform_key
+
+
+PUBLISH_CONTENT_POLICY_VERSION = "2026-09-10.1"
+
+
+class PublishContentLimitError(ValueError):
+    """Raised before a publisher is loaded when a platform copy is unsafe."""
+
+
+_CONTENT_POLICIES: dict[str, dict[str, Any]] = {
+    "douyin": {
+        "content_mode": "image_note",
+        "hard_limit": 1000,
+        "default_safe_limit": 920,
+        "fixed_reserve": 24,
+        "label": "作品描述",
+        "counting_note": "按 Unicode 字符预估；另为话题、换行和平台计数差异预留余量",
+    },
+    "kuaishou": {
+        "content_mode": "image_note",
+        "hard_limit": 500,
+        "default_safe_limit": 450,
+        "fixed_reserve": 18,
+        "label": "作品描述",
+        "counting_note": "按 Unicode 字符预估；另为话题、换行和平台计数差异预留余量",
+    },
+    "bilibili": {
+        "content_mode": "video_description",
+        "hard_limit": 2000,
+        "default_safe_limit": 2000,
+        "fixed_reserve": 0,
+        "label": "视频简介",
+        "counting_note": "按 Unicode 字符计数；标题和标签由独立字段提交",
+    },
+}
+
+
+_TITLE_POLICIES: dict[str, dict[str, Any]] = {
+    # These limits mirror the fields used by the bundled uploaders.  Keeping
+    # them here makes any shortening visible before a job is persisted.
+    "zhihu": {"hard_limit": 100, "safe_limit": 100, "min_length": 1},
+    # The current Douyin image-note publisher UI exposes a 20-character title
+    # field.  Keep two characters of product-side headroom for platform-side
+    # counting differences instead of letting a 20/20 snapshot reach submit.
+    "douyin": {"hard_limit": 20, "safe_limit": 18, "min_length": 1},
+    "toutiao": {"hard_limit": 30, "safe_limit": 30, "min_length": 1},
+    "sohu": {"hard_limit": 72, "safe_limit": 72, "min_length": 5},
+    "baijiahao": {"hard_limit": 64, "safe_limit": 64, "min_length": 2},
+    "xiaohongshu": {"hard_limit": 20, "safe_limit": 20, "min_length": 1},
+}
+
+_PLAIN_TEXT_CONTENT_PLATFORMS = frozenset({"baijiahao", "xiaohongshu"})
+
+
+_VERIFICATION_POLICIES: dict[str, dict[str, Any]] = {
+    "zhihu": {
+        "methods": ("扫码确认", "短信验证", "安全验证"),
+        "notice": "知乎可能要求扫码、短信或安全验证，请保持知乎 App 和绑定手机可用。",
+    },
+    "toutiao": {
+        "methods": ("短信验证", "扫码确认", "安全验证"),
+        "notice": "今日头条可能要求短信、扫码或安全验证，请保持绑定手机可用。",
+    },
+    "baijiahao": {
+        "methods": ("滑块验证", "短信验证", "扫码确认"),
+        "notice": "百家号可能在最终提交前要求滑块、短信或扫码验证。",
+    },
+    "sohu": {
+        "methods": ("短信验证", "扫码确认", "安全验证"),
+        "notice": "搜狐号可能要求短信、扫码或安全验证，请保持绑定手机可用。",
+    },
+    "xiaohongshu": {
+        "methods": ("扫码确认", "短信验证", "安全验证"),
+        "notice": "小红书可能要求 App 扫码、短信或安全验证，请保持小红书 App 可用。",
+    },
+    "douyin": {
+        "methods": ("短信验证码", "扫码确认", "滑块验证"),
+        "notice": "抖音可能在最终发布时要求短信验证码、扫码或滑块验证，请保持绑定手机和抖音 App 可用。",
+    },
+    "kuaishou": {
+        "methods": ("短信验证码", "扫码确认", "安全验证"),
+        "notice": "快手可能在最终发布时要求短信验证码、扫码或安全验证，请保持绑定手机和快手 App 可用。",
+    },
+    "bilibili": {
+        "methods": ("扫码确认", "短信验证", "安全验证"),
+        "notice": "Bilibili 可能要求扫码、短信或安全验证，请保持哔哩哔哩 App 和绑定手机可用。",
+    },
+    "channels": {
+        "methods": ("管理员扫码", "安全确认"),
+        "notice": "视频号可能要求管理员微信扫码或安全确认，请保持对应管理员微信可用。",
+    },
+    "tiktok": {
+        "methods": ("邮件验证码", "短信验证", "安全验证"),
+        "notice": "TikTok 可能要求邮件、短信或安全验证，请保持绑定邮箱和手机可用。",
+    },
+}
+
+
+PLATFORM_FREQUENCY_GUIDANCE_DEFAULTS: dict[str, dict[str, int]] = {
+    "zhihu": {"daily_recommended_max": 3, "cooldown_minutes": 60},
+    "toutiao": {"daily_recommended_max": 5, "cooldown_minutes": 30},
+    "baijiahao": {"daily_recommended_max": 3, "cooldown_minutes": 60},
+    "sohu": {"daily_recommended_max": 3, "cooldown_minutes": 60},
+    "xiaohongshu": {"daily_recommended_max": 3, "cooldown_minutes": 120},
+    "douyin": {"daily_recommended_max": 3, "cooldown_minutes": 120},
+    "kuaishou": {"daily_recommended_max": 3, "cooldown_minutes": 120},
+    "bilibili": {"daily_recommended_max": 2, "cooldown_minutes": 180},
+    "channels": {"daily_recommended_max": 3, "cooldown_minutes": 120},
+    "tiktok": {"daily_recommended_max": 3, "cooldown_minutes": 120},
+}
+
+
+def get_publish_content_policy(
+    platform: str,
+    *,
+    tags: Iterable[Any] | None = None,
+) -> dict[str, Any] | None:
+    """Return the effective platform limit after reserving tag space."""
+
+    normalized_platform = _normalize_platform(platform)
+    configured = _CONTENT_POLICIES.get(normalized_platform)
+    if configured is None:
+        return None
+
+    normalized_tags = _normalize_tags(tags)
+    tag_characters = sum(character_count(tag) + 2 for tag in normalized_tags)
+    hard_limit = int(configured["hard_limit"])
+    fixed_reserve = int(configured["fixed_reserve"])
+    reserved_characters = fixed_reserve + tag_characters
+    safe_limit = min(
+        int(configured["default_safe_limit"]),
+        hard_limit - reserved_characters,
+    )
+    if safe_limit < 80:
+        raise PublishContentLimitError(
+            f"{normalized_platform} 话题占用过多，无法为正文保留安全空间；"
+            "请先减少或缩短文章标签"
+        )
+    return {
+        "version": PUBLISH_CONTENT_POLICY_VERSION,
+        "field": "content",
+        "content_mode": configured["content_mode"],
+        "label": configured["label"],
+        "hard_limit": hard_limit,
+        "safe_limit": safe_limit,
+        "fixed_reserve": fixed_reserve,
+        "tag_characters": tag_characters,
+        "reserved_characters": reserved_characters,
+        "counting_note": configured["counting_note"],
+    }
+
+
+def get_publish_title_policy(platform: str) -> dict[str, Any] | None:
+    normalized_platform = _normalize_platform(platform)
+    configured = _TITLE_POLICIES.get(normalized_platform)
+    if configured is None:
+        return None
+    return {
+        "version": PUBLISH_CONTENT_POLICY_VERSION,
+        "field": "title",
+        "label": "发布标题",
+        "hard_limit": int(configured["hard_limit"]),
+        "safe_limit": int(configured["safe_limit"]),
+        "min_length": int(configured["min_length"]),
+        "counting_note": "按 Unicode 字符计数；超限时在创建任务前生成并展示短标题",
+    }
+
+
+def get_platform_verification_policy(platform: str) -> dict[str, Any]:
+    normalized_platform = _normalize_platform(platform)
+    configured = _VERIFICATION_POLICIES.get(normalized_platform)
+    if configured is None:
+        return {
+            "likely": True,
+            "methods": ["账号安全验证"],
+            "notice": "平台可能要求账号安全验证，请保持绑定设备可用。",
+            "action": "软件会停止自动操作并将任务标记为待人工确认，不会绕过或自动重试验证。",
+        }
+    return {
+        "likely": True,
+        "methods": list(configured["methods"]),
+        "notice": configured["notice"],
+        "action": "出现验证时请在已打开的平台窗口内本人完成；软件会保留任务并转为待人工确认，不会绕过或自动重试。",
+    }
+
+
+def get_platform_frequency_guidance(platform: str) -> dict[str, Any]:
+    """Return product-side conservative defaults, never an official quota."""
+
+    normalized_platform = _normalize_platform(platform)
+    configured = PLATFORM_FREQUENCY_GUIDANCE_DEFAULTS.get(
+        normalized_platform,
+        {"daily_recommended_max": 3, "cooldown_minutes": 120},
+    )
+    return {
+        "daily_recommended_max": configured["daily_recommended_max"],
+        "cooldown_minutes": configured["cooldown_minutes"],
+        "enforcement": "warning",
+        "source": "geo_conservative_default",
+        "disclaimer": (
+            "这是 GEO 软件的保守操作建议，不是平台官方配额或通过保证；"
+            "平台会按账号状态、内容和行为动态风控，账号运营方需自行承担"
+            "限流、处罚或封禁风险。"
+        ),
+        "risk_notice": (
+            "新账号、短时间批量发送、重复内容或平台要求验证时，应降低频率；"
+            "可能出现验证码、限流、审核延迟或账号处罚。"
+        ),
+    }
+
+
+def build_platform_publish_variant(
+    *,
+    platform: str,
+    title: str,
+    content: str,
+    tags: Iterable[Any] | None = None,
+    publish_title: str | None = None,
+    publish_content: str | None = None,
+) -> dict[str, Any]:
+    """Build a visible, immutable platform copy without changing the article."""
+
+    normalized_platform = _normalize_platform(platform)
+    original_content = _normalize_line_endings(content).strip()
+    if not original_content:
+        raise PublishContentLimitError("原稿正文不能为空")
+    original_title = str(title or "").strip()
+    if not original_title:
+        raise PublishContentLimitError("原稿标题不能为空")
+
+    policy = get_publish_content_policy(normalized_platform, tags=tags)
+    title_policy = get_publish_title_policy(normalized_platform)
+    title_manually_edited = publish_title is not None
+    if title_manually_edited:
+        actual_title = str(publish_title or "").strip()
+    elif title_policy is not None:
+        actual_title = _shorten_title_to_limit(
+            original_title,
+            title_policy["safe_limit"],
+        )
+    else:
+        actual_title = original_title
+    if not actual_title:
+        raise PublishContentLimitError("平台发布标题不能为空")
+
+    manually_edited = publish_content is not None
+    if manually_edited:
+        actual_content = _normalize_line_endings(publish_content).strip()
+        if not actual_content:
+            raise PublishContentLimitError("平台发布副本不能为空")
+    elif policy is not None or normalized_platform in _PLAIN_TEXT_CONTENT_PLATFORMS:
+        compact_content = _markdown_to_note_text(original_content)
+        actual_content = (
+            _shorten_to_limit(compact_content, policy["safe_limit"])
+            if policy is not None
+            else compact_content
+        )
+    else:
+        actual_content = original_content
+
+    actual_length = character_count(actual_content)
+    original_length = character_count(original_content)
+    title_length = character_count(actual_title)
+    original_title_length = character_count(original_title)
+    if title_policy is not None:
+        if title_length < title_policy["min_length"]:
+            raise PublishContentLimitError(
+                f"{normalized_platform} 发布标题至少需要 "
+                f"{title_policy['min_length']} 字"
+            )
+        if title_length > title_policy["safe_limit"]:
+            raise PublishContentLimitError(
+                f"{normalized_platform} 发布标题当前 {title_length} 字，"
+                f"请缩短至 {title_policy['safe_limit']} 字以内"
+            )
+    if actual_length > 50_000:
+        raise PublishContentLimitError("平台发布副本不能超过 50000 字")
+    if policy is not None and actual_length > policy["safe_limit"]:
+        raise PublishContentLimitError(
+            f"{normalized_platform} 平台副本当前 {actual_length} 字，"
+            f"为避免超过平台 {policy['hard_limit']} 字上限（含话题和计数余量），"
+            f"请缩短至 {policy['safe_limit']} 字以内"
+        )
+
+    adapted = actual_content != original_content
+    if manually_edited:
+        adaptation_reason = "用户编辑的平台副本"
+    elif adapted and policy is not None:
+        adaptation_reason = (
+            f"已移除不适合图片笔记的 Markdown 标记，并自动缩至 "
+            f"{policy['safe_limit']} 字安全线内"
+        )
+    elif adapted and normalized_platform in _PLAIN_TEXT_CONTENT_PLATFORMS:
+        adaptation_reason = "已在创建任务前移除平台编辑器不需要的 Markdown 标记"
+    else:
+        adaptation_reason = "原稿已符合平台安全限制，无需缩减"
+
+    return {
+        "platform": normalized_platform,
+        "policy_version": PUBLISH_CONTENT_POLICY_VERSION,
+        "title": actual_title,
+        "original_title": original_title,
+        "title_length": title_length,
+        "original_title_length": original_title_length,
+        "title_adapted": actual_title != original_title,
+        "title_manually_edited": title_manually_edited,
+        "title_policy": title_policy,
+        "original_content": original_content,
+        "publish_content": actual_content,
+        "original_length": original_length,
+        "publish_length": actual_length,
+        "adapted": adapted,
+        "manually_edited": manually_edited,
+        "adaptation_reason": adaptation_reason,
+        "content_policy": policy,
+        "verification": get_platform_verification_policy(normalized_platform),
+    }
+
+
+def validate_platform_publish_variant(
+    *,
+    platform: str,
+    title: str,
+    content: str,
+    tags: Iterable[Any] | None = None,
+) -> dict[str, Any]:
+    """Final execution gate for an already-created platform copy."""
+
+    return build_platform_publish_variant(
+        platform=platform,
+        title=title,
+        content=content,
+        tags=tags,
+        publish_title=title,
+        publish_content=content,
+    )
+
+
+def character_count(value: Any) -> int:
+    return len(str(value or ""))
+
+
+def _normalize_platform(platform: str) -> str:
+    normalized = normalize_platform_key(platform)
+    if not normalized:
+        raise PublishContentLimitError("暂不支持该发布平台")
+    return normalized
+
+
+def _normalize_tags(tags: Iterable[Any] | None) -> list[str]:
+    if tags is None or isinstance(tags, (str, bytes)):
+        return []
+    result: list[str] = []
+    for item in tags:
+        normalized = str(item or "").strip().lstrip("#").strip()
+        if normalized:
+            result.append(normalized)
+    return result
+
+
+def _normalize_line_endings(value: Any) -> str:
+    return str(value or "").replace("\r\n", "\n").replace("\r", "\n")
+
+
+def _markdown_to_note_text(value: str) -> str:
+    text = _normalize_line_endings(value)
+    text = re.sub(r"^\s*```[^\n]*\n?", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s{0,3}#{1,6}\s*", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s*>\s?", "", text, flags=re.MULTILINE)
+    text = re.sub(r"^\s*[-*+]\s+", "• ", text, flags=re.MULTILINE)
+    text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
+    text = text.replace("**", "").replace("__", "").replace("`", "")
+    text = re.sub(r"[ \t]+", " ", text)
+    text = re.sub(r" *\n *", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _shorten_to_limit(value: str, limit: int) -> str:
+    if character_count(value) <= limit:
+        return value
+    if limit < 2:
+        raise PublishContentLimitError("平台安全字数不足，无法生成发布副本")
+
+    target = limit - 1
+    pieces = re.split(r"(?<=[。！？!?；;])|\n+", value)
+    selected: list[str] = []
+    used = 0
+    for raw_piece in pieces:
+        piece = raw_piece.strip()
+        if not piece:
+            continue
+        separator = "\n" if selected else ""
+        addition = f"{separator}{piece}"
+        if used + character_count(addition) <= target:
+            selected.append(piece)
+            used += character_count(addition)
+            continue
+        remaining = target - used - character_count(separator)
+        if remaining > 0 and not selected:
+            selected.append(piece[:remaining].rstrip())
+        break
+
+    shortened = "\n".join(selected).rstrip(" ，,。；;：:")
+    if not shortened:
+        shortened = value[:target].rstrip()
+    return f"{shortened}…"
+
+
+def _shorten_title_to_limit(value: str, limit: int) -> str:
+    normalized = " ".join(str(value or "").split())
+    if character_count(normalized) <= limit:
+        return normalized
+    return normalized[:limit].rstrip()

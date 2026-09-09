@@ -12,9 +12,9 @@ from services.publish_job_service import (
     PUBLISH_AUTHORIZATION_MISMATCH_MESSAGE,
     build_publish_confirmation_fingerprint,
     claim_publish_job,
+    mark_publish_job_awaiting_reconciliation,
     publish_authorization_matches,
     transition_publish_job,
-    update_publish_job_progress,
 )
 from services.publisher_adapter import (
     classify_publisher_error,
@@ -22,6 +22,10 @@ from services.publisher_adapter import (
     PublishContent,
     PublisherAdapter,
     PublishResult,
+)
+from services.publish_preflight_service import (
+    PublishContentLimitError,
+    validate_platform_publish_variant,
 )
 
 
@@ -134,6 +138,17 @@ def execute_publish_job(
             message=str(exc),
             expected_state_version=job["state_version"],
         )
+    except PublishContentLimitError as exc:
+        return transition_publish_job(
+            database_path,
+            job_id,
+            "need_action",
+            message=(
+                f"发布前置校验未通过：{exc}；未加载发布器、未访问平台，"
+                "请重新创建任务并编辑平台短版"
+            ),
+            expected_state_version=job["state_version"],
+        )
     except Exception as exc:
         detail = str(exc).strip() or exc.__class__.__name__
         return transition_publish_job(
@@ -174,6 +189,17 @@ def _build_publish_content(
     publish_at = job.get("publish_at")
     if isinstance(publish_at, str) and publish_at.strip():
         publish_at = datetime.fromisoformat(publish_at.strip())
+    effective_title = str(job.get("publish_title") or article["title"]).strip()
+    effective_content = str(
+        job.get("publish_content") or article["content"]
+    ).strip()
+    validate_platform_publish_variant(
+        platform=job["platform"],
+        title=effective_title,
+        content=effective_content,
+        tags=article.get("tags") or (),
+    )
+
     resolved_media_root = Path(media_root).expanduser().resolve()
     image_paths: list[str] = []
     for filename in job.get("images") or ():
@@ -200,8 +226,8 @@ def _build_publish_content(
 
     return PublishContent(
         platform=job["platform"],
-        title=article["title"],
-        content=article["content"],
+        title=effective_title,
+        content=effective_content,
         images=tuple(image_paths),
         video=video_path,
         tags=tuple(article.get("tags") or ()),
@@ -235,7 +261,7 @@ def _persist_result(
             expected_state_version=job["state_version"],
         )
     if result.status == "processing":
-        return update_publish_job_progress(
+        return mark_publish_job_awaiting_reconciliation(
             database_path,
             job["id"],
             message=result.message,

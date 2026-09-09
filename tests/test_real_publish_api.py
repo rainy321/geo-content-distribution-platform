@@ -533,7 +533,7 @@ class RealPublishApiTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 403)
-        self.assertIn("ENABLE_BILIBILI_RUNTIME", response.get_json()["msg"])
+        self.assertIn("Bilibili", response.get_json()["msg"])
         create_factory.assert_not_called()
         self.assertEqual(
             get_publish_job(self.db_path, job["id"])["status"],
@@ -736,7 +736,7 @@ class RealPublishApiTests(unittest.TestCase):
         self.assertFalse(zhihu["login_available"])
         self.assertFalse(zhihu["scheduled_real_publishing_enabled"])
         self.assertEqual(zhihu["release_status"], "stable")
-        self.assertEqual(bilibili["release_status"], "disabled")
+        self.assertEqual(bilibili["release_status"], "review_required")
         health = self.client.get("/api/health").get_json()["data"]
         self.assertFalse(health["scheduled_real_publishing_enabled"])
 

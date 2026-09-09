@@ -8,6 +8,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
+from services.ai_cost_ledger_service import (
+    attach_article_to_usage,
+    canonicalize_provider,
+    record_ai_usage,
+)
 from services.content_engine_contract import (
     ContentEngineError,
     ContentGenerationRequest,
@@ -234,6 +239,23 @@ def mark_succeeded(
                     int(run_id),
                 ),
             )
+            record_ai_usage(
+                database_path,
+                operation="generate",
+                provider=canonicalize_provider(result.engine, result.engine_version),
+                model=result.engine_version,
+                usage=result.usage,
+                usage_status="reported" if result.usage is not None else "unknown",
+                project_id=current["project_id"],
+                reference_type="generation_run",
+                reference_id=run_id,
+                metadata={
+                    "outcome": "succeeded",
+                    "fallback_used": result.fallback_used,
+                    "usage_origin": "provider_response" if result.usage is not None else "not_reported",
+                },
+                connection=conn,
+            )
     return payload
 
 
@@ -367,6 +389,26 @@ def _mark_error(
                 ),
             )
             row = _fetch_run(conn, run_id)
+            if status == "unknown":
+                record_ai_usage(
+                    database_path,
+                    operation="generate",
+                    provider=canonicalize_provider(
+                        row["actual_engine"] or row["configured_engine"] or "unknown",
+                        row["engine_version"] or "unknown",
+                    ),
+                    model=row["engine_version"] or "unknown",
+                    usage=None,
+                    usage_status="unknown",
+                    project_id=row["project_id"],
+                    reference_type="generation_run",
+                    reference_id=run_id,
+                    metadata={
+                        "outcome": "unknown",
+                        "usage_origin": "provider_outcome_unknown",
+                    },
+                    connection=conn,
+                )
     return _serialize_run(row)
 
 
@@ -402,6 +444,14 @@ def _bind_article_on_connection(
         raise GenerationRunStateError("文章已绑定到另一条生成记录") from exc
     if cursor.rowcount != 1:
         raise GenerationRunStateError("生成记录绑定发生并发冲突")
+    attach_article_to_usage(
+        "",
+        operation="generate",
+        reference_type="generation_run",
+        reference_id=run_id,
+        article_id=article_id,
+        connection=conn,
+    )
 
 
 def _connect(database_path: str | Path) -> sqlite3.Connection:

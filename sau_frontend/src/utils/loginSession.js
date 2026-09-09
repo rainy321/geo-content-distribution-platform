@@ -152,9 +152,35 @@ export const parseLoginSessionEvent = rawValue => {
 export const buildStreamFailure = () => ({
   kind: 'failure',
   code: 'stream_disconnected',
-  message: '软件与登录流程的状态连接已中断。',
+  message: '软件与登录流程的状态连接在多次重连后仍未恢复。',
   action: LOGIN_ERROR_ACTIONS.stream_disconnected
 })
+
+export const LOGIN_STREAM_RECONNECT_DELAYS_MS = Object.freeze([800, 1600, 3000])
+
+/**
+ * Produce a bounded reconnect decision. `completedAttempts` counts retries
+ * already started for the current uninterrupted transport outage.
+ */
+export const planLoginStreamReconnect = completedAttempts => {
+  const normalizedAttempts = Number.isInteger(completedAttempts) && completedAttempts > 0
+    ? completedAttempts
+    : 0
+  if (normalizedAttempts >= LOGIN_STREAM_RECONNECT_DELAYS_MS.length) {
+    return {
+      exhausted: true,
+      attempt: normalizedAttempts,
+      maxAttempts: LOGIN_STREAM_RECONNECT_DELAYS_MS.length,
+      delayMs: 0
+    }
+  }
+  return {
+    exhausted: false,
+    attempt: normalizedAttempts + 1,
+    maxAttempts: LOGIN_STREAM_RECONNECT_DELAYS_MS.length,
+    delayMs: LOGIN_STREAM_RECONNECT_DELAYS_MS[normalizedAttempts]
+  }
+}
 
 /**
  * Resolve the cancellation endpoint without guessing whether credentials were

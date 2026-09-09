@@ -126,7 +126,9 @@ class TouTiaoVideo(object):
         dry_run=False,
         description: str = "",
     ):
-        self.title = (title or "")[:30]
+        self.title = str(title or "").strip()
+        if len(self.title) > 30:
+            raise ValueError("今日头条视频标题不能超过 30 字，请返回平台预检编辑")
         self.file_path = file_path
         self.tags = tags or []
         self.publish_date = publish_date
@@ -428,7 +430,9 @@ class TouTiaoArticle(object):
         cover_path=None,
         work_statements=None,
     ):
-        self.title = (title or "")[:30]
+        self.title = str(title or "").strip()
+        if len(self.title) > 30:
+            raise ValueError("今日头条文章标题不能超过 30 字，请返回平台预检编辑")
         self.body = body or ""
         self.tags = tags or []
         self.publish_date = publish_date

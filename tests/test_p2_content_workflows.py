@@ -12,6 +12,7 @@ from openpyxl import Workbook
 from db.createTable import initialize_database
 from sau_backend import app
 from services.content_engine_adapters import MockContentEngineAdapter
+from services.content_engine_contract import ContentEngineUnavailableError
 from services.content_generation_service import ContentGenerationService
 
 
@@ -228,6 +229,155 @@ class P2ContentWorkflowApiTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM articles WHERE title IN ('主题一', '换了主题')"
             ).fetchone()[0]
         self.assertEqual(count, 1)
+
+    def test_batch_generation_accepts_twenty_topics_and_rejects_twenty_one(self):
+        topics = [f"主题{i}" for i in range(1, 21)]
+        adapter = MockContentEngineAdapter(
+            [
+                {
+                    "title": topic,
+                    "summary": "",
+                    "content": f"{topic}正文",
+                    "tags": [],
+                    "faq": [],
+                    "sources": [],
+                }
+                for topic in topics
+            ]
+        )
+        service = ContentGenerationService(self.db_path, adapter)
+        headers = {
+            "X-Request-ID": "batch-limit-twenty",
+            "Idempotency-Key": "batch-limit-twenty",
+        }
+        with patch(
+            "sau_backend._create_content_generation_service",
+            return_value=service,
+        ):
+            accepted = self.client.post(
+                "/api/articles/generate-batch",
+                headers=headers,
+                json={"project_id": self.project_id, "topics": topics},
+            )
+            rejected = self.client.post(
+                "/api/articles/generate-batch",
+                json={
+                    "project_id": self.project_id,
+                    "topics": [*topics, "主题21"],
+                },
+            )
+
+        self.assertEqual(accepted.status_code, 200)
+        data = accepted.get_json()["data"]
+        self.assertEqual(data["batch_limit"], 20)
+        self.assertEqual(data["execution_mode"], "sequential")
+        self.assertEqual(data["created_count"], 20)
+        self.assertEqual([call.topic for call in adapter.calls], topics)
+        self.assertEqual(data["cost_summary"]["operation_count"], 20)
+        self.assertEqual(data["cost_summary"]["unknown_usage_count"], 20)
+        self.assertIsNone(data["cost_summary"]["known_total_tokens"])
+        self.assertEqual(rejected.status_code, 400)
+        self.assertIn("20", rejected.get_json()["msg"])
+
+    def test_batch_generation_continues_after_failure_and_summarizes_costs(self):
+        adapter = MockContentEngineAdapter(
+            [
+                {
+                    "title": "成功一",
+                    "summary": "",
+                    "content": "正文一",
+                    "tags": [],
+                    "faq": [],
+                    "sources": [],
+                    "usage": {"input_tokens": 100, "output_tokens": 50},
+                },
+                ContentEngineUnavailableError("模型暂时不可用"),
+                {
+                    "title": "成功三",
+                    "summary": "",
+                    "content": "正文三",
+                    "tags": [],
+                    "faq": [],
+                    "sources": [],
+                    "usage": {"input_tokens": 60, "output_tokens": 40},
+                },
+            ],
+            version="batch-model",
+        )
+        service = ContentGenerationService(self.db_path, adapter)
+        payload = {
+            "project_id": self.project_id,
+            "topics": ["成功主题一", "失败主题二", "成功主题三"],
+        }
+        headers = {
+            "X-Request-ID": "batch-cost-partial",
+            "Idempotency-Key": "batch-cost-partial",
+        }
+        catalog = json.dumps(
+            {
+                "mock/batch-model": {
+                    "input_per_million": "1",
+                    "output_per_million": "2",
+                    "currency": "CNY",
+                }
+            }
+        )
+        with patch.dict("os.environ", {"AI_PRICE_CATALOG_JSON": catalog}), patch(
+            "sau_backend._create_content_generation_service",
+            return_value=service,
+        ):
+            response = self.client.post(
+                "/api/articles/generate-batch",
+                headers=headers,
+                json=payload,
+            )
+            replay = self.client.post(
+                "/api/articles/generate-batch",
+                headers=headers,
+                json=payload,
+            )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()["data"]
+        self.assertEqual(data["created_count"], 2)
+        self.assertEqual(data["failed_count"], 1)
+        self.assertEqual(
+            [item["status"] for item in data["items"]],
+            ["created", "failed", "created"],
+        )
+        self.assertEqual(len(adapter.calls), 3)
+        self.assertTrue(data["items"][0]["cost_receipt"]["recorded"])
+        self.assertEqual(
+            data["items"][0]["cost_receipt"]["cost_status"],
+            "calculated",
+        )
+        self.assertFalse(data["items"][1]["cost_receipt"]["recorded"])
+        self.assertIsNone(data["items"][1]["cost_receipt"]["estimated_cost"])
+        self.assertTrue(data["items"][2]["cost_receipt"]["recorded"])
+
+        summary = data["cost_summary"]
+        self.assertEqual(summary["operation_count"], 2)
+        self.assertEqual(summary["known_total_tokens"], 250)
+        self.assertEqual(summary["known_token_record_count"], 2)
+        self.assertEqual(summary["unknown_usage_count"], 1)
+        self.assertEqual(summary["unpriced_count"], 0)
+        self.assertEqual(summary["unknown_cost_item_count"], 1)
+        self.assertEqual(summary["missing_receipt_item_count"], 1)
+        self.assertEqual(
+            summary["calculated_costs"],
+            [{"currency": "CNY", "estimated_cost": "0.00034"}],
+        )
+
+        self.assertEqual(replay.status_code, 200)
+        replay_data = replay.get_json()["data"]
+        self.assertEqual(replay_data["replayed_count"], 2)
+        self.assertEqual(replay_data["cost_summary"], summary)
+        self.assertEqual(len(adapter.calls), 3)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            receipt_count = conn.execute(
+                "SELECT COUNT(*) FROM ai_usage_ledger WHERE operation = 'generate'"
+            ).fetchone()[0]
+        self.assertEqual(receipt_count, 2)
 
     def test_excel_template_and_import(self):
         template = self.client.get("/api/articles/import-template.xlsx")

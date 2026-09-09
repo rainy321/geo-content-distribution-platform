@@ -64,7 +64,7 @@ const publishingLabel = computed(() => ({
 
 const publishingHint = computed(() => {
   if (publishingState.value === 'enabled') {
-    return '真实发布已授权且组件就绪；每个任务仍需绑定账号并单独确认。'
+    return '真实发布已授权且组件就绪；执行前仍需绑定账号，并进行单任务或明确批次强确认。'
   }
   if (publishingState.value === 'locked') {
     return '当前是安全构建，媒体账号与真实发布功能未授权。'
