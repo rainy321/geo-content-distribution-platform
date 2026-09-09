@@ -210,6 +210,8 @@ try {
             throw "Packaged health check failed with exit code $($process.ExitCode)"
         }
         $report = Get-Content -Raw -LiteralPath $reportPath | ConvertFrom-Json
+        $lastHealthReportPath = Join-Path $projectRoot ".build\last-packaged-health.json"
+        Copy-Item -LiteralPath $reportPath -Destination $lastHealthReportPath -Force
         if (
             -not $report.ok -or
             -not $report.frontend -or
@@ -228,7 +230,8 @@ try {
             $report.build.source_commit -ne $sourceCommit -or
             $report.build.publishing_profile -ne $PublishingProfile
         ) {
-            throw "Packaged health report did not pass"
+            $healthDiagnostic = $report | ConvertTo-Json -Depth 10 -Compress
+            throw "Packaged health report did not pass: $healthDiagnostic"
         }
         if (
             $isRealPublishBuild -and (
@@ -291,6 +294,8 @@ try {
             throw "Packaged native UI smoke failed with exit code $($uiProcess.ExitCode)"
         }
         $uiReport = Get-Content -Raw -LiteralPath $uiReportPath | ConvertFrom-Json
+        $lastUiReportPath = Join-Path $projectRoot ".build\last-packaged-ui.json"
+        Copy-Item -LiteralPath $uiReportPath -Destination $lastUiReportPath -Force
         if (
             -not $uiReport.ok -or
             $uiReport.ui.native_gui -ne "edgechromium" -or
@@ -302,7 +307,8 @@ try {
             $uiReport.ui.external_model_used -ne $false -or
             $uiReport.ui.real_publishing_attempted -ne $false
         ) {
-            throw "Packaged native UI report did not pass"
+            $uiDiagnostic = $uiReport | ConvertTo-Json -Depth 10 -Compress
+            throw "Packaged native UI report did not pass: $uiDiagnostic"
         }
     }
     finally {
