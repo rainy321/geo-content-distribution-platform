@@ -49,7 +49,17 @@ try {
     Assert-NativeSuccess -Operation "Reading Git source status" -ExitCode $LASTEXITCODE
     $sourceDirty = @(
         $sourceStatus |
-            Where-Object { $_ -and -not $_.Contains(".build/") -and -not $_.Contains("release/windows/") }
+            Where-Object {
+                $_ -and
+                -not $_.Contains(".build/") -and
+                -not $_.Contains("release/windows/") -and
+                # Customer-facing reports under output/ are generated
+                # artifacts, not release source.  Only ignore untracked files;
+                # a tracked modification under that path must still fail the
+                # clean-source gate.
+                -not $_.StartsWith("?? output/") -and
+                -not $_.StartsWith('?? "output/')
+            }
     ).Count -gt 0
     if ($sourceDirty -and -not $AllowDirtySource) {
         throw "Refusing to build a release from a dirty source tree. Commit the release source or pass -AllowDirtySource explicitly."
@@ -126,6 +136,15 @@ try {
             tests.test_ai_visibility_sampling_database `
             tests.test_ai_visibility_sampling_api `
             tests.test_ai_cost_ledger_service `
+            tests.test_geo_article_compiler_service `
+            tests.test_geo_article_compiler_api `
+            tests.test_ai_service `
+            tests.test_content_generation_service `
+            tests.test_content_generation_api_v1 `
+            tests.test_articles_api `
+            tests.test_articles_optimize_api `
+            tests.test_geo_score_service `
+            tests.test_geo_score_api `
             tests.test_geo_diagnostic_service `
             tests.test_geo_diagnostic_cost_api `
             tests.test_dongclaw_evaluation_service `
@@ -418,12 +437,14 @@ try {
         }
         algorithm = [ordered]@{
             integration_version = "ai-visibility-python-port-1.1.0"
+            article_compiler_version = "geo-article-compiler-2.0.0"
+            ai_citeability_version = "ai-citeability-rules-2.0.0"
             handoff_archive_sha256 = "2ff20604dad3b68807c47d0f3aef3d59ce613bf927dcde0b90ad80bc4b96e96c"
             source_rights_status = "pending_written_authorization"
             directly_comparable_to_provider_grounding = $false
         }
         product_features = [ordered]@{
-            geo_diagnostic_version = "geo-commercial-diagnostic-1.0.1"
+            geo_diagnostic_version = "geo-commercial-diagnostic-1.1.0"
             ai_cost_ledger_version = "ai-cost-ledger-1.1.0"
             platform_content_policy_version = "2026-09-10.1"
             per_call_token_and_cost_receipts = $true
@@ -454,6 +475,8 @@ try {
         -Destination (Join-Path $stagingRoot "Windows桌面技术说明.md") -Force
     Copy-Item -LiteralPath (Join-Path $projectRoot "docs\geo-diagnostic-cost-ledger.md") `
         -Destination (Join-Path $stagingRoot "GEO诊断与成本台账.md") -Force
+    Copy-Item -LiteralPath (Join-Path $projectRoot "docs\GEO算法融合说明.md") `
+        -Destination (Join-Path $stagingRoot "GEO算法融合说明.md") -Force
     Copy-Item -LiteralPath (Join-Path $projectRoot "LICENSE") `
         -Destination (Join-Path $stagingRoot "LICENSE.txt") -Force
     Copy-Item -LiteralPath (Join-Path $projectRoot "THIRD-PARTY-NOTICES.txt") `
@@ -471,6 +494,7 @@ try {
         (Join-Path $stagingRoot "AI可见度接口契约.md"),
         (Join-Path $stagingRoot "Windows桌面技术说明.md"),
         (Join-Path $stagingRoot "GEO诊断与成本台账.md"),
+        (Join-Path $stagingRoot "GEO算法融合说明.md"),
         (Join-Path $stagingRoot "LICENSE.txt"),
         (Join-Path $stagingRoot "THIRD-PARTY-NOTICES.txt"),
         (Join-Path $stagingRoot "build-info.json")

@@ -86,6 +86,11 @@ from services.cover_image_service import (
     recommend_article_images,
 )
 from services.geo_score_service import score_geo_content
+from services.geo_article_compiler_service import (
+    GEOArticleCompilerError,
+    build_geo_article_blueprint,
+    score_ai_citeability,
+)
 from services.geo_diagnostic_service import (
     GEODiagnosticError,
     GEODiagnosticNotFoundError,
@@ -1513,6 +1518,12 @@ def _prepare_generation_request(data):
     project = _get_project(project_id)
     if project is None:
         return None, (jsonify({"code": 404, "msg": "品牌项目不存在", "data": None}), 404)
+    visibility_guidance = _get_latest_visibility_guidance(project_id)
+    if visibility_guidance is not None:
+        project = {
+            **project,
+            "latest_visibility_result": visibility_guidance,
+        }
     requested_keywords = data.get("keywords", project["keywords"])
     if not isinstance(requested_keywords, list):
         return None, (jsonify({"code": 400, "msg": "keywords 必须是字符串数组", "data": None}), 400)
@@ -1969,6 +1980,61 @@ def _get_project(project_id):
     return project
 
 
+def _get_latest_visibility_guidance(project_id):
+    """Return only rule metadata safe for the local pre-publish compiler.
+
+    Captured model answers and evidence excerpts deliberately stay out of the
+    article blueprint so third-party text cannot become a generation prompt.
+    """
+
+    with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
+        row = conn.execute(
+            """
+            SELECT result_json
+            FROM ai_visibility_runs
+            WHERE project_id = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            (int(project_id),),
+        ).fetchone()
+    if row is None or not row[0]:
+        return None
+    try:
+        result = json.loads(row[0])
+    except (TypeError, json.JSONDecodeError):
+        return None
+    if not isinstance(result, dict):
+        return None
+
+    versions = result.get("algorithm_versions")
+    summary = result.get("summary")
+    confidence = summary.get("confidence") if isinstance(summary, dict) else None
+    recommendation_details = result.get("recommendation_details")
+    return {
+        "algorithm_versions": {
+            "integration": str(versions.get("integration") or "")
+            if isinstance(versions, dict)
+            else ""
+        },
+        "summary": {
+            "sample_count": summary.get("sample_count", 0)
+            if isinstance(summary, dict)
+            else 0,
+            "confidence": {
+                "level": str(confidence.get("level") or "")
+                if isinstance(confidence, dict)
+                else ""
+            },
+        },
+        "recommendation_details": [
+            {"rule_id": str(item.get("rule_id") or "").strip()}
+            for item in recommendation_details or []
+            if isinstance(item, dict) and str(item.get("rule_id") or "").strip()
+        ][:20],
+    }
+
+
 def _decode_json_list(value):
     if not value:
         return []
@@ -2373,6 +2439,8 @@ def calculate_geo_score():
     keywords = data.get("keywords", [])
     generation_run_id = data.get("generation_run_id")
 
+    score_context = None
+    citeability_sources = data.get("sources", [])
     if generation_run_id not in (None, ""):
         try:
             generation_run_id = int(generation_run_id)
@@ -2390,6 +2458,25 @@ def calculate_geo_score():
             return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
         brand = score_context["brand"]
         keywords = score_context["keywords"]
+        generation_run = get_run(
+            app.config["DATABASE_PATH"],
+            generation_run_id,
+        )
+        result_payload = (
+            generation_run.get("result_payload", {})
+            if isinstance(generation_run, dict)
+            else {}
+        )
+        stored_sources = (
+            result_payload.get("sources")
+            if isinstance(result_payload, dict)
+            else None
+        )
+        # A generated draft is scored only against its immutable provider
+        # receipt, never a mutable client copy.  Receipts that predate the
+        # sources field have no recorded evidence, so their safe value is an
+        # empty list rather than client-supplied replacement evidence.
+        citeability_sources = stored_sources if isinstance(stored_sources, list) else []
 
     if not title:
         return jsonify({"code": 400, "msg": "文章标题不能为空", "data": None}), 400
@@ -2406,6 +2493,28 @@ def calculate_geo_score():
         brand=brand,
         keywords=_normalize_string_list(keywords),
     )
+    project_snapshot = (
+        score_context.get("project_snapshot", {})
+        if isinstance(score_context, dict)
+        else {}
+    )
+    try:
+        result["citeability"] = score_ai_citeability(
+            title=title,
+            summary=str(data.get("summary") or "").strip(),
+            content=content,
+            brand=brand,
+            product=str(
+                project_snapshot.get("product") or data.get("product") or ""
+            ).strip(),
+            website=str(
+                project_snapshot.get("website") or data.get("website") or ""
+            ).strip(),
+            keywords=_normalize_string_list(keywords),
+            sources=citeability_sources,
+        )
+    except GEOArticleCompilerError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
     if generation_run_id not in (None, ""):
         result["score_context"] = {
             "generation_run_id": generation_run_id,
@@ -2413,6 +2522,70 @@ def calculate_geo_score():
             "keywords": keywords,
         }
     return jsonify(result), 200
+
+
+@app.route('/api/geo/content-blueprint', methods=['POST'])
+def build_geo_content_blueprint():
+    """Build a deterministic pre-publish GEO plan without calling an AI model."""
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
+
+    try:
+        project_id = int(data.get("project_id"))
+    except (TypeError, ValueError):
+        return jsonify({"code": 400, "msg": "project_id 必须是整数", "data": None}), 400
+    if project_id <= 0:
+        return jsonify({"code": 400, "msg": "project_id 必须是正整数", "data": None}), 400
+
+    topic = str(data.get("topic") or "").strip()
+    if not topic:
+        return jsonify({"code": 400, "msg": "文章主题不能为空", "data": None}), 400
+    project = _get_project(project_id)
+    if project is None:
+        return jsonify({"code": 404, "msg": "品牌项目不存在", "data": None}), 404
+
+    keywords = data.get("keywords", project.get("keywords", []))
+    if not isinstance(keywords, list):
+        return jsonify({"code": 400, "msg": "keywords 必须是字符串数组", "data": None}), 400
+    try:
+        length = int(data.get("length", 1000))
+        query_count = int(data.get("query_count", 12))
+    except (TypeError, ValueError):
+        return jsonify({"code": 400, "msg": "length 和 query_count 必须是整数", "data": None}), 400
+    if length not in ARTICLE_LENGTHS:
+        return jsonify({"code": 400, "msg": "文章长度仅支持 600、1000、1500", "data": None}), 400
+    if query_count < 6 or query_count > 30:
+        return jsonify({"code": 400, "msg": "query_count 仅支持 6 到 30", "data": None}), 400
+
+    content_type = str(data.get("content_type") or "行业科普").strip()
+    if content_type not in ARTICLE_CONTENT_TYPES:
+        return jsonify({"code": 400, "msg": "不支持的内容类型", "data": None}), 400
+    target_platform_raw = str(
+        data.get("target_platform") or data.get("targetPlatform") or ""
+    ).strip()
+    target_platform = normalize_platform_key(target_platform_raw)
+    if target_platform_raw and not target_platform:
+        return jsonify({"code": 400, "msg": "不支持的目标平台", "data": None}), 400
+
+    compiler_project = dict(project)
+    visibility_guidance = _get_latest_visibility_guidance(project_id)
+    if visibility_guidance is not None:
+        compiler_project["latest_visibility_result"] = visibility_guidance
+    try:
+        blueprint = build_geo_article_blueprint(
+            project=compiler_project,
+            topic=topic,
+            keywords=_normalize_string_list(keywords),
+            content_type=content_type,
+            target_platform=target_platform,
+            length=length,
+            requested_query_count=query_count,
+        )
+    except GEOArticleCompilerError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    return jsonify({"code": 200, "msg": "success", "data": blueprint}), 200
 
 
 @app.route('/api/articles', methods=['POST'])
@@ -2636,6 +2809,8 @@ def optimize_article(article_id):
 
     score_brand = project["name"]
     score_keywords = project["keywords"]
+    scoring_project = project
+    generation_sources = []
     if article.get("generation_run_id") is not None:
         try:
             score_context = get_run_score_context(
@@ -2646,12 +2821,28 @@ def optimize_article(article_id):
             return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
         score_brand = score_context["brand"]
         score_keywords = score_context["keywords"]
+        scoring_project = score_context.get("project_snapshot") or project
+        generation = article.get("generation")
+        if isinstance(generation, dict) and isinstance(
+            generation.get("sources"), list
+        ):
+            generation_sources = generation["sources"]
 
     before_score = score_geo_content(
         title=article["title"],
         content=article["content"],
         brand=score_brand,
         keywords=score_keywords,
+    )
+    before_score["citeability"] = score_ai_citeability(
+        title=article["title"],
+        summary=article.get("summary", ""),
+        content=article["content"],
+        brand=score_brand,
+        product=str(scoring_project.get("product") or "").strip(),
+        website=str(scoring_project.get("website") or "").strip(),
+        keywords=score_keywords,
+        sources=generation_sources,
     )
     try:
         ai_settings = _request_ai_settings(data)
@@ -2707,6 +2898,19 @@ def optimize_article(article_id):
         content=optimized["content"],
         brand=score_brand,
         keywords=score_keywords,
+    )
+    after_score["citeability"] = score_ai_citeability(
+        title=optimized["title"],
+        summary=optimized.get("summary", ""),
+        content=optimized["content"],
+        brand=score_brand,
+        product=str(scoring_project.get("product") or "").strip(),
+        website=str(scoring_project.get("website") or "").strip(),
+        keywords=score_keywords,
+        # Optimization does not create a new persisted source receipt. Score
+        # the preview with the same immutable sources that article update will
+        # reuse, so the preview cannot jump when the operator saves it.
+        sources=generation_sources,
     )
     return jsonify(
         {

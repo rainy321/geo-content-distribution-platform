@@ -15,10 +15,14 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from services.ai_visibility_service import AI_VISIBILITY_ALGORITHM_VERSION
+from services.geo_article_compiler_service import (
+    AI_CITEABILITY_SCORE_VERSION,
+    score_ai_citeability,
+)
 from services.geo_score_service import score_geo_content
 
 
-GEO_DIAGNOSTIC_VERSION = "geo-commercial-diagnostic-1.0.1"
+GEO_DIAGNOSTIC_VERSION = "geo-commercial-diagnostic-1.1.0"
 PROJECT_DIMENSION_WEIGHTS = {
     "positioning": 20,
     "discoverability": 20,
@@ -154,9 +158,11 @@ def diagnose_geo_readiness(
         else:
             content_title = article["title"] if article is not None else title
             content_body = article["content"] if article is not None else content
+            content_summary = article["summary"] if article is not None else ""
             result = _diagnose_content(
                 project=dict(project),
                 title=str(content_title),
+                summary=str(content_summary or ""),
                 content=str(content_body),
                 project_result=project_result,
                 source_type=source_type,
@@ -175,6 +181,8 @@ def diagnose_geo_readiness(
                 "content_scoring_context_sha256": _digest_json(
                     {
                         "brand": str(project["name"] or "").strip(),
+                        "product": str(project["product"] or "").strip(),
+                        "website": str(project["website"] or "").strip(),
                         "keywords": _decode_string_list(project["keywords"]),
                         "project_readiness_score": project_result.get("score"),
                     }
@@ -382,6 +390,7 @@ def _diagnose_content(
     *,
     project: Mapping[str, Any],
     title: str,
+    summary: str,
     content: str,
     project_result: Mapping[str, Any],
     source_type: str,
@@ -393,6 +402,16 @@ def _diagnose_content(
         brand=str(project.get("name") or "").strip(),
         keywords=_decode_string_list(project.get("keywords")),
     )
+    citeability = score_ai_citeability(
+        title=title,
+        summary=summary,
+        content=content,
+        brand=str(project.get("name") or "").strip(),
+        product=str(project.get("product") or "").strip(),
+        website=str(project.get("website") or "").strip(),
+        keywords=_decode_string_list(project.get("keywords")),
+        sources=(),
+    )
     dimensions = [
         _dimension(key, _content_dimension_label(key), int(score_result["dimensions"].get(key, 0)), {
             "weight": CONTENT_DIMENSION_WEIGHTS[key],
@@ -400,6 +419,18 @@ def _diagnose_content(
         for key in CONTENT_DIMENSION_WEIGHTS
     ]
     gaps = _content_gaps(score_result)
+    gaps.extend(
+        _gap(
+            f"citeability.{issue.get('code') or 'blocking'}",
+            str(issue.get("priority") or "P0"),
+            "citeability",
+            str(issue.get("message") or "AI 可引用性门禁未通过"),
+            str(issue.get("action") or "按门禁提示修复后重新诊断。"),
+            f"ai_citeability >= {citeability['pass_score']} 且无 P0 阻断",
+        )
+        for issue in citeability.get("blocking_issues", [])
+        if isinstance(issue, Mapping)
+    )
     result = _base_result(
         project_id=int(project["id"]),
         scope="content",
@@ -410,15 +441,19 @@ def _diagnose_content(
         algorithm_versions={
             "diagnostic": GEO_DIAGNOSTIC_VERSION,
             "content_score": "geo-score-mvp-rules-1.0.0",
+            "ai_citeability": AI_CITEABILITY_SCORE_VERSION,
         },
         baseline={
             "article_id": article_id,
             "title_characters": len(title),
             "content_characters": len(content),
             "project_readiness_score": project_result.get("score"),
+            "ai_citeability_score": citeability["score"],
+            "ai_citeability_passed": citeability["passed"],
         },
     )
     result["score_suggestions"] = list(score_result.get("suggestions") or [])
+    result["citeability"] = citeability
     return result
 
 

@@ -139,6 +139,7 @@
               show-word-limit
               :disabled="generating"
               placeholder="例如：企业如何选择适合自己的 AI Agent"
+              @input="markBlueprintStale"
             />
           </el-form-item>
 
@@ -151,6 +152,7 @@
               default-first-option
               :disabled="generating"
               placeholder="选择或输入关键词"
+              @change="markBlueprintStale"
             >
               <el-option
                 v-for="keyword in availableKeywords"
@@ -162,7 +164,7 @@
           </el-form-item>
 
           <el-form-item label="文章长度" prop="length">
-            <el-radio-group v-model="brief.length" class="length-options" :disabled="generating">
+            <el-radio-group v-model="brief.length" class="length-options" :disabled="generating" @change="markBlueprintStale">
               <el-radio-button :value="600">600 字</el-radio-button>
               <el-radio-button :value="1000">1000 字</el-radio-button>
               <el-radio-button :value="1500">1500 字</el-radio-button>
@@ -171,16 +173,96 @@
 
           <div class="form-pair">
             <el-form-item label="内容类型" prop="content_type">
-              <el-select v-model="brief.content_type" :disabled="generating">
+              <el-select v-model="brief.content_type" :disabled="generating" @change="markBlueprintStale">
                 <el-option v-for="item in contentTypes" :key="item" :label="item" :value="item" />
               </el-select>
             </el-form-item>
             <el-form-item label="目标平台" prop="target_platform">
-              <el-select v-model="brief.target_platform" :disabled="generating">
+              <el-select v-model="brief.target_platform" :disabled="generating" @change="markBlueprintStale">
                 <el-option v-for="item in platforms" :key="item.value" :label="item.label" :value="item.value" />
               </el-select>
             </el-form-item>
           </div>
+
+          <section class="blueprint-preview" aria-labelledby="blueprint-title">
+            <header>
+              <div>
+                <span>AI CITATION BLUEPRINT</span>
+                <h3 id="blueprint-title">AI 引用蓝图</h3>
+              </div>
+              <div class="blueprint-actions">
+                <em v-if="blueprintStale && geoBlueprint">参数已变更</em>
+                <el-button
+                  text
+                  size="small"
+                  :loading="blueprintLoading"
+                  :disabled="blueprintLoading || !brief.project_id || !brief.topic.trim()"
+                  @click="loadGeoBlueprint"
+                >
+                  {{ geoBlueprint ? '刷新蓝图' : '建立蓝图' }}
+                </el-button>
+              </div>
+            </header>
+
+            <p v-if="!brief.topic.trim()" class="blueprint-empty">填写文章主题后，可在本机生成问题矩阵和证据门禁。</p>
+            <p v-else-if="blueprintLoading && !geoBlueprint" class="blueprint-empty">正在整理实体、查询意图与证据边界…</p>
+            <div v-else-if="blueprintError" class="blueprint-error" role="status">
+              <strong>蓝图暂未建立</strong>
+              <span>{{ blueprintError }}</span>
+            </div>
+
+            <template v-if="geoBlueprint">
+              <div class="blueprint-gate" :class="geoBlueprint.gate.ready ? 'ready' : 'blocked'">
+                <span>{{ geoBlueprint.gate.ready ? 'READY' : 'NEEDS INPUT' }}</span>
+                <div>
+                  <strong>{{ geoBlueprint.queryMatrix.intentLabel }}</strong>
+                  <small>{{ geoBlueprint.queryMatrix.total }} 个问题 · {{ geoBlueprint.gate.evidenceMode === 'strict' ? '严格证据' : '受控证据' }}</small>
+                </div>
+              </div>
+
+              <div v-if="geoBlueprint.queryMatrix.items.length" class="query-matrix">
+                <div class="blueprint-subheading">
+                  <span>问题矩阵</span>
+                  <small>点击问题可直接设为本篇主题</small>
+                </div>
+                <button
+                  v-for="item in geoBlueprint.queryMatrix.items.slice(0, 6)"
+                  :key="item.id"
+                  type="button"
+                  :class="{ active: brief.topic.trim() === item.query }"
+                  @click="selectBlueprintQuery(item)"
+                >
+                  <span>{{ item.intentLabel }}</span>
+                  <strong>{{ item.query }}</strong>
+                </button>
+              </div>
+
+              <div
+                v-if="geoBlueprint.gate.blockingIssues.length || geoBlueprint.gate.warnings.length"
+                class="blueprint-issues"
+              >
+                <div class="blueprint-subheading">
+                  <span>发布前门禁预检</span>
+                  <small>{{ geoBlueprint.gate.blockingIssues.length }} 项发布阻断 · {{ geoBlueprint.gate.warnings.length }} 项提醒</small>
+                </div>
+                <article
+                  v-for="issue in blueprintIssues"
+                  :key="issue.code"
+                  :class="issue.priority.toLowerCase()"
+                >
+                  <b>{{ issue.priority }}</b>
+                  <div>
+                    <strong>{{ issue.message }}</strong>
+                    <small>{{ issue.action }}</small>
+                  </div>
+                </article>
+              </div>
+
+              <p class="blueprint-boundary">
+                {{ geoBlueprint.methodology.claim_boundary || '蓝图是本地发布前检查，不代表页面已被抓取、收录或被模型引用。' }}
+              </p>
+            </template>
+          </section>
 
           <el-button
             class="generate-button"
@@ -413,6 +495,7 @@
                     <span>/ 100</span>
                   </div>
                 </div>
+                <small>基础 GEO 规则分</small>
                 <p>{{ scoreSummary }}</p>
               </div>
 
@@ -452,6 +535,39 @@
                   当前规则项已全部覆盖
                 </div>
               </div>
+
+              <section v-if="scoreResult?.citeability" class="citeability-card" aria-labelledby="citeability-title">
+                <header>
+                  <div>
+                    <span>AI CITEABILITY / 7D</span>
+                    <h3 id="citeability-title">AI 可引用度</h3>
+                  </div>
+                  <strong :class="scoreResult.citeability.passed ? 'passed' : 'attention'">
+                    {{ scoreResult.citeability.score }} / 100
+                  </strong>
+                </header>
+                <div class="citeability-status">
+                  <b>{{ scoreResult.citeability.passed ? '通过发布前门禁' : `未达到 ${scoreResult.citeability.passScore} 分门禁` }}</b>
+                  <span>{{ scoreResult.citeability.grade }} · {{ scoreResult.citeability.version || '规则版本未声明' }}</span>
+                </div>
+                <div class="citeability-dimensions">
+                  <div v-for="dimension in scoreResult.citeability.dimensions" :key="dimension.key">
+                    <span>{{ dimension.label }}</span>
+                    <i><b :style="{ width: `${dimension.value}%` }" /></i>
+                    <strong>{{ dimension.value }}</strong>
+                  </div>
+                </div>
+                <div v-if="scoreResult.citeability.blockingIssues.length" class="citeability-blockers">
+                  <article v-for="issue in scoreResult.citeability.blockingIssues" :key="issue.code">
+                    <b>{{ issue.priority }}</b>
+                    <span>{{ issue.message }} {{ issue.action }}</span>
+                  </article>
+                </div>
+                <ul v-else-if="scoreResult.citeability.suggestions.length" class="citeability-suggestions">
+                  <li v-for="suggestion in scoreResult.citeability.suggestions.slice(0, 4)" :key="suggestion">{{ suggestion }}</li>
+                </ul>
+                <p>{{ scoreResult.citeability.methodology.claim_boundary || '该分数只衡量结构和证据可提取性，不代表真实收录或引用率。' }}</p>
+              </section>
 
               <p class="score-note">评分来自本地规则，用于内容检查，不代表真实搜索排名。</p>
             </aside>
@@ -578,6 +694,7 @@ import { articleApi } from '@/api/article'
 import { projectApi } from '@/api/project'
 import { normalizeGenerationReceipt } from '@/utils/generationReceipt'
 import { buildGeoScorePayload } from '@/utils/generationScore'
+import { normalizeGeoBlueprint, normalizeGeoScoreResult } from '@/utils/geoBlueprint'
 import {
   BATCH_GENERATION_LIMIT,
   formatBatchCost,
@@ -622,6 +739,11 @@ const batchDialogVisible = ref(false)
 const batchGenerating = ref(false)
 const batchTopics = ref('')
 const batchResult = ref(null)
+const geoBlueprint = ref(null)
+const blueprintLoading = ref(false)
+const blueprintError = ref('')
+const blueprintStale = ref(false)
+let blueprintRequestSequence = 0
 
 const generating = computed(() => generationPhase.value === 'requesting')
 
@@ -698,6 +820,12 @@ const briefReady = computed(() => Boolean(
   brief.project_id && brief.topic.trim() && brief.keywords.length
 ))
 
+const blueprintIssues = computed(() => (
+  geoBlueprint.value
+    ? [...geoBlueprint.value.gate.blockingIssues, ...geoBlueprint.value.gate.warnings].slice(0, 4)
+    : []
+))
+
 const rateLimitRemaining = computed(() => Math.max(
   0,
   Math.ceil((rateLimitUntil.value - rateLimitNow.value) / 1000)
@@ -750,6 +878,10 @@ const scoreSummary = computed(() => {
   if (score >= 70) return '基础质量良好，仍有几项可以加强。'
   return '建议先根据右侧提示补充内容证据。'
 })
+
+const markBlueprintStale = () => {
+  if (geoBlueprint.value) blueprintStale.value = true
+}
 
 const displayMetric = (value) => (
   value == null || value === '' ? '未提供' : String(value)
@@ -934,6 +1066,40 @@ const removeTemplate = async (item) => {
   }
 }
 
+const loadGeoBlueprint = async () => {
+  if (!brief.project_id || !brief.topic.trim() || blueprintLoading.value) return
+  const sequence = ++blueprintRequestSequence
+  blueprintLoading.value = true
+  blueprintError.value = ''
+  try {
+    const response = await articleApi.getGeoBlueprint({
+      project_id: brief.project_id,
+      topic: brief.topic.trim(),
+      keywords: brief.keywords,
+      content_type: brief.content_type,
+      target_platform: brief.target_platform,
+      length: brief.length,
+      query_count: 12
+    }, { suppressGlobalError: true })
+    if (sequence !== blueprintRequestSequence) return
+    geoBlueprint.value = normalizeGeoBlueprint(response)
+    blueprintStale.value = false
+  } catch (error) {
+    if (sequence !== blueprintRequestSequence) return
+    blueprintError.value = error.response?.data?.msg || '本地蓝图接口暂时不可用；不影响继续使用旧版生成流程。'
+  } finally {
+    if (sequence === blueprintRequestSequence) blueprintLoading.value = false
+  }
+}
+
+const selectBlueprintQuery = async (item) => {
+  const query = String(item?.query || '').trim()
+  if (!query) return
+  brief.topic = query
+  blueprintStale.value = true
+  await loadGeoBlueprint()
+}
+
 const generateBatch = async () => {
   if (!canBatchGenerate.value) {
     if (parsedBatchTopics.value.length > BATCH_GENERATION_LIMIT) {
@@ -974,6 +1140,11 @@ const applyProjectKeywords = () => {
 }
 
 const handleProjectChange = () => {
+  blueprintRequestSequence += 1
+  geoBlueprint.value = null
+  blueprintError.value = ''
+  blueprintLoading.value = false
+  blueprintStale.value = Boolean(brief.topic.trim())
   applyProjectKeywords()
   if (hasDraft.value) {
     resetDraft()
@@ -1125,13 +1296,18 @@ const scoreDraft = async ({ silent = false } = {}) => {
   scoring.value = true
   scoreError.value = ''
   try {
-    scoreResult.value = await articleApi.scoreArticle(buildGeoScorePayload({
+    const response = await articleApi.scoreArticle(buildGeoScorePayload({
       title: draft.title,
+      summary: draft.summary,
       content: draft.content,
       generationRunId: generationReceipt.value?.runId,
       brand: selectedProject.value?.name || '',
-      keywords: brief.keywords
+      product: selectedProject.value?.product || '',
+      website: selectedProject.value?.website || '',
+      keywords: brief.keywords,
+      sources: generationReceipt.value?.sources || []
     }))
+    scoreResult.value = normalizeGeoScoreResult(response)
     scoreStale.value = false
     if (!silent) ElMessage.success('GEO 评分已更新')
   } catch (error) {
@@ -1167,13 +1343,14 @@ const saveDraft = async () => {
   }
 
   try {
+    const citeabilitySnapshot = scoreResult.value?.citeability || null
     const response = savedArticleId.value
       ? await articleApi.updateArticle(savedArticleId.value, articleFields)
       : await articleApi.createArticle(createFields)
     const savedArticle = response.data
     savedArticleId.value = savedArticle.id
     dirty.value = false
-    hydrateStoredScore(savedArticle)
+    hydrateStoredScore(savedArticle, citeabilitySnapshot)
     ElMessage.success(isUpdate ? '草稿修改已保存' : '文章已保存到内容库')
   } catch (error) {
     console.error('保存文章失败:', error)
@@ -1182,18 +1359,19 @@ const saveDraft = async () => {
   }
 }
 
-const hydrateStoredScore = (article) => {
+const hydrateStoredScore = (article, fallbackCiteability = null) => {
   if (article.geo_score == null) {
     scoreResult.value = null
     scoreStale.value = false
     return
   }
   scoreError.value = ''
-  scoreResult.value = {
+  scoreResult.value = normalizeGeoScoreResult({
     score: article.geo_score,
     dimensions: article.geo_analysis?.dimensions || {},
-    suggestions: article.geo_analysis?.suggestions || []
-  }
+    suggestions: article.geo_analysis?.suggestions || [],
+    citeability: article.geo_analysis?.citeability || fallbackCiteability
+  })
   scoreStale.value = false
 }
 
@@ -1245,6 +1423,9 @@ const loadExistingArticle = async (articleId) => {
     const article = response.data
     brief.project_id = article.project_id
     brief.topic = article.title
+    geoBlueprint.value = null
+    blueprintError.value = ''
+    blueprintStale.value = true
     applyProjectKeywords()
     Object.assign(draft, {
       title: article.title || '',
@@ -1674,6 +1855,186 @@ onBeforeUnmount(() => {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
+}
+
+.blueprint-preview {
+  margin: 2px 0 19px;
+  padding: 14px;
+  border: 1px solid var(--geo-line);
+  border-top: 3px solid var(--geo-ink);
+  border-radius: 8px;
+  background: var(--geo-canvas);
+
+  > header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+
+    > div:first-child span {
+      color: var(--geo-muted);
+      font: 700 8px/1 "Cascadia Mono", monospace;
+      letter-spacing: 0.12em;
+    }
+
+    h3 {
+      margin: 4px 0 0;
+      color: var(--geo-ink);
+      font-size: 14px;
+    }
+  }
+}
+
+.blueprint-actions {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+
+  em {
+    color: var(--geo-warning);
+    font: 700 8px/1 "Cascadia Mono", monospace;
+  }
+
+  :deep(.el-button) {
+    height: auto;
+    padding: 3px 0;
+    color: var(--geo-ink);
+    font-size: 10px;
+  }
+}
+
+.blueprint-empty {
+  margin: 13px 0 0;
+  color: var(--geo-muted);
+  font-size: 10px;
+  line-height: 1.6;
+}
+
+.blueprint-error {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 12px;
+  padding: 10px;
+  border: 1px solid rgba(150, 62, 55, 0.25);
+  background: #fff6f4;
+  color: var(--geo-danger);
+
+  strong { font-size: 10px; }
+  span { font-size: 9px; line-height: 1.55; }
+}
+
+.blueprint-gate {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  margin-top: 13px;
+  padding: 10px;
+  border-left: 3px solid var(--geo-warning);
+  background: #fff;
+
+  &.ready { border-left-color: var(--geo-success); }
+
+  > span {
+    color: var(--geo-warning);
+    font: 700 8px/1.2 "Cascadia Mono", monospace;
+  }
+
+  &.ready > span { color: var(--geo-success); }
+
+  > div {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  strong { font-size: 11px; }
+  small { color: var(--geo-muted); font-size: 8px; }
+}
+
+.blueprint-subheading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 13px 0 7px;
+
+  span { color: var(--geo-ink); font-size: 10px; font-weight: 700; }
+  small { color: var(--geo-muted); font-size: 8px; }
+}
+
+.query-matrix {
+  display: grid;
+  gap: 5px;
+
+  > button {
+    display: grid;
+    grid-template-columns: 58px minmax(0, 1fr);
+    gap: 8px;
+    align-items: start;
+    width: 100%;
+    padding: 8px;
+    border: 1px solid var(--geo-line);
+    background: #fff;
+    color: var(--geo-ink);
+    text-align: left;
+
+    &:hover,
+    &:focus-visible,
+    &.active {
+      border-color: var(--geo-line-strong);
+      background: var(--geo-soft);
+    }
+
+    span {
+      color: var(--geo-muted);
+      font: 700 8px/1.45 "Cascadia Mono", monospace;
+    }
+
+    strong {
+      min-width: 0;
+      font-size: 9px;
+      font-weight: 600;
+      line-height: 1.5;
+    }
+  }
+}
+
+.blueprint-issues {
+  article {
+    display: grid;
+    grid-template-columns: 25px minmax(0, 1fr);
+    gap: 7px;
+    padding: 8px 0;
+    border-top: 1px solid var(--geo-line);
+
+    > b {
+      color: var(--geo-muted);
+      font: 700 8px/1.5 "Cascadia Mono", monospace;
+    }
+
+    &.p0 > b { color: var(--geo-danger); }
+    &.p1 > b { color: var(--geo-warning); }
+
+    > div {
+      display: flex;
+      min-width: 0;
+      flex-direction: column;
+      gap: 3px;
+    }
+
+    strong { font-size: 9px; line-height: 1.45; }
+    small { color: var(--geo-muted); font-size: 8px; line-height: 1.5; }
+  }
+}
+
+.blueprint-boundary {
+  margin: 10px 0 0;
+  color: var(--geo-muted);
+  font-size: 8px;
+  line-height: 1.55;
 }
 
 .generate-button {
@@ -2301,6 +2662,14 @@ onBeforeUnmount(() => {
     font-size: 11px;
     line-height: 1.6;
   }
+
+  > small {
+    display: block;
+    margin-top: 8px;
+    color: var(--geo-muted);
+    font: 700 8px/1 "Cascadia Mono", monospace;
+    letter-spacing: 0.08em;
+  }
 }
 
 .score-ring {
@@ -2443,6 +2812,116 @@ onBeforeUnmount(() => {
   gap: 7px;
   color: var(--teal);
   font-size: 11px;
+}
+
+.citeability-card {
+  margin-top: 21px;
+  padding-top: 18px;
+  border-top: 3px solid var(--geo-ink);
+
+  > header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 10px;
+
+    span {
+      color: var(--geo-muted);
+      font: 700 8px/1 "Cascadia Mono", monospace;
+      letter-spacing: 0.1em;
+    }
+
+    h3 { margin: 5px 0 0; font-size: 14px; }
+
+    > strong {
+      color: var(--geo-warning);
+      font: 800 13px/1 "Cascadia Mono", monospace;
+
+      &.passed { color: var(--geo-success); }
+    }
+  }
+
+  > p {
+    margin: 12px 0 0;
+    color: var(--geo-muted);
+    font-size: 8px;
+    line-height: 1.55;
+  }
+}
+
+.citeability-status {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin-top: 13px;
+  padding: 9px 10px;
+  border: 1px solid var(--geo-line);
+  background: #fff;
+
+  b { font-size: 10px; }
+  span { color: var(--geo-muted); font: 700 8px/1.4 "Cascadia Mono", monospace; }
+}
+
+.citeability-dimensions {
+  display: grid;
+  gap: 9px;
+  margin-top: 14px;
+
+  > div {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 62px 25px;
+    gap: 7px;
+    align-items: center;
+  }
+
+  span { color: var(--geo-ink-secondary); font-size: 9px; }
+
+  i {
+    display: block;
+    height: 3px;
+    overflow: hidden;
+    background: var(--geo-line);
+
+    b {
+      display: block;
+      height: 100%;
+      background: var(--geo-ink);
+    }
+  }
+
+  strong {
+    font: 700 8px/1 "Cascadia Mono", monospace;
+    text-align: right;
+  }
+}
+
+.citeability-blockers {
+  margin-top: 14px;
+
+  article {
+    display: grid;
+    grid-template-columns: 24px minmax(0, 1fr);
+    gap: 7px;
+    padding: 8px 0;
+    border-top: 1px solid var(--geo-line);
+
+    b { color: var(--geo-danger); font: 700 8px/1.5 "Cascadia Mono", monospace; }
+    span { color: var(--geo-ink-secondary); font-size: 8px; line-height: 1.55; }
+  }
+}
+
+.citeability-suggestions {
+  display: grid;
+  gap: 7px;
+  margin: 13px 0 0;
+
+  li {
+    padding-left: 10px;
+    border-left: 2px solid var(--geo-warning);
+    color: var(--geo-ink-secondary);
+    font-size: 8px;
+    line-height: 1.55;
+  }
 }
 
 .score-note {

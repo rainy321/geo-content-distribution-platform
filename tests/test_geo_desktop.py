@@ -587,8 +587,19 @@ class DesktopPackagingContractTests(unittest.TestCase):
         )
         self.assertIn("uv run --no-sync pyinstaller", build_script)
         self.assertIn("function Assert-NativeSuccess", build_script)
+        self.assertIn('-not $_.StartsWith("?? output/")', build_script)
+        self.assertIn("-not $_.StartsWith('?? \"output/')", build_script)
         self.assertIn('Operation "Running Python regression tests"', build_script)
         self.assertIn('Operation "Running frontend regression tests"', build_script)
+        self.assertIn("tests.test_geo_article_compiler_service", build_script)
+        self.assertIn("tests.test_geo_article_compiler_api", build_script)
+        self.assertIn("tests.test_ai_service", build_script)
+        self.assertIn("tests.test_content_generation_service", build_script)
+        self.assertIn("tests.test_content_generation_api_v1", build_script)
+        self.assertIn("tests.test_articles_api", build_script)
+        self.assertIn("tests.test_articles_optimize_api", build_script)
+        self.assertIn("tests.test_geo_score_service", build_script)
+        self.assertIn("tests.test_geo_score_api", build_script)
         self.assertIn('Operation "Packaging the Windows executable"', build_script)
         self.assertIn("$env:PLAYWRIGHT_BROWSERS_PATH = $isolatedBrowserCache", build_script)
         self.assertLess(
@@ -613,6 +624,15 @@ class DesktopPackagingContractTests(unittest.TestCase):
             'ai_cost_ledger_version = "ai-cost-ledger-1.1.0"',
             build_script,
         )
+        self.assertIn(
+            'article_compiler_version = "geo-article-compiler-2.0.0"',
+            build_script,
+        )
+        self.assertIn(
+            'ai_citeability_version = "ai-citeability-rules-2.0.0"',
+            build_script,
+        )
+        self.assertIn('docs\\GEO算法融合说明.md', build_script)
 
     def test_windowed_build_does_not_require_a_console_stream(self):
         logging_source = (self.project_root / "utils" / "log.py").read_text(

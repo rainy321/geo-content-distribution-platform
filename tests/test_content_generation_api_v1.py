@@ -27,11 +27,11 @@ VALID_RESULT = {
         "## 实施步骤\n2026 年建议分 3 个阶段验证。\n\n"
         "## FAQ\n问：如何开始？\n答：先验证最小流程。\n"
         "问：如何验收？\n答：保留运行记录。\n\n"
-        "## 总结\n以可追踪结果为准。来源：https://example.test/report"
+        "## 总结\n以可追踪结果为准。来源：https://example.com/report"
     ),
     "tags": ["AI Agent"],
     "faq": [{"question": "如何开始？", "answer": "先验证最小流程。"}],
-    "sources": [{"title": "测试来源", "url": "https://example.test/report"}],
+    "sources": [{"title": "测试来源", "url": "https://example.com/report"}],
     "engine": "mock",
     "engine_version": "1.0-test",
     "usage": {"input_tokens": 12, "output_tokens": 34, "total_tokens": 46},
@@ -266,6 +266,14 @@ class ContentGenerationApiV1Tests(unittest.TestCase):
             rescored["score_context"]["keywords"],
             ["AI Agent", "企业智能体"],
         )
+        self.assertEqual(
+            rescored["citeability"],
+            generated["geo_analysis"]["citeability"],
+        )
+        self.assertEqual(
+            rescored["citeability"]["signals"]["citation_count"],
+            1,
+        )
 
         saved_response = self.client.post(
             "/api/articles",
@@ -283,7 +291,58 @@ class ContentGenerationApiV1Tests(unittest.TestCase):
         saved = saved_response.get_json()["data"]
         self.assertEqual(generated["geo_score"], rescored["score"])
         self.assertEqual(rescored["score"], saved["geo_score"])
+        self.assertEqual(
+            saved["geo_analysis"]["citeability"],
+            generated["geo_analysis"]["citeability"],
+        )
         self.assertEqual(saved["generation"]["sources"], VALID_RESULT["sources"])
+
+    def test_legacy_generation_receipt_cannot_accept_client_supplied_sources(self):
+        adapter = MockContentEngineAdapter([VALID_RESULT], version="1.0-test")
+        service = ContentGenerationService(self.db_path, adapter)
+        with patch("sau_backend._create_content_generation_service", return_value=service):
+            generated = self._post(
+                key="legacy-source-context",
+                request_id="req-legacy-source-context",
+            ).get_json()["data"]
+        run_id = generated["generation"]["run_id"]
+
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            row = conn.execute(
+                "SELECT result_payload FROM content_generation_runs WHERE id = ?",
+                (run_id,),
+            ).fetchone()
+            payload = json.loads(row[0])
+            payload.pop("sources", None)
+            with conn:
+                conn.execute(
+                    "UPDATE content_generation_runs SET result_payload = ? WHERE id = ?",
+                    (json.dumps(payload, ensure_ascii=False), run_id),
+                )
+
+        response = self.client.post(
+            "/api/geo/score",
+            json={
+                "title": generated["title"],
+                "summary": generated["summary"],
+                "content": generated["content"].replace(
+                    "来源：https://example.com/report", ""
+                ),
+                "generation_run_id": run_id,
+                "sources": [
+                    {
+                        "title": "客户端伪造来源",
+                        "url": "https://untrusted.example.com/client-source",
+                    }
+                ],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.get_json()["citeability"]["signals"]["citation_count"],
+            0,
+        )
 
     def test_optimize_before_and_after_scores_use_generation_snapshot(self):
         adapter = MockContentEngineAdapter([VALID_RESULT], version="1.0-test")

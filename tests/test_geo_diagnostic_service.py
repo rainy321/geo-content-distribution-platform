@@ -65,6 +65,12 @@ class GEODiagnosticServiceTests(unittest.TestCase):
 
         self.assertEqual(result["scope"], "content")
         self.assertEqual(result["source_type"], "ad_hoc")
+        self.assertEqual(
+            result["algorithm_versions"]["ai_citeability"],
+            "ai-citeability-rules-2.0.0",
+        )
+        self.assertIn("citeability", result)
+        self.assertEqual(len(result["citeability"]["dimensions"]), 7)
         self.assertTrue(any(gap["dimension"] == "structure" for gap in result["gaps"]))
         stored = get_geo_diagnostic_run(self.database_path, result["run_id"])
         self.assertNotIn(private_body, json.dumps(stored, ensure_ascii=False))

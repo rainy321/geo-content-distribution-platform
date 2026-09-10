@@ -172,6 +172,51 @@
         </article>
       </section>
 
+      <section v-if="hasCiteability" class="citeability-gate" aria-labelledby="citeability-gate-title">
+        <header class="citeability-gate__header">
+          <div>
+            <span>04 / AI CITATION GATE</span>
+            <h2 id="citeability-gate-title">发布前可引用性门禁</h2>
+            <p>七维规则只衡量内容是否便于模型提取与引用，不代表已经被抓取、收录或采用。</p>
+          </div>
+          <div class="gate-transition" aria-label="门禁状态变化">
+            <span :class="['gate-state', citeabilityStateClass(beforeCiteability)]">
+              原稿 {{ citeabilityStateLabel(beforeCiteability) }}
+            </span>
+            <i>→</i>
+            <span :class="['gate-state', citeabilityStateClass(afterCiteability)]">
+              优化稿 {{ citeabilityStateLabel(afterCiteability, '待检测') }}
+            </span>
+          </div>
+        </header>
+
+        <div class="citeability-grid" aria-label="可引用性七维前后对比">
+          <article v-for="item in citeabilityComparison" :key="item.key">
+            <span>{{ item.label }}</span>
+            <div>
+              <strong>{{ item.before }}</strong>
+              <i>→</i>
+              <strong>{{ afterCiteability ? item.after : '—' }}</strong>
+              <b v-if="afterCiteability" :class="deltaClass(item.delta)">{{ signedDelta(item.delta) }}</b>
+            </div>
+            <div class="citeability-track">
+              <span :style="{ width: `${item.before}%` }" />
+              <span v-if="afterCiteability" :style="{ width: `${item.after}%` }" />
+            </div>
+          </article>
+        </div>
+
+        <div v-if="remainingP0Issues.length" class="p0-blockers" role="alert">
+          <strong>P0 · 发布前必须处理</strong>
+          <ul>
+            <li v-for="issue in remainingP0Issues" :key="issue.code">
+              {{ issue.message }} {{ issue.action }}
+            </li>
+          </ul>
+        </div>
+        <p v-else-if="afterCiteability?.passed" class="gate-cleared">七维门禁已通过；仍需人工核验事实、来源和平台规则。</p>
+      </section>
+
       <div v-if="optimizationError" class="optimization-error" role="alert">
         <strong>{{ optimizationError.title }}</strong>
         <p>{{ optimizationError.message }}</p>
@@ -220,6 +265,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { EditPen, FolderChecked, MagicStick, Refresh } from '@element-plus/icons-vue'
 import { articleApi } from '@/api/article'
+import { CITEABILITY_DIMENSIONS, normalizeGeoScoreResult } from '@/utils/geoBlueprint'
 
 const route = useRoute()
 const router = useRouter()
@@ -276,6 +322,21 @@ const scoreTrendClass = computed(() => ({
   negative: scoreDelta.value < 0
 }))
 
+const beforeCiteability = computed(() => beforeScore.value?.citeability || null)
+const afterCiteability = computed(() => afterScore.value?.citeability || null)
+const hasCiteability = computed(() => Boolean(beforeCiteability.value || afterCiteability.value))
+
+const citeabilityComparison = computed(() => CITEABILITY_DIMENSIONS.map(dimension => {
+  const before = citeabilityDimensionValue(beforeCiteability.value, dimension.key)
+  const after = citeabilityDimensionValue(afterCiteability.value, dimension.key)
+  return { ...dimension, before, after, delta: after - before }
+}))
+
+const remainingP0Issues = computed(() => {
+  const source = afterCiteability.value || beforeCiteability.value
+  return (source?.blockingIssues || []).filter(issue => issue.priority === 'P0')
+})
+
 const fetchArticleList = async () => {
   listLoading.value = true
   listError.value = false
@@ -327,8 +388,8 @@ const runOptimization = async () => {
   try {
     const response = await articleApi.optimizeArticle(currentArticle.value.id)
     optimizedArticle.value = response.data.optimized
-    beforeScore.value = response.data.before
-    afterScore.value = response.data.after
+    beforeScore.value = normalizeGeoScoreResult(response.data.before)
+    afterScore.value = normalizeGeoScoreResult(response.data.after)
   } catch (error) {
     optimizationError.value = formatOptimizationError(error)
   } finally {
@@ -386,11 +447,31 @@ const openEditor = () => {
   router.push({ path: '/content-create', query: { articleId: currentArticle.value.id } })
 }
 
-const scoreFromArticle = article => ({
+const scoreFromArticle = article => normalizeGeoScoreResult({
   score: article.geo_score || 0,
   dimensions: article.geo_analysis?.dimensions || {},
-  suggestions: article.geo_analysis?.suggestions || []
+  suggestions: article.geo_analysis?.suggestions || [],
+  citeability: article.geo_analysis?.citeability || null
 })
+
+const citeabilityDimensionValue = (score, key) => {
+  const dimension = score?.dimensions?.find(item => item.key === key)
+  return Number.isFinite(Number(dimension?.value)) ? Math.round(Number(dimension.value)) : 0
+}
+
+const citeabilityStateLabel = (score, emptyLabel = '未检测') => {
+  if (!score) return emptyLabel
+  return score.passed ? `通过 · ${displayScore(score.score)}` : `阻断 · ${displayScore(score.score)}`
+}
+
+const citeabilityStateClass = score => ({
+  passed: Boolean(score?.passed),
+  blocked: Boolean(score && !score.passed),
+  pending: !score
+})
+
+const signedDelta = value => (value > 0 ? `+${value}` : String(value))
+const deltaClass = value => ({ positive: value > 0, negative: value < 0, neutral: value === 0 })
 
 const formatOptimizationError = (error) => {
   const status = error.response?.status
@@ -798,6 +879,69 @@ onMounted(async () => {
 
 .optimization-error p { margin: 4px 0 0; font-size: 12px; }
 
+.citeability-gate {
+  margin-top: 16px;
+  padding: 20px 22px;
+  border: 1px solid rgba(23, 34, 43, 0.14);
+  border-left: 4px solid var(--signal);
+  background: var(--paper);
+  box-shadow: 0 12px 30px rgba(16, 43, 49, 0.045);
+}
+
+.citeability-gate__header {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 20px;
+  padding-bottom: 15px;
+  border-bottom: 1px solid rgba(23, 34, 43, 0.1);
+}
+
+.citeability-gate__header > div:first-child > span {
+  color: var(--teal);
+  font-family: "Cascadia Mono", monospace;
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.13em;
+}
+
+.citeability-gate__header h2 { margin: 4px 0; color: var(--deep-teal); font-size: 17px; }
+.citeability-gate__header p { margin: 0; color: #748187; font-size: 10px; }
+.gate-transition { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.gate-transition > i { color: #8b999d; font-style: normal; }
+.gate-state { padding: 6px 9px; border: 1px solid #cbd6d7; font: 700 10px "Cascadia Mono", monospace; }
+.gate-state.passed { border-color: rgba(40, 125, 83, 0.35); background: rgba(40, 125, 83, 0.08); color: #287d53; }
+.gate-state.blocked { border-color: rgba(181, 77, 66, 0.4); background: rgba(181, 77, 66, 0.07); color: #99443b; }
+.gate-state.pending { border-style: dashed; color: #758589; }
+
+.citeability-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(105px, 1fr));
+  margin-top: 16px;
+  overflow-x: auto;
+}
+
+.citeability-grid article { min-width: 105px; padding: 0 12px; border-left: 1px solid rgba(23, 34, 43, 0.09); }
+.citeability-grid article:first-child { padding-left: 0; border-left: 0; }
+.citeability-grid article > span { color: #67757b; font-size: 9px; }
+.citeability-grid article > div:nth-child(2) { display: flex; align-items: baseline; gap: 4px; margin-top: 6px; }
+.citeability-grid article strong { color: var(--deep-teal); font: 700 14px "Cascadia Mono", monospace; }
+.citeability-grid article i { color: #a0adaf; font-style: normal; font-size: 9px; }
+.citeability-grid article b { margin-left: auto; font: 700 9px "Cascadia Mono", monospace; }
+.citeability-grid article b.positive { color: #287d53; }
+.citeability-grid article b.negative { color: #99443b; }
+.citeability-grid article b.neutral { color: #7b888d; }
+
+.citeability-track { position: relative; height: 5px; margin-top: 8px; background: var(--mist); }
+.citeability-track span { position: absolute; left: 0; height: 2px; background: #96a5a8; }
+.citeability-track span:first-child { top: 0; }
+.citeability-track span + span { bottom: 0; background: var(--signal); }
+
+.p0-blockers { display: grid; grid-template-columns: 180px 1fr; gap: 14px; margin-top: 16px; padding: 12px 14px; border: 1px solid rgba(181, 77, 66, 0.28); background: rgba(181, 77, 66, 0.055); color: #763d36; }
+.p0-blockers strong { font-size: 10px; }
+.p0-blockers ul { display: grid; gap: 4px; margin: 0; padding-left: 16px; font-size: 10px; line-height: 1.5; }
+.gate-cleared { margin: 16px 0 0; color: #287d53; font-size: 10px; font-weight: 600; }
+
 .action-dock {
   display: flex;
   align-items: center;
@@ -866,6 +1010,7 @@ onMounted(async () => {
   .score-transition { max-width: 420px; }
   .dimension-compare { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .suggestion-brief ul { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .citeability-gate__header { align-items: flex-start; flex-direction: column; }
 }
 
 @media (max-width: 700px) {
@@ -876,6 +1021,9 @@ onMounted(async () => {
   .article-selector :deep(.el-select) { grid-column: 1 / -1; }
   .revision-contract { flex-wrap: wrap; }
   .dock-buttons { flex-wrap: wrap; }
+  .gate-transition { align-items: flex-start; flex-direction: column; }
+  .gate-transition > i { transform: rotate(90deg); }
+  .p0-blockers { grid-template-columns: 1fr; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -105,6 +105,14 @@ class ContentGenerationServiceTests(unittest.TestCase):
 
         self.assertIn("geo_score", result)
         self.assertIn("geo_analysis", result)
+        self.assertEqual(
+            result["geo_analysis"]["citeability"]["version"],
+            "ai-citeability-rules-2.0.0",
+        )
+        self.assertEqual(
+            len(result["geo_analysis"]["citeability"]["dimensions"]),
+            7,
+        )
         self.assertIsNone(result["generation"]["usage"])
         self.assertEqual(result["generation"]["usage_status"], "unknown")
         run = get_run(self.db_path, result["generation"]["run_id"])

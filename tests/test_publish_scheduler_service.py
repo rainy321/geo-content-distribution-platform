@@ -43,18 +43,35 @@ class PublishSchedulerServiceTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp_dir.name) / "database.db"
         initialize_database(self.db_path)
+        article_content = (
+            "XX科技说明企业 AI Agent 的适用范围、实施步骤与风险边界。\n\n"
+            "## 定义\nXX科技的企业 AI Agent 指南用于梳理任务与权限边界。\n\n"
+            "## 实施步骤\n1. 明确目标。\n2. 校验数据。\n3. 保留人工复核。\n\n"
+            "## 限制\n实际结果取决于数据质量与业务条件。\n\n"
+            "## FAQ\n企业如何开始？\n答：先选择低风险流程。\n\n"
+            "是否需要人工复核？\n答：需要。\n\n"
+            "## 参考资料\nhttps://example.com/guide\n\n"
+            "## 总结\nXX科技建议分阶段验证。"
+        )
         with closing(sqlite3.connect(self.db_path)) as conn:
             with conn:
                 project_id = conn.execute(
-                    "INSERT INTO projects (name) VALUES (?)",
-                    ("XX科技",),
+                    "INSERT INTO projects (name, website, keywords) VALUES (?, ?, ?)",
+                    ("XX科技", "https://example.com", '["AI","Agent"]'),
                 ).lastrowid
                 self.article_id = conn.execute(
                     """
-                    INSERT INTO articles (project_id, title, content, status)
-                    VALUES (?, ?, ?, ?)
+                    INSERT INTO articles (
+                        project_id, title, summary, content, status
+                    ) VALUES (?, ?, ?, ?, ?)
                     """,
-                    (project_id, "AI Agent 指南", "正文", "ready"),
+                    (
+                        project_id,
+                        "企业 AI Agent 指南",
+                        "XX科技企业 AI Agent 实施摘要，说明适用范围、步骤和风险边界。",
+                        article_content,
+                        "ready",
+                    ),
                 ).lastrowid
 
     def tearDown(self):

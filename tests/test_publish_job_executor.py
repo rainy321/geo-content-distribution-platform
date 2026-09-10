@@ -50,21 +50,33 @@ class PublishJobExecutorTests(unittest.TestCase):
         self.temp_dir = tempfile.TemporaryDirectory()
         self.db_path = Path(self.temp_dir.name) / "database.db"
         initialize_database(self.db_path)
+        self.article_content = (
+            "XX科技说明企业 AI Agent 的适用范围、实施步骤与风险边界。\n\n"
+            "## 定义\nXX科技的企业 AI Agent 指南用于梳理任务与权限边界。\n\n"
+            "## 实施步骤\n1. 明确目标。\n2. 校验数据。\n3. 保留人工复核。\n\n"
+            "## 限制\n实际结果取决于数据质量与业务条件。\n\n"
+            "## FAQ\n企业如何开始？\n答：先选择低风险流程。\n\n"
+            "是否需要人工复核？\n答：需要。\n\n"
+            "## 参考资料\nhttps://example.com/guide\n\n"
+            "## 总结\nXX科技建议分阶段验证。"
+        )
         with closing(sqlite3.connect(self.db_path)) as conn:
             with conn:
                 project_id = conn.execute(
-                    "INSERT INTO projects (name) VALUES (?)",
-                    ("XX科技",),
+                    "INSERT INTO projects (name, website, keywords) VALUES (?, ?, ?)",
+                    ("XX科技", "https://example.com", '["AI","Agent"]'),
                 ).lastrowid
                 self.article_id = conn.execute(
                     """
-                    INSERT INTO articles (project_id, title, content, tags, status)
-                    VALUES (?, ?, ?, ?, ?)
+                    INSERT INTO articles (
+                        project_id, title, summary, content, tags, status
+                    ) VALUES (?, ?, ?, ?, ?, ?)
                     """,
                     (
                         project_id,
                         "企业 AI Agent 指南",
-                        "这里是文章正文",
+                        "XX科技企业 AI Agent 实施摘要，说明适用范围、步骤和风险边界。",
+                        self.article_content,
                         '["AI","Agent"]',
                         "ready",
                     ),
@@ -191,7 +203,7 @@ class PublishJobExecutorTests(unittest.TestCase):
         self.assertEqual(self._article_status(), "published")
 
     def test_executor_sends_saved_platform_copy_instead_of_mutating_original(self):
-        platform_copy = "快手实际发布短版"
+        platform_copy = self.article_content
         platform_title = "快手短标题"
         job = self._create_job(
             platform="kuaishou",
@@ -214,8 +226,49 @@ class PublishJobExecutorTests(unittest.TestCase):
         self.assertEqual(publisher.calls[0].content, platform_copy)
         self.assertEqual(
             get_article(self.db_path, self.article_id)["content"],
-            "这里是文章正文",
+            self.article_content,
         )
+
+    def test_real_executor_blocks_legacy_low_citeability_before_loading_publisher(self):
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE articles SET content = ?, geo_analysis = '{}' WHERE id = ?",
+                    ("缺少标准实体和结构的旧文章正文", self.article_id),
+                )
+        job = self._create_job()
+        publisher_factory = Mock(name="publisher_factory_must_not_be_called")
+
+        result = execute_publish_job(
+            self.db_path,
+            job["id"],
+            publisher_factory=publisher_factory,
+        )
+
+        publisher_factory.assert_not_called()
+        self.assertEqual(result["status"], "need_action")
+        self.assertIn("AI 可引用性发布门禁未通过", result["message"])
+        self.assertIn("标准品牌名称“XX科技”", result["message"])
+        self.assertIn("处理建议", result["message"])
+        self.assertIn("未加载发布器、未访问平台", result["message"])
+
+    def test_real_executor_scores_exact_platform_override_before_publishing(self):
+        job = self._create_job(
+            platform="kuaishou",
+            publish_title="平台短标题",
+            publish_content="不含标准品牌、结构或来源的短版",
+        )
+        publisher_factory = Mock(name="publisher_factory_must_not_be_called")
+
+        result = execute_publish_job(
+            self.db_path,
+            job["id"],
+            publisher_factory=publisher_factory,
+        )
+
+        publisher_factory.assert_not_called()
+        self.assertEqual(result["status"], "need_action")
+        self.assertIn("AI 可引用性发布门禁未通过", result["message"])
 
     def test_executor_blocks_tampered_over_limit_copy_before_loading_publisher(self):
         job = self._create_job(platform="kuaishou")

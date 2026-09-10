@@ -25,6 +25,7 @@ from services.content_generation_run_service import (
     mark_unknown,
 )
 from services.geo_score_service import score_geo_content
+from services.geo_article_compiler_service import score_ai_citeability
 
 
 class ContentGenerationInProgressError(ContentEngineError):
@@ -177,9 +178,20 @@ class ContentGenerationService:
                 brand=str(request.project_context.get("name") or "").strip(),
                 keywords=request.keywords,
             )
+            citeability = score_ai_citeability(
+                title=result.title,
+                summary=result.summary,
+                content=result.content,
+                brand=str(request.project_context.get("name") or "").strip(),
+                product=str(request.project_context.get("product") or "").strip(),
+                website=str(request.project_context.get("website") or "").strip(),
+                keywords=request.keywords,
+                sources=result.sources,
+            )
             analysis = {
                 "dimensions": score["dimensions"],
                 "suggestions": score["suggestions"],
+                "citeability": citeability,
             }
             return mark_succeeded(
                 self.database_path,

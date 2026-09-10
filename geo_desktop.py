@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Mapping, MutableMapping, Sequence
 
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.0"
 BUILD_INFO_SCHEMA_VERSION = 1
 APP_TITLE = "GEO 智能内容分发平台"
 APP_DIRECTORY_NAME = "GEOContentPlatform"

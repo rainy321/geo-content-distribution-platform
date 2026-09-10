@@ -62,6 +62,10 @@ class ArticlesApiTests(unittest.TestCase):
         self.assertEqual(article["tags"], ["AI Agent", "企业智能体"])
         self.assertNotEqual(article["geo_score"], 100)
         self.assertIn("dimensions", article["geo_analysis"])
+        self.assertEqual(
+            article["geo_analysis"]["citeability"]["version"],
+            "ai-citeability-rules-2.0.0",
+        )
         self.assertEqual(article["status"], "draft")
 
         get_response = self.client.get(f"/api/articles/{article['id']}")
@@ -85,7 +89,7 @@ class ArticlesApiTests(unittest.TestCase):
 答：适合有明确业务需求的企业。
 
 ## 总结
-建议结合自身情况实施。数据来源：https://example.test/report
+建议结合自身情况实施。数据来源：https://example.com/report
 """
 
         response = self.client.put(
@@ -236,6 +240,11 @@ class ArticlesApiTests(unittest.TestCase):
         self.assertEqual(article["generation_run_id"], run.run_id)
         self.assertEqual(article["generation"]["engine"], "mock")
         self.assertEqual(article["generation"]["usage"], None)
+        self.assertEqual(article["generation"]["sources"], [])
+        self.assertEqual(
+            article["geo_analysis"]["citeability"]["signals"]["citation_count"],
+            0,
+        )
         score_before = article["geo_score"]
 
         detail = self.client.get(f"/api/articles/{article['id']}")
@@ -270,6 +279,87 @@ class ArticlesApiTests(unittest.TestCase):
         )
         self.assertEqual(duplicate.status_code, 409)
         self.assertIn("已经保存", duplicate.get_json()["msg"])
+
+    def test_generated_article_reuses_receipt_sources_when_saved_and_edited(self):
+        request = ContentGenerationRequest.create(
+            project_context={
+                "id": self.project_id,
+                "name": "XX科技",
+                "product": "智能体平台",
+                "website": "https://xx.example.com",
+                "keywords": ["AI Agent"],
+            },
+            topic="生成来源保持",
+            keywords=["AI Agent"],
+            length=600,
+            content_type="行业科普",
+            idempotency_key="article-source-receipt-test",
+        )
+        run = begin_or_replay(self.db_path, request, configured_engine="mock")
+        result = ContentGenerationResult.from_payload(
+            {
+                "title": "AI Agent 如何落地？",
+                "summary": "XX科技智能体平台的实施步骤与适用边界说明。",
+                "content": (
+                    "XX科技智能体平台可先从单一流程验证。\n\n"
+                    "## 实施步骤\n1. 明确场景。\n2. 保留验收记录。\n\n"
+                    "## FAQ\n问：适合谁？\n答：适合有明确流程的团队。"
+                ),
+                "tags": ["AI Agent"],
+                "sources": [
+                    {
+                        "title": "产品说明",
+                        "url": "https://xx.example.com/product",
+                    }
+                ],
+            },
+            default_engine="mock",
+            default_engine_version="test",
+            request_id=request.request_id,
+            elapsed_ms=1,
+        )
+        mark_succeeded(
+            self.db_path,
+            run.run_id,
+            result,
+            local_score=60,
+            local_analysis={"dimensions": {}, "suggestions": []},
+        )
+
+        saved_response = self.client.post(
+            "/api/articles",
+            json={
+                "project_id": self.project_id,
+                "generation_run_id": run.run_id,
+                "title": result.title,
+                "summary": result.summary,
+                "content": result.content,
+                "tags": list(result.tags),
+            },
+        )
+        self.assertEqual(saved_response.status_code, 201)
+        saved = saved_response.get_json()["data"]
+        before = saved["geo_analysis"]["citeability"]
+        self.assertEqual(before["signals"]["citation_count"], 1)
+        self.assertEqual(before["signals"]["owned_citation_count"], 1)
+        self.assertEqual(
+            saved["generation"]["sources"],
+            [{"title": "产品说明", "url": "https://xx.example.com/product"}],
+        )
+
+        updated_response = self.client.put(
+            f"/api/articles/{saved['id']}",
+            json={"summary": result.summary + " 内容已复核。"},
+        )
+        self.assertEqual(updated_response.status_code, 200)
+        updated = updated_response.get_json()["data"]
+        after = updated["geo_analysis"]["citeability"]
+        self.assertEqual(after["signals"]["citation_count"], 1)
+        self.assertEqual(after["signals"]["owned_citation_count"], 1)
+        self.assertEqual(
+            after["dimensions"]["evidence_traceability"],
+            before["dimensions"]["evidence_traceability"],
+        )
 
     def _create_article(self):
         response = self.client.post(

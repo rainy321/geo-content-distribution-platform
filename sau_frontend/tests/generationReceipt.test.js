@@ -116,6 +116,35 @@ test('GEO scoring uses the immutable run snapshot when a run id exists', () => {
 })
 
 
+test('GEO scoring keeps draft evidence but does not override immutable run context', () => {
+  const sources = [{ title: '产品事实页', url: 'https://example.test/facts' }]
+  const payload = buildGeoScorePayload({
+    title: '生成后编辑的标题',
+    summary: '生成后补充的摘要',
+    content: '生成后编辑的正文',
+    generationRunId: 73,
+    brand: '后来改名的品牌',
+    product: '后来改名的产品',
+    website: 'https://mutated.example.test',
+    keywords: ['后来修改的关键词'],
+    sources
+  })
+
+  assert.deepEqual(payload, {
+    title: '生成后编辑的标题',
+    summary: '生成后补充的摘要',
+    content: '生成后编辑的正文',
+    sources: [{ title: '产品事实页', url: 'https://example.test/facts' }],
+    generation_run_id: 73
+  })
+  assert.notEqual(payload.sources, sources)
+  assert.equal('brand' in payload, false)
+  assert.equal('product' in payload, false)
+  assert.equal('website' in payload, false)
+  assert.equal('keywords' in payload, false)
+})
+
+
 test('GEO scoring uses current brand and keywords when there is no run', () => {
   const keywords = ['当前关键词']
   const payload = buildGeoScorePayload({
@@ -133,4 +162,29 @@ test('GEO scoring uses current brand and keywords when there is no run', () => {
     keywords: ['当前关键词']
   })
   assert.notEqual(payload.keywords, keywords)
+})
+
+
+test('manual GEO scoring includes product and website context when provided', () => {
+  assert.deepEqual(
+    buildGeoScorePayload({
+      title: '手工稿标题',
+      summary: '手工稿摘要',
+      content: '手工稿正文',
+      generationRunId: null,
+      brand: '当前品牌',
+      product: '当前产品',
+      website: 'https://example.test',
+      keywords: ['当前关键词']
+    }),
+    {
+      title: '手工稿标题',
+      summary: '手工稿摘要',
+      content: '手工稿正文',
+      brand: '当前品牌',
+      keywords: ['当前关键词'],
+      product: '当前产品',
+      website: 'https://example.test'
+    }
+  )
 })

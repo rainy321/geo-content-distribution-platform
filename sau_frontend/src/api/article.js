@@ -71,6 +71,10 @@ export const articleApi = {
     return http.post('/api/geo/score', data)
   },
 
+  getGeoBlueprint(data, config = {}) {
+    return http.post('/api/geo/content-blueprint', data, config)
+  },
+
   createArticle(data) {
     return http.post('/api/articles', data)
   },

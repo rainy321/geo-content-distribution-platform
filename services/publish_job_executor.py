@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from services.article_service import get_article
+from services.geo_article_compiler_service import (
+    GEOArticleCompilerError,
+    score_ai_citeability,
+)
+from services.project_service import ProjectNotFoundError, get_project
 from services.publish_job_service import (
     ConcurrentPublishJobUpdateError,
     PUBLISH_AUTHORIZATION_MISMATCH_MESSAGE,
@@ -43,6 +48,10 @@ class PublishConfirmationMismatchError(RuntimeError):
     def __init__(self, message: str, *, job: dict[str, Any]):
         super().__init__(message)
         self.job = job
+
+
+class PublishCiteabilityGateError(RuntimeError):
+    """Raised when the exact real-publication copy is not safe to release."""
 
 
 def execute_publish_job(
@@ -119,6 +128,13 @@ def execute_publish_job(
                 expected_state_version=job["state_version"],
             )
         content = _build_publish_content(job, article, media_root=media_root)
+        if not job["demo"]:
+            _enforce_citeability_gate(
+                database_path,
+                article=article,
+                title=content.title,
+                content=content.content,
+            )
         publisher = _select_publisher(job, publisher_factory)
         result = publisher.publish(content)
         if not isinstance(result, PublishResult):
@@ -146,6 +162,17 @@ def execute_publish_job(
             message=(
                 f"发布前置校验未通过：{exc}；未加载发布器、未访问平台，"
                 "请重新创建任务并编辑平台短版"
+            ),
+            expected_state_version=job["state_version"],
+        )
+    except PublishCiteabilityGateError as exc:
+        return transition_publish_job(
+            database_path,
+            job_id,
+            "need_action",
+            message=(
+                f"AI 可引用性发布门禁未通过：{exc}；"
+                "未加载发布器、未访问平台，请返回内容库完成优化后重试"
             ),
             expected_state_version=job["state_version"],
         )
@@ -178,6 +205,69 @@ def _select_publisher(
             f"任务平台 {job['platform']} 与发布器 {publisher.platform} 不一致"
         )
     return publisher
+
+
+def _enforce_citeability_gate(
+    database_path: str | Path,
+    *,
+    article: dict[str, Any],
+    title: str,
+    content: str,
+) -> dict[str, Any]:
+    """Score the exact outbound copy and reject failed real publications.
+
+    Re-scoring here intentionally covers legacy articles without a persisted
+    ``geo_analysis.citeability`` payload and platform-specific title/body
+    overrides.  It is deterministic and local: no model or platform is called.
+    """
+
+    try:
+        project = get_project(database_path, int(article["project_id"]))
+        result = score_ai_citeability(
+            title=title,
+            # The current publisher contract sends title/body/tags only.  A
+            # summary stored on the article cannot improve the score of an
+            # outbound platform copy that does not actually contain it.
+            summary="",
+            content=content,
+            brand=str(project.get("name") or "").strip(),
+            product=str(project.get("product") or "").strip(),
+            website=str(project.get("website") or "").strip(),
+            keywords=(
+                project.get("keywords")
+                if isinstance(project.get("keywords"), list)
+                else []
+            ),
+            # Provider receipt sources are not part of PublishContent and
+            # therefore cannot improve the exact outbound-copy gate.  Public
+            # URLs that are actually present in the body are still audited.
+            sources=[],
+        )
+    except (GEOArticleCompilerError, ProjectNotFoundError, KeyError, TypeError, ValueError) as exc:
+        raise PublishCiteabilityGateError(
+            f"无法校验当前发布副本（{str(exc).strip() or exc.__class__.__name__}）"
+        ) from exc
+
+    if result.get("passed") is True:
+        return result
+
+    actions: list[str] = []
+    for issue in result.get("blocking_issues") or ():
+        if not isinstance(issue, dict):
+            continue
+        text = str(issue.get("action") or issue.get("message") or "").strip()
+        if text and text not in actions:
+            actions.append(text)
+    for suggestion in result.get("suggestions") or ():
+        text = str(suggestion or "").strip()
+        if text and text not in actions:
+            actions.append(text)
+    action_text = "；".join(actions[:3]) or "补齐标准实体、直接答案、结构与可核验来源"
+    score = result.get("score", 0)
+    pass_score = result.get("pass_score", 70)
+    raise PublishCiteabilityGateError(
+        f"当前 {score}/100，要求至少 {pass_score}/100。处理建议：{action_text}"
+    )
 
 
 def _build_publish_content(

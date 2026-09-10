@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from services.geo_score_service import score_geo_content
+from services.geo_article_compiler_service import score_ai_citeability
 from services.content_generation_run_service import (
     GenerationRunNotFoundError,
     GenerationRunStateError,
@@ -47,6 +48,7 @@ def create_article(
                 project,
                 title,
                 content,
+                summary=summary,
                 score_context=score_context,
             )
             cursor = conn.execute(
@@ -98,6 +100,7 @@ def create_articles_bulk(
                     project,
                     article["title"],
                     article["content"],
+                    summary=article.get("summary", ""),
                 )
                 cursor = conn.execute(
                     """
@@ -210,6 +213,7 @@ def update_article(
                 project,
                 title,
                 content,
+                summary=summary,
                 score_context=score_context,
             )
 
@@ -245,7 +249,7 @@ def _connect(database_path: str | Path) -> sqlite3.Connection:
 
 def _fetch_project(conn: sqlite3.Connection, project_id: int):
     return conn.execute(
-        "SELECT id, name, keywords FROM projects WHERE id = ?",
+        "SELECT id, name, product, website, keywords FROM projects WHERE id = ?",
         (project_id,),
     ).fetchone()
 
@@ -280,19 +284,37 @@ def _score_article(
     title: str,
     content: str,
     *,
+    summary: str = "",
     score_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     context = score_context or {}
-    return score_geo_content(
+    brand = str(context.get("brand") or project["name"]).strip()
+    keywords = (
+        context["keywords"]
+        if isinstance(context.get("keywords"), list)
+        else _decode_string_list(project["keywords"])
+    )
+    result = score_geo_content(
         title=title,
         content=content,
-        brand=str(context.get("brand") or project["name"]).strip(),
-        keywords=(
-            context["keywords"]
-            if isinstance(context.get("keywords"), list)
-            else _decode_string_list(project["keywords"])
+        brand=brand,
+        keywords=keywords,
+    )
+    result["citeability"] = score_ai_citeability(
+        title=title,
+        summary=summary,
+        content=content,
+        brand=brand,
+        product=str(context.get("product") or project["product"] or "").strip(),
+        website=str(context.get("website") or project["website"] or "").strip(),
+        keywords=keywords,
+        sources=(
+            context["sources"]
+            if isinstance(context.get("sources"), list)
+            else ()
         ),
     )
+    return result
 
 
 def _score_context_for_run(
@@ -306,7 +328,8 @@ def _score_context_for_run(
         return None
     row = conn.execute(
         """
-        SELECT project_id, project_snapshot, brief_snapshot, status, article_id
+        SELECT project_id, project_snapshot, brief_snapshot, result_payload,
+               status, article_id
         FROM content_generation_runs
         WHERE id = ?
         """,
@@ -324,12 +347,20 @@ def _score_context_for_run(
         raise GenerationRunStateError("生成记录已经保存为另一篇文章")
     project_snapshot = _decode_json_object(row["project_snapshot"])
     brief_snapshot = _decode_json_object(row["brief_snapshot"])
+    result_payload = _decode_json_object(row["result_payload"])
+    sources = result_payload.get("sources")
     keywords = brief_snapshot.get("keywords")
     if not isinstance(keywords, list):
         keywords = project_snapshot.get("keywords")
     return {
         "brand": str(project_snapshot.get("name") or "").strip(),
         "keywords": _decode_string_list(keywords),
+        "product": str(project_snapshot.get("product") or "").strip(),
+        "website": str(project_snapshot.get("website") or "").strip(),
+        # Generation sources are immutable provenance stored in the existing
+        # result receipt. Reusing them keeps pre-save, saved and later edited
+        # citeability scores stable without adding another article column.
+        "sources": sources if isinstance(sources, list) else [],
     }
 
 
@@ -375,12 +406,13 @@ def _serialize_article_list_item(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _encode_geo_analysis(score_result: dict[str, Any]) -> str:
-    return _encode_json(
-        {
-            "dimensions": score_result["dimensions"],
-            "suggestions": score_result["suggestions"],
-        }
-    )
+    analysis = {
+        "dimensions": score_result["dimensions"],
+        "suggestions": score_result["suggestions"],
+    }
+    if isinstance(score_result.get("citeability"), dict):
+        analysis["citeability"] = score_result["citeability"]
+    return _encode_json(analysis)
 
 
 def _encode_json(value: Any) -> str:
