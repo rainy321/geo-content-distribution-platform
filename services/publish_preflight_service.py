@@ -3,10 +3,16 @@ from __future__ import annotations
 import re
 from typing import Any, Iterable
 
+from services.content_hygiene_service import sanitize_generated_content
 from services.platform_capability_service import normalize_platform_key
+from services.platform_publish_policy_service import (
+    adapt_tags_for_platform,
+    evaluate_platform_offline_preflight,
+    get_platform_publish_policy,
+)
 
 
-PUBLISH_CONTENT_POLICY_VERSION = "2026-09-10.1"
+PUBLISH_CONTENT_POLICY_VERSION = "2026-09-10.2"
 
 
 class PublishContentLimitError(ValueError):
@@ -14,29 +20,52 @@ class PublishContentLimitError(ValueError):
 
 
 _CONTENT_POLICIES: dict[str, dict[str, Any]] = {
+    "xiaohongshu": {
+        "content_mode": "image_note",
+        "hard_limit": 1000,
+        "default_safe_limit": 900,
+        "fixed_reserve": 30,
+        "tags_share_content_limit": True,
+        "label": "笔记正文",
+        "counting_note": (
+            "按小红书编辑器截图显示的 1000 字上限预检；"
+            "另为话题、换行和平台计数差异预留余量"
+        ),
+        "basis": "user_editor_screenshot_2026_09_10",
+        "safe_limit_basis": "geo_conservative_headroom",
+    },
     "douyin": {
         "content_mode": "image_note",
         "hard_limit": 1000,
         "default_safe_limit": 920,
         "fixed_reserve": 24,
+        "tags_share_content_limit": True,
         "label": "作品描述",
         "counting_note": "按 Unicode 字符预估；另为话题、换行和平台计数差异预留余量",
+        "basis": "existing_repository_policy",
+        "safe_limit_basis": "existing_repository_policy",
     },
     "kuaishou": {
         "content_mode": "image_note",
         "hard_limit": 500,
         "default_safe_limit": 450,
         "fixed_reserve": 18,
+        "tags_share_content_limit": True,
         "label": "作品描述",
         "counting_note": "按 Unicode 字符预估；另为话题、换行和平台计数差异预留余量",
+        "basis": "existing_repository_policy",
+        "safe_limit_basis": "existing_repository_policy",
     },
     "bilibili": {
         "content_mode": "video_description",
         "hard_limit": 2000,
         "default_safe_limit": 2000,
         "fixed_reserve": 0,
+        "tags_share_content_limit": False,
         "label": "视频简介",
         "counting_note": "按 Unicode 字符计数；标题和标签由独立字段提交",
+        "basis": "existing_repository_policy",
+        "safe_limit_basis": "existing_repository_policy",
     },
 }
 
@@ -55,7 +84,20 @@ _TITLE_POLICIES: dict[str, dict[str, Any]] = {
     "xiaohongshu": {"hard_limit": 20, "safe_limit": 20, "min_length": 1},
 }
 
-_PLAIN_TEXT_CONTENT_PLATFORMS = frozenset({"baijiahao", "xiaohongshu"})
+_PLAIN_TEXT_CONTENT_PLATFORMS = frozenset(
+    {
+        "zhihu",
+        "toutiao",
+        "baijiahao",
+        "sohu",
+        "xiaohongshu",
+        "douyin",
+        "kuaishou",
+        "bilibili",
+        "channels",
+        "tiktok",
+    }
+)
 
 _GEO_PRESERVATION_PATTERN = re.compile(
     r"(?:https?://|参考(?:资料|来源)?|来源|证据|适用(?:条件|范围)|"
@@ -134,8 +176,14 @@ def get_publish_content_policy(
     if configured is None:
         return None
 
-    normalized_tags = _normalize_tags(tags)
-    tag_characters = sum(character_count(tag) + 2 for tag in normalized_tags)
+    tag_preview = adapt_tags_for_platform(normalized_platform, tags)
+    normalized_tags = tag_preview["selected"]
+    tags_share_content_limit = bool(configured.get("tags_share_content_limit"))
+    tag_characters = (
+        sum(character_count(tag) + 2 for tag in normalized_tags)
+        if tags_share_content_limit
+        else 0
+    )
     hard_limit = int(configured["hard_limit"])
     fixed_reserve = int(configured["fixed_reserve"])
     reserved_characters = fixed_reserve + tag_characters
@@ -157,8 +205,16 @@ def get_publish_content_policy(
         "safe_limit": safe_limit,
         "fixed_reserve": fixed_reserve,
         "tag_characters": tag_characters,
+        "tag_count_used": len(normalized_tags),
+        "tag_count_dropped": int(tag_preview["dropped_count"]),
         "reserved_characters": reserved_characters,
+        "tags_share_content_limit": tags_share_content_limit,
         "counting_note": configured["counting_note"],
+        "basis": configured.get("basis", "existing_repository_policy"),
+        "safe_limit_basis": configured.get(
+            "safe_limit_basis", "geo_conservative_headroom"
+        ),
+        "guaranteed_pass": False,
     }
 
 
@@ -256,19 +312,24 @@ def build_platform_publish_variant(
         raise PublishContentLimitError("平台发布标题不能为空")
 
     manually_edited = publish_content is not None
+    hygiene = sanitize_generated_content(original_content)
+    automatic_source_content = hygiene.content
     if manually_edited:
         actual_content = _normalize_line_endings(publish_content).strip()
         if not actual_content:
             raise PublishContentLimitError("平台发布副本不能为空")
     elif policy is not None or normalized_platform in _PLAIN_TEXT_CONTENT_PLATFORMS:
-        compact_content = _markdown_to_note_text(original_content)
+        compact_content = _format_platform_text(
+            automatic_source_content,
+            platform=normalized_platform,
+        )
         actual_content = (
             _shorten_to_limit(compact_content, policy["safe_limit"])
             if policy is not None
             else compact_content
         )
     else:
-        actual_content = original_content
+        actual_content = automatic_source_content
 
     actual_length = character_count(actual_content)
     original_length = character_count(original_content)
@@ -297,6 +358,11 @@ def build_platform_publish_variant(
     adapted = actual_content != original_content
     if manually_edited:
         adaptation_reason = "用户编辑的平台副本"
+    elif hygiene.changed and adapted:
+        adaptation_reason = (
+            "已移除未完成的作者、日期或证据占位标记；"
+            "平台账号和文章记录仍保留正式作者与时间信息"
+        )
     elif adapted and policy is not None:
         adaptation_reason = (
             f"已移除不适合图片笔记的 Markdown 标记，并自动缩至 "
@@ -306,6 +372,14 @@ def build_platform_publish_variant(
         adaptation_reason = "已在创建任务前移除平台编辑器不需要的 Markdown 标记"
     else:
         adaptation_reason = "原稿已符合平台安全限制，无需缩减"
+
+    platform_policy = get_platform_publish_policy(normalized_platform)
+    offline_preflight = evaluate_platform_offline_preflight(
+        platform=normalized_platform,
+        title=actual_title,
+        content=actual_content,
+        tags=tags,
+    )
 
     return {
         "platform": normalized_platform,
@@ -324,7 +398,14 @@ def build_platform_publish_variant(
         "adapted": adapted,
         "manually_edited": manually_edited,
         "adaptation_reason": adaptation_reason,
+        "placeholder_cleanup": {
+            "applied": bool(hygiene.changed and not manually_edited),
+            "removed_lines": hygiene.removed_lines if not manually_edited else 0,
+            "replaced_markers": hygiene.replaced_markers if not manually_edited else 0,
+        },
         "content_policy": policy,
+        "platform_policy": platform_policy,
+        "offline_preflight": offline_preflight,
         "verification": get_platform_verification_policy(normalized_platform),
     }
 
@@ -338,7 +419,7 @@ def validate_platform_publish_variant(
 ) -> dict[str, Any]:
     """Final execution gate for an already-created platform copy."""
 
-    return build_platform_publish_variant(
+    result = build_platform_publish_variant(
         platform=platform,
         title=title,
         content=content,
@@ -346,6 +427,26 @@ def validate_platform_publish_variant(
         publish_title=title,
         publish_content=content,
     )
+    assert_platform_publish_variant_ready(result)
+    return result
+
+
+def assert_platform_publish_variant_ready(variant: dict[str, Any]) -> None:
+    """Reject only deterministic blockers; warnings never predict moderation."""
+
+    preflight = variant.get("offline_preflight")
+    if not isinstance(preflight, dict) or preflight.get("passed") is True:
+        return
+    issues = preflight.get("issues")
+    blocking = [
+        item
+        for item in issues or ()
+        if isinstance(item, dict) and item.get("severity") == "blocking"
+    ]
+    if not blocking:
+        return
+    summary = "；".join(str(item.get("message") or "").strip() for item in blocking[:3])
+    raise PublishContentLimitError(f"平台离线预检未通过：{summary}")
 
 
 def evaluate_publish_citeability(
@@ -408,23 +509,58 @@ def _normalize_line_endings(value: Any) -> str:
 
 def _markdown_to_note_text(value: str) -> str:
     text = _normalize_line_endings(value)
+    text = re.sub(r"!\[([^\]]*)\]\([^\)]*\)", r"\1", text)
     text = re.sub(r"^\s*```[^\n]*\n?", "", text, flags=re.MULTILINE)
+    text = re.sub(
+        r"^\s{0,3}(?:[-*_]\s*){3,}$",
+        "",
+        text,
+        flags=re.MULTILINE,
+    )
     text = re.sub(r"^\s{0,3}#{1,6}\s*", "", text, flags=re.MULTILINE)
     text = re.sub(r"^\s*>\s?", "", text, flags=re.MULTILINE)
     text = re.sub(r"^\s*[-*+]\s+", "• ", text, flags=re.MULTILINE)
     # A public evidence link is part of the outbound GEO signal. Plain-text
     # editors do not need Markdown syntax, but dropping the URL would remove
     # the visible evidence that readers and models can verify.
+    def public_link(match: re.Match[str]) -> str:
+        label = match.group(1).strip()
+        url = match.group(2).strip()
+        # Models commonly emit [https://host](https://host). Repeating the
+        # same URL with a full-width colon creates one malformed apparent URL
+        # for the citeability scanner and for downstream plain-text editors.
+        if label.rstrip("/").casefold() == url.rstrip("/").casefold():
+            return url
+        return f"{label}：{url}"
+
     text = re.sub(
         r"\[([^\]]+)\]\((https?://[^\s\)]+)\)",
-        r"\1：\2",
+        public_link,
         text,
         flags=re.IGNORECASE,
     )
     text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
-    text = text.replace("**", "").replace("__", "").replace("`", "")
+    text = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", text)
+    text = re.sub(r"__([^_\n]+)__", r"\1", text)
+    text = re.sub(r"~~([^~\n]+)~~", r"\1", text)
+    text = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"\1", text)
+    text = text.replace("`", "")
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r" *\n *", "\n", text)
+    text = re.sub(r"\n{3,}", "\n\n", text)
+    return text.strip()
+
+
+def _format_platform_text(value: str, *, platform: str) -> str:
+    text = _markdown_to_note_text(value)
+    if platform != "sohu":
+        return text
+
+    # Sohu receives an intentionally conservative enterprise-education copy:
+    # ordinary paragraphs, no decorative divider residue, and no fake footer.
+    # Semantic claims are not rewritten here; the explainable risk checks below
+    # flag anything that needs a human decision instead of inventing facts.
+    text = re.sub(r"^\s*[—–_=]{3,}\s*$", "", text, flags=re.MULTILINE)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 

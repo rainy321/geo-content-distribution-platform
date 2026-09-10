@@ -124,6 +124,15 @@ class _CancellableQueue(Queue):
         self.cancel_event = threading.Event()
 
 
+class _ProtocolTwoQueue(Queue):
+    protocol_version = 2
+    existing_account_id = None
+
+    def __init__(self):
+        super().__init__()
+        self.cancel_event = threading.Event()
+
+
 class ToutiaoLoginWaiterTests(unittest.IsolatedAsyncioTestCase):
     def test_manual_login_default_is_ten_minutes(self):
         waiter_timeout = inspect.signature(
@@ -236,8 +245,18 @@ class ToutiaoLoginWaiterTests(unittest.IsolatedAsyncioTestCase):
         while not status_queue.empty():
             events.append(status_queue.get_nowait())
         self.assertEqual(events[0], "MANUAL_LOGIN")
-        self.assertEqual(json.loads(events[1])["code"], "operator_cancelled")
-        self.assertEqual(events[2], "500")
+        structured = [
+            json.loads(item)
+            for item in events[1:-1]
+            if str(item).startswith("{")
+        ]
+        self.assertTrue(
+            any(item.get("stage") == "opening_browser" for item in structured)
+        )
+        self.assertTrue(
+            any(item.get("code") == "operator_cancelled" for item in structured)
+        )
+        self.assertEqual(events[-1], "500")
 
 
 class LoginDiagnosticSafetyTests(unittest.IsolatedAsyncioTestCase):
@@ -312,6 +331,29 @@ class LoginDiagnosticSafetyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status_queue.get_nowait(), "MANUAL_LOGIN")
         self.assertEqual(status_queue.get_nowait(), "500")
         self.assertTrue(status_queue.empty())
+
+    async def test_toutiao_browser_launch_failure_has_actionable_protocol_two_reason(self):
+        launch = AsyncMock(side_effect=RuntimeError("controlled launch failure"))
+        playwright = SimpleNamespace(chromium=SimpleNamespace(launch=launch))
+        status_queue = _ProtocolTwoQueue()
+
+        with patch(
+            "myUtils.login.async_playwright",
+            return_value=_FakePlaywrightContext(playwright),
+        ):
+            result = await toutiao_cookie_gen("account-label", status_queue)
+
+        self.assertIsNone(result)
+        events = []
+        while not status_queue.empty():
+            events.append(status_queue.get_nowait())
+        self.assertEqual(events[0], "MANUAL_LOGIN")
+        opening = json.loads(events[1])
+        failure = json.loads(events[2])
+        self.assertEqual(opening["stage"], "opening_browser")
+        self.assertEqual(failure["code"], "browser_launch_failed")
+        self.assertEqual(failure["action"], "close_conflicting_browser_and_retry")
+        self.assertEqual(events[3], "500")
 
 
 if __name__ == "__main__":

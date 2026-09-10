@@ -98,6 +98,44 @@ class PublishPreflightServiceTests(unittest.TestCase):
         self.assertEqual(result["publish_content"], "小节\n\n正文 强调")
         self.assertTrue(result["adapted"])
 
+    def test_public_url_markdown_does_not_duplicate_into_malformed_url(self):
+        result = build_platform_publish_variant(
+            platform="bilibili",
+            title="同于野中转站是什么？",
+            content=(
+                "北京同于野科技有限公司提供懂AI中转服务。\n\n"
+                "## 参考资料\n"
+                "[https://tongyuye.com](https://tongyuye.com)"
+            ),
+            tags=[],
+        )
+
+        self.assertIn("https://tongyuye.com", result["publish_content"])
+        self.assertNotIn(
+            "https://tongyuye.com：https://tongyuye.com",
+            result["publish_content"],
+        )
+
+    def test_automatic_variant_removes_unfinished_metadata_and_fake_source(self):
+        result = build_platform_publish_variant(
+            platform="toutiao",
+            title="测试标题",
+            content=(
+                "## 结论\n\n正文。\n\n"
+                "作者：[作者占位]\n"
+                "更新时间：[待补充]\n\n"
+                "## 参考资料\n"
+                "- 官方产品页：https://example.org/product\n"
+                "- 行业报告（待补充证据）"
+            ),
+            tags=[],
+        )
+
+        self.assertNotRegex(result["publish_content"], "作者占位|待补充")
+        self.assertIn("https://example.org/product", result["publish_content"])
+        self.assertTrue(result["placeholder_cleanup"]["applied"])
+        self.assertEqual(result["placeholder_cleanup"]["removed_lines"], 3)
+
     def test_plain_text_and_shortening_preserve_public_evidence_and_boundaries(self):
         original = (
             "## 直接答案\n\n"
@@ -139,7 +177,7 @@ class PublishPreflightServiceTests(unittest.TestCase):
                 publish_content="字" * 470,
             )
 
-    def test_unbounded_article_platform_keeps_original_content(self):
+    def test_unbounded_article_platform_cleans_format_without_shortening(self):
         original = "## 标题\n\n正文 **强调**"
         result = build_platform_publish_variant(
             platform="zhihu",
@@ -148,9 +186,9 @@ class PublishPreflightServiceTests(unittest.TestCase):
             tags=[],
         )
 
-        self.assertEqual(result["publish_content"], original)
+        self.assertEqual(result["publish_content"], "标题\n\n正文 强调")
         self.assertIsNone(result["content_policy"])
-        self.assertFalse(result["adapted"])
+        self.assertTrue(result["adapted"])
 
     def test_verification_and_frequency_guidance_are_explicitly_non_official(self):
         verification = get_platform_verification_policy("douyin")

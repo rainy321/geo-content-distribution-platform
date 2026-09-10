@@ -50,7 +50,7 @@ class GEOArticleCompilerApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         blueprint = response.get_json()["data"]
-        self.assertEqual(blueprint["compiler_version"], "geo-article-compiler-2.1.0")
+        self.assertEqual(blueprint["compiler_version"], "geo-article-compiler-2.1.1")
         self.assertEqual(blueprint["query_matrix"]["total"], 12)
         self.assertEqual(blueprint["query_matrix"]["primary_intent"], "comparison")
         self.assertFalse(blueprint["methodology"]["external_model_used"])
@@ -139,7 +139,7 @@ class GEOArticleCompilerApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.get_json()
         self.assertIn("score", payload)
-        self.assertEqual(payload["citeability"]["version"], "ai-citeability-rules-2.1.0")
+        self.assertEqual(payload["citeability"]["version"], "ai-citeability-rules-2.1.1")
         self.assertEqual(len(payload["citeability"]["dimensions"]), 7)
         self.assertFalse(payload["citeability"]["methodology"]["network_accessed"])
 

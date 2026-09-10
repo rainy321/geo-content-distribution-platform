@@ -14,7 +14,10 @@ from services.platform_capability_service import (
     PLATFORM_BY_KEY,
     SUPPORTED_PUBLISH_PLATFORMS,
 )
-from services.publish_preflight_service import build_platform_publish_variant
+from services.publish_preflight_service import (
+    assert_platform_publish_variant_ready,
+    build_platform_publish_variant,
+)
 
 
 PUBLISH_JOB_STATUSES = frozenset(
@@ -90,6 +93,7 @@ def create_publish_job(
                 publish_title=publish_title,
                 publish_content=publish_content,
             )
+            assert_platform_publish_variant_ready(variant)
             resolved_account_id = _resolve_publish_account_id(
                 conn,
                 normalized_platform,

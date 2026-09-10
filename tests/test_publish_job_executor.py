@@ -203,7 +203,10 @@ class PublishJobExecutorTests(unittest.TestCase):
         self.assertEqual(self._article_status(), "published")
 
     def test_executor_sends_saved_platform_copy_instead_of_mutating_original(self):
-        platform_copy = self.article_content
+        # A manually saved outbound copy must already satisfy the platform's
+        # plain-text gate; the test is about snapshot fidelity, not Markdown
+        # cleanup (automatic copies exercise that path separately).
+        platform_copy = self.article_content.replace("## ", "")
         platform_title = "快手短标题"
         job = self._create_job(
             platform="kuaishou",

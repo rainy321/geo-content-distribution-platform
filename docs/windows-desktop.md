@@ -6,7 +6,7 @@
 
 本阶段交付对象只有 Windows EXE、校验清单和随附文档；正式网站、网页部署、服务器发布与服务器数据库迁移都不属于这份桌面交付，也不是启动或使用 EXE 的前置条件。
 
-当前产品版本为 `1.2.1`，构建时必须选择不可变的发布 profile：默认 `safe` 版不带真实发布运行时；`authorized_real` 版带经过成品探针验收的真实发布运行面。两种构建使用不同的产物目录和 ZIP 名称，不能靠 Windows 环境变量把 `safe` 版改成真实发布版。EXE 没有安装向导、自动更新器、Windows 服务或开机启动项；同一数据目录一次只允许一个实例运行。
+当前产品版本为 `1.2.2`，构建时必须选择不可变的发布 profile：默认 `safe` 版不带真实发布运行时；`authorized_real` 版带经过成品探针验收的真实发布运行面。两种构建使用不同的产物目录和 ZIP 名称，不能靠 Windows 环境变量把 `safe` 版改成真实发布版。EXE 没有安装向导、自动更新器、Windows 服务或开机启动项；同一数据目录一次只允许一个实例运行。
 
 同事交接 ZIP 未包含 `LICENSE` 或 `NOTICE`。在取得权利人的书面内部授权或补齐可核验的许可声明前，包含其 Python 移植算法的构建只用于内部受控 Beta，不作为已完成外部商业分发授权的版本。
 
@@ -131,7 +131,7 @@ GEO 诊断对项目定位、可发现性基础、竞品参照、内容资产就�
 
 产物目录形如：
 
-- `release\windows\GEO-Content-Platform-1.2.1-<safe或authorized-real>-<UTC时间>-<提交短SHA>\GEO-Content-Platform.exe`
+- `release\windows\GEO-Content-Platform-1.2.2-<safe或authorized-real>-<UTC时间>-<提交短SHA>\GEO-Content-Platform.exe`
 - 同目录的 ZIP、`GEO-Content-Platform.sha256.txt`、`GEO-Content-Platform.manifest.json`、`build-info.json`、`首次使用.md`、`AI可见度接口契约.md`、`GEO诊断与成本台账.md`、`Windows桌面技术说明.md`、`LICENSE.txt` 和 `THIRD-PARTY-NOTICES.txt`
 
 只有在同一提交上已经独立跑完回归时，才可显式使用 `-SkipTests`；manifest 会如实记录该状态。该参数仍不会跳过两个成品 EXE 冒烟测试。默认拒绝脏工作树，构建成功也不等于完成代码签名；签名状态会写入 manifest，外部商业交付仍必须单独完成签名与许可门禁。
@@ -158,11 +158,11 @@ Get-Content -Raw (Join-Path $geoCheckDir "health.json")
 - “本地认证配置不可用”：保留 `config\auth.json` 和整个数据目录的副本，不要直接编辑 JSON；交给维护人员核验。
 - 可见度没有命中品牌：核对项目主名、产品名、别名和回答原文；短词、模糊命中与歧义会降低置信度或要求人工复核。
 - 引用数量为零：当前引擎只识别回答原文中显式出现的 `http://`、`https://` 或 `www.` 地址，不会联网推断来源。
-- 真实采样按钮不可用或请求被拒绝：核对 prompt、HTTPS 服务地址、精确模型 ID、当前软件会话 API Key、1–5 次采样数量和外发确认。不要把缺失凭据改写为“已测试”；无完整配置时软件不会调用模型。
+- 真实采样按钮不可用或请求被拒绝：先在系统设置核对统一 AI 的 HTTPS 服务地址、精确模型 ID 和“凭据已保护”状态，再核对 prompt、1–5 次采样数量和外发确认。不要把缺失凭据改写为“已测试”；无完整配置时软件不会调用模型。
 - 真实采样超时或显示“需要人工处理”：先核对供应商账单和原请求 ID/幂等键；同键只回放已有结果，软件不会自动重发。只有确认确实需要新调用后，才由操作员建立新的请求。
 
 ## 外部引擎与扩展采样边界
 
 同事的纯分析算法已经以本机 Python 版本接入 AI 可见度，操作员确认的当前配置模型顺序采样也已接入；但这不代表已经具备 provider 网页自动登录、定时/无人值守/分布式采样，也不代表同事内容生成服务已经上线。内容生成适配层仍要求版本化 `POST /api/v1/generate`、健康检查、受限内部地址、独立 Token、超时和响应大小限制；在实际地址、Token、镜像摘要、许可和数据发送边界完成验收前，应保持现有内容引擎设置，不发送真实客户或项目数据。
 
-发布后分析标识为 `ai-visibility-python-port-1.1.0`，发布前内容编译标识为 `geo-article-compiler-2.1.0`，可引用性门禁标识为 `ai-citeability-rules-2.1.0`，临时统计标识为 `metrics-ad-hoc-python-1.1.0`。这些结果不能与 provider grounding 运行或历史 TypeScript 指标直接拼接；详细迁移和权利阻塞见 AI 可见度接口契约与 GEO 算法融合说明。内容结构门禁只能提升被准确提取和引用的准备度，豆包、千问、DeepSeek 等模型是否实际采用仍须用固定问题、失败分母和至少 14–30 天同口径回测验证，不能由单次短测外推。
+发布后分析标识为 `ai-visibility-python-port-1.1.0`，发布前内容编译标识为 `geo-article-compiler-2.1.1`，可引用性门禁标识为 `ai-citeability-rules-2.1.1`，临时统计标识为 `metrics-ad-hoc-python-1.1.0`。这些结果不能与 provider grounding 运行或历史 TypeScript 指标直接拼接；详细迁移和权利阻塞见 AI 可见度接口契约与 GEO 算法融合说明。内容结构门禁只能提升被准确提取和引用的准备度，豆包、千问、DeepSeek 等模型是否实际采用仍须用固定问题、失败分母和至少 14–30 天同口径回测验证，不能由单次短测外推。

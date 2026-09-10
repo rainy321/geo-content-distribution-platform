@@ -18,11 +18,19 @@ export const refreshEditableVariant = variant => {
   const citeability = variant.citeability && typeof variant.citeability === 'object'
     ? variant.citeability
     : null
+  const offlinePreflight = variant.offline_preflight
+    && typeof variant.offline_preflight === 'object'
+    ? variant.offline_preflight
+    : null
   const citeabilityScore = Number(citeability?.score)
   const citeabilityPassScore = Number(citeability?.pass_score)
   const citeabilityCurrent = Boolean(citeability)
     && normalizedSnapshotText(editableTitle) === normalizedSnapshotText(variant.title)
     && normalizedSnapshotText(editableContent) === normalizedSnapshotText(variant.publish_content)
+  const offlinePreflightCurrent = !offlinePreflight || (
+    normalizedSnapshotText(editableTitle) === normalizedSnapshotText(variant.title)
+    && normalizedSnapshotText(editableContent) === normalizedSnapshotText(variant.publish_content)
+  )
   return {
     ...variant,
     editable_title: editableTitle,
@@ -41,7 +49,14 @@ export const refreshEditableVariant = variant => {
       : [],
     citeability_suggestions: Array.isArray(citeability?.suggestions)
       ? citeability.suggestions
-      : []
+      : [],
+    offline_preflight_current: offlinePreflightCurrent,
+    offline_preflight_passed: !offlinePreflight
+      || (offlinePreflightCurrent && offlinePreflight?.passed === true),
+    offline_preflight_issues: Array.isArray(offlinePreflight?.issues)
+      ? offlinePreflight.issues
+      : [],
+    offline_preflight_disclaimer: String(offlinePreflight?.disclaimer || '')
   }
 }
 

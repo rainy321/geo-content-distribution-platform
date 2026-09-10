@@ -1,0 +1,299 @@
+from __future__ import annotations
+
+import json
+import sqlite3
+import tempfile
+import unittest
+from contextlib import closing
+from pathlib import Path
+from unittest.mock import patch
+
+from db.createTable import initialize_database
+from sau_backend import app
+from services.ai_service import AICompletionResult, AISettings
+from services.unified_ai_config_service import UnifiedAIConfigService
+
+
+class SyntheticProtector:
+    name = "synthetic_test_protector"
+
+    def protect(self, plaintext: bytes) -> bytes:
+        return b"protected:" + plaintext[::-1]
+
+    def unprotect(self, ciphertext: bytes) -> bytes:
+        if not ciphertext.startswith(b"protected:"):
+            raise ValueError("invalid ciphertext")
+        return ciphertext.removeprefix(b"protected:")[::-1]
+
+
+class UnifiedAIConfigApiTests(unittest.TestCase):
+    def setUp(self):
+        self.temporary_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary_directory.cleanup)
+        root = Path(self.temporary_directory.name)
+        self.database_path = root / "database.db"
+        initialize_database(self.database_path)
+        with closing(sqlite3.connect(self.database_path)) as conn:
+            with conn:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO projects (
+                        name, website, product, industry, description,
+                        keywords, competitors
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        "Synthetic Company",
+                        "https://synthetic.example.test",
+                        "Synthetic Product",
+                        "Testing",
+                        "Synthetic test data only.",
+                        "[]",
+                        "[]",
+                    ),
+                )
+                self.project_id = int(cursor.lastrowid)
+        self.config_path = root / "config" / "ai.json"
+        self.config_service = UnifiedAIConfigService(
+            self.config_path,
+            protector=SyntheticProtector(),
+            use_platform_protector=False,
+        )
+        self.original_config = {
+            "DATABASE_PATH": app.config.get("DATABASE_PATH"),
+            "ACCESS_CONTROL_ENABLED": app.config.get("ACCESS_CONTROL_ENABLED"),
+            "AI_RATE_LIMIT_PER_MINUTE": app.config.get("AI_RATE_LIMIT_PER_MINUTE"),
+            "UNIFIED_AI_CONFIG_SERVICE": app.config.get("UNIFIED_AI_CONFIG_SERVICE"),
+            "TESTING": app.config.get("TESTING"),
+        }
+        app.config.update(
+            DATABASE_PATH=self.database_path,
+            ACCESS_CONTROL_ENABLED=False,
+            AI_RATE_LIMIT_PER_MINUTE=0,
+            UNIFIED_AI_CONFIG_SERVICE=self.config_service,
+            TESTING=True,
+        )
+        self.client = app.test_client()
+
+    def tearDown(self):
+        app.config.update(self.original_config)
+
+    def save_payload(self, **overrides):
+        payload = {
+            "provider": "qwen",
+            "base_url": "https://api.example.test/compatible-mode/v1",
+            "model": "synthetic-model",
+            "api_key": "synthetic-unified-api-key",
+        }
+        payload.update(overrides)
+        return payload
+
+    def test_save_status_and_clear_never_return_or_plaintext_persist_key(self):
+        secret = self.save_payload()["api_key"]
+
+        saved = self.client.put("/api/ai/config", json=self.save_payload())
+        status = self.client.get("/api/ai/config-status")
+
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(status.status_code, 200)
+        for response in (saved, status):
+            serialized = response.get_data(as_text=True)
+            self.assertNotIn(secret, serialized)
+            data = response.get_json()["data"]
+            self.assertTrue(data["configured"])
+            self.assertTrue(data["saved_configured"])
+            self.assertTrue(data["api_key_configured"])
+            self.assertEqual(data["source"], "saved")
+            self.assertEqual(data["provider"], "qwen")
+            self.assertEqual(data["model"], "synthetic-model")
+            self.assertEqual(response.headers["Cache-Control"], "no-store")
+        self.assertNotIn(secret, self.config_path.read_text(encoding="utf-8"))
+        self.assertNotIn(secret.encode("utf-8"), self.database_path.read_bytes())
+
+        cleared = self.client.delete("/api/ai/config")
+        self.assertEqual(cleared.status_code, 200)
+        self.assertFalse(cleared.get_json()["data"]["saved_configured"])
+        self.assertFalse(self.config_path.exists())
+
+    def test_invalid_save_does_not_replace_existing_good_config(self):
+        self.client.post("/api/ai/config", json=self.save_payload())
+
+        response = self.client.put(
+            "/api/ai/config",
+            json=self.save_payload(base_url="http://localhost:9999/v1"),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        settings = self.config_service.load_settings()
+        self.assertEqual(
+            settings.base_url,
+            "https://api.example.test/compatible-mode/v1",
+        )
+
+    def test_content_engine_health_uses_saved_unified_configuration(self):
+        self.config_service.save(**self.save_payload())
+
+        response = self.client.get("/api/content-engine/status")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()["data"]
+        self.assertTrue(data["ready"])
+        self.assertEqual(data["primary"]["engine"], "qwen")
+        self.assertEqual(data["primary"]["version"], "synthetic-model")
+
+    @patch("sau_backend.sample_ai_prompt_detailed")
+    def test_connection_test_uses_fixed_synthetic_prompt_and_saved_config(self, sample):
+        self.config_service.save(**self.save_payload())
+        sample.return_value = AICompletionResult(
+            content="OK",
+            model="synthetic-model",
+            provider_request_id="provider-test-1",
+            elapsed_ms=4,
+            usage={"total_tokens": 3},
+        )
+
+        response = self.client.post(
+            "/api/ai/config/test",
+            json={"confirm_external_call": True},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        sample.assert_called_once()
+        self.assertEqual(sample.call_args.kwargs["prompt"], "仅回复 OK")
+        self.assertEqual(sample.call_args.kwargs["settings"].model, "synthetic-model")
+        data = response.get_json()["data"]
+        self.assertTrue(data["ok"])
+        self.assertEqual(data["status"], "ready")
+        self.assertFalse(data["data_disclosure"]["project_data_sent"])
+        self.assertFalse(data["data_disclosure"]["api_key_returned"])
+        self.assertNotIn(self.save_payload()["api_key"], response.get_data(as_text=True))
+
+    @patch("sau_backend.sample_ai_prompt_detailed")
+    def test_connection_test_rejects_invalid_explicit_draft_as_bad_request(self, sample):
+        response = self.client.post(
+            "/api/ai/config/test",
+            json={
+                "confirm_external_call": True,
+                "ai_config": {
+                    "base_url": "http://localhost:9999/v1",
+                    "model": "synthetic-model",
+                    "api_key": "request-only-secret",
+                },
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        sample.assert_not_called()
+
+    @patch("sau_backend.sample_ai_prompt_detailed")
+    def test_connection_test_requires_explicit_external_call_confirmation(self, sample):
+        self.config_service.save(**self.save_payload())
+
+        response = self.client.post(
+            "/api/ai/config/test",
+            json={"confirm_external_call": False},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        sample.assert_not_called()
+
+    @patch("services.ai_visibility_sampling_service.sample_ai_prompt_detailed")
+    def test_visibility_sampling_uses_saved_config_when_request_omits_it(self, sampler):
+        self.config_service.save(**self.save_payload())
+        sampler.return_value = AICompletionResult(
+            content="Synthetic Product",
+            model="synthetic-model",
+            provider_request_id="provider-synthetic-1",
+            elapsed_ms=3,
+            usage={"total_tokens": 2},
+        )
+
+        response = self.client.post(
+            "/api/geo/visibility/sample",
+            json={
+                "project_id": self.project_id,
+                "prompt": "Which synthetic product is visible?",
+                "sample_count": 1,
+                "persist": False,
+                "confirm_external_call": True,
+            },
+            headers={
+                "X-Request-ID": "saved-config-sample-1",
+                "Idempotency-Key": "saved-config-sample-key-1",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        settings = sampler.call_args.kwargs["settings"]
+        self.assertIsInstance(settings, AISettings)
+        self.assertEqual(settings.model, "synthetic-model")
+        self.assertEqual(settings.provider, "qwen")
+        self.assertEqual(settings.api_key, self.save_payload()["api_key"])
+        self.assertNotIn(
+            self.save_payload()["api_key"],
+            response.get_data(as_text=True),
+        )
+
+    @patch("sau_backend._create_content_generation_service")
+    def test_content_generation_uses_same_saved_config(self, factory):
+        self.config_service.save(**self.save_payload())
+        factory.return_value.generate.return_value = {
+            "title": "Synthetic title",
+            "summary": "",
+            "content": "Synthetic body",
+            "tags": [],
+            "faq": [],
+        }
+
+        response = self.client.post(
+            "/api/articles/generate",
+            json={
+                "project_id": self.project_id,
+                "topic": "Synthetic topic",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        settings = factory.call_args.args[0]
+        self.assertIsInstance(settings, AISettings)
+        self.assertEqual(settings.model, "synthetic-model")
+        self.assertEqual(settings.api_key, self.save_payload()["api_key"])
+        self.assertNotIn(
+            self.save_payload()["api_key"],
+            response.get_data(as_text=True),
+        )
+
+    @patch("sau_backend._create_content_generation_service")
+    def test_explicit_request_config_overrides_saved_config(self, factory):
+        self.config_service.save(**self.save_payload())
+        factory.return_value.generate.return_value = {
+            "title": "Synthetic title",
+            "summary": "",
+            "content": "Synthetic body",
+            "tags": [],
+            "faq": [],
+        }
+        explicit = {
+            "base_url": "https://override.example.test/v1",
+            "model": "override-model",
+            "api_key": "request-only-secret",
+        }
+
+        response = self.client.post(
+            "/api/articles/generate",
+            json={
+                "project_id": self.project_id,
+                "topic": "Synthetic topic",
+                "ai_config": explicit,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        settings = factory.call_args.args[0]
+        self.assertEqual(settings.base_url, explicit["base_url"])
+        self.assertEqual(settings.model, explicit["model"])
+        self.assertEqual(settings.api_key, explicit["api_key"])
+
+
+if __name__ == "__main__":
+    unittest.main()

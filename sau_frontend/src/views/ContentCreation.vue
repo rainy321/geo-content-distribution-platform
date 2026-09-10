@@ -30,6 +30,16 @@
       </ol>
     </header>
 
+    <section :class="['creation-engine-bus', { ready: unifiedAIStatus.configured }]" aria-live="polite">
+      <span class="bus-signal" aria-hidden="true" />
+      <div>
+        <span>UNIFIED AI BUS</span>
+        <strong>{{ unifiedAIStatusLoading ? '正在读取统一引擎…' : unifiedAIEngineLabel }}</strong>
+      </div>
+      <p>{{ unifiedAIStatus.configured ? '本次写稿与后续调优将自动使用该引擎。' : '先保存一次模型配置，之后写稿和回测都无需重复填写 API Key。' }}</p>
+      <button type="button" @click="router.push('/settings')">{{ unifiedAIStatus.configured ? '管理引擎' : '立即配置' }}</button>
+    </section>
+
     <div v-if="loadingExisting" class="loading-existing" aria-live="polite">
       <span class="loading-existing-mark" />
       正在从内容库载入稿件…
@@ -691,7 +701,9 @@ import {
   WarningFilled
 } from '@element-plus/icons-vue'
 import { articleApi } from '@/api/article'
+import { aiConfigApi } from '@/api/aiConfig'
 import { projectApi } from '@/api/project'
+import { normalizeUnifiedAIStatus } from '@/utils/aiConfig'
 import { normalizeGenerationReceipt } from '@/utils/generationReceipt'
 import { buildGeoScorePayload } from '@/utils/generationScore'
 import { normalizeGeoBlueprint, normalizeGeoScoreResult } from '@/utils/geoBlueprint'
@@ -714,6 +726,8 @@ const generationPhase = ref('idle')
 const generationReceipt = ref(null)
 const generationNotice = ref(null)
 const engineStatus = ref(null)
+const unifiedAIStatusLoading = ref(false)
+const unifiedAIStatus = reactive(normalizeUnifiedAIStatus({}))
 const activeRequestId = ref('')
 const liveElapsedMs = ref(null)
 const rateLimitUntil = ref(0)
@@ -837,6 +851,13 @@ const generateButtonLabel = computed(() => {
   return 'AI 生成 GEO 内容'
 })
 const expectedEngineLabel = computed(() => engineStatus.value?.engine || '内容引擎')
+const unifiedAIEngineLabel = computed(() => {
+  if (!unifiedAIStatus.configured) return '统一 AI 引擎尚未配置'
+  if (unifiedAIStatus.providerLabel && unifiedAIStatus.model) {
+    return `${unifiedAIStatus.providerLabel} · ${unifiedAIStatus.model}`
+  }
+  return unifiedAIStatus.model || unifiedAIStatus.providerLabel || '运行环境模型'
+})
 
 const tokenUsageLabel = computed(() => {
   const usage = generationReceipt.value?.tokenUsage
@@ -1064,6 +1085,22 @@ const removeTemplate = async (item) => {
   } catch (error) {
     console.error('删除内容模板失败:', error)
   }
+}
+
+const fetchUnifiedAIStatus = async () => {
+  unifiedAIStatusLoading.value = true
+  try {
+    const response = await aiConfigApi.get({ suppressGlobalError: true })
+    Object.assign(unifiedAIStatus, normalizeUnifiedAIStatus(response))
+  } catch {
+    Object.assign(unifiedAIStatus, normalizeUnifiedAIStatus({}))
+  } finally {
+    unifiedAIStatusLoading.value = false
+  }
+}
+
+const handleUnifiedAIConfigChanged = () => {
+  void fetchUnifiedAIStatus()
 }
 
 const loadGeoBlueprint = async () => {
@@ -1525,7 +1562,7 @@ const formatGenerationError = (error, requestId = '') => {
     return {
       kind: 'unavailable',
       title: 'AI 服务尚未配置',
-      message: backendMessage || '请到“系统设置”检查内容引擎与备用模型状态。',
+      message: backendMessage || '请到“系统设置”保存并测试统一 AI 引擎。',
       traceId
     }
   }
@@ -1546,7 +1583,8 @@ const formatGenerationError = (error, requestId = '') => {
 }
 
 onMounted(async () => {
-  await Promise.all([fetchProjects(), fetchTemplates(), fetchEngineStatus()])
+  window.addEventListener('geo-unified-ai-config-changed', handleUnifiedAIConfigChanged)
+  await Promise.all([fetchProjects(), fetchTemplates(), fetchEngineStatus(), fetchUnifiedAIStatus()])
   const articleId = Number.parseInt(route.query.articleId, 10)
   if (Number.isInteger(articleId) && articleId > 0) {
     await loadExistingArticle(articleId)
@@ -1554,6 +1592,7 @@ onMounted(async () => {
 })
 
 onBeforeUnmount(() => {
+  window.removeEventListener('geo-unified-ai-config-changed', handleUnifiedAIConfigChanged)
   generationController?.abort()
   stopGenerationTimer()
   clearRateLimitTimer()
@@ -1855,6 +1894,67 @@ onBeforeUnmount(() => {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
+}
+
+.creation-engine-bus {
+  display: grid;
+  grid-template-columns: 10px minmax(220px, auto) minmax(0, 1fr) auto;
+  gap: 13px;
+  align-items: center;
+  margin: 12px 0 18px;
+  padding: 11px 13px;
+  border: 1px solid var(--geo-line);
+  border-radius: 8px;
+  background: #fff;
+
+  .bus-signal {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--geo-subtle);
+    box-shadow: 0 0 0 4px var(--geo-soft);
+  }
+
+  &.ready .bus-signal { background: var(--geo-success); }
+
+  > div {
+    display: grid;
+    gap: 3px;
+    min-width: 0;
+  }
+
+  > div > span {
+    color: var(--geo-muted);
+    font: 700 8px/1 "Cascadia Mono", monospace;
+    letter-spacing: .1em;
+  }
+
+  > div > strong {
+    overflow: hidden;
+    font-size: 11px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  p {
+    margin: 0;
+    color: var(--geo-muted);
+    font-size: 10px;
+    text-align: right;
+  }
+
+  button {
+    padding: 7px 9px;
+    border: 1px solid var(--geo-line-strong);
+    border-radius: 5px;
+    color: var(--geo-ink);
+    background: #fff;
+    font-size: 9px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+
+  button:focus-visible { outline: 2px solid var(--geo-ink); outline-offset: 2px; }
 }
 
 .blueprint-preview {
@@ -3125,6 +3225,12 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 820px) {
+  .creation-engine-bus {
+    grid-template-columns: 10px minmax(0, 1fr) auto;
+
+    p { grid-column: 2 / -1; text-align: left; }
+  }
+
   .editor-grid {
     grid-template-columns: 1fr;
   }
@@ -3145,6 +3251,12 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 640px) {
+  .creation-engine-bus {
+    grid-template-columns: 10px minmax(0, 1fr);
+
+    button { grid-column: 2; justify-self: start; }
+  }
+
   .workbench-header {
     gap: 24px;
     padding: 12px 2px 20px;

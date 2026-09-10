@@ -1,5 +1,4 @@
 import { http } from '@/utils/request'
-import { withCustomAIConfig } from '@/utils/aiConfig'
 import { apiUrl } from '@/config/api'
 
 export const articleApi = {
@@ -12,15 +11,15 @@ export const articleApi = {
   },
 
   optimizeArticle(id) {
-    return http.post(`/api/articles/${id}/optimize`, withCustomAIConfig())
+    return http.post(`/api/articles/${id}/optimize`, {})
   },
 
   generateArticle(data, config = {}) {
-    return http.post('/api/articles/generate', withCustomAIConfig(data), config)
+    return http.post('/api/articles/generate', data, config)
   },
 
   generateBatch(data, config = {}) {
-    return http.post('/api/articles/generate-batch', withCustomAIConfig(data), config)
+    return http.post('/api/articles/generate-batch', data, config)
   },
 
   getTemplates() {
@@ -53,10 +52,6 @@ export const articleApi = {
 
   generateCover(id) {
     return http.post(`/api/articles/${id}/images/generate`)
-  },
-
-  getAIConfigStatus() {
-    return http.get('/api/ai/config-status')
   },
 
   getContentEngineStatus(config = {}) {

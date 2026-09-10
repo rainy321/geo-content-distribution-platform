@@ -193,7 +193,32 @@
                 </span>
                 <strong v-if="platformDraftReadyForDispatch(platformDrafts[platform.key])">可创建任务</strong>
                 <strong v-else-if="!platformDrafts[platform.key]?.within_safe_limit || !platformDrafts[platform.key]?.title_within_safe_limit" class="over-limit">请继续缩短后再创建</strong>
+                <strong v-else-if="!platformDrafts[platform.key]?.offline_preflight_current || !platformDrafts[platform.key]?.offline_preflight_passed" class="over-limit">先修复平台离线预检问题</strong>
                 <strong v-else class="over-limit">先修复 AI 可引用性问题</strong>
+              </div>
+              <div
+                :class="['citeability-receipt', {
+                  stale: !platformDrafts[platform.key]?.offline_preflight_current,
+                  failed: platformDrafts[platform.key]?.offline_preflight_current && !platformDrafts[platform.key]?.offline_preflight_passed
+                }]"
+              >
+                <div>
+                  <span>平台离线预检</span>
+                  <strong v-if="!platformDrafts[platform.key]?.offline_preflight_current">内容编辑后正在重新检查…</strong>
+                  <strong v-else>
+                    {{ platformDrafts[platform.key]?.offline_preflight_passed ? '通过' : '未通过' }}
+                    · {{ platformDrafts[platform.key]?.offline_preflight_issues?.length || 0 }} 项提示
+                  </strong>
+                </div>
+                <ul v-if="platformDrafts[platform.key]?.offline_preflight_current && platformDrafts[platform.key]?.offline_preflight_issues?.length">
+                  <li
+                    v-for="issue in platformDrafts[platform.key].offline_preflight_issues.slice(0, 4)"
+                    :key="`${issue.code}:${issue.message}`"
+                  >{{ issue.message }} {{ issue.suggestion }}</li>
+                </ul>
+                <p v-if="platformDrafts[platform.key]?.offline_preflight_disclaimer">
+                  {{ platformDrafts[platform.key].offline_preflight_disclaimer }}
+                </p>
               </div>
               <div
                 :class="['citeability-receipt', {
@@ -590,6 +615,7 @@
             <div class="progress-track" :class="job.status">
               <span :style="{ width: `${statusProgress(job.status)}%` }" />
             </div>
+            <small v-if="jobNextStep(job)" class="job-next-step">{{ jobNextStep(job) }}</small>
           </div>
 
           <div class="job-time">
@@ -842,6 +868,17 @@ const jobFilters = reactive({ platform: '', status: '' })
 const jobPagination = reactive({ page: 1, page_size: 20, total: 0, total_pages: 0 })
 let pollTimer = null
 let pollingStopped = false
+let pollRequestInFlight = false
+let pollAttempts = 0
+let pollLimitNotified = false
+let consecutivePollFailures = 0
+let pollFailureNotified = false
+let jobsRequestSerial = 0
+
+const ACTIVE_JOB_STATUSES = new Set(['queued', 'processing'])
+const JOB_POLL_INTERVAL_MS = 5000
+const JOB_POLL_MAX_ATTEMPTS = 120
+const JOB_POLL_MAX_CONSECUTIVE_FAILURES = 3
 
 const selectedArticle = computed(() => (
   articles.value.find(article => article.id === selectedArticleId.value) || null
@@ -878,6 +915,8 @@ const citeabilityRequired = computed(() => (
 const platformDraftReadyForDispatch = draft => Boolean(
   draft?.within_safe_limit === true
   && draft?.title_within_safe_limit === true
+  && draft?.offline_preflight_current !== false
+  && draft?.offline_preflight_passed !== false
   && (
     !citeabilityRequired.value
     || (draft?.citeability_current === true && draft?.citeability_passed === true)
@@ -979,7 +1018,7 @@ const dispatchButtonLabel = computed(() => {
 })
 
 const activeJobCount = computed(() => (
-  jobs.value.filter(job => ['queued', 'processing'].includes(job.status)).length
+  jobs.value.filter(job => ACTIVE_JOB_STATUSES.has(job.status)).length
 ))
 
 const hasJobFilters = computed(() => Boolean(jobFilters.platform || jobFilters.status))
@@ -1257,6 +1296,11 @@ const requestPlatformLogin = async (platform, job = null) => {
 
 const fetchJobs = async (pageOrSilent = false) => {
   const silent = pageOrSilent === true
+  const requestSerial = ++jobsRequestSerial
+  if (!silent) {
+    pollAttempts = 0
+    pollLimitNotified = false
+  }
   if (typeof pageOrSilent === 'number') jobPagination.page = pageOrSilent
   if (silent) jobsRefreshing.value = false
   else if (jobs.value.length) jobsRefreshing.value = true
@@ -1272,16 +1316,41 @@ const fetchJobs = async (pageOrSilent = false) => {
 
   try {
     const response = await publishApi.getJobs(params)
+    if (requestSerial !== jobsRequestSerial || pollingStopped) return null
     jobs.value = response.data?.items || []
     Object.assign(jobPagination, response.data?.pagination || {})
     lastSyncedAt.value = new Date()
+    return true
   } catch (error) {
-    if (!silent) jobsLoadError.value = true
+    if (requestSerial !== jobsRequestSerial || pollingStopped) return null
+    if (requestSerial === jobsRequestSerial && !silent) jobsLoadError.value = true
     console.error('加载发布任务失败:', error)
+    return false
   } finally {
-    jobsLoading.value = false
-    jobsRefreshing.value = false
+    if (requestSerial === jobsRequestSerial) {
+      jobsLoading.value = false
+      jobsRefreshing.value = false
+      if (!silent && !pollingStopped) scheduleJobPoll()
+    }
   }
+}
+
+const applyJobSnapshot = snapshot => {
+  const jobId = Number(snapshot?.job_id ?? snapshot?.id)
+  if (!Number.isInteger(jobId) || jobId <= 0) return false
+  const index = jobs.value.findIndex(job => Number(job.job_id) === jobId)
+  if (index < 0) return false
+  // The execute response is newer than any list request that started before it.
+  // Invalidate those requests so a slow, stale poll cannot roll the row back.
+  jobsRequestSerial += 1
+  jobs.value = jobs.value.map((job, jobIndex) => (
+    jobIndex === index ? { ...job, ...snapshot, job_id: jobId } : job
+  ))
+  lastSyncedAt.value = new Date()
+  if (ACTIVE_JOB_STATUSES.has(snapshot.status)) {
+    scheduleJobPoll({ resetWindow: true })
+  }
+  return true
 }
 
 function isBatchEligible(job) {
@@ -1571,7 +1640,8 @@ const dispatchArticle = async () => {
 const executeDemoJob = async (job) => {
   markJobBusy(job.job_id, true)
   try {
-    await publishApi.executeDemoJob(job.job_id)
+    const response = await publishApi.executeDemoJob(job.job_id)
+    applyJobSnapshot(response.data)
     ElMessage.success('演示任务已完成，未访问真实平台')
     await fetchJobs(true)
   } catch (error) {
@@ -1690,6 +1760,7 @@ const executeRealBatch = async () => {
       try {
         const response = await publishApi.executeRealJob(job)
         const result = response.data || {}
+        applyJobSnapshot(result)
         outcomes.push({
           job_id: job.job_id,
           platform: job.platform,
@@ -1872,6 +1943,7 @@ const executeRealJob = async (job) => {
   try {
     const response = await publishApi.executeRealJob(currentJob)
     const result = response.data
+    applyJobSnapshot(result)
     if (result.status === 'success') ElMessage.success(`${platformName(currentJob.platform)}真实发布成功`)
     else if (result.status === 'need_action') {
       const requiresReconciliation = Boolean(result.reconciliation_required)
@@ -2075,6 +2147,33 @@ const defaultStatusMessage = (status) => ({
   failed: '发布流程失败'
 }[status] || '状态待确认')
 
+const jobNextStep = job => {
+  if (!job) return ''
+  if (job.reconciliation_required) {
+    return '下一步：先到平台后台核对是否已产生内容，再点“核验平台结果”；核验前不要重复提交。'
+  }
+  if (job.status === 'processing') {
+    return '下一步：软件会自动刷新终态；结果未知前不要重复提交。'
+  }
+  if (job.status === 'need_action' && !job.account_id) {
+    return '下一步：账号已失效或未绑定，请重新登录并重建任务。'
+  }
+  if (job.status === 'need_action') {
+    const message = String(job.message || '')
+    if (/短信|验证码|扫码|滑块|安全验证|本人验证/.test(message)) {
+      return '下一步：在平台窗口完成短信、验证码、扫码或安全验证，核对平台后台后再继续。'
+    }
+    if (/封禁|封号|账号异常|登录失效|离线|cookie/i.test(message)) {
+      return '下一步：停止重复尝试，先处理账号异常；必要时退出账号后重新登录。'
+    }
+    return '下一步：按提示完成人工处理，先核对平台后台，再点“完成验证后继续”。'
+  }
+  if (job.status === 'failed') {
+    return '下一步：根据失败原因修正正文、素材或账号后，再点“重新发布”；不会自动重试。'
+  }
+  return ''
+}
+
 const scoreTone = (score) => {
   if (score >= 80) return 'strong'
   if (score >= 60) return 'medium'
@@ -2106,13 +2205,58 @@ const openResult = (url) => {
   if (/^https?:\/\//i.test(url)) window.open(url, '_blank', 'noopener,noreferrer')
 }
 
-const scheduleJobPoll = () => {
-  if (pollingStopped) return
+const clearJobPollTimer = () => {
+  if (pollTimer) window.clearTimeout(pollTimer)
+  pollTimer = null
+}
+
+const resetJobPollWindow = () => {
+  pollAttempts = 0
+  pollLimitNotified = false
+  consecutivePollFailures = 0
+  pollFailureNotified = false
+}
+
+const stopJobPoll = ({ resetWindow = false } = {}) => {
+  clearJobPollTimer()
+  if (resetWindow) resetJobPollWindow()
+}
+
+const scheduleJobPoll = ({ resetWindow = false } = {}) => {
+  if (resetWindow) resetJobPollWindow()
+  if (pollingStopped || activeJobCount.value === 0) {
+    stopJobPoll({ resetWindow: activeJobCount.value === 0 })
+    return
+  }
+  if (pollTimer || pollRequestInFlight) return
+  if (pollAttempts >= JOB_POLL_MAX_ATTEMPTS) {
+    if (!pollLimitNotified) {
+      pollLimitNotified = true
+      ElMessage.warning('任务长时间没有终态，已暂停自动刷新；请核对平台后台后手动刷新，避免无限轮询。')
+    }
+    return
+  }
   pollTimer = window.setTimeout(async () => {
     pollTimer = null
-    await fetchJobs(true)
-    scheduleJobPoll()
-  }, 5000)
+    if (pollingStopped || activeJobCount.value === 0) return
+    pollAttempts += 1
+    pollRequestInFlight = true
+    try {
+      const refreshed = await fetchJobs(true)
+      if (refreshed === true) consecutivePollFailures = 0
+      else if (refreshed === false) consecutivePollFailures += 1
+    } finally {
+      pollRequestInFlight = false
+      if (consecutivePollFailures >= JOB_POLL_MAX_CONSECUTIVE_FAILURES) {
+        if (!pollFailureNotified) {
+          pollFailureNotified = true
+          ElMessage.warning('任务状态连续 3 次同步失败，已暂停自动刷新；请检查本机服务后手动刷新。')
+        }
+      } else {
+        scheduleJobPoll()
+      }
+    }
+  }, JOB_POLL_INTERVAL_MS)
 }
 
 onMounted(async () => {
@@ -2142,6 +2286,14 @@ onMounted(async () => {
   scheduleJobPoll()
 })
 
+watch(activeJobCount, (count, previousCount) => {
+  if (count === 0) {
+    stopJobPoll({ resetWindow: true })
+    return
+  }
+  scheduleJobPoll({ resetWindow: previousCount === 0 || count > previousCount })
+})
+
 watch(selectedArticleId, async value => {
   selectedImage.value = null
   selectedVideo.value = null
@@ -2161,9 +2313,9 @@ watch(
 
 onBeforeUnmount(() => {
   pollingStopped = true
-  if (pollTimer) window.clearTimeout(pollTimer)
+  jobsRequestSerial += 1
+  stopJobPoll()
   if (preflightDebounceTimer) window.clearTimeout(preflightDebounceTimer)
-  pollTimer = null
   preflightDebounceTimer = null
 })
 </script>
@@ -3134,6 +3286,14 @@ onBeforeUnmount(() => {
   &.success > span { background: var(--signal); }
   &.failed > span { background: var(--danger); }
   &.need_action > span, &.scheduled > span { background: var(--amber); }
+}
+
+.job-next-step {
+  display: block;
+  margin-top: 7px;
+  color: #8b5b24;
+  font-size: 9px;
+  line-height: 1.45;
 }
 
 .job-time {

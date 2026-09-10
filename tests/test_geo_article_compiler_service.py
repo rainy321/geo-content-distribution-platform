@@ -537,6 +537,23 @@ DongClaw 产品页：https://geo.example.com/products/dongclaw
 
         self.assertEqual(result["dimensions"]["structural_extractability"], 100)
 
+    def test_platform_safe_bullet_glyph_remains_extractable(self):
+        result = score_ai_citeability(
+            "DongClaw 如何部署？",
+            (
+                "北京同于野科技有限公司的 DongClaw 可先从单一流程开始验证。\n"
+                "实施步骤\n• 明确场景。\n• 保留验收记录。\n"
+                "限制与适用条件\n结果取决于数据质量并需要人工复核。\n"
+                "FAQ\n如何开始？\n先选择低风险流程。\n"
+                "如何验收？\n固定口径后再复测。"
+            ),
+            "北京同于野科技有限公司",
+            ["DongClaw"],
+            product="DongClaw",
+        )
+
+        self.assertEqual(result["dimensions"]["structural_extractability"], 80)
+
     def test_unrelated_url_cannot_validate_absolute_or_quantified_claims(self):
         result = score_ai_citeability(
             "DongClaw 效果",
@@ -652,6 +669,22 @@ DongClaw 产品页：https://geo.example.com/products/dongclaw
         self.assertFalse(result["passed"])
         self.assertEqual(result["signals"]["invalid_inline_url_count"], 1)
         self.assertIn("source.non_public_inline_url", codes)
+
+    def test_full_width_punctuation_terminates_public_inline_url(self):
+        result = score_ai_citeability(
+            "同于野中转站是什么？",
+            (
+                "北京同于野科技有限公司提供懂AI国内模型聚合与中转站。\n\n"
+                "## 参考资料\n官网：https://tongyuye.com：具体能力以官网为准。"
+            ),
+            "北京同于野科技有限公司",
+            ["AI API中转站"],
+            product="懂AI国内模型聚合与中转站",
+            website="https://tongyuye.com",
+        )
+
+        self.assertEqual(result["signals"]["invalid_inline_url_count"], 0)
+        self.assertEqual(result["signals"]["owned_citation_count"], 1)
 
     def test_private_source_urls_are_invalid_and_cannot_validate_claims(self):
         result = score_ai_citeability(

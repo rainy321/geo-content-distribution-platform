@@ -107,7 +107,7 @@ class ContentGenerationServiceTests(unittest.TestCase):
         self.assertIn("geo_analysis", result)
         self.assertEqual(
             result["geo_analysis"]["citeability"]["version"],
-            "ai-citeability-rules-2.1.0",
+            "ai-citeability-rules-2.1.1",
         )
         self.assertEqual(
             len(result["geo_analysis"]["citeability"]["dimensions"]),
@@ -119,6 +119,28 @@ class ContentGenerationServiceTests(unittest.TestCase):
         self.assertEqual(run["status"], "succeeded")
         self.assertIsNone(run["usage"])
         self.assertEqual(run["provider_geo_score"], None)
+
+    def test_success_removes_unfinished_placeholders_before_persistence(self):
+        payload = engine_payload()
+        payload["content"] += (
+            "\n\n作者：[作者占位]\n"
+            "更新时间：[待补充]\n\n"
+            "## 参考资料\n"
+            "- 官方产品页：https://example.org/product\n"
+            "- 行业规范（待补充证据）"
+        )
+        primary = MockContentEngineAdapter([payload])
+
+        result = ContentGenerationService(self.db_path, primary).generate(self.request())
+
+        self.assertNotRegex(result["content"], "作者占位|待补充")
+        self.assertIn("https://example.org/product", result["content"])
+        self.assertIn(
+            "已移除未完成的作者、日期或证据占位标记",
+            result["generation"]["warnings"],
+        )
+        persisted = get_run(self.db_path, result["generation"]["run_id"])
+        self.assertNotRegex(persisted["result_payload"]["content"], "作者占位|待补充")
 
     def test_only_connection_failure_falls_back(self):
         primary = MockContentEngineAdapter(

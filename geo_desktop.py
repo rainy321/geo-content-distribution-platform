@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Mapping, MutableMapping, Sequence
 
 
-APP_VERSION = "1.2.1"
+APP_VERSION = "1.2.2"
 BUILD_INFO_SCHEMA_VERSION = 1
 APP_TITLE = "GEO 智能内容分发平台"
 APP_DIRECTORY_NAME = "GEOContentPlatform"
@@ -50,6 +50,7 @@ class DesktopPaths:
     media: Path
     cookies: Path
     auth_config: Path
+    ai_config: Path
     backups: Path
     logs: Path
     webview: Path
@@ -63,6 +64,7 @@ class DesktopPaths:
             media=resolved_root / "media",
             cookies=resolved_root / "accounts",
             auth_config=resolved_root / "config" / "auth.json",
+            ai_config=resolved_root / "config" / "ai.json",
             backups=resolved_root / "backups",
             logs=resolved_root / "logs",
             webview=resolved_root / "webview",
@@ -275,6 +277,7 @@ def apply_desktop_environment(
             "APP_SESSION_SECRET": session_secret,
             "GEO_DESKTOP_MODE": "true",
             "GEO_DESKTOP_AUTH_PATH": str(paths.auth_config),
+            "GEO_UNIFIED_AI_CONFIG_PATH": str(paths.ai_config),
             "DEMO_MODE": "false",
             "SEED_DEMO_DATA": "false",
             # The immutable profile grants intent.  The actual gate stays

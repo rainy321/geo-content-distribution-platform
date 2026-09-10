@@ -71,6 +71,29 @@ test('citeability receipt is valid only for the exact visible outbound snapshot'
 })
 
 
+test('offline preflight is bound to the exact visible platform copy', () => {
+  const checked = refreshEditableVariant({
+    title: '企业内容发布说明',
+    publish_content: '中性正文。',
+    offline_preflight: {
+      passed: true,
+      issues: [{ code: 'sohu_no_public_source_url', severity: 'warning', message: '缺少公开来源' }],
+      disclaimer: '软件不保证审核通过。'
+    }
+  })
+  const edited = refreshEditableVariant({
+    ...checked,
+    editable_content: `${checked.editable_content}待补充来源`
+  })
+
+  assert.equal(checked.offline_preflight_current, true)
+  assert.equal(checked.offline_preflight_passed, true)
+  assert.equal(checked.offline_preflight_issues.length, 1)
+  assert.equal(edited.offline_preflight_current, false)
+  assert.equal(edited.offline_preflight_passed, false)
+})
+
+
 test('frequency label is explicitly a software recommendation', () => {
   assert.equal(
     frequencyGuidanceLabel({ daily_recommended_max: 3, cooldown_minutes: 120 }),
@@ -97,6 +120,9 @@ test('distribution center previews per-platform copies and warns about human ver
   assert.match(source, /任务已暂停 · 需要本人验证/)
   assert.match(source, /不是平台官方配额/)
   assert.match(source, /AI 可引用性/)
+  assert.match(source, /平台离线预检/)
+  assert.match(source, /offline_preflight_passed/)
+  assert.match(source, /offline_preflight_disclaimer/)
   assert.match(source, /title_overrides/)
   assert.match(source, /citeability_current/)
   assert.match(source, /内容编辑后正在重新检查/)

@@ -19,6 +19,11 @@ TOUTIAO_DASHBOARD_PATH = "/profile_v4"
 TOUTIAO_UPLOAD_URL = "https://mp.toutiao.com/profile_v4/xigua/upload-video"
 TOUTIAO_ARTICLE_URL = "https://mp.toutiao.com/profile_v4/graphic/publish"
 TOUTIAO_LOGIN_PATH = "/auth/page/login"
+TOUTIAO_TOPIC_NO_MATCH_TEXT = "没有匹配到话题，请重新输入"
+TOUTIAO_TOPIC_SEARCH_TIMEOUT_MS = 2500
+# 从定位光标、输入、搜索到单次点击校验的全流程硬上限。
+TOUTIAO_TOPIC_TOTAL_TIMEOUT_SECONDS = 8.0
+TOUTIAO_TOPIC_CLEANUP_TIMEOUT_SECONDS = 2.0
 
 
 def _build_launch_kwargs(headless: bool) -> dict:
@@ -442,6 +447,9 @@ class TouTiaoArticle(object):
         self.dry_run = bool(dry_run)
         self.cover_path = cover_path
         self.work_statements = self._normalize_work_statements(work_statements)
+        # 话题只是可选增强项。保留一次尝试的结果，便于日志/测试诊断，
+        # 但它绝不能阻断后续封面、预览或发布流程。
+        self.topic_outcome = "topic_not_requested"
 
     @staticmethod
     def _normalize_work_statements(work_statements) -> list[str]:
@@ -496,9 +504,19 @@ class TouTiaoArticle(object):
         return []
 
     def _normalize_tags(self) -> list[str]:
-        tags = [str(t).strip().lstrip("#") for t in (self.tags or []) if str(t).strip()]
-        # 头条图文正文内话题不宜过多
-        return tags[:10]
+        """返回唯一的首选话题。
+
+        上游标签按相关度排序，因此首个有效标签就是首选项。这里绝不轮换
+        后续标签：首选项无匹配时直接跳过话题，避免把多标签列表变成一次
+        没有全局上限的关键词穷举。
+        """
+        for raw in self.tags or []:
+            tag = str(raw or "").replace("\u200b", " ")
+            tag = re.sub(r"#+", " ", tag)
+            tag = re.sub(r"\s+", " ", tag).strip()
+            if tag:
+                return [tag]
+        return []
 
     async def fill_title(self, page: Page) -> None:
         candidates = [
@@ -1043,105 +1061,188 @@ class TouTiaoArticle(object):
         # 节点数量增加不能证明选中了正确话题；必须核对标签文本本身。
         return await self._editor_contains_confirmed_topic(editor, tag)
 
-    async def _wait_for_topic_dropdown(self, page: Page, tag: str, timeout_ms: int = 3500) -> list[dict]:
-        """等待真正的话题下拉项出现；过滤页面杂讯。"""
+    async def _topic_no_match_visible(self, page: Page) -> bool:
+        """识别头条话题浮层的明确“无匹配”终态。"""
+        try:
+            return bool(
+                await page.evaluate(
+                    """(message) => {
+                        const normalize = (value) => String(value || '')
+                            .replace(/\\s+/g, '')
+                            .trim();
+                        const wanted = normalize(message);
+                        const nodes = Array.from(document.querySelectorAll('body *'));
+                        return nodes.some((el) => {
+                            const text = normalize(el.innerText || el.textContent || '');
+                            if (!text || !text.includes(wanted)) return false;
+                            const style = window.getComputedStyle(el);
+                            const rect = el.getBoundingClientRect();
+                            return style.display !== 'none'
+                                && style.visibility !== 'hidden'
+                                && Number(style.opacity || 1) > 0.05
+                                && rect.width > 0
+                                && rect.height > 0;
+                        });
+                    }""",
+                    TOUTIAO_TOPIC_NO_MATCH_TEXT,
+                )
+            )
+        except Exception:
+            return False
+
+    async def _wait_for_topic_dropdown(
+        self,
+        page: Page,
+        tag: str,
+        timeout_ms: int = TOUTIAO_TOPIC_SEARCH_TIMEOUT_MS,
+    ) -> tuple[str, list[dict]]:
+        """等待话题搜索进入 match/no_match/unknown 三种有限终态。"""
         tag = (tag or "").strip().lstrip("#")
         deadline = asyncio.get_event_loop().time() + timeout_ms / 1000
-        last: list[dict] = []
         while asyncio.get_event_loop().time() < deadline:
+            if await self._topic_no_match_visible(page):
+                return "no_match", []
             raw = await self._find_topic_dropdown_candidates(page, tag)
             ranked = self._rank_topic_candidates(raw, tag)
             if ranked:
-                # 有「讨论」的项即可点，不必死等稳定两次
-                if any("讨论" in str(c.get("text") or "") for c in ranked):
-                    await page.wait_for_timeout(200)
-                    return ranked
-                last = ranked
+                # 排序函数已过滤为精确话题，只采用第一项，绝不轮换候选。
+                await page.wait_for_timeout(150)
+                return "match", ranked[:1]
             await page.wait_for_timeout(250)
-        return last
+        return "unknown", []
 
-    async def _click_topic_suggestion(self, page: Page, tag: str, editor=None, before_nodes: int | None = None) -> bool:
-        """输入 #话题 后点下拉建议。失败快速返回，避免空转。"""
+    async def _click_topic_suggestion(
+        self,
+        page: Page,
+        tag: str,
+        editor=None,
+        before_nodes: int | None = None,
+    ) -> str:
+        """最多点击一个精确候选一次，并返回有限状态。"""
         tag = (tag or "").strip().lstrip("#")
 
-        candidates = await self._wait_for_topic_dropdown(page, tag, timeout_ms=3500)
-        if not candidates:
-            # Playwright 轻量兜底一次
-            try:
-                opts = page.locator('[role="option"]')
-                n = await opts.count()
-                for i in range(min(n, 6)):
-                    opt = opts.nth(i)
-                    if not await opt.is_visible():
-                        continue
-                    t = ((await opt.inner_text()) or "").strip().replace("\n", " ")
-                    if not self._is_real_topic_dropdown_item(t, tag):
-                        continue
-                    if tag and tag not in t:
-                        continue
-                    box = await opt.bounding_box()
-                    if not box:
-                        continue
-                    toutiao_logger.info(f"尝试点击 role=option: 「{t[:24]}」")
-                    await self._mouse_click_xy(
-                        page, box["x"] + box["width"] / 2, box["y"] + box["height"] / 2
-                    )
-                    await page.wait_for_timeout(600)
-                    if await self._topic_click_succeeded(editor, tag, before_nodes):
-                        toutiao_logger.info(f"已点选话题建议: #{tag}（{t[:30]}）")
-                        return True
-            except Exception:
-                pass
-            toutiao_logger.warning(f"未找到可用的话题下拉项: #{tag}")
-            return False
+        state, candidates = await self._wait_for_topic_dropdown(page, tag)
+        if state != "match" or not candidates:
+            return state
 
-        debug = [
-            f"{c.get('text','')[:20]}@{int(c.get('x',0))},{int(c.get('y',0))}s={c.get('score')}"
-            for c in candidates[:5]
-        ]
-        toutiao_logger.info(f"话题下拉候选: {debug}")
+        candidate = candidates[0]
+        x, y = candidate.get("x"), candidate.get("y")
+        text = str(candidate.get("text") or "")
+        if x is None or y is None:
+            return "unknown"
+        toutiao_logger.info(
+            f"单次点击精确话题项: 「{text[:24]}」 @({int(x)},{int(y)})"
+        )
+        try:
+            await self._mouse_click_xy(page, x, y)
+            await page.wait_for_timeout(500)
+        except Exception as exc:
+            toutiao_logger.debug(f"单次话题点击失败: {exc}")
+            return "click_failed"
+        if await self._topic_click_succeeded(editor, tag, before_nodes):
+            toutiao_logger.info(f"已点选话题建议: #{tag}（{text[:30]}）")
+            return "selected"
+        return "click_failed"
 
-        # 最多试前 2 个真实候选项，每个只点中心 1 次（必要时再偏一点）
-        for c in candidates[:2]:
-            x, y = c.get("x"), c.get("y")
-            text = str(c.get("text") or "")
-            if x is None or y is None:
-                continue
-            for dy in (0, -6):
-                toutiao_logger.info(f"尝试鼠标点击话题项: 「{text[:24]}」 @({int(x)},{int(y + dy)})")
-                try:
-                    await self._mouse_click_xy(page, x, y + dy)
-                    await page.wait_for_timeout(650)
-                    if await self._topic_click_succeeded(editor, tag, before_nodes):
-                        toutiao_logger.info(f"已点选话题建议: #{tag}（{text[:30]}）")
-                        return True
-                except Exception as exc:
-                    toutiao_logger.debug(f"点击候选失败: {exc}")
-                    continue
-            # 该候选项点了两次仍无效，换下一个，不再死磕
+    async def _clear_partial_topic_input(self, page: Page, editor, tag: str) -> None:
+        """只删除编辑器末尾与本次查询相同的纯文本前缀。
 
-        toutiao_logger.warning(f"话题下拉点了但未生效: #{tag}；候选={debug}")
-        return False
+        不再盲按固定次数 Backspace；若话题尝试在输入中途超时，盲删会误伤
+        正文。DOM 范围删除只处理 ``#tag`` 的实际已输入前缀。
+        """
+        if editor is None or not tag:
+            return
+        try:
+            removed = await editor.evaluate(
+                """(el, tag) => {
+                    if (!el) return '';
+                    const query = '#' + String(tag || '');
+                    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+                    const nodes = [];
+                    let node;
+                    while ((node = walker.nextNode())) nodes.push(node);
+                    const joined = nodes.map((item) => item.nodeValue || '').join('');
+                    let suffix = '';
+                    for (let size = query.length; size >= 1; size -= 1) {
+                        const prefix = query.slice(0, size);
+                        if (joined.endsWith(prefix)) {
+                            suffix = prefix;
+                            break;
+                        }
+                    }
+                    if (!suffix) return '';
 
-    async def _clear_partial_topic_input(self, page: Page, tag: str) -> None:
-        """清掉未成功转成标签的 #话题 纯文本，避免残留。"""
-        n = len(tag or "") + 2  # # + tag + 可能空格
-        for _ in range(max(n, 3)):
-            try:
-                await page.keyboard.press("Backspace")
-                await page.wait_for_timeout(30)
-            except Exception:
-                break
-        await page.wait_for_timeout(150)
+                    let startIndex = joined.length - suffix.length;
+                    let offset = 0;
+                    let startNode = null;
+                    let startOffset = 0;
+                    for (const item of nodes) {
+                        const length = (item.nodeValue || '').length;
+                        if (startIndex <= offset + length) {
+                            startNode = item;
+                            startOffset = Math.max(0, startIndex - offset);
+                            break;
+                        }
+                        offset += length;
+                    }
+                    const endNode = nodes[nodes.length - 1];
+                    if (!startNode || !endNode) return '';
+                    const range = document.createRange();
+                    range.setStart(startNode, startOffset);
+                    range.setEnd(endNode, (endNode.nodeValue || '').length);
+                    range.deleteContents();
+                    el.dispatchEvent(new InputEvent('input', { bubbles: true }));
+                    el.dispatchEvent(new Event('change', { bubbles: true }));
+                    return suffix;
+                }""",
+                tag,
+            )
+            if removed:
+                toutiao_logger.info(f"已清理未确认的话题查询文本: {removed}")
+        except Exception as exc:
+            # 清理失败时宁可留下供人工核对，也不能用 Backspace 误删正文。
+            toutiao_logger.warning(f"未确认话题文本清理失败，已停止键盘删除: {exc}")
 
     async def _type_topic_query(self, page: Page, tag: str) -> None:
-        """慢速输入 #话题，给搜索下拉充足过滤时间。"""
-        await page.keyboard.type("#", delay=140)
-        await page.wait_for_timeout(500)
-        for ch in tag:
-            await page.keyboard.type(ch, delay=110)
-            await page.wait_for_timeout(40)
-        await page.wait_for_timeout(900)
+        """一次性输入唯一的 #话题 查询；调用方禁止重试或换词。"""
+        await page.keyboard.type(f"#{tag}", delay=80)
+        await page.wait_for_timeout(600)
+
+    async def _close_topic_picker(self, page: Page, editor) -> None:
+        """关闭话题建议浮层，使后续封面控件可以正常交互。"""
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+        try:
+            if editor is not None:
+                await editor.evaluate("el => { if (el && el.blur) el.blur(); }")
+        except Exception:
+            pass
+        try:
+            await page.wait_for_timeout(100)
+        except Exception:
+            pass
+
+    async def _attempt_single_topic(self, page: Page, editor, tag: str) -> str:
+        """执行唯一一次话题输入/搜索/点选。"""
+        await self._move_caret_to_editor_end(page, editor)
+        try:
+            tail = ((await editor.inner_text()) or "")[-1:]
+        except Exception:
+            tail = ""
+        if tail and not tail.isspace():
+            await page.keyboard.type(" ", delay=40)
+        await page.wait_for_timeout(100)
+
+        before_nodes = await self._count_topic_nodes_in_editor(editor)
+        await self._type_topic_query(page, tag)
+        return await self._click_topic_suggestion(
+            page,
+            tag,
+            editor=editor,
+            before_nodes=before_nodes,
+        )
 
     async def _screenshot_topic_debug(self, page: Page, tag: str) -> None:
         try:
@@ -1151,16 +1252,13 @@ class TouTiaoArticle(object):
         except Exception:
             pass
 
-    async def insert_topics_in_body(self, page: Page, editor) -> None:
-        """在正文末尾逐个键入 #话题并点选下拉。
-
-        注意：确认话题只能点下拉，不能回车/空格确认；
-        话题与话题之间只用空格分隔，不要回车换行。
-        目标形态：#氛围感# #手工作品# #模型定制#（同一行）
-        """
+    async def insert_topics_in_body(self, page: Page, editor) -> str:
+        """尝试添加一个首选话题；任何失败都清理浮层并继续主流程。"""
         tags = self._normalize_tags()
         if not tags:
-            return
+            self.topic_outcome = "topic_not_requested"
+            return self.topic_outcome
+        tag = tags[0]
 
         try:
             existing_text = (await editor.inner_text()) or ""
@@ -1170,123 +1268,60 @@ class TouTiaoArticle(object):
         for part in existing_text.replace("\n", " ").split():
             if part.startswith("#") and len(part) > 1:
                 existing.add(part.lstrip("#").strip(",.，。"))
-        tags = [t for t in tags if t not in existing]
-        if not tags:
-            toutiao_logger.info("正文中已含全部话题，跳过插入")
-            return
+        if tag in existing:
+            self.topic_outcome = "topic_skipped_already_present"
+            toutiao_logger.info(f"{self.topic_outcome}: 正文已含 #{tag}")
+            return self.topic_outcome
 
-        toutiao_logger.info(f"准备在正文内键入并点选话题（同行空格分隔）: {tags}")
-        # 光标移到正文末尾；正文与话题之间最多一个空格，话题之间也不换行
-        await self._move_caret_to_editor_end(page, editor)
-        await page.wait_for_timeout(150)
-
-        # 去掉正文末尾多余换行，避免话题从新行开始后继续被拆行
-        for _ in range(6):
-            try:
-                trailing_break = await editor.evaluate(
-                    """(el) => {
-                        const t = (el.innerText || '');
-                        return /[\\r\\n]+\\s*$/.test(t);
-                    }"""
-                )
-            except Exception:
-                trailing_break = False
-            if not trailing_break:
-                break
-            try:
-                await page.keyboard.press("Backspace")
-                await page.wait_for_timeout(40)
-            except Exception:
-                break
-
+        toutiao_logger.info(f"准备单次尝试首选话题: #{tag}")
         try:
-            tail = ""
-            try:
-                tail = ((await editor.inner_text()) or "")[-8:]
-            except Exception:
-                pass
-            # 仅在末尾非空白时补一个空格；末尾已是空格则不再加
-            if tail and not tail[-1].isspace():
-                await page.keyboard.type(" ", delay=40)
-        except Exception:
-            await page.keyboard.type(" ", delay=40)
-        await page.wait_for_timeout(200)
+            state = await asyncio.wait_for(
+                self._attempt_single_topic(page, editor, tag),
+                timeout=TOUTIAO_TOPIC_TOTAL_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            state = "timeout"
+        except Exception as exc:
+            state = "error"
+            toutiao_logger.warning(f"单次话题尝试异常，按可选项跳过: {exc}")
 
-        added = []
-        failed = []
-        for idx, tag in enumerate(tags):
-            try:
-                # 绝对不要 Enter / Ctrl+End；第二个及以后话题的间隔由
-                # _ensure_inline_after_topic 在上一个话题后写入的空格负责
-                if idx > 0:
-                    # 双保险：若上一步没留下空格，这里再补一个（仍不回车）
-                    try:
-                        need_space = await editor.evaluate(
-                            """(el) => {
-                                const sel = window.getSelection();
-                                if (!sel || !sel.rangeCount) return true;
-                                const range = sel.getRangeAt(0);
-                                const pre = range.cloneRange();
-                                pre.selectNodeContents(el);
-                                pre.setEnd(range.startContainer, range.startOffset);
-                                const text = pre.toString();
-                                if (!text) return true;
-                                const ch = text.slice(-1);
-                                return !(ch === ' ' || ch === '\\u00a0');
-                            }"""
-                        )
-                    except Exception:
-                        need_space = False
-                    if need_space:
-                        await page.keyboard.type(" ", delay=40)
-                        await page.wait_for_timeout(120)
+        if state == "selected":
+            self.topic_outcome = "topic_selected"
+            toutiao_logger.success(f"{self.topic_outcome}: #{tag}")
+            return self.topic_outcome
 
-                before_nodes = await self._count_topic_nodes_in_editor(editor)
-                await self._type_topic_query(page, tag)
+        known_states = {"no_match", "unknown", "click_failed", "timeout", "error"}
+        safe_state = state if state in known_states else "unknown"
+        self.topic_outcome = f"topic_skipped_{safe_state}"
+        try:
+            await asyncio.wait_for(
+                self._clear_partial_topic_input(page, editor, tag),
+                timeout=TOUTIAO_TOPIC_CLEANUP_TIMEOUT_SECONDS,
+            )
+        except (asyncio.TimeoutError, Exception) as exc:
+            toutiao_logger.warning(f"话题残留清理未完成，停止继续操作话题控件: {exc}")
+        try:
+            await asyncio.wait_for(
+                self._close_topic_picker(page, editor),
+                timeout=TOUTIAO_TOPIC_CLEANUP_TIMEOUT_SECONDS,
+            )
+        except (asyncio.TimeoutError, Exception):
+            pass
 
-                # 每个话题：点选最多 1 次完整尝试 + 1 次快速重试，失败立刻跳过
-                clicked = await self._click_topic_suggestion(
-                    page, tag, editor=editor, before_nodes=before_nodes
-                )
-
-                if not clicked:
-                    toutiao_logger.warning(f"首次未点到，快速重试一次: #{tag}")
-                    await self._clear_partial_topic_input(page, tag)
-                    await page.wait_for_timeout(300)
-                    await self._type_topic_query(page, tag)
-                    clicked = await self._click_topic_suggestion(
-                        page, tag, editor=editor, before_nodes=before_nodes
-                    )
-
-                if clicked and await self._topic_click_succeeded(editor, tag, before_nodes):
-                    added.append(tag)
-                    await page.wait_for_timeout(250)
-                    # 合并误插入换行，并只补一个空格给下一个话题
-                    await self._ensure_inline_after_topic(page, editor)
-                else:
-                    failed.append(tag)
-                    await self._screenshot_topic_debug(page, tag)
-                    toutiao_logger.warning(f"未点选到话题下拉: #{tag}，已跳过（不继续死磕）")
-                    await self._clear_partial_topic_input(page, tag)
-            except Exception as exc:
-                failed.append(tag)
-                toutiao_logger.warning(f"插入话题 #{tag} 失败: {exc}")
-
-        # 兜底：若编辑器仍把话题拆成多行，尝试 DOM 合并到同一行
-        if len(added) >= 2:
-            await self._collapse_topic_line_breaks(page, editor)
-
-        if added:
-            toutiao_logger.success(f"已点选话题（同行空格分隔）: {added}")
-        if failed:
-            toutiao_logger.warning(f"未能点选的话题: {failed}")
-        if not added:
-            toutiao_logger.warning("未能插入任何话题")
+        if safe_state == "no_match":
+            toutiao_logger.info(
+                f"{self.topic_outcome}: {TOUTIAO_TOPIC_NO_MATCH_TEXT}；已关闭浮层并继续"
+            )
+        else:
+            toutiao_logger.warning(
+                f"{self.topic_outcome}: #{tag}；不重试、不换下一个标签，继续后续流程"
+            )
+        return self.topic_outcome
 
     async def fill_body(self, page: Page) -> None:
-        """先填纯正文，再在文末逐个键入 #话题并鼠标点选下拉。"""
+        """先填必需的正文，再尝试一个可选话题。"""
         body_text = (self.body or "").rstrip()
-        if not body_text.strip() and not self._normalize_tags():
+        if not body_text.strip():
             raise ValueError("文章正文不能为空")
 
         _frame, editor = await self._find_editor(page)
@@ -1299,12 +1334,7 @@ class TouTiaoArticle(object):
         await editor.scroll_into_view_if_needed()
         await page.wait_for_timeout(300)
 
-        if body_text.strip():
-            await self._paste_or_type_text(page, editor, body_text)
-        else:
-            await editor.click(force=True)
-            await page.keyboard.press("Control+A")
-            await page.keyboard.press("Backspace")
+        await self._paste_or_type_text(page, editor, body_text)
 
         try:
             content = await editor.inner_text()
@@ -2144,7 +2174,7 @@ class TouTiaoArticle(object):
         toutiao_logger.success("已点击文章发布")
 
     async def upload(self, playwright: Playwright) -> None:
-        if not (self.body or "").strip() and not self.tags:
+        if not (self.body or "").strip():
             raise ValueError("文章正文不能为空")
         if not self.title:
             raise ValueError("文章标题不能为空")

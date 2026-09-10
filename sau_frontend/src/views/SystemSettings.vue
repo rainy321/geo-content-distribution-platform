@@ -2,31 +2,71 @@
   <main class="settings-page">
     <section class="settings-hero">
       <div class="hero-copy">
-        <span class="eyebrow">SYSTEM / ENGINE ROUTING</span>
+        <span class="eyebrow">SYSTEM / UNIFIED AI BUS</span>
         <h1>系统设置</h1>
         <p>
-          查看当前内容引擎的运行状态，并为 Windows 软件配置 OpenAI-compatible API。
-          会话配置只影响这台电脑上当前打开的 GEO 软件。
+          只配置一次，写稿、调优与 AI 可见度回测共用同一个模型。
+          API Key 由当前 Windows 用户加密保护，界面和状态接口都不会回显明文。
         </p>
       </div>
       <div :class="['active-source', sourceTone]">
-        <span>备用模型连接</span>
+        <span>统一 AI 引擎</span>
         <strong>{{ activeSourceLabel }}</strong>
         <small>{{ activeSourceHint }}</small>
       </div>
     </section>
 
     <div class="settings-layout">
-      <section class="config-card">
+      <section class="config-card" v-loading="statusLoading">
         <header class="section-heading">
           <div>
-            <span class="section-kicker">DESKTOP SESSION</span>
-            <h2>自定义 AI API</h2>
+            <span class="section-kicker">ONE ENGINE / ALL WORKFLOWS</span>
+            <h2>统一 AI 引擎</h2>
           </div>
-          <el-tag :type="customActive ? 'success' : 'info'" effect="plain">
-            {{ customActive ? '当前会话已启用' : '未启用' }}
+          <el-tag :type="aiStatus.configured ? 'success' : 'info'" effect="plain">
+            {{ unifiedAIStatusLabel(aiStatus) }}
           </el-tag>
         </header>
+
+        <section class="engine-bus" aria-label="统一 AI 引擎总线状态">
+          <div class="bus-line" aria-hidden="true"><i :class="{ live: aiStatus.configured }" /></div>
+          <article>
+            <span>SECURE VAULT</span>
+            <strong>{{ unifiedAICredentialLabel(aiStatus) }}</strong>
+            <small>{{ credentialStorageLabel }}</small>
+          </article>
+          <article>
+            <span>MODEL CORE</span>
+            <strong>{{ aiStatus.model || '等待配置' }}</strong>
+            <small>{{ aiStatus.providerLabel || 'OpenAI-compatible' }}</small>
+          </article>
+          <article class="bus-output">
+            <span>SHARED OUTPUT</span>
+            <strong>写稿 · 调优 · 回测</strong>
+            <small>三个功能使用同一设置</small>
+          </article>
+        </section>
+
+        <div v-if="statusError" class="config-error" role="status">
+          {{ statusError }}
+          <button type="button" @click="loadAIStatus">重新读取</button>
+        </div>
+
+        <div class="provider-picker" role="radiogroup" aria-label="模型服务商">
+          <button
+            v-for="preset in providerPresets"
+            :key="preset.id"
+            type="button"
+            role="radio"
+            :aria-checked="form.provider === preset.id"
+            :class="{ active: form.provider === preset.id }"
+            :disabled="saving"
+            @click="selectProvider(preset.id)"
+          >
+            <strong>{{ preset.label }}</strong>
+            <small>{{ preset.id === 'custom' ? 'COMPATIBLE' : preset.id.toUpperCase() }}</small>
+          </button>
+        </div>
 
         <el-form
           ref="formRef"
@@ -35,7 +75,7 @@
           label-position="top"
           class="config-form"
         >
-          <el-form-item label="API 服务地址" prop="baseUrl">
+          <el-form-item label="Base URL" prop="baseUrl">
             <el-input
               v-model="form.baseUrl"
               placeholder="https://api.example.com/v1"
@@ -59,11 +99,11 @@
               </el-input>
             </el-form-item>
 
-            <el-form-item label="API Key（仅当前软件会话）" prop="apiKey">
+            <el-form-item label="API Key" prop="apiKey">
               <el-input
                 v-model="form.apiKey"
                 type="password"
-                placeholder="输入服务商提供的 API Key"
+                :placeholder="aiStatus.savedConfigured && aiStatus.apiKeyConfigured ? '已安全保存；留空继续使用现有密钥' : '首次保存必须填写 API Key'"
                 autocomplete="new-password"
                 show-password
                 clearable
@@ -75,29 +115,38 @@
         </el-form>
 
         <div class="session-note">
-          <el-icon><Timer /></el-icon>
+          <el-icon><Lock /></el-icon>
           <div>
-            <strong>密钥不会长期保存</strong>
-            <p>服务地址和模型名保存在本机软件数据中；API Key 只保存在当前软件会话，关闭 GEO 后自动清除。</p>
+            <strong>{{ aiStatus.savedConfigured && aiStatus.apiKeyConfigured ? '凭据已经安全保存' : '首次保存需要 API Key' }}</strong>
+            <p>密钥经 Windows DPAPI 加密后只供当前用户使用；修改地址或模型时可留空继续使用原密钥。</p>
           </div>
         </div>
 
+        <div v-if="connectionResult" :class="['connection-result', connectionResult.ok ? 'success' : 'failure']" aria-live="polite">
+          <span>{{ connectionResult.ok ? 'CONNECTION / READY' : 'CONNECTION / FAILED' }}</span>
+          <strong>{{ connectionResult.message }}</strong>
+          <small v-if="connectionResult.ok">
+            {{ connectionResult.provider }} · {{ connectionResult.model }} · {{ connectionResult.elapsedMs }} ms
+          </small>
+        </div>
+
         <footer class="form-actions">
-          <el-button :disabled="!hasDraft" @click="clearConfig">清除自定义配置</el-button>
+          <el-button :disabled="!aiStatus.savedConfigured || clearing" :loading="clearing" @click="clearConfig">清除统一配置</el-button>
           <div>
-            <el-button @click="goToCreation">前往内容创作</el-button>
-            <el-button type="primary" :loading="saving" @click="saveConfig">
-              保存到当前会话
+            <el-button :loading="testing" :disabled="!aiStatus.configured" @click="testConnection">测试连接</el-button>
+            <el-button type="primary" :loading="saving" :disabled="!aiStatus.saveSupported" @click="saveConfig">
+              保存统一引擎
             </el-button>
           </div>
         </footer>
+        <p class="test-boundary">测试连接只会向当前模型发送固定合成文本“仅回复 OK”，不会发送项目、文章、账号或 Cookie。</p>
       </section>
 
       <aside class="routing-column">
         <section class="engine-status-card" aria-live="polite">
           <header class="engine-status-heading">
             <div>
-              <span class="section-kicker">CONTENT ENGINE / READ ONLY</span>
+              <span class="section-kicker">CONTENT ENGINE / RUNTIME</span>
               <h2>内容引擎状态</h2>
             </div>
             <el-button text :loading="engineStatusLoading" @click="loadEngineStatus">刷新状态</el-button>
@@ -143,27 +192,27 @@
           </header>
 
           <div class="routing-rail">
-            <article :class="['route-node', { active: customActive }]">
+            <article :class="['route-node', { active: aiStatus.savedConfigured }]">
               <span class="node-index">01</span>
               <div>
-                <strong>当前软件会话配置</strong>
-                <p>三项填写完整时优先使用，只影响本次打开的 GEO 软件。</p>
+                <strong>Windows 安全配置</strong>
+                <p>保存一次后由当前 Windows 用户解密，关闭软件也不会丢失。</p>
               </div>
               <el-icon><Monitor /></el-icon>
             </article>
-            <article :class="['route-node', { active: !customActive && serverConfigured }]">
+            <article :class="['route-node', { active: !aiStatus.savedConfigured && aiStatus.serverConfigured }]">
               <span class="node-index">02</span>
               <div>
-                <strong>本机默认配置</strong>
-                <p>{{ serverConfigured ? '当前 EXE 运行环境已配置，可作为默认连接。' : '本机尚未配置完整的模型变量。' }}</p>
+                <strong>运行环境配置</strong>
+                <p>{{ aiStatus.serverConfigured ? '当前运行环境已配置，可在未保存本机设置时使用。' : '运行环境没有备用模型设置。' }}</p>
               </div>
               <el-icon><Cloudy /></el-icon>
             </article>
             <article class="route-node provider-node">
               <span class="node-index">03</span>
               <div>
-                <strong>OpenAI-compatible 服务</strong>
-                <p>后端拼接标准 chat/completions 路径并解析模型输出。</p>
+                <strong>统一模型总线</strong>
+                <p>内容生成、调优与手动确认的可见度采样共用同一连接。</p>
               </div>
               <el-icon><Promotion /></el-icon>
             </article>
@@ -178,7 +227,7 @@
             <p>
               {{ accessControlEnabled
                 ? '模型调用、数据修改和媒体控制均要求有效的 HttpOnly 会话。'
-                : '自定义地址只允许 HTTPS，并拒绝本机、私网、保留地址以及 URL 内嵌凭据。' }}
+                : '地址只允许 HTTPS，并拒绝本机、私网、保留地址以及 URL 内嵌凭据。' }}
             </p>
             <el-button v-if="accessControlEnabled" text @click="logoutSession">
               <el-icon><SwitchButton /></el-icon>
@@ -193,7 +242,6 @@
 
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
-import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Cloudy,
@@ -203,28 +251,35 @@ import {
   Lock,
   Monitor,
   Promotion,
-  SwitchButton,
-  Timer
+  SwitchButton
 } from '@element-plus/icons-vue'
 import { articleApi } from '@/api/article'
+import { aiConfigApi } from '@/api/aiConfig'
 import { authApi } from '@/api/auth'
 import {
-  clearCustomAIConfig,
-  getAIConfigDraft,
-  getCustomAIConfig,
-  saveCustomAIConfig
+  UNIFIED_AI_PROVIDER_PRESETS,
+  applyUnifiedAIProviderPreset,
+  buildUnifiedAIConfigPayload,
+  normalizeUnifiedAIStatus,
+  unifiedAICredentialLabel,
+  unifiedAIStatusLabel
 } from '@/utils/aiConfig'
 
-const router = useRouter()
 const formRef = ref(null)
 const saving = ref(false)
-const serverConfigured = ref(false)
+const clearing = ref(false)
+const testing = ref(false)
+const statusLoading = ref(false)
+const statusError = ref('')
 const accessControlEnabled = ref(false)
 const engineStatusLoading = ref(false)
 const engineStatusError = ref('')
 const engineStatus = ref(null)
-const activeCustomModel = ref(getCustomAIConfig()?.model || '')
+const connectionResult = ref(null)
+const providerPresets = UNIFIED_AI_PROVIDER_PRESETS
+const aiStatus = reactive(normalizeUnifiedAIStatus({}))
 const form = reactive({
+  provider: 'qwen',
   baseUrl: '',
   apiKey: '',
   model: ''
@@ -267,28 +322,39 @@ const rules = {
     { max: 200, message: '模型名称不能超过 200 个字符', trigger: 'blur' }
   ],
   apiKey: [
-    { required: true, message: '请输入 API Key', trigger: 'blur' },
+    {
+      validator: (rule, value, callback) => {
+        if (!String(value || '').trim() && !(aiStatus.savedConfigured && aiStatus.apiKeyConfigured)) {
+          callback(new Error('首次保存需要填写 API Key'))
+          return
+        }
+        callback()
+      },
+      trigger: 'blur'
+    },
     { max: 8192, message: 'API Key 格式异常', trigger: 'blur' }
   ]
 }
 
-const customActive = ref(Boolean(getCustomAIConfig()))
-const hasDraft = computed(() => Boolean(form.baseUrl || form.apiKey || form.model))
 const activeSourceLabel = computed(() => {
-  if (customActive.value) return '当前软件会话'
-  if (serverConfigured.value) return '本机默认'
-  return '尚未配置'
+  if (aiStatus.source === 'saved') return 'Windows 安全配置'
+  if (aiStatus.source === 'environment') return '运行环境配置'
+  return '等待接入'
 })
 const activeSourceHint = computed(() => {
-  if (customActive.value) return activeCustomModel.value
-  if (serverConfigured.value) return '由部署环境安全提供'
-  return '填写左侧三项后启用'
+  if (aiStatus.configured) return aiStatus.model || aiStatus.providerLabel
+  return '保存一次，全软件共用'
 })
 const sourceTone = computed(() => ({
-  custom: customActive.value,
-  server: !customActive.value && serverConfigured.value,
-  missing: !customActive.value && !serverConfigured.value
+  custom: aiStatus.source === 'saved',
+  server: aiStatus.source === 'environment',
+  missing: !aiStatus.configured
 }))
+const credentialStorageLabel = computed(() => ({
+  windows_dpapi_current_user: 'Windows 当前用户专属加密',
+  environment: '由运行环境安全提供',
+  unavailable: '当前环境无法安全保存'
+}[aiStatus.credentialStorage] || '密钥不会通过状态接口返回'))
 
 const engineHealthTone = computed(() => {
   if (!engineStatus.value || engineStatusError.value) return 'unknown'
@@ -322,18 +388,36 @@ const fallbackStatusLabel = computed(() => {
     : '已启用'
 })
 
-const loadDraft = () => {
-  const draft = getAIConfigDraft()
-  Object.assign(form, draft)
+const loadAIStatus = async () => {
+  statusLoading.value = true
+  statusError.value = ''
+  try {
+    const response = await aiConfigApi.get({ suppressGlobalError: true })
+    Object.assign(aiStatus, normalizeUnifiedAIStatus(response))
+    Object.assign(form, {
+      provider: aiStatus.provider || 'qwen',
+      baseUrl: aiStatus.baseUrl,
+      model: aiStatus.model,
+      apiKey: ''
+    })
+  } catch (error) {
+    statusError.value = readableError(error, '统一 AI 配置状态读取失败')
+  } finally {
+    statusLoading.value = false
+  }
 }
 
-const loadServerStatus = async () => {
-  try {
-    const response = await articleApi.getAIConfigStatus()
-    serverConfigured.value = Boolean(response.data?.server_configured)
-  } catch (error) {
-    console.error('读取 AI 配置状态失败:', error)
-  }
+const readableError = (error, fallback) => (
+  error?.response?.data?.msg
+  || error?.response?.data?.message
+  || error?.message
+  || fallback
+)
+
+const selectProvider = providerId => {
+  Object.assign(form, applyUnifiedAIProviderPreset(form, providerId))
+  connectionResult.value = null
+  formRef.value?.clearValidate()
 }
 
 const formatCheckedAt = (value) => {
@@ -385,22 +469,49 @@ const saveConfig = async () => {
   if (!valid) return
   saving.value = true
   try {
-    saveCustomAIConfig(form)
-    customActive.value = true
-    activeCustomModel.value = form.model.trim()
-    ElMessage.success('自定义 AI API 已用于当前软件会话')
+    const payload = buildUnifiedAIConfigPayload(form, aiStatus)
+    const response = await aiConfigApi.save(payload, { suppressGlobalError: true })
+    Object.assign(aiStatus, normalizeUnifiedAIStatus(response))
+    form.apiKey = ''
+    connectionResult.value = null
+    window.dispatchEvent(new CustomEvent('geo-unified-ai-config-changed'))
+    ElMessage.success('统一 AI 引擎已安全保存，写稿、调优与回测将自动使用')
   } catch (error) {
-    ElMessage.error(error.message || '软件无法保存当前配置')
+    ElMessage.error(readableError(error, '统一 AI 配置保存失败'))
   } finally {
     saving.value = false
+  }
+}
+
+const testConnection = async () => {
+  if (!aiStatus.configured || testing.value) return
+  testing.value = true
+  connectionResult.value = null
+  try {
+    const response = await aiConfigApi.test({ suppressGlobalError: true })
+    const data = response.data || {}
+    connectionResult.value = {
+      ok: Boolean(data.ok),
+      message: data.message || '固定合成测试已收到模型响应',
+      provider: data.provider || aiStatus.providerLabel,
+      model: data.model || aiStatus.model,
+      elapsedMs: Number(data.elapsed_ms) || 0
+    }
+    ElMessage.success('统一 AI 引擎连接正常')
+  } catch (error) {
+    const message = readableError(error, '统一 AI 引擎连接失败')
+    connectionResult.value = { ok: false, message }
+    ElMessage.error(message)
+  } finally {
+    testing.value = false
   }
 }
 
 const clearConfig = async () => {
   try {
     await ElMessageBox.confirm(
-      '清除后，AI 请求将自动回退到服务器默认配置。',
-      '清除自定义配置',
+      '清除后，写稿、调优和回测将回退到运行环境配置；若环境也未配置，这些功能会停用。',
+      '清除统一 AI 配置',
       {
         confirmButtonText: '清除配置',
         cancelButtonText: '保留',
@@ -410,15 +521,26 @@ const clearConfig = async () => {
   } catch {
     return
   }
-  clearCustomAIConfig()
-  customActive.value = false
-  activeCustomModel.value = ''
-  Object.assign(form, { baseUrl: '', apiKey: '', model: '' })
-  formRef.value?.clearValidate()
-  ElMessage.success('自定义配置已清除')
+  clearing.value = true
+  try {
+    const response = await aiConfigApi.clear({ suppressGlobalError: true })
+    Object.assign(aiStatus, normalizeUnifiedAIStatus(response))
+    Object.assign(form, {
+      provider: aiStatus.provider || 'qwen',
+      baseUrl: aiStatus.baseUrl,
+      apiKey: '',
+      model: aiStatus.model
+    })
+    connectionResult.value = null
+    formRef.value?.clearValidate()
+    window.dispatchEvent(new CustomEvent('geo-unified-ai-config-changed'))
+    ElMessage.success(aiStatus.configured ? '本机配置已清除，已回退到运行环境' : '统一 AI 配置已清除')
+  } catch (error) {
+    ElMessage.error(readableError(error, '统一 AI 配置清除失败'))
+  } finally {
+    clearing.value = false
+  }
 }
-
-const goToCreation = () => router.push('/content-create')
 
 const logoutSession = async () => {
   await authApi.logout()
@@ -426,8 +548,7 @@ const logoutSession = async () => {
 }
 
 onMounted(() => {
-  loadDraft()
-  loadServerStatus()
+  loadAIStatus()
   loadSecurityStatus()
   loadEngineStatus()
 })
@@ -547,6 +668,162 @@ onMounted(() => {
     margin-top: 6px;
     font-size: 25px;
   }
+}
+
+.engine-bus {
+  position: relative;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 1px;
+  margin: 22px 0 20px;
+  overflow: hidden;
+  border: 1px solid var(--geo-line);
+  border-radius: 9px;
+  background: var(--geo-line);
+}
+
+.bus-line {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  height: 3px;
+  background: #e1e5e4;
+
+  i {
+    display: block;
+    width: 34%;
+    height: 100%;
+    background: var(--geo-subtle);
+    transition: width 280ms ease, background-color 280ms ease;
+  }
+
+  i.live {
+    width: 100%;
+    background: var(--geo-success);
+  }
+}
+
+.engine-bus article {
+  min-width: 0;
+  padding: 18px 16px 15px;
+  background: #fff;
+
+  span {
+    color: var(--geo-muted);
+    font: 700 9px/1.2 "Cascadia Mono", monospace;
+    letter-spacing: .11em;
+  }
+
+  strong,
+  small { display: block; }
+
+  strong {
+    overflow: hidden;
+    margin-top: 8px;
+    font-size: 13px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  small {
+    margin-top: 5px;
+    color: var(--geo-muted);
+    font-size: 10px;
+  }
+}
+
+.engine-bus .bus-output {
+  color: #fff;
+  background: var(--geo-ink);
+
+  span,
+  small { color: rgba(255, 255, 255, .64); }
+}
+
+.provider-picker {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 20px;
+}
+
+.provider-picker button {
+  display: flex;
+  min-width: 0;
+  min-height: 54px;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 13px 12px;
+  border: 1px solid var(--geo-line);
+  border-radius: 8px;
+  color: var(--geo-ink);
+  background: #fff;
+  cursor: pointer;
+
+  strong { font-size: 11px; }
+  small {
+    color: var(--geo-muted);
+    font: 700 7px/1.2 "Cascadia Mono", monospace;
+  }
+
+  &.active {
+    border-color: var(--geo-ink);
+    color: #fff;
+    background: var(--geo-ink);
+  }
+
+  &.active small { color: rgba(255, 255, 255, .58); }
+  &:focus-visible { outline: 2px solid var(--geo-line-strong); outline-offset: 2px; }
+}
+
+.config-error,
+.connection-result {
+  margin: 18px 0;
+  padding: 13px 15px;
+  border-left: 3px solid var(--geo-warning);
+  color: #6c4d1b;
+  background: #fff9ee;
+  font-size: 11px;
+}
+
+.config-error button {
+  margin-left: 8px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font-weight: 700;
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.connection-result {
+  display: grid;
+  gap: 5px;
+  border-left-color: var(--geo-danger);
+  color: var(--geo-ink);
+  background: #fff5f3;
+
+  span {
+    color: var(--geo-muted);
+    font: 700 9px/1.2 "Cascadia Mono", monospace;
+    letter-spacing: .1em;
+  }
+
+  &.success {
+    border-left-color: var(--geo-success);
+    background: var(--geo-soft);
+  }
+
+  small { color: var(--geo-muted); }
+}
+
+.test-boundary {
+  margin-top: 13px;
+  color: var(--geo-muted);
+  font-size: 10px;
+  line-height: 1.6;
 }
 
 .config-form {
@@ -833,6 +1110,8 @@ onMounted(() => {
   .settings-hero,
   .config-card { padding: 24px 20px; }
   .active-source { min-width: 0; }
+  .engine-bus,
+  .provider-picker { grid-template-columns: 1fr; }
   .field-grid { grid-template-columns: 1fr; gap: 0; }
   .form-actions > div { display: grid; gap: 8px; }
   .form-actions :deep(.el-button) { margin-left: 0; }

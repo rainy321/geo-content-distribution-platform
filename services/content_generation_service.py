@@ -24,6 +24,7 @@ from services.content_generation_run_service import (
     mark_succeeded,
     mark_unknown,
 )
+from services.content_hygiene_service import sanitize_generated_content
 from services.geo_score_service import score_geo_content
 from services.geo_article_compiler_service import score_ai_citeability
 
@@ -168,6 +169,20 @@ class ContentGenerationService:
             raise error from exc
 
         try:
+            hygiene = sanitize_generated_content(result.content)
+            if hygiene.changed:
+                result = replace(
+                    result,
+                    content=hygiene.content,
+                    warnings=tuple(
+                        dict.fromkeys(
+                            [
+                                *result.warnings,
+                                "已移除未完成的作者、日期或证据占位标记",
+                            ]
+                        )
+                    ),
+                )
             result = replace(
                 result,
                 elapsed_ms=round((time.perf_counter() - started_at) * 1000),

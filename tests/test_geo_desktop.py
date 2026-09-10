@@ -54,6 +54,7 @@ class DesktopPathsTests(unittest.TestCase):
             self.assertTrue(paths.media.is_dir())
             self.assertTrue(paths.cookies.is_dir())
             self.assertTrue(paths.auth_config.parent.is_dir())
+            self.assertEqual(paths.auth_config.parent, paths.ai_config.parent)
             self.assertTrue(paths.backups.is_dir())
             self.assertTrue(paths.logs.is_dir())
             self.assertTrue(paths.webview.is_dir())
@@ -260,6 +261,10 @@ class DesktopEnvironmentTests(unittest.TestCase):
             self.assertEqual(
                 str((root / "runtime" / "config" / "auth.json").resolve()),
                 environ["GEO_DESKTOP_AUTH_PATH"],
+            )
+            self.assertEqual(
+                str((root / "runtime" / "config" / "ai.json").resolve()),
+                environ["GEO_UNIFIED_AI_CONFIG_PATH"],
             )
 
     def test_authorized_profile_records_intent_but_keeps_gate_closed_until_probe(self):
@@ -625,11 +630,11 @@ class DesktopPackagingContractTests(unittest.TestCase):
             build_script,
         )
         self.assertIn(
-            'article_compiler_version = "geo-article-compiler-2.1.0"',
+            'article_compiler_version = "geo-article-compiler-2.1.1"',
             build_script,
         )
         self.assertIn(
-            'ai_citeability_version = "ai-citeability-rules-2.1.0"',
+            'ai_citeability_version = "ai-citeability-rules-2.1.1"',
             build_script,
         )
         self.assertIn('docs\\GEO算法融合说明.md', build_script)

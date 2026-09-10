@@ -96,11 +96,14 @@ class FrontendDeliveryTests(unittest.TestCase):
         self.assertTrue((frontend_root / "public" / "geo-favicon.svg").is_file())
         self.assertNotIn("SAU自媒体自动化运营系统", index)
 
-    def test_system_settings_supports_session_scoped_custom_ai_config(self):
+    def test_system_settings_supports_persisted_unified_ai_config(self):
         frontend_root = Path(__file__).resolve().parents[1] / "sau_frontend" / "src"
         router = (frontend_root / "router" / "index.js").read_text(encoding="utf-8")
         app = (frontend_root / "App.vue").read_text(encoding="utf-8")
         article_api = (frontend_root / "api" / "article.js").read_text(
+            encoding="utf-8"
+        )
+        ai_config_api = (frontend_root / "api" / "aiConfig.js").read_text(
             encoding="utf-8"
         )
         config = (frontend_root / "utils" / "aiConfig.js").read_text(
@@ -109,10 +112,11 @@ class FrontendDeliveryTests(unittest.TestCase):
 
         self.assertIn("path: '/settings'", router)
         self.assertIn("<span>系统设置</span>", app)
-        self.assertIn("withCustomAIConfig(data)", article_api)
-        self.assertIn("withCustomAIConfig()", article_api)
-        self.assertIn("window.sessionStorage.setItem(SESSION_SECRET_KEY", config)
-        self.assertNotIn("localStorage.setItem(SESSION_SECRET_KEY", config)
+        self.assertNotIn("withCustomAIConfig", article_api)
+        self.assertIn("http.put('/api/ai/config'", ai_config_api)
+        self.assertIn("http.post('/api/ai/config/test'", ai_config_api)
+        self.assertIn("apiKeyConfigured", config)
+        self.assertNotIn("sessionStorage", config)
 
     def test_frontend_has_operator_access_gate_and_credentialed_requests(self):
         frontend_root = Path(__file__).resolve().parents[1] / "sau_frontend"

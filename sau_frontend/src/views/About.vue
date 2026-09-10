@@ -93,7 +93,7 @@
         </article>
         <article>
           <span class="row-code">MODEL</span>
-          <div><strong>按功能区分外部调用</strong><p>AI 可见度分析不调用外部模型；内容生成只有在配置并主动使用模型时才会发起生成请求。</p></div>
+          <div><strong>按功能区分外部调用</strong><p>手工导入的 AI 可见度分析只在本机运行；真实采样和内容生成仅在你主动确认后使用系统设置中的统一模型。</p></div>
           <small>使用前核对模型设置</small>
         </article>
         <article>
@@ -115,7 +115,7 @@
 
     <footer class="about-footer">
       <span>GEO CONTENT WORKBENCH</span>
-      <p>版本 1.0.0 · 本机优先 · 可审计证据 · {{ publishingFooter }}</p>
+      <p>版本 1.2.2 · 本机优先 · 可审计证据 · {{ publishingFooter }}</p>
     </footer>
   </main>
 </template>

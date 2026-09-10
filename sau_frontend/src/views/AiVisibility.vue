@@ -139,65 +139,82 @@
           <section class="live-sampling-panel" aria-labelledby="live-sampling-title">
             <header class="sampling-heading">
               <div>
-                <span>CONTROLLED LIVE SAMPLE / 真实模型</span>
+                <span>CONTROLLED LIVE SAMPLE / UNIFIED ENGINE</span>
                 <h3 id="live-sampling-title">从真实 AI 取得回答，再在本机量化</h3>
-                <p>每次 1–5 条，后端逐条调用并在首次失败时停下；软件不会自动重试或隐藏部分结果。</p>
+                <p>默认使用系统设置里保存的统一引擎；每次 1–5 条，只在你确认当前 Prompt 后调用，不会后台自动回测。</p>
               </div>
-              <span class="session-badge">SESSION ONLY</span>
+              <span class="session-badge">ONE ENGINE</span>
             </header>
 
-            <div class="provider-switch" role="radiogroup" aria-label="AI 服务预设">
+            <section :class="['sampling-engine-bus', { ready: unifiedAIStatus.configured }]" aria-live="polite">
+              <div class="engine-pulse" aria-hidden="true"><i /></div>
+              <div>
+                <span>UNIFIED AI BUS</span>
+                <strong>{{ unifiedAIStatusLoading ? '正在读取统一引擎…' : (unifiedAIStatus.configured ? samplingEngineLabel : '统一引擎尚未配置') }}</strong>
+                <small v-if="unifiedAIStatusError">读取失败：{{ unifiedAIStatusError }}</small>
+                <small v-else>{{ unifiedAIStatus.configured ? `${samplingEngineModel} · ${samplingEngineBaseUrl}` : '保存一次后，写稿、调优和回测共用，不必重复填写 Key。' }}</small>
+              </div>
+              <dl v-if="unifiedAIStatus.configured">
+                <div><dt>凭据</dt><dd>{{ unifiedAIStatus.savedConfigured && unifiedAIStatus.apiKeyConfigured ? '•••••••• 已保护' : '运行环境提供' }}</dd></div>
+                <div><dt>来源</dt><dd>{{ unifiedAIStatus.source === 'saved' ? 'Windows 安全配置' : '运行环境' }}</dd></div>
+              </dl>
+              <button type="button" @click="router.push('/settings')">
+                {{ unifiedAIStatus.configured ? '管理统一引擎' : '立即配置' }}
+              </button>
+            </section>
+
+            <div class="sampling-mode-row">
+              <label>
+                <input v-model="sampling.useUnifiedEngine" type="checkbox" @change="handleSamplingModeChange" />
+                <span>使用已保存的统一引擎</span>
+              </label>
               <button
-                v-for="preset in providerPresets"
-                :key="preset.id"
                 type="button"
-                role="radio"
-                :aria-checked="sampling.providerId === preset.id"
-                :class="{ active: sampling.providerId === preset.id }"
-                @click="selectSamplingProvider(preset.id)"
+                :aria-expanded="samplingOverrideExpanded"
+                @click="samplingOverrideExpanded = !samplingOverrideExpanded"
               >
-                <strong>{{ preset.label }}</strong>
-                <small>{{ preset.id === 'custom' ? 'OPENAI COMPATIBLE' : preset.id.toUpperCase() }}</small>
+                {{ samplingOverrideExpanded ? '收起本次覆盖' : '高级：仅本次覆盖' }}
               </button>
             </div>
 
-            <div class="sampling-config-grid">
-              <label class="sampling-field wide">
-                <span>BASE URL</span>
-                <el-input
-                  v-model="sampling.baseUrl"
-                  autocomplete="off"
-                  placeholder="https://provider.example/v1"
-                  @keydown.enter.prevent
-                />
-              </label>
-              <label class="sampling-field">
-                <span>MODEL ID</span>
-                <el-input
-                  v-model="sampling.model"
-                  autocomplete="off"
-                  :placeholder="activeProviderPreset.modelHint"
-                  @keydown.enter.prevent
-                />
-              </label>
-              <label class="sampling-field">
-                <span>API KEY</span>
-                <el-input
-                  v-model="sampling.apiKey"
-                  type="password"
-                  show-password
-                  autocomplete="new-password"
-                  placeholder="仅用于本次页面会话"
-                  @keydown.enter.prevent
-                />
-                <small>API Key 只保存在当前页面内存，切换页面或退出软件即清除。</small>
-              </label>
-              <label class="sampling-field compact">
-                <span>样本数</span>
-                <el-input-number v-model="sampling.sampleCount" :min="1" :max="5" controls-position="right" />
-                <small>按顺序执行，不并发突发。</small>
-              </label>
+            <div v-if="samplingOverrideExpanded && !sampling.useUnifiedEngine" class="sampling-override">
+              <p>本次覆盖不会修改系统设置，API Key 只保留到离开当前页面。</p>
+              <div class="provider-switch" role="radiogroup" aria-label="本次覆盖服务预设">
+                <button
+                  v-for="preset in providerPresets"
+                  :key="preset.id"
+                  type="button"
+                  role="radio"
+                  :aria-checked="sampling.providerId === preset.id"
+                  :class="{ active: sampling.providerId === preset.id }"
+                  @click="selectSamplingProvider(preset.id)"
+                >
+                  <strong>{{ preset.label }}</strong>
+                  <small>{{ preset.id === 'custom' ? 'OPENAI COMPATIBLE' : preset.id.toUpperCase() }}</small>
+                </button>
+              </div>
+
+              <div class="sampling-config-grid">
+                <label class="sampling-field wide">
+                  <span>BASE URL</span>
+                  <el-input v-model="sampling.baseUrl" autocomplete="off" placeholder="https://provider.example/v1" @keydown.enter.prevent />
+                </label>
+                <label class="sampling-field">
+                  <span>MODEL ID</span>
+                  <el-input v-model="sampling.model" autocomplete="off" :placeholder="activeProviderPreset.modelHint" @keydown.enter.prevent />
+                </label>
+                <label class="sampling-field">
+                  <span>API KEY</span>
+                  <el-input v-model="sampling.apiKey" type="password" show-password autocomplete="new-password" placeholder="仅用于本次覆盖" @keydown.enter.prevent />
+                </label>
+              </div>
             </div>
+
+            <label class="sample-count-field">
+              <span>样本数</span>
+              <el-input-number v-model="sampling.sampleCount" :min="1" :max="5" controls-position="right" />
+              <small>按顺序执行，不并发突发。</small>
+            </label>
 
             <div class="dispatch-slip">
               <div class="dispatch-index" aria-hidden="true">OUT<br>01</div>
@@ -208,9 +225,9 @@
                     <h4>仅发送下面这一段问题</h4>
                   </div>
                   <dl>
-                    <div><dt>服务</dt><dd>{{ activeProviderPreset.label }}</dd></div>
-                    <div><dt>地址</dt><dd>{{ sampling.baseUrl || '未填写' }}</dd></div>
-                    <div><dt>模型</dt><dd>{{ sampling.model || '未填写' }}</dd></div>
+                    <div><dt>服务</dt><dd>{{ samplingEngineLabel }}</dd></div>
+                    <div><dt>地址</dt><dd>{{ samplingEngineBaseUrl || '未填写' }}</dd></div>
+                    <div><dt>模型</dt><dd>{{ samplingEngineModel || '未填写' }}</dd></div>
                   </dl>
                 </div>
                 <pre>{{ samplingPromptPreview || '请先填写上方“监测问题”。' }}</pre>
@@ -223,7 +240,7 @@
                 </div>
                 <div class="dispatch-confirm">
                   <el-checkbox v-model="sampling.confirmed">
-                    我已核对 prompt、服务地址和模型，同意本次 {{ sampling.sampleCount }} 次顺序调用
+                    我已核对 Prompt 与统一引擎，同意本次 {{ sampling.sampleCount }} 次顺序调用
                   </el-checkbox>
                   <el-button
                     type="primary"
@@ -457,6 +474,60 @@
               <div v-else class="gap-empty">当前没有 P0/P1 缺口；保持同一口径定期复测。</div>
             </div>
           </div>
+
+          <section
+            v-if="diagnostic?.channelStrategy?.recommendations?.length"
+            class="channel-priority-panel"
+            aria-labelledby="channel-priority-title"
+          >
+            <header>
+              <div>
+                <span>CONTROLLED CHANNEL PLAN / {{ diagnostic.channelStrategy.evaluatedPlatformCount }} PLATFORMS</span>
+                <h3 id="channel-priority-title">渠道试验优先级</h3>
+                <p>适配分用于安排自己的对照试验，不代表平台权重、流量或收录概率。</p>
+              </div>
+              <b :class="{ warning: diagnostic.channelStrategy.baselineRequired }">
+                {{ diagnostic.channelStrategy.baselineRequired ? '先建立 AI 可见度基线' : '已有可比基线' }}
+              </b>
+            </header>
+            <ol>
+              <li v-for="channel in diagnostic.channelStrategy.recommendations" :key="channel.platform">
+                <div class="channel-rank">
+                  <span>#{{ String(channel.rank).padStart(2, '0') }}</span>
+                  <strong>{{ channel.fitScore }}</strong>
+                  <small>FIT / 100</small>
+                </div>
+                <div class="channel-copy">
+                  <header>
+                    <div>
+                      <strong>{{ channel.platformName }}</strong>
+                      <span>{{ channel.fitLabel }}</span>
+                    </div>
+                    <b>{{ channel.stageLabel }}</b>
+                  </header>
+                  <p>{{ channel.objective }}</p>
+                  <small>内容角度：{{ channel.contentAngle }}</small>
+                  <small v-if="channel.fitReasons.length">排序依据：{{ channel.fitReasons.slice(1, 3).join('；') || channel.fitReasons[0] }}</small>
+                  <dl>
+                    <div><dt>验证目标</dt><dd>{{ channel.validationTarget }}</dd></div>
+                    <div>
+                      <dt>本地证据</dt>
+                      <dd>
+                        内容就绪 {{ channel.evidence.content_readiness_score ?? '—' }}
+                        <template v-if="channel.evidence.visibility_run_id"> · 可见度记录 #{{ channel.evidence.visibility_run_id }}</template>
+                        <template v-else> · 尚无可见度记录</template>
+                      </dd>
+                    </div>
+                  </dl>
+                  <small v-if="channel.risks.length" class="channel-risk">风险：{{ channel.risks[0] }}</small>
+                </div>
+              </li>
+            </ol>
+            <footer>
+              <span>ATTRIBUTION BOUNDARY</span>
+              <p>{{ diagnostic.channelStrategy.attributionLimit || diagnostic.channelStrategy.claimBoundary }}</p>
+            </footer>
+          </section>
 
           <footer v-if="diagnostic" class="diagnostic-boundary">
             <span>{{ diagnostic.externalModelUsed || diagnostic.contentSentExternally ? '需要复核数据边界' : '本地确定性诊断 · 未发送客户内容' }}</span>
@@ -906,6 +977,8 @@ import { ArrowRight, Document, Grid, Link, Loading, Refresh, View, WarningFilled
 import { projectApi } from '@/api/project'
 import { visibilityApi } from '@/api/visibility'
 import { diagnosticsApi } from '@/api/diagnostics'
+import { aiConfigApi } from '@/api/aiConfig'
+import { normalizeUnifiedAIStatus } from '@/utils/aiConfig'
 import {
   normalizeCommercialDiagnostic,
   normalizeCommercialDiagnosticHistory,
@@ -954,6 +1027,10 @@ const samplingLoading = ref(false)
 const samplingError = ref('')
 const liveSamplingReceipt = ref(null)
 const manualImportSnapshot = ref(null)
+const samplingOverrideExpanded = ref(false)
+const unifiedAIStatusLoading = ref(false)
+const unifiedAIStatusError = ref('')
+const unifiedAIStatus = reactive(normalizeUnifiedAIStatus({}))
 let historyRequestSequence = 0
 let commercialRequestSequence = 0
 
@@ -970,6 +1047,7 @@ const form = reactive({
 
 const providerPresets = VISIBILITY_PROVIDER_PRESETS
 const sampling = reactive({
+  useUnifiedEngine: true,
   providerId: 'qwen',
   baseUrl: visibilityProviderPreset('qwen').baseUrl,
   model: visibilityProviderPreset('qwen').model,
@@ -990,6 +1068,17 @@ const selectedProject = computed(() => (
   projects.value.find(project => String(project.id) === String(form.projectId)) || null
 ))
 const activeProviderPreset = computed(() => visibilityProviderPreset(sampling.providerId))
+const samplingEngineLabel = computed(() => (
+  sampling.useUnifiedEngine
+    ? (unifiedAIStatus.providerLabel || '统一 AI 引擎')
+    : activeProviderPreset.value.label
+))
+const samplingEngineBaseUrl = computed(() => (
+  sampling.useUnifiedEngine ? (unifiedAIStatus.baseUrl || '由运行环境安全提供') : sampling.baseUrl
+))
+const samplingEngineModel = computed(() => (
+  sampling.useUnifiedEngine ? (unifiedAIStatus.model || '由运行环境提供') : sampling.model
+))
 const samplingPromptPreview = computed(() => form.prompt.trim())
 const samplingDraft = computed(() => ({
   projectId: form.projectId,
@@ -999,6 +1088,8 @@ const samplingDraft = computed(() => ({
   competitors: form.competitors,
   persist: form.persist,
   confirmed: sampling.confirmed,
+  useUnifiedEngine: sampling.useUnifiedEngine,
+  unifiedConfigured: unifiedAIStatus.configured,
   baseUrl: sampling.baseUrl,
   model: sampling.model,
   apiKey: sampling.apiKey
@@ -1099,6 +1190,25 @@ const readableError = error => {
   const detail = error?.response?.data?.detail
   if (Array.isArray(detail)) return detail.map(item => item.msg).filter(Boolean).join('；')
   return error?.response?.data?.msg || error?.response?.data?.message || detail || error?.message || '检查输入与后端服务后重试。'
+}
+
+const loadUnifiedAIStatus = async () => {
+  unifiedAIStatusLoading.value = true
+  unifiedAIStatusError.value = ''
+  try {
+    const response = await aiConfigApi.get({ suppressGlobalError: true })
+    Object.assign(unifiedAIStatus, normalizeUnifiedAIStatus(response))
+  } catch (error) {
+    Object.assign(unifiedAIStatus, normalizeUnifiedAIStatus({}))
+    unifiedAIStatusError.value = readableError(error)
+  } finally {
+    unifiedAIStatusLoading.value = false
+  }
+}
+
+const handleUnifiedAIConfigChanged = () => {
+  sampling.confirmed = false
+  void loadUnifiedAIStatus()
 }
 
 const loadLatestDiagnostic = async projectId => {
@@ -1212,6 +1322,11 @@ const formatReceiptCost = receipt => {
 const selectSamplingProvider = providerId => {
   Object.assign(sampling, applyVisibilityProviderPreset(sampling, providerId))
   sampling.confirmed = false
+}
+
+const handleSamplingModeChange = () => {
+  sampling.confirmed = false
+  if (!sampling.useUnifiedEngine) samplingOverrideExpanded.value = true
 }
 
 const createSamplingIdentity = () => {
@@ -1441,9 +1556,14 @@ const competitorSummary = mentions => {
   return mentions.map(item => `${item.name}${item.mentions > 1 ? ` × ${item.mentions}` : ''}`).join('、')
 }
 
-onMounted(loadProjects)
+onMounted(() => {
+  void loadProjects()
+  void loadUnifiedAIStatus()
+  window.addEventListener('geo-unified-ai-config-changed', handleUnifiedAIConfigChanged)
+})
 onBeforeUnmount(() => {
   sampling.apiKey = ''
+  window.removeEventListener('geo-unified-ai-config-changed', handleUnifiedAIConfigChanged)
 })
 </script>
 
@@ -1632,6 +1752,59 @@ onBeforeUnmount(() => {
   p { max-width: 720px; margin: 7px 0 0; color: var(--muted); font-size: 10px; line-height: 1.65; }
 }
 .session-badge { padding: 6px 8px; border: 1px solid #b7b8b5; background: #fff; color: #55575b; font: 700 8px/1 "Cascadia Mono", monospace; letter-spacing: 0.08em; white-space: nowrap; }
+.sampling-engine-bus {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 22px;
+  align-items: center;
+  margin-top: 16px;
+  padding: 17px 18px 16px 22px;
+  overflow: hidden;
+  border: 1px solid #cfd0cd;
+  border-radius: 7px;
+  background: #fff;
+
+  .engine-pulse { position: absolute; top: 0; bottom: 0; left: 0; width: 4px; background: #d8d9d6; }
+  .engine-pulse i { display: block; width: 100%; height: 32%; background: #93959a; }
+  &.ready .engine-pulse i { height: 100%; background: #32674d; }
+  > div:nth-child(2) { min-width: 0; }
+  > div:nth-child(2) > span { color: #6d6f74; font: 700 8px/1 "Cascadia Mono", monospace; letter-spacing: .1em; }
+  > div:nth-child(2) > strong,
+  > div:nth-child(2) > small { display: block; }
+  > div:nth-child(2) > strong { margin-top: 7px; font-size: 14px; }
+  > div:nth-child(2) > small { overflow: hidden; margin-top: 4px; color: var(--muted); font: 8px/1.5 "Cascadia Mono", "Microsoft YaHei UI", monospace; text-overflow: ellipsis; white-space: nowrap; }
+  dl { display: grid; grid-template-columns: repeat(2, minmax(90px, auto)); gap: 16px; margin: 0; }
+  dl > div { min-width: 0; }
+  dt { color: #84868a; font-size: 8px; }
+  dd { margin: 5px 0 0; color: #393a3d; font-size: 9px; white-space: nowrap; }
+  > button { padding: 8px 11px; border: 1px solid #bfc0bd; border-radius: 5px; color: var(--ink); background: #fff; font-size: 9px; font-weight: 700; cursor: pointer; }
+  > button:hover { border-color: var(--ink); }
+  > button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+}
+.sampling-mode-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-top: 12px;
+  padding: 10px 12px;
+  border: 1px solid #dedfdb;
+  border-radius: 6px;
+  background: #f3f3f0;
+
+  label { display: flex; align-items: center; gap: 9px; color: #303135; font-size: 10px; font-weight: 700; }
+  input { width: 15px; height: 15px; accent-color: var(--ink); }
+  button { padding: 0; border: 0; color: #54565a; background: transparent; font-size: 9px; font-weight: 700; text-decoration: underline; cursor: pointer; }
+}
+.sampling-override {
+  margin-top: 10px;
+  padding: 13px;
+  border: 1px dashed #bfc0bd;
+  border-radius: 6px;
+  background: #fff;
+  > p { margin: 0; color: var(--muted); font-size: 9px; }
+}
 .provider-switch {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1660,7 +1833,7 @@ onBeforeUnmount(() => {
 }
 .sampling-config-grid {
   display: grid;
-  grid-template-columns: minmax(280px, 1.4fr) minmax(190px, 0.8fr) minmax(220px, 0.9fr) 120px;
+  grid-template-columns: minmax(280px, 1.4fr) minmax(190px, 0.8fr) minmax(220px, 0.9fr);
   gap: 11px;
   margin-top: 12px;
 }
@@ -1673,6 +1846,18 @@ onBeforeUnmount(() => {
   > small { color: var(--muted); font-size: 8px; line-height: 1.45; }
   :deep(.el-input__wrapper), :deep(.el-input-number) { border-radius: 6px; }
   :deep(.el-input-number) { width: 100%; }
+}
+.sample-count-field {
+  display: grid;
+  grid-template-columns: auto 120px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  margin-top: 12px;
+  color: #5d5f64;
+  font-size: 9px;
+  > span { font-weight: 700; }
+  > small { color: var(--muted); font-size: 8px; }
+  :deep(.el-input-number) { width: 120px; }
 }
 .dispatch-slip {
   display: grid;
@@ -1876,6 +2061,54 @@ onBeforeUnmount(() => {
   small { display: block; margin-top: 5px; color: #4f827f; font: 600 7px/1.4 "Cascadia Mono", monospace; }
 }
 .gap-empty { padding: 24px 0; color: #4c7f7b; font-size: 10px; line-height: 1.6; }
+.channel-priority-panel {
+  grid-column: 1 / -1;
+  min-width: 0;
+  padding: 18px;
+  border-top: 1px solid #d7e2df;
+  background: #fbfcfa;
+  > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+  > header span { color: #4e8682; font: 700 8px/1 "Cascadia Mono", monospace; letter-spacing: .09em; }
+  > header h3 { margin: 7px 0 0; color: var(--harbor); font-size: 14px; }
+  > header p { margin: 6px 0 0; color: var(--muted); font-size: 8px; line-height: 1.55; }
+  > header > b { flex: 0 0 auto; padding: 6px 8px; border: 1px solid #9dbab6; background: #edf6f3; color: #286c66; font-size: 8px; }
+  > header > b.warning { border-color: #d9bd88; background: #fff8e9; color: #8e641f; }
+  > ol { display: grid; max-height: 430px; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; margin: 15px 0 0; padding: 0 3px 0 0; overflow: auto; list-style: none; scrollbar-color: #9cb9b5 transparent; scrollbar-width: thin; }
+  > ol > li { display: grid; min-width: 0; grid-template-columns: 62px minmax(0, 1fr); border: 1px solid #d8e1df; background: #fff; }
+  > footer { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; margin-top: 11px; padding-top: 10px; border-top: 1px dashed #c8d5d2; }
+  > footer span { flex: 0 0 auto; color: #3e7773; font: 700 7px/1.5 "Cascadia Mono", monospace; }
+  > footer p { max-width: 720px; margin: 0; color: #71817f; font-size: 7px; line-height: 1.55; text-align: right; }
+}
+.channel-rank {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 11px 7px;
+  border-right: 1px solid #d9e2e0;
+  background: var(--harbor);
+  color: #eef7f5;
+  > span { align-self: flex-start; color: #9dc6c1; font: 700 7px/1 "Cascadia Mono", monospace; }
+  > strong { margin-top: 8px; font: 700 25px/1 "Bahnschrift SemiCondensed", sans-serif; }
+  > small { margin-top: 4px; color: #98afac; font: 600 6px/1 "Cascadia Mono", monospace; }
+}
+.channel-copy {
+  min-width: 0;
+  padding: 11px 12px;
+  > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 9px; }
+  > header > div { min-width: 0; }
+  > header strong, > header span { display: block; }
+  > header strong { color: var(--ink); font-size: 10px; }
+  > header span { margin-top: 3px; overflow: hidden; color: #748582; font-size: 7px; text-overflow: ellipsis; white-space: nowrap; }
+  > header b { flex: 0 0 auto; padding: 4px 5px; border: 1px solid #b9c9c6; color: #4f7470; font-size: 7px; }
+  > p { margin: 8px 0 0; color: #3f5150; font-size: 8px; line-height: 1.5; }
+  > small { display: block; margin-top: 5px; color: #70817e; font-size: 7px; line-height: 1.45; }
+  > dl { margin: 8px 0 0; padding-top: 6px; border-top: 1px dashed #d6dfdd; }
+  > dl > div { display: grid; grid-template-columns: 48px minmax(0, 1fr); gap: 8px; padding: 2px 0; }
+  dt { color: #758582; font-size: 7px; }
+  dd { margin: 0; overflow-wrap: anywhere; color: #3c4b4a; font: 600 7px/1.45 "Cascadia Mono", "Microsoft YaHei UI", monospace; text-align: right; }
+  > .channel-risk { margin-top: 7px; padding-top: 6px; border-top: 1px solid #f0dedb; color: #9b514b; }
+}
 .diagnostic-boundary {
   display: flex;
   grid-column: 1 / -1;
@@ -2227,6 +2460,10 @@ onBeforeUnmount(() => {
   .diagnostic-board { grid-template-columns: 1fr; }
   .diagnostic-score { min-height: 170px; border-right: 0; border-bottom: 1px solid #b8ceca; }
   .diagnostic-score > strong { margin-top: 20px; }
+  .channel-priority-panel > header,
+  .channel-priority-panel > footer { align-items: flex-start; flex-direction: column; }
+  .channel-priority-panel > footer p { text-align: left; }
+  .channel-priority-panel > ol { grid-template-columns: 1fr; }
   .diagnostic-boundary { align-items: flex-start; flex-direction: column; }
   .diagnostic-boundary p { text-align: left; }
   .analysis-console { grid-template-columns: 36px minmax(0, 1fr); }
@@ -2235,8 +2472,12 @@ onBeforeUnmount(() => {
   .analysis-form { padding: 22px 16px 0; }
   .form-grid { grid-template-columns: 1fr; gap: 18px; }
   .live-sampling-panel { padding: 17px 14px; }
-  .sampling-heading, .dispatch-confirm, .privacy-boundary { align-items: flex-start; flex-direction: column; }
+  .sampling-heading, .dispatch-confirm, .privacy-boundary, .sampling-mode-row { align-items: flex-start; flex-direction: column; }
+  .sampling-engine-bus { grid-template-columns: 1fr; }
+  .sampling-engine-bus dl { grid-template-columns: 1fr 1fr; }
   .provider-switch, .sampling-config-grid { grid-template-columns: 1fr; }
+  .sample-count-field { grid-template-columns: auto 1fr; }
+  .sample-count-field > small { grid-column: 1 / -1; }
   .dispatch-slip { grid-template-columns: 42px minmax(0, 1fr); }
   .dispatch-index { padding-right: 5px; padding-left: 5px; font-size: 10px; }
   .dispatch-main { padding: 14px; }

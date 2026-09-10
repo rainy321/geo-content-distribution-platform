@@ -22,7 +22,7 @@ test('provider presets cover Qwen, DeepSeek, Doubao and custom without persistin
   assert.equal(JSON.stringify(VISIBILITY_PROVIDER_PRESETS).includes('session-secret'), false)
 })
 
-test('sampling request sends only bounded local contract fields and exact trimmed prompt', () => {
+test('sampling request uses the saved unified engine without sending a key again', () => {
   const body = buildVisibilitySamplingRequest({
     projectId: 7,
     prompt: '  哪些随身 AI 助手值得考虑？  ',
@@ -31,13 +31,11 @@ test('sampling request sends only bounded local contract fields and exact trimme
     competitors: ['RanClaw'],
     persist: true,
     confirmed: true,
-    baseUrl: 'https://api.example.test/v1',
-    apiKey: 'current-session-only',
-    model: 'example-model'
+    useUnifiedEngine: true,
+    unifiedConfigured: true
   })
 
   assert.deepEqual(Object.keys(body).sort(), [
-    'ai_config',
     'aliases',
     'competitors',
     'confirm_external_call',
@@ -51,9 +49,31 @@ test('sampling request sends only bounded local contract fields and exact trimme
   assert.equal('project' in body, false)
   assert.equal('articles' in body, false)
   assert.equal('accounts' in body, false)
+  assert.equal('ai_config' in body, false)
 })
 
-test('sampling draft blocks invalid URL, missing key, missing model and unconfirmed calls', () => {
+test('sampling request can carry an explicit one-time advanced override', () => {
+  const body = buildVisibilitySamplingRequest({
+    projectId: 7,
+    prompt: '有效问题',
+    sampleCount: 1,
+    aliases: [],
+    competitors: [],
+    persist: false,
+    confirmed: true,
+    useUnifiedEngine: false,
+    baseUrl: 'https://api.example.test/v1',
+    apiKey: 'one-time-only',
+    model: 'example-model'
+  })
+  assert.deepEqual(body.ai_config, {
+    base_url: 'https://api.example.test/v1',
+    api_key: 'one-time-only',
+    model: 'example-model'
+  })
+})
+
+test('sampling draft blocks invalid advanced override and unconfirmed calls', () => {
   const issues = validateVisibilitySamplingDraft({
     projectId: 1,
     prompt: '有效问题',
@@ -61,13 +81,36 @@ test('sampling draft blocks invalid URL, missing key, missing model and unconfir
     baseUrl: 'http://localhost:8000',
     model: '',
     apiKey: '',
+    useUnifiedEngine: false,
     confirmed: false
   })
   assert.ok(issues.includes('真实采样次数必须是 1–5'))
   assert.ok(issues.includes('模型地址必须使用 HTTPS'))
   assert.ok(issues.includes('请填写精确模型 ID'))
-  assert.ok(issues.includes('请填写当前会话的 API Key'))
+  assert.ok(issues.includes('请填写本次覆盖使用的 API Key'))
   assert.ok(issues.includes('请确认本次外发边界'))
+})
+
+test('sampling draft requires a configured unified engine but never requires its saved key', () => {
+  const missing = validateVisibilitySamplingDraft({
+    projectId: 1,
+    prompt: '有效问题',
+    sampleCount: 3,
+    useUnifiedEngine: true,
+    unifiedConfigured: false,
+    confirmed: true
+  })
+  assert.deepEqual(missing, ['请先在系统设置中保存统一 AI 引擎'])
+
+  const ready = validateVisibilitySamplingDraft({
+    projectId: 1,
+    prompt: '有效问题',
+    sampleCount: 3,
+    useUnifiedEngine: true,
+    unifiedConfigured: true,
+    confirmed: true
+  })
+  assert.deepEqual(ready, [])
 })
 
 test('partial result keeps completed evidence, honest unknown cost and failure action', () => {
@@ -117,7 +160,7 @@ test('partial result keeps completed evidence, honest unknown cost and failure a
   assert.equal(JSON.stringify(result).includes('api_key'), false)
 })
 
-test('EXE visibility view exposes disclosure, session-only key, rollback and no retry promise', () => {
+test('EXE visibility view defaults to the unified engine and keeps explicit-call boundaries', () => {
   const apiSource = readFileSync(new URL('../src/api/diagnostics.js', import.meta.url), 'utf8')
   const viewSource = readFileSync(new URL('../src/views/AiVisibility.vue', import.meta.url), 'utf8')
 
@@ -125,7 +168,9 @@ test('EXE visibility view exposes disclosure, session-only key, rollback and no 
   assert.match(apiSource, /Idempotency-Key/)
   assert.match(viewSource, /仅发送下面这一段问题/)
   assert.match(viewSource, /项目、文章、账号、Cookie 均不发送/)
-  assert.match(viewSource, /API Key 只保存在当前页面内存/)
+  assert.match(viewSource, /使用已保存的统一引擎/)
+  assert.match(viewSource, /高级：仅本次覆盖/)
+  assert.match(viewSource, /不会后台自动回测/)
   assert.match(viewSource, /撤销导入/)
   assert.match(viewSource, /不会自动重试/)
 })

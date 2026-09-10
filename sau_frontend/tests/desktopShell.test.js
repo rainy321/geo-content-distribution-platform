@@ -99,7 +99,7 @@ test('first-run copy describes the local visibility workflow', () => {
 })
 
 
-test('AI settings copy stays within the current EXE software session', () => {
+test('AI settings exposes one protected engine for writing, tuning and retesting', () => {
   const settingsSource = readFileSync(
     new URL('../src/views/SystemSettings.vue', import.meta.url),
     'utf8'
@@ -109,12 +109,13 @@ test('AI settings copy stays within the current EXE software session', () => {
     'utf8'
   )
 
-  assert.match(settingsSource, /DESKTOP SESSION/)
-  assert.match(settingsSource, /当前软件会话/)
-  assert.match(settingsSource, /当前 EXE 运行环境/)
+  assert.match(settingsSource, /ONE ENGINE \/ ALL WORKFLOWS/)
+  assert.match(settingsSource, /Windows DPAPI/)
+  assert.match(settingsSource, /写稿、调优与回测/)
+  assert.match(settingsSource, /测试连接只会向当前模型发送固定合成文本/)
   assert.doesNotMatch(settingsSource, /Vercel Production/)
   assert.doesNotMatch(settingsSource, /仅当前标签页/)
   assert.doesNotMatch(settingsSource, /浏览器配置/)
-  assert.match(configSource, /当前软件会话不支持安全密钥存储/)
-  assert.doesNotMatch(configSource, /当前浏览器会话/)
+  assert.match(configSource, /apiKeyConfigured/)
+  assert.doesNotMatch(configSource, /sessionStorage/)
 })

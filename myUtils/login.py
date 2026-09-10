@@ -50,6 +50,24 @@ _BILIBILI_LOGIN_ERROR_ACTIONS = {
     "unexpected_error": "关闭残留窗口后重试；如仍失败，请查看本机日志",
 }
 
+_TOUTIAO_LOGIN_ERROR_MESSAGES = {
+    "browser_launch_failed": "无法启动 Chrome 今日头条登录窗口",
+    "login_page_unavailable": "今日头条登录页未成功打开",
+    "login_timeout": "等待今日头条登录超时",
+    "login_interrupted": "今日头条登录窗口已关闭或流程中断",
+    "session_save_failed": "登录已完成但本机会话保存失败",
+    "unexpected_error": "今日头条登录流程发生异常",
+}
+
+_TOUTIAO_LOGIN_ERROR_ACTIONS = {
+    "browser_launch_failed": "close_conflicting_browser_and_retry",
+    "login_page_unavailable": "check_network_and_retry",
+    "login_timeout": "complete_login_then_retry",
+    "login_interrupted": "retry",
+    "session_save_failed": "check_data_directory_and_retry",
+    "unexpected_error": "retry_and_check_logs",
+}
+
 
 def _queue_login_event(status_queue, event_type: str, **fields) -> None:
     """Send a structured, secret-free event alongside the legacy SSE tokens."""
@@ -95,6 +113,22 @@ def _queue_bilibili_login_error(status_queue, code: str) -> None:
         code=normalized_code,
         message=_BILIBILI_LOGIN_ERROR_MESSAGES[normalized_code],
         action=_BILIBILI_LOGIN_ERROR_ACTIONS[normalized_code],
+    )
+    status_queue.put("500")
+
+
+def _queue_toutiao_login_error(status_queue, code: str) -> None:
+    """Expose an actionable protocol-2 reason while keeping legacy terminal flow."""
+
+    normalized_code = (
+        code if code in _TOUTIAO_LOGIN_ERROR_MESSAGES else "unexpected_error"
+    )
+    _queue_login_event(
+        status_queue,
+        "error",
+        code=normalized_code,
+        message=_TOUTIAO_LOGIN_ERROR_MESSAGES[normalized_code],
+        action=_TOUTIAO_LOGIN_ERROR_ACTIONS[normalized_code],
     )
     status_queue.put("500")
 
@@ -933,9 +967,17 @@ async def toutiao_cookie_gen(
     page = None
     account_file = None
     database_saved = False
+    stage = "browser_launch"
     try:
         # 尽早通知前端进入「手动登录」态，避免浏览器启动慢时一直转圈
         status_queue.put("MANUAL_LOGIN")
+        _queue_login_event(
+            status_queue,
+            "stage",
+            stage="opening_browser",
+            message="正在打开 Chrome 今日头条登录页",
+            action="等待 Chrome 登录窗口打开",
+        )
         if _login_cancelled(status_queue):
             _queue_login_cancelled(status_queue, "toutiao")
             return None
@@ -946,12 +988,22 @@ async def toutiao_cookie_gen(
             options['headless'] = False
             _safe_login_log("toutiao", "browser_launch_started")
             browser = await playwright.chromium.launch(**options)
+            stage = "context_create"
             context = await browser.new_context()
             context = await set_init_script(context)
             page = await context.new_page()
+            stage = "login_page"
             _safe_login_log("toutiao", "login_page_navigation_started")
             await page.goto("https://mp.toutiao.com/auth/page/login", timeout=60000, wait_until="domcontentloaded")
             _safe_login_log("toutiao", "login_page_opened")
+            _queue_login_event(
+                status_queue,
+                "stage",
+                stage="waiting_for_account",
+                message="请在 Chrome 中完成今日头条登录和必要验证",
+                action="在十分钟内完成账号登录和必要验证",
+            )
+            stage = "login_wait"
             if await wait_for_toutiao_creator_backend(
                 page,
                 timeout_seconds=timeout_seconds,
@@ -963,7 +1015,7 @@ async def toutiao_cookie_gen(
                     _queue_login_cancelled(status_queue, "toutiao")
                     return None
                 _safe_login_log("toutiao", "login_timeout", level="warning")
-                status_queue.put("500")
+                _queue_toutiao_login_error(status_queue, "login_timeout")
                 return None
 
             if _login_cancelled(status_queue):
@@ -976,6 +1028,7 @@ async def toutiao_cookie_gen(
             cookies_dir.mkdir(parents=True, exist_ok=True)
             file_name = f"{uuid_v1}.json"
             account_file = cookies_dir / file_name
+            stage = "session_save"
             await context.storage_state(path=account_file)
             if _login_cancelled(status_queue):
                 _queue_login_cancelled(status_queue, "toutiao")
@@ -993,6 +1046,7 @@ async def toutiao_cookie_gen(
                 _queue_login_cancelled(status_queue, "toutiao")
                 return None
 
+            stage = "database_save"
             with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
                 conn.execute("BEGIN IMMEDIATE")
                 try:
@@ -1022,10 +1076,18 @@ async def toutiao_cookie_gen(
     except Exception as e:
         _safe_login_log("toutiao", "login_failed", level="error", error=e)
         try:
-            status_queue.put("500")
+            error_code = {
+                "browser_launch": "browser_launch_failed",
+                "context_create": "browser_launch_failed",
+                "login_page": "login_page_unavailable",
+                "login_wait": "login_interrupted",
+                "session_save": "session_save_failed",
+                "database_save": "session_save_failed",
+            }.get(stage, "unexpected_error")
+            _queue_toutiao_login_error(status_queue, error_code)
         except Exception:
             pass
-            return None
+        return None
     finally:
         if account_file is not None and not database_saved:
             _discard_unregistered_login_file(account_file)

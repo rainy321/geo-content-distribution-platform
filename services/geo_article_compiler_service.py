@@ -36,8 +36,8 @@ from services.publish_preflight_service import (
 )
 
 
-GEO_ARTICLE_COMPILER_VERSION = "geo-article-compiler-2.1.0"
-AI_CITEABILITY_SCORE_VERSION = "ai-citeability-rules-2.1.0"
+GEO_ARTICLE_COMPILER_VERSION = "geo-article-compiler-2.1.1"
+AI_CITEABILITY_SCORE_VERSION = "ai-citeability-rules-2.1.1"
 DEFAULT_CITEABILITY_PASS_SCORE = 75
 
 QUERY_INTENTS = frozenset(
@@ -118,7 +118,10 @@ _VISIBILITY_RULE_DIRECTIVES = {
     ),
 }
 
-_URL_PATTERN = re.compile(r"(?:https?://|www\.)[^\s<>\]\[()（）]+", re.IGNORECASE)
+_URL_PATTERN = re.compile(
+    r"(?:https?://|www\.)[^\s<>\]\[()（），。；：！？、“”‘’]+",
+    re.IGNORECASE,
+)
 _HEADING_PATTERN = re.compile(
     r"(?m)^\s*#{2,3}\s+\S|<h[23](?:\s[^>]*)?>|"
     r"^\s*(?:核心结论|定义|适用场景|实施步骤|判断标准|限制(?:与适用条件)?|"
@@ -543,7 +546,7 @@ def build_generation_instructions(blueprint: Mapping[str, Any]) -> str:
         if safe_evidence
         else (
             "当前没有声明式证据。不得生成具体比例、排名、客户案例、测评结论或"
-            "竞品优劣结论；信息不足时明确写“待补充证据”。"
+            "竞品优劣结论；信息不足时直接说明“暂无可核验公开证据”，不得输出待补充占位符。"
         )
     )
     return "\n".join(
@@ -572,7 +575,8 @@ def build_generation_instructions(blueprint: Mapping[str, Any]) -> str:
             f"平台要求：{platform.get('directive', _PLATFORM_DIRECTIVES['generic'])}",
             *limit_lines,
             *[f"可见度回测提示：{item}" for item in visibility_directives],
-            "保留清晰的 H2/H3、2–4 个真实 FAQ、作者/更新时间占位和参考资料段。",
+            "保留清晰的 H2/H3、2–4 个真实 FAQ 和参考资料段。正文不得输出作者、"
+            "更新时间、链接或证据的待补充/占位标记；作者与发布时间由发布平台元数据提供。",
         ]
     )
 
@@ -662,7 +666,14 @@ def score_ai_citeability(
         structure_points += 4
     if _SUMMARY_PATTERN.search(normalized_content):
         structure_points += 3
-    if re.search(r"(?m)^\s*(?:[-*+]\s+|\d+[.、]\s*)\S", normalized_content):
+    # Platform plain-text adapters intentionally convert Markdown bullets to
+    # the editor-safe `•` glyph.  Treat that as the same extractable list
+    # structure instead of making an otherwise identical short copy lose the
+    # list signal after adaptation.
+    if re.search(
+        r"(?m)^\s*(?:[-*+]\s+|[•·]\s*|\d+[.、]\s*)\S",
+        normalized_content,
+    ):
         structure_points += 3
 
     if normalized_keywords:
@@ -1568,7 +1579,14 @@ def _competitor_evidence_present(
 
 
 def _first_meaningful_paragraph(content: str) -> str:
-    for block in re.split(r"(?:\r?\n\s*){2,}", content.strip()):
+    normalized = content.strip()
+    blocks = re.split(r"(?:\r?\n\s*){2,}", normalized)
+    if len(blocks) == 1:
+        # Plain-text publishing editors retain meaningful single line breaks
+        # after Markdown removal. Treat the first non-empty line as the lead
+        # rather than misclassifying the entire document as one huge opening.
+        blocks = [line for line in normalized.splitlines() if line.strip()]
+    for block in blocks:
         cleaned = re.sub(r"^\s*#{1,6}\s*", "", block.strip())
         if cleaned:
             return cleaned
@@ -1576,9 +1594,13 @@ def _first_meaningful_paragraph(content: str) -> str:
 
 
 def _paragraph_count(content: str) -> int:
-    return len(
-        [item for item in re.split(r"(?:\r?\n\s*){2,}", content.strip()) if item.strip()]
-    )
+    normalized = content.strip()
+    blocks = [
+        item for item in re.split(r"(?:\r?\n\s*){2,}", normalized) if item.strip()
+    ]
+    if len(blocks) == 1:
+        return len([line for line in normalized.splitlines() if line.strip()])
+    return len(blocks)
 
 
 def _visible_text(value: str) -> str:

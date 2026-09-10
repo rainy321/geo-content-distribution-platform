@@ -65,14 +65,19 @@ export const validateVisibilitySamplingDraft = draft => {
   if (!Number.isInteger(sampleCount) || sampleCount < 1 || sampleCount > 5) {
     issues.push('真实采样次数必须是 1–5')
   }
-  try {
-    const url = new URL(baseUrl)
-    if (url.protocol !== 'https:') issues.push('模型地址必须使用 HTTPS')
-  } catch {
-    issues.push('请填写有效的模型地址')
+  const useUnifiedEngine = draft?.useUnifiedEngine !== false
+  if (useUnifiedEngine) {
+    if (!draft?.unifiedConfigured) issues.push('请先在系统设置中保存统一 AI 引擎')
+  } else {
+    try {
+      const url = new URL(baseUrl)
+      if (url.protocol !== 'https:') issues.push('模型地址必须使用 HTTPS')
+    } catch {
+      issues.push('请填写有效的模型地址')
+    }
+    if (!model) issues.push('请填写精确模型 ID')
+    if (!apiKey) issues.push('请填写本次覆盖使用的 API Key')
   }
-  if (!model) issues.push('请填写精确模型 ID')
-  if (!apiKey) issues.push('请填写当前会话的 API Key')
   if (draft?.confirmed !== true) issues.push('请确认本次外发边界')
   return [...new Set(issues)]
 }
@@ -80,20 +85,23 @@ export const validateVisibilitySamplingDraft = draft => {
 export const buildVisibilitySamplingRequest = draft => {
   const issues = validateVisibilitySamplingDraft(draft)
   if (issues.length) throw new Error(issues[0])
-  return {
+  const payload = {
     project_id: draft.projectId,
     prompt: String(draft.prompt).trim(),
     sample_count: Number(draft.sampleCount),
     aliases: asArray(draft.aliases),
     competitors: asArray(draft.competitors),
     persist: Boolean(draft.persist),
-    confirm_external_call: true,
-    ai_config: {
+    confirm_external_call: true
+  }
+  if (draft.useUnifiedEngine === false) {
+    payload.ai_config = {
       base_url: String(draft.baseUrl).trim(),
       api_key: String(draft.apiKey).trim(),
       model: String(draft.model).trim()
     }
   }
+  return payload
 }
 
 const unwrapSamplingPayload = value => {

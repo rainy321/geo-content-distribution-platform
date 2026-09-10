@@ -26,11 +26,16 @@ from flask import (
 from conf import BASE_DIR
 from db.createTable import initialize_database
 from services.ai_service import (
+    AIConnectError,
     AIConfigurationError,
+    AIProviderRateLimitError,
+    AIReadTimeoutError,
     AIServiceError,
     AISettings,
     generate_geo_content,
     optimize_geo_content,
+    provider_label_for_settings,
+    sample_ai_prompt_detailed,
 )
 from services.ai_cost_ledger_service import (
     AIUsageLedgerError,
@@ -107,6 +112,11 @@ from services.local_auth_service import (
     LocalAuthService,
     PasswordAlreadyConfiguredError,
     PasswordPolicyError,
+)
+from services.unified_ai_config_service import (
+    UnifiedAIConfigError,
+    UnifiedAIConfigService,
+    UnifiedAIConfigStorageUnavailableError,
 )
 from services.media_account_service import (
     DISCONNECTED_ACCOUNT_STATUS,
@@ -190,6 +200,10 @@ from services.publish_preflight_service import (
     get_publish_content_policy,
     get_publish_title_policy,
     get_platform_verification_policy,
+)
+from services.platform_publish_policy_service import (
+    evaluate_platform_offline_preflight,
+    get_platform_publish_policy,
 )
 from services.publish_scheduler_runtime import create_publish_scheduler
 from services.real_publisher_factory import (
@@ -575,6 +589,7 @@ access_password = str(os.getenv("APP_ACCESS_PASSWORD", "")).strip()
 session_secret = str(os.getenv("APP_SESSION_SECRET", "")).strip()
 desktop_mode = _environment_flag("GEO_DESKTOP_MODE")
 local_auth_service = None
+unified_ai_config_service = None
 if desktop_mode:
     local_auth_path = str(os.getenv("GEO_DESKTOP_AUTH_PATH", "")).strip()
     if not local_auth_path:
@@ -583,6 +598,11 @@ if desktop_mode:
     # The persisted per-user secret is authoritative for the desktop session.
     session_secret = local_auth_service.get_session_secret()
     access_password = ""
+unified_ai_config_path = str(
+    os.getenv("GEO_UNIFIED_AI_CONFIG_PATH", "")
+).strip()
+if unified_ai_config_path:
+    unified_ai_config_service = UnifiedAIConfigService(unified_ai_config_path)
 if access_password and not session_secret:
     raise RuntimeError(
         "配置 APP_ACCESS_PASSWORD 时必须同时配置 APP_SESSION_SECRET"
@@ -593,6 +613,7 @@ app.config.update(
     ACCESS_PASSWORD=access_password,
     DESKTOP_MODE=desktop_mode,
     LOCAL_AUTH_SERVICE=local_auth_service,
+    UNIFIED_AI_CONFIG_SERVICE=unified_ai_config_service,
     SECRET_KEY=session_secret or os.urandom(32),
     SESSION_COOKIE_NAME="geo_operator_session",
     SESSION_COOKIE_HTTPONLY=True,
@@ -756,7 +777,7 @@ def apply_security_headers(response):
         "Permissions-Policy",
         "camera=(), microphone=(), geolocation=()",
     )
-    if request.path.startswith("/api/auth"):
+    if request.path.startswith(("/api/auth", "/api/ai/config")):
         response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -1190,6 +1211,8 @@ def generate_article():
 
 
 def _create_content_generation_service(settings=None):
+    if settings is None:
+        settings = _request_ai_settings({})
     return ContentGenerationService.from_environment(
         app.config["DATABASE_PATH"],
         qwen_settings=settings,
@@ -1546,7 +1569,11 @@ def _prepare_generation_request(data):
     try:
         ai_settings = _request_ai_settings(data)
     except AIConfigurationError as exc:
-        return None, (jsonify({"code": 400, "msg": str(exc), "data": None}), 400)
+        status_code = 400 if data.get("ai_config") is not None else 503
+        return None, (
+            jsonify({"code": status_code, "msg": str(exc), "data": None}),
+            status_code,
+        )
     target_platform_raw = str(
         data.get("target_platform") or data.get("targetPlatform") or ""
     ).strip()
@@ -1651,16 +1678,185 @@ def _parse_content_template_fields(data, *, partial):
     return result, None
 
 
+def _unified_ai_config_status_data():
+    service = app.config.get("UNIFIED_AI_CONFIG_SERVICE")
+    environment_configured = AISettings.environment_is_configured()
+    if service is None:
+        return {
+            "server_configured": environment_configured,
+            "custom_config_supported": True,
+            "custom_key_storage": "browser_session",
+            "configured": environment_configured,
+            "saved_configured": False,
+            "save_supported": False,
+            "source": "environment" if environment_configured else "none",
+            "provider": "",
+            "base_url": "",
+            "model": "",
+            "api_key_configured": environment_configured,
+            "credential_storage": "environment" if environment_configured else "unavailable",
+            "updated_at": "",
+        }
+    status = service.status()
+    public = status.public_dict()
+    return {
+        "server_configured": environment_configured,
+        "custom_config_supported": True,
+        "custom_key_storage": public["credential_storage"],
+        **public,
+        "saved_configured": public["configured"],
+        "configured": public["configured"] or environment_configured,
+        "source": (
+            "saved"
+            if public["configured"]
+            else ("environment" if environment_configured else "none")
+        ),
+    }
+
+
+@app.route('/api/ai/config', methods=['GET'])
 @app.route('/api/ai/config-status', methods=['GET'])
 def get_ai_config_status():
+    try:
+        data = _unified_ai_config_status_data()
+    except UnifiedAIConfigError as exc:
+        return jsonify({"code": 503, "msg": str(exc), "data": None}), 503
+    return jsonify({"code": 200, "msg": "success", "data": data}), 200
+
+
+@app.route('/api/ai/config', methods=['POST', 'PUT'])
+def save_ai_config():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
+    unsupported = sorted(set(data) - {"provider", "base_url", "model", "api_key"})
+    if unsupported:
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "统一 AI 配置包含不支持的字段: " + ", ".join(unsupported),
+                "data": None,
+            }
+        ), 400
+    for field in ("provider", "base_url", "model"):
+        if field in data and not isinstance(data[field], str):
+            return jsonify(
+                {"code": 400, "msg": f"{field} 必须是字符串", "data": None}
+            ), 400
+    if "api_key" in data and data["api_key"] is not None and not isinstance(
+        data["api_key"], str
+    ):
+        return jsonify(
+            {"code": 400, "msg": "api_key 必须是字符串", "data": None}
+        ), 400
+    service = app.config.get("UNIFIED_AI_CONFIG_SERVICE")
+    if service is None:
+        return jsonify(
+            {
+                "code": 503,
+                "msg": "当前运行方式不支持保存 AI 凭据，请继续使用服务器环境变量",
+                "data": None,
+            }
+        ), 503
+    try:
+        service.save(
+            provider=data.get("provider"),
+            base_url=data.get("base_url"),
+            model=data.get("model"),
+            api_key=data.get("api_key"),
+        )
+        status = _unified_ai_config_status_data()
+    except AIConfigurationError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    except UnifiedAIConfigStorageUnavailableError as exc:
+        return jsonify({"code": 503, "msg": str(exc), "data": None}), 503
+    except UnifiedAIConfigError as exc:
+        return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
+    return jsonify({"code": 200, "msg": "统一 AI 配置已安全保存", "data": status}), 200
+
+
+@app.route('/api/ai/config', methods=['DELETE'])
+def clear_ai_config():
+    service = app.config.get("UNIFIED_AI_CONFIG_SERVICE")
+    if service is None:
+        return jsonify(
+            {"code": 503, "msg": "当前运行方式没有本地 AI 配置", "data": None}
+        ), 503
+    try:
+        service.clear()
+        status = _unified_ai_config_status_data()
+    except UnifiedAIConfigError as exc:
+        return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
+    return jsonify({"code": 200, "msg": "统一 AI 配置已清除", "data": status}), 200
+
+
+@app.route('/api/ai/config/test', methods=['POST'])
+def test_ai_config_connection():
+    """Test the unified model using one fixed synthetic prompt only."""
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
+    unsupported = sorted(set(data) - {"confirm_external_call", "ai_config"})
+    if unsupported:
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "AI 连通测试包含不支持的字段: " + ", ".join(unsupported),
+                "data": None,
+            }
+        ), 400
+    if data.get("confirm_external_call") is not True:
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "必须确认本次仅向模型发送固定合成测试文本",
+                "data": None,
+            }
+        ), 400
+    try:
+        settings = _request_ai_settings(data)
+        if settings is None:
+            settings = AISettings.from_environment()
+    except AIConfigurationError as exc:
+        status_code = 400 if data.get("ai_config") is not None else 503
+        return jsonify(
+            {"code": status_code, "msg": str(exc), "data": None}
+        ), status_code
+    rate_limit_response = _enforce_ai_rate_limit()
+    if rate_limit_response is not None:
+        return rate_limit_response
+    try:
+        result = sample_ai_prompt_detailed(
+            prompt="仅回复 OK",
+            settings=settings,
+        )
+    except AIProviderRateLimitError as exc:
+        response = jsonify({"code": 429, "msg": str(exc), "data": None})
+        if exc.retry_after_seconds is not None:
+            response.headers["Retry-After"] = str(exc.retry_after_seconds)
+        return response, 429
+    except (AIConnectError, AIReadTimeoutError, AIServiceError) as exc:
+        return jsonify({"code": 502, "msg": str(exc), "data": None}), 502
     return jsonify(
         {
             "code": 200,
-            "msg": "success",
+            "msg": "AI 服务连接正常",
             "data": {
-                "server_configured": AISettings.environment_is_configured(),
-                "custom_config_supported": True,
-                "custom_key_storage": "browser_session",
+                "ok": True,
+                "status": "ready",
+                "message": "固定合成测试已收到模型响应",
+                "provider": provider_label_for_settings(settings),
+                "model": result.model,
+                "elapsed_ms": result.elapsed_ms,
+                "provider_request_id": result.provider_request_id,
+                "data_disclosure": {
+                    "sent_to_provider": ["fixed_synthetic_prompt"],
+                    "project_data_sent": False,
+                    "article_data_sent": False,
+                    "account_data_sent": False,
+                    "api_key_returned": False,
+                },
             },
         }
     ), 200
@@ -1673,7 +1869,7 @@ def get_content_engine_status():
     checked_at = datetime.now(timezone.utc).isoformat()
     try:
         engine_health = _create_content_generation_service().health()
-    except ContentEngineError as exc:
+    except (ContentEngineError, AIConfigurationError) as exc:
         return jsonify(
             {
                 "code": 200,
@@ -2265,7 +2461,10 @@ def sample_geo_visibility():
     try:
         ai_settings = _request_ai_settings(data)
     except AIConfigurationError as exc:
-        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+        status_code = 400 if data.get("ai_config") is not None else 503
+        return jsonify(
+            {"code": status_code, "msg": str(exc), "data": None}
+        ), status_code
     if ai_settings is None:
         try:
             ai_settings = AISettings.from_environment()
@@ -2871,7 +3070,10 @@ def optimize_article(article_id):
     try:
         ai_settings = _request_ai_settings(data)
     except AIConfigurationError as exc:
-        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+        status_code = 400 if data.get("ai_config") is not None else 503
+        return jsonify(
+            {"code": status_code, "msg": str(exc), "data": None}
+        ), status_code
     rate_limit_response = _enforce_ai_rate_limit()
     if rate_limit_response is not None:
         return rate_limit_response
@@ -2971,9 +3173,18 @@ def optimize_article(article_id):
 
 
 def _request_ai_settings(data):
-    if "ai_config" not in data or data["ai_config"] is None:
+    if "ai_config" in data and data["ai_config"] is not None:
+        return AISettings.from_mapping(data["ai_config"])
+    service = app.config.get("UNIFIED_AI_CONFIG_SERVICE")
+    if service is None:
         return None
-    return AISettings.from_mapping(data["ai_config"])
+    try:
+        status = service.status()
+        return service.load_settings() if status.configured else None
+    except UnifiedAIConfigError as exc:
+        raise AIConfigurationError(
+            "统一 AI 配置不可用，请在系统设置中重新保存或清除"
+        ) from exc
 
 
 def _parse_article_fields(data, *, partial):
@@ -3841,6 +4052,13 @@ def _publish_job_payload(
                 job["platform"],
                 tags=snapshot.get("tags") or (),
             ),
+            "publish_policy": get_platform_publish_policy(job["platform"]),
+            "offline_preflight": evaluate_platform_offline_preflight(
+                platform=job["platform"],
+                title=publish_title,
+                content=publish_content,
+                tags=snapshot.get("tags") or (),
+            ),
             "verification": get_platform_verification_policy(job["platform"]),
             "frequency_guidance": get_platform_frequency_guidance(job["platform"]),
         }
@@ -3921,6 +4139,7 @@ def get_publish_platforms():
                 **item,
                 "content_policy": get_publish_content_policy(item["key"]),
                 "title_policy": get_publish_title_policy(item["key"]),
+                "publish_policy": get_platform_publish_policy(item["key"]),
                 "verification": get_platform_verification_policy(item["key"]),
                 "frequency_guidance": get_platform_frequency_guidance(item["key"]),
                 "runtime_available": runtime_available,

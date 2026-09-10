@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from db.createTable import initialize_database
 from services.geo_diagnostic_service import (
+    CHANNEL_RECOMMENDATION_VERSION,
     GEO_DIAGNOSTIC_VERSION,
     diagnose_geo_readiness,
     get_geo_diagnostic_run,
@@ -47,6 +48,24 @@ class GEODiagnosticServiceTests(unittest.TestCase):
         self.assertFalse(result["methodology"]["external_model_used"])
         self.assertFalse(result["methodology"]["customer_content_sent_externally"])
         self.assertNotIn("Acme Cloud", result["input_digest"])
+        channel_strategy = result["channel_strategy"]
+        self.assertEqual(channel_strategy["version"], CHANNEL_RECOMMENDATION_VERSION)
+        self.assertTrue(channel_strategy["baseline_required"])
+        self.assertEqual(channel_strategy["evaluated_platform_count"], 10)
+        self.assertEqual(
+            {item["platform"] for item in channel_strategy["recommendations"]},
+            {
+                "zhihu", "toutiao", "baijiahao", "sohu", "xiaohongshu",
+                "douyin", "kuaishou", "bilibili", "channels", "tiktok",
+            },
+        )
+        self.assertTrue(
+            all(item["stage"] == "baseline_then_pilot" for item in channel_strategy["recommendations"])
+        )
+        self.assertIn("不是平台权重", channel_strategy["claim_boundary"])
+        self.assertTrue(
+            all("weight" not in item for item in channel_strategy["recommendations"])
+        )
 
         history = list_geo_diagnostic_runs(
             self.database_path, project_id=self.project_id
@@ -68,13 +87,18 @@ class GEODiagnosticServiceTests(unittest.TestCase):
         self.assertEqual(result["source_type"], "ad_hoc")
         self.assertEqual(
             result["algorithm_versions"]["ai_citeability"],
-            "ai-citeability-rules-2.1.0",
+            "ai-citeability-rules-2.1.1",
         )
         self.assertIn("citeability", result)
         self.assertEqual(len(result["citeability"]["dimensions"]), 7)
         self.assertTrue(any(gap["dimension"] == "structure" for gap in result["gaps"]))
         self.assertFalse(result["publish_ready"])
         self.assertEqual(result["readiness_status"], "blocked")
+        self.assertEqual(
+            {item["stage"] for item in result["channel_strategy"]["recommendations"]},
+            {"content_preflight_blocked"},
+        )
+        self.assertFalse(result["channel_strategy"]["content_gate"]["publish_ready"])
         self.assertTrue(
             any(
                 gap["dimension"] == "citeability"
@@ -254,6 +278,22 @@ class GEODiagnosticServiceTests(unittest.TestCase):
             "ai-visibility-python-port-1.1.0",
         )
         self.assertFalse(any(gap["key"] == "visibility.baseline" for gap in result["gaps"]))
+        self.assertFalse(result["channel_strategy"]["baseline_required"])
+        ranked = result["channel_strategy"]["recommendations"]
+        self.assertEqual([item["rank"] for item in ranked], list(range(1, 11)))
+        self.assertEqual(ranked, sorted(ranked, key=lambda item: (-item["fit_score"], item["platform"])))
+        self.assertIn(ranked[0]["platform"], {"zhihu", "sohu", "toutiao", "baijiahao"})
+        self.assertEqual(
+            result["algorithm_versions"]["channel_fit"],
+            CHANNEL_RECOMMENDATION_VERSION,
+        )
+        for item in ranked:
+            self.assertTrue(item["fit_components"])
+            self.assertEqual(
+                item["validation"]["target"],
+                "相对同口径基线改善；没有基线时先建立基线，不预填虚假提升比例。",
+            )
+            self.assertIn("不可由本软件保证", item["risks"][0])
 
     def test_project_digest_changes_when_scored_article_evidence_changes(self):
         with closing(sqlite3.connect(self.database_path)) as conn:

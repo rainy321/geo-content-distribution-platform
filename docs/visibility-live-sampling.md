@@ -34,7 +34,7 @@ Content-Type: application/json
   "confirm_external_call": true,
   "ai_config": {
     "base_url": "https://provider.example/v1",
-    "api_key": "只从当前前端会话传入，不保存",
+    "api_key": "仅本次高级覆盖；不写入数据库或响应",
     "model": "provider-model-id"
   }
 }
@@ -42,7 +42,7 @@ Content-Type: application/json
 
 - `sample_count` 只能是 1 到 5；同一个问题按顺序调用，禁止并发突发。
 - `confirm_external_call` 必须严格为 `true`。
-- `ai_config` 可省略；省略时读取本机 `AI_BASE_URL`、`AI_API_KEY`、`AI_MODEL`。请求级密钥不会写入数据库或响应。
+- `ai_config` 可省略；省略时优先读取当前 Windows 用户以 DPAPI 保护的统一 AI 配置，再回退本机 `AI_BASE_URL`、`AI_API_KEY`、`AI_MODEL`。请求级覆盖密钥不会写入数据库或响应。
 - Qwen、DeepSeek、豆包只有在各自服务提供 OpenAI-compatible Chat Completions 地址、有效模型名和密钥时才能分别采样；切换供应商必须使用新的幂等键。
 
 ## 幂等与失败

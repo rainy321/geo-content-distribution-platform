@@ -17,6 +17,27 @@ test('commercial diagnostic normalizes dimensions, priorities and privacy bounda
       grade: 'C',
       dimensions: [{ key: 'positioning', label: '产品定位', score: 50, weight: 20, status: 'attention' }],
       gaps: [{ key: 'x', priority: 'P0', title: '缺少基线', action: '建立基线', metric_target: '样本 >= 5' }],
+      channel_strategy: {
+        version: 'geo-channel-fit-rules-1.0.0',
+        evaluated_platform_count: 10,
+        baseline_required: true,
+        claim_boundary: '内部适配度，不是平台权重',
+        measurement_protocol: { attribution_limit: '只表示相关性' },
+        recommendations: [{
+          rank: 1,
+          platform: 'zhihu',
+          platform_name: '知乎',
+          fit_score: 88,
+          fit_label: '高意图问答',
+          stage: 'baseline_then_pilot',
+          objective: '覆盖选型问题',
+          content_angle: '问题式标题',
+          fit_components: [{ signal: 'content_gap', points: 10, reason: '内容就绪度不足' }],
+          evidence: { mention_rate: null, local_release_status: 'stable' },
+          validation: { target: '相对基线改善' },
+          risks: ['不保证平台收录']
+        }]
+      },
       methodology: {
         external_model_used: false,
         customer_content_sent_externally: false,
@@ -32,6 +53,14 @@ test('commercial diagnostic normalizes dimensions, priorities and privacy bounda
   assert.equal(result.gapCounts.P0, 1)
   assert.equal(result.externalModelUsed, false)
   assert.equal(result.contentSentExternally, false)
+  assert.equal(result.channelStrategy.evaluatedPlatformCount, 10)
+  assert.equal(result.channelStrategy.baselineRequired, true)
+  assert.equal(result.channelStrategy.recommendations[0].platformName, '知乎')
+  assert.equal(result.channelStrategy.recommendations[0].fitScore, 88)
+  assert.equal(result.channelStrategy.recommendations[0].stageLabel, '先建基线再试验')
+  assert.equal(result.channelStrategy.recommendations[0].validationTarget, '相对基线改善')
+  assert.deepEqual(result.channelStrategy.recommendations[0].fitReasons, ['内容就绪度不足'])
+  assert.match(result.channelStrategy.claimBoundary, /不是平台权重/)
 })
 
 test('cost summary preserves unknown and non-model publishing instead of turning them into zero cost', () => {
@@ -142,4 +171,7 @@ test('AI visibility view exposes diagnostic and cost endpoints with explicit bou
   assert.match(viewSource, /未提供 Token ≠ 0 Token/)
   assert.match(viewSource, /逐次调用明细/)
   assert.match(viewSource, /输入 \/ 输出 \/ 合计/)
+  assert.match(viewSource, /渠道试验优先级/)
+  assert.match(viewSource, /不代表平台权重、流量或收录概率/)
+  assert.match(viewSource, /ATTRIBUTION BOUNDARY/)
 })

@@ -18,6 +18,15 @@ const numberOrNull = value => {
 
 const array = value => (Array.isArray(value) ? value : [])
 
+const channelStageLabel = value => ({
+  baseline_then_pilot: '先建基线再试验',
+  priority_pilot: '优先试验',
+  manual_review_pilot: '人工复核后试验',
+  second_wave: '第二批试验',
+  observe: '暂缓观察',
+  content_preflight_blocked: '内容门禁未通过'
+}[String(value)] || '待人工判断')
+
 export const normalizeCommercialDiagnostic = response => {
   const root = unwrap(response)
   const dimensions = array(root.dimensions).map((item, index) => ({
@@ -38,6 +47,26 @@ export const normalizeCommercialDiagnostic = response => {
     action: String(item?.action || '按诊断建议完成优化后复测。'),
     metricTarget: String(item?.metric_target || item?.metricTarget || '使用同一口径复测')
   }))
+  const channelRoot = root.channel_strategy && typeof root.channel_strategy === 'object'
+    ? root.channel_strategy
+    : {}
+  const channelRecommendations = array(channelRoot.recommendations).map((item, index) => ({
+    rank: Math.max(1, numberOrNull(item?.rank) ?? index + 1),
+    platform: String(item?.platform || ''),
+    platformName: String(item?.platform_name || item?.platform || `渠道 ${index + 1}`),
+    fitScore: Math.max(0, Math.min(100, numberOrNull(item?.fit_score) ?? 0)),
+    fitLabel: String(item?.fit_label || '受控渠道试验'),
+    stage: String(item?.stage || ''),
+    stageLabel: channelStageLabel(item?.stage),
+    objective: String(item?.objective || ''),
+    contentAngle: String(item?.content_angle || ''),
+    fitReasons: array(item?.fit_components)
+      .map(component => String(component?.reason || ''))
+      .filter(Boolean),
+    evidence: item?.evidence && typeof item.evidence === 'object' ? item.evidence : {},
+    validationTarget: String(item?.validation?.target || '使用同一口径复测'),
+    risks: array(item?.risks).map(value => String(value || '')).filter(Boolean)
+  })).sort((left, right) => left.rank - right.rank)
   return {
     runId: root.run_id ?? root.id ?? null,
     createdAt: root.created_at || '',
@@ -56,7 +85,15 @@ export const normalizeCommercialDiagnostic = response => {
     externalModelUsed: Boolean(root.methodology?.external_model_used),
     contentSentExternally: Boolean(root.methodology?.customer_content_sent_externally),
     claimBoundary: String(root.methodology?.claim_boundary || ''),
-    version: String(root.diagnostic_version || root.algorithm_versions?.diagnostic || '')
+    version: String(root.diagnostic_version || root.algorithm_versions?.diagnostic || ''),
+    channelStrategy: {
+      version: String(channelRoot.version || ''),
+      evaluatedPlatformCount: Math.max(0, numberOrNull(channelRoot.evaluated_platform_count) ?? channelRecommendations.length),
+      baselineRequired: Boolean(channelRoot.baseline_required),
+      recommendations: channelRecommendations,
+      claimBoundary: String(channelRoot.claim_boundary || ''),
+      attributionLimit: String(channelRoot.measurement_protocol?.attribution_limit || '')
+    }
   }
 }
 

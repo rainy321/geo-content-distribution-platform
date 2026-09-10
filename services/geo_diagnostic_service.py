@@ -20,9 +20,11 @@ from services.geo_article_compiler_service import (
     score_ai_citeability,
 )
 from services.geo_score_service import score_geo_content
+from services.platform_capability_service import list_platform_capabilities
 
 
-GEO_DIAGNOSTIC_VERSION = "geo-commercial-diagnostic-1.2.0"
+GEO_DIAGNOSTIC_VERSION = "geo-commercial-diagnostic-1.3.0"
+CHANNEL_RECOMMENDATION_VERSION = "geo-channel-fit-rules-1.0.0"
 PROJECT_DIMENSION_WEIGHTS = {
     "positioning": 20,
     "discoverability": 20,
@@ -36,6 +38,73 @@ CONTENT_DIMENSION_WEIGHTS = {
     "structure": 35,
     "faq": 10,
     "citation": 10,
+}
+
+
+# These are product-side channel archetypes, not claims about a platform's
+# ranking algorithm or an official traffic weight.  The deterministic fit
+# score below only orders a customer's own controlled publishing experiments.
+_CHANNEL_ARCHETYPES: dict[str, dict[str, Any]] = {
+    "zhihu": {
+        "label": "高意图问答与决策解释",
+        "objective": "覆盖用户会直接向 AI 提问的选型、原理和对比问题",
+        "content_angle": "问题式标题 + 先给结论 + 边界条件 + 可核验来源",
+        "segment_bonus": {"technology_b2b": 20, "general": 8},
+    },
+    "toutiao": {
+        "label": "行业解释与大众信息流图文",
+        "objective": "扩展品类问题、使用场景和行业解释的内容覆盖",
+        "content_angle": "行业问题 + 分步骤说明 + 事实依据；话题不匹配时直接跳过",
+        "segment_bonus": {"technology_b2b": 12, "consumer_lifestyle": 8, "general": 10},
+    },
+    "baijiahao": {
+        "label": "搜索型图文与产品知识",
+        "objective": "验证品牌词、品类词和问题词的图文解释入口",
+        "content_angle": "实体名称一致 + 图文步骤 + FAQ + 稳定官网来源",
+        "segment_bonus": {"technology_b2b": 12, "local_service": 8, "general": 10},
+    },
+    "sohu": {
+        "label": "企业知识与行业观点",
+        "objective": "沉淀克制、可核验的企业产品说明和行业知识",
+        "content_angle": "弱营销表达 + 完整事实链 + 来源说明 + 风险边界",
+        "segment_bonus": {"technology_b2b": 15, "general": 7},
+    },
+    "xiaohongshu": {
+        "label": "场景化图文笔记",
+        "objective": "验证具体使用场景、体验步骤和视觉素材的表达效果",
+        "content_angle": "单一场景 + 短段落 + 实际步骤 + 配图；避免绝对化承诺",
+        "segment_bonus": {"consumer_lifestyle": 22, "local_service": 12, "general": 4},
+    },
+    "douyin": {
+        "label": "短图文或短视频演示",
+        "objective": "验证一个问题、一个结论、一个演示的短内容表达",
+        "content_angle": "前置结论 + 单一演示 + 简短描述；发布验证由人工完成",
+        "segment_bonus": {"video_demo": 18, "consumer_lifestyle": 15, "general": 3},
+    },
+    "kuaishou": {
+        "label": "短内容与实操演示",
+        "objective": "验证通俗问题解答和可复现操作步骤",
+        "content_angle": "口语化结论 + 实操过程 + 明确适用范围",
+        "segment_bonus": {"video_demo": 15, "consumer_lifestyle": 12, "local_service": 10, "general": 2},
+    },
+    "bilibili": {
+        "label": "长视频教程与深度演示",
+        "objective": "验证复杂产品教程、技术原理和完整操作演示",
+        "content_angle": "章节化脚本 + 真实演示 + 简介摘要 + 可核验链接",
+        "segment_bonus": {"technology_b2b": 12, "video_demo": 20, "general": 3},
+    },
+    "channels": {
+        "label": "社交关系链中的产品演示",
+        "objective": "验证已有私域受众对产品说明和演示内容的反馈",
+        "content_angle": "短演示 + 明确受众 + 可执行下一步；不把互动量当作 AI 收录证明",
+        "segment_bonus": {"local_service": 14, "video_demo": 12, "consumer_lifestyle": 8, "general": 2},
+    },
+    "tiktok": {
+        "label": "国际化短视频试验",
+        "objective": "仅在存在海外市场、外语内容和国际受众时验证",
+        "content_angle": "目标市场语言 + 单一场景演示 + 当地合规复核",
+        "segment_bonus": {"international": 28, "video_demo": 8, "general": -18},
+    },
 }
 
 
@@ -369,7 +438,7 @@ def _diagnose_project(
         visibility=visibility,
         visibility_row=visibility_row,
     )
-    return _base_result(
+    result = _base_result(
         project_id=int(project["id"]),
         scope="project",
         source_type="project",
@@ -384,6 +453,14 @@ def _diagnose_project(
             "latest_visibility_created_at": visibility_row["created_at"] if visibility_row else None,
         },
     )
+    result["channel_strategy"] = _build_channel_strategy(
+        project=project,
+        scores=scores,
+        article_count=len(articles),
+        visibility_summary=visibility_summary,
+        visibility_row=visibility_row,
+    )
+    return result
 
 
 def _diagnose_content(
@@ -437,6 +514,7 @@ def _diagnose_content(
             "diagnostic": GEO_DIAGNOSTIC_VERSION,
             "content_score": "geo-score-mvp-rules-1.0.0",
             "ai_citeability": AI_CITEABILITY_SCORE_VERSION,
+            "channel_fit": CHANNEL_RECOMMENDATION_VERSION,
         },
         baseline={
             "article_id": article_id,
@@ -472,6 +550,11 @@ def _diagnose_content(
     }
     result["score_suggestions"] = list(score_result.get("suggestions") or [])
     result["citeability"] = citeability
+    result["channel_strategy"] = _content_channel_strategy(
+        project_result.get("channel_strategy"),
+        publish_ready=citeability_passed,
+        citeability_score=int(citeability["score"]),
+    )
     return result
 
 
@@ -518,6 +601,289 @@ def _base_result(
         },
         "algorithm_versions": dict(algorithm_versions),
     }
+
+
+def _build_channel_strategy(
+    *,
+    project: Mapping[str, Any],
+    scores: Mapping[str, int],
+    article_count: int,
+    visibility_summary: Mapping[str, Any],
+    visibility_row: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Rank controlled channel experiments without claiming platform weight.
+
+    Every point in ``fit_score`` is traceable to local project readiness, the
+    latest imported/sampled visibility evidence, a declared audience segment,
+    or this repository's runtime capability status.  The score is deliberately
+    named *fit*, not weight, reach or expected lift.
+    """
+
+    segments = _project_segments(project)
+    visibility_available = visibility_row is not None
+    sample_count = int(_safe_number(visibility_summary.get("sample_count")))
+    mention_rate = _safe_ratio(visibility_summary.get("mention_rate"))
+    owned_citation_rate = _safe_ratio(
+        visibility_summary.get("owned_citation_rate")
+    )
+    content_readiness = int(scores.get("content_readiness") or 0)
+    recommendations: list[dict[str, Any]] = []
+
+    for capability in list_platform_capabilities():
+        platform = str(capability["key"])
+        archetype = _CHANNEL_ARCHETYPES[platform]
+        components: list[dict[str, Any]] = [
+            {
+                "signal": "controlled_experiment_baseline",
+                "points": 24,
+                "reason": "所有支持渠道从同一中性起点比较，避免把产品内排序伪装成平台权重。",
+            }
+        ]
+
+        release_status = str(capability.get("release_status") or "")
+        release_points = {
+            "stable": 12,
+            "experimental": -6,
+            "review_required": -10,
+        }.get(release_status, -8)
+        components.append(
+            {
+                "signal": "local_runtime_readiness",
+                "points": release_points,
+                "reason": {
+                    "stable": "本机适配标记为 stable，可进入受控试验。",
+                    "experimental": "本机适配仍为 experimental，需要人工核对结果。",
+                    "review_required": "本机适配要求人工复核，不能按全自动成功理解。",
+                }.get(release_status, "本机适配状态未确认，先人工验证。"),
+            }
+        )
+
+        content_mode = str(capability.get("content_mode") or "")
+        is_long_form = content_mode in {"article", "image_article"}
+        is_visual = content_mode in {"image_note", "video"}
+        if content_readiness < 80 and is_long_form:
+            components.append(
+                {
+                    "signal": "content_readiness_gap",
+                    "points": 16,
+                    "reason": "当前内容资产就绪度未达 80，优先用结构化长文补实体、FAQ 与来源。",
+                }
+            )
+        elif article_count >= 3 and is_visual:
+            components.append(
+                {
+                    "signal": "repurpose_ready",
+                    "points": 8,
+                    "reason": "已有至少 3 篇内容，可在不新增事实的前提下改写为视觉内容试验。",
+                }
+            )
+
+        if not visibility_available:
+            if is_long_form:
+                components.append(
+                    {
+                        "signal": "visibility_baseline_missing",
+                        "points": 8,
+                        "reason": "尚无 AI 可见度基线；长文渠道只作为基线完成后的首批候选。",
+                    }
+                )
+        else:
+            if mention_rate < 0.4:
+                components.append(
+                    {
+                        "signal": "mention_rate_gap",
+                        "points": 14 if is_long_form else 6,
+                        "reason": "最近样本的品牌提及率低于 40%，优先验证可直接回答高意图问题的内容。",
+                    }
+                )
+            if owned_citation_rate < 0.2 and is_long_form:
+                components.append(
+                    {
+                        "signal": "owned_citation_gap",
+                        "points": 12,
+                        "reason": "最近样本的自有来源引用率低于 20%，优先验证可承载稳定来源的长文。",
+                    }
+                )
+
+        segment_points = 0
+        matched_segments: list[str] = []
+        for segment in segments:
+            points = int(archetype["segment_bonus"].get(segment, 0))
+            if points:
+                segment_points += points
+                matched_segments.append(segment)
+        if not matched_segments:
+            segment_points = int(archetype["segment_bonus"].get("general", 0))
+            matched_segments = ["general"]
+        components.append(
+            {
+                "signal": "declared_audience_fit",
+                "points": segment_points,
+                "reason": f"项目字段匹配受众场景：{'、'.join(_segment_label(item) for item in matched_segments)}。",
+            }
+        )
+
+        fit_score = max(0, min(100, sum(int(item["points"]) for item in components)))
+        risks = [
+            "平台动态审核、账号状态、收录与推荐不可由本软件保证。",
+            "渠道适配度不等于搜索或大模型平台权重。",
+        ]
+        if capability.get("requires_images"):
+            risks.append("需要人工确认图片版权、清晰度和平台展示效果。")
+        if capability.get("requires_video"):
+            risks.append("需要人工确认视频文件、封面、字幕和最终发布状态。")
+        if release_status != "stable":
+            risks.append("本机发布能力尚非 stable，必须保留人工复核步骤。")
+
+        recommendations.append(
+            {
+                "platform": platform,
+                "platform_name": str(capability["name"]),
+                "fit_score": fit_score,
+                "fit_label": str(archetype["label"]),
+                "stage": _channel_stage(
+                    fit_score=fit_score,
+                    visibility_available=visibility_available,
+                    release_status=release_status,
+                ),
+                "objective": str(archetype["objective"]),
+                "content_angle": str(archetype["content_angle"]),
+                "fit_components": components,
+                "evidence": {
+                    "visibility_run_id": (
+                        int(visibility_row["id"]) if visibility_row else None
+                    ),
+                    "visibility_sample_count": sample_count,
+                    "mention_rate": mention_rate if visibility_available else None,
+                    "owned_citation_rate": (
+                        owned_citation_rate if visibility_available else None
+                    ),
+                    "content_readiness_score": content_readiness,
+                    "article_count": article_count,
+                    "content_mode": content_mode,
+                    "local_release_status": release_status,
+                },
+                "validation": {
+                    "test_unit": "一个问题簇的一组唯一内容，不做跨平台原文复制作为归因依据。",
+                    "metrics": [
+                        "mention_rate",
+                        "owned_citation_rate",
+                        "share_of_voice",
+                    ],
+                    "target": "相对同口径基线改善；没有基线时先建立基线，不预填虚假提升比例。",
+                    "timing": "内容公开可访问且可检索后复测；短期结果必须标记为初步观察。",
+                },
+                "risks": risks,
+            }
+        )
+
+    recommendations.sort(
+        key=lambda item: (-int(item["fit_score"]), str(item["platform"]))
+    )
+    for rank, item in enumerate(recommendations, start=1):
+        item["rank"] = rank
+
+    return {
+        "version": CHANNEL_RECOMMENDATION_VERSION,
+        "evaluated_platform_count": len(recommendations),
+        "segments": segments,
+        "baseline_required": not visibility_available,
+        "recommendations": recommendations,
+        "measurement_protocol": {
+            "before": "固定问题集、模型、模型版本与样本数，保存首次回答作为基线。",
+            "change": "一次只验证一个渠道和一个内容簇，记录公开 URL 与发布时间。",
+            "after": "内容公开可访问且可检索后，用同一问题集与采样口径复测。",
+            "compare": ["mention_rate", "owned_citation_rate", "share_of_voice"],
+            "attribution_limit": "观察到的变化只能记为相关性信号；模型更新、平台抓取节奏和其他内容都会影响结果。",
+        },
+        "claim_boundary": (
+            "fit_score 仅为本软件依据项目字段、内容缺口、最近可见度样本与本机能力状态生成的试验优先级；"
+            "它不是平台权重、流量预测、收录概率或审核通过承诺。"
+        ),
+    }
+
+
+def _content_channel_strategy(
+    strategy: Any,
+    *,
+    publish_ready: bool,
+    citeability_score: int,
+) -> dict[str, Any]:
+    if not isinstance(strategy, Mapping):
+        return {}
+    result = {key: value for key, value in strategy.items() if key != "recommendations"}
+    recommendations: list[dict[str, Any]] = []
+    for raw in strategy.get("recommendations") or []:
+        if not isinstance(raw, Mapping):
+            continue
+        item = dict(raw)
+        if not publish_ready:
+            item["stage"] = "content_preflight_blocked"
+            item["next_action"] = "先修复当前内容的 AI 可引用性门禁，再进入任何渠道试验。"
+        else:
+            item["next_action"] = "按该渠道内容角度生成独立副本，并在发布前人工确认。"
+        recommendations.append(item)
+    result["recommendations"] = recommendations
+    result["content_gate"] = {
+        "publish_ready": publish_ready,
+        "ai_citeability_score": citeability_score,
+        "next_action": (
+            "可以准备受控渠道试验，发布仍需人工确认。"
+            if publish_ready
+            else "当前文章不可进入渠道试验；先按 P0/P1 缺口优化并复测。"
+        ),
+    }
+    return result
+
+
+def _project_segments(project: Mapping[str, Any]) -> list[str]:
+    text = " ".join(
+        str(project.get(key) or "").casefold()
+        for key in ("name", "product", "industry", "description")
+    )
+    definitions = {
+        "technology_b2b": (
+            "ai", "api", "saas", "软件", "模型", "人工智能", "开发者", "企业", "科技", "云服务", "技术"
+        ),
+        "consumer_lifestyle": (
+            "消费", "生活", "美妆", "穿搭", "家居", "旅游", "母婴", "健康", "餐饮", "教育"
+        ),
+        "video_demo": ("视频", "直播", "游戏", "演示", "教程", "影音", "娱乐"),
+        "local_service": ("本地", "门店", "到店", "同城", "线下", "地区", "餐饮"),
+        "international": ("海外", "国际", "出海", "跨境", "global", "international"),
+    }
+    segments = [
+        key for key, terms in definitions.items() if any(term in text for term in terms)
+    ]
+    return segments or ["general"]
+
+
+def _segment_label(value: str) -> str:
+    return {
+        "technology_b2b": "技术/B2B",
+        "consumer_lifestyle": "消费/生活方式",
+        "video_demo": "视频演示",
+        "local_service": "本地服务",
+        "international": "国际化",
+        "general": "通用",
+    }.get(value, value)
+
+
+def _channel_stage(
+    *,
+    fit_score: int,
+    visibility_available: bool,
+    release_status: str,
+) -> str:
+    if not visibility_available:
+        return "baseline_then_pilot"
+    if release_status != "stable" and fit_score >= 55:
+        return "manual_review_pilot"
+    if fit_score >= 65:
+        return "priority_pilot"
+    if fit_score >= 45:
+        return "second_wave"
+    return "observe"
 
 
 def _project_gaps(
@@ -691,6 +1057,7 @@ def _algorithm_versions(visibility: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "diagnostic": GEO_DIAGNOSTIC_VERSION,
         "content_score": "geo-score-mvp-rules-1.0.0",
+        "channel_fit": CHANNEL_RECOMMENDATION_VERSION,
         "visibility_integration": (
             versions.get("integration")
             if isinstance(versions, Mapping)
@@ -810,6 +1177,7 @@ def _connect(database_path: str | Path) -> sqlite3.Connection:
 
 
 __all__ = [
+    "CHANNEL_RECOMMENDATION_VERSION",
     "GEO_DIAGNOSTIC_VERSION",
     "GEODiagnosticError",
     "GEODiagnosticNotFoundError",
