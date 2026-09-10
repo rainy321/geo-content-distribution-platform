@@ -35,7 +35,7 @@
       <article class="warning">
         <span>03 / ACTION</span>
         <strong>{{ overview.summary.needs_action }}</strong>
-        <p>需要重新登录</p>
+        <p>需要处理</p>
       </article>
     </section>
 
@@ -44,6 +44,7 @@
       <div>
         <strong>平台检测采用显式触发</strong>
         <p>“刷新本地状态”不联网；只有点击某个账号的“检测登录”，才会打开本机浏览器访问该平台。退出 / 解绑只移除本机凭证，不代表撤销平台网站上的其他设备会话。</p>
+        <p><b>多账号提示：</b>平台没有公布统一的“同 IP 安全账号数量”。重复内容、高频发布和短时间快速切换账号都可能触发风控；软件只使用你明确选择的独立账号会话，不自动轮换账号，也不绕过封禁。</p>
       </div>
     </section>
 
@@ -75,8 +76,11 @@
             :platform="platform"
             :checking-ids="checkingIds"
             :disconnecting-ids="disconnectingIds"
+            :resolving-risk-ids="resolvingRiskIds"
             @check="checkAccount"
             @login="openLogin"
+            @reconnect="reconnectAccount"
+            @recover="recoverAccount"
             @disconnect="disconnectAccount"
           />
         </div>
@@ -98,8 +102,11 @@
             :platform="platform"
             :checking-ids="checkingIds"
             :disconnecting-ids="disconnectingIds"
+            :resolving-risk-ids="resolvingRiskIds"
             @check="checkAccount"
             @login="openLogin"
+            @reconnect="reconnectAccount"
+            @recover="recoverAccount"
             @disconnect="disconnectAccount"
           />
         </div>
@@ -268,17 +275,33 @@ const statusCopy = {
   connected: { label: '已连接', note: '本地 Cookie 状态正常' },
   expired: { label: '已失效', note: '需要重新登录' },
   missing_cookie: { label: '缺少 Cookie', note: '凭证文件不存在' },
-  checking: { label: '检测中', note: '正在确认平台状态' }
+  checking: { label: '检测中', note: '正在确认平台状态' },
+  permanent_ban: { label: '永久封禁', note: '任务已冻结，不会自动换号' },
+  temporary_restriction: { label: '暂时受限', note: '等待限制解除或完成申诉' },
+  verification_required: { label: '待本人验证', note: '完成平台要求的短信、扫码或滑块验证' },
+  session_expired: { label: '会话失效', note: '重新登录后才可继续' }
 }
+
+const riskActionCopy = category => ({
+  permanent_ban: '申诉通过后验证',
+  temporary_restriction: '限制解除后验证',
+  verification_required: '完成验证后重试',
+  session_expired: '重新登录'
+}[category] || '重新检测')
+
+// The backend currently guarantees atomic in-place credential replacement for
+// Zhihu only. Other platform helpers create a separate local account row.
+const supportsInPlaceReauth = platform => Number(platform?.type) === 9
 
 const PlatformCard = defineComponent({
   name: 'PlatformCard',
   props: {
     platform: { type: Object, required: true },
     checkingIds: { type: Object, required: true },
-    disconnectingIds: { type: Object, required: true }
+    disconnectingIds: { type: Object, required: true },
+    resolvingRiskIds: { type: Object, required: true }
   },
-  emits: ['check', 'login', 'disconnect'],
+  emits: ['check', 'login', 'reconnect', 'recover', 'disconnect'],
   setup(props, { emit }) {
     const formatCheckedAt = value => {
       if (!value) return '尚未检测'
@@ -300,9 +323,21 @@ const PlatformCard = defineComponent({
           h('span', `${props.platform.priority} / ${String(props.platform.type).padStart(2, '0')}`),
           h('h3', props.platform.name)
         ]),
-        h('small', props.platform.login_available === false
-          ? 'RUNTIME OFF'
-          : props.platform.connected_count ? `${props.platform.connected_count} ONLINE` : 'OFFLINE')
+        h('div', { class: 'platform-head-actions' }, [
+          h('small', props.platform.login_available === false
+            ? 'RUNTIME OFF'
+            : `${props.platform.account_count || 0} SESSION${props.platform.account_count === 1 ? '' : 'S'}`),
+          h(ElButton, {
+            size: 'small',
+            type: 'primary',
+            plain: true,
+            disabled: props.platform.login_available === false,
+            title: props.platform.login_available === false
+              ? (props.platform.unavailable_reason || '本机登录运行时不可用')
+              : `为${props.platform.name}添加一个独立账号会话`,
+            onClick: () => emit('login', props.platform)
+          }, () => '添加账号')
+        ])
       ]),
       props.platform.login_available === false
         ? h('div', { class: 'platform-runtime-note', role: 'note' }, [
@@ -315,7 +350,10 @@ const PlatformCard = defineComponent({
             const copy = statusCopy[account.status] || { label: account.status, note: '状态未知' }
             const checking = props.checkingIds.has(account.id)
             const disconnecting = props.disconnectingIds.has(account.id)
-            const lifecycleBusy = checking || disconnecting
+            const resolvingRisk = props.resolvingRiskIds.has(account.id)
+            const risk = account.risk_event || null
+            const frozen = Boolean(risk?.frozen)
+            const lifecycleBusy = checking || disconnecting || resolvingRisk
             return h('section', { class: 'account-entry', key: account.id }, [
               h('div', { class: 'account-identity' }, [
                 h('strong', `${account.account_name} · ID ${account.id}`),
@@ -327,21 +365,44 @@ const PlatformCard = defineComponent({
                 h(ElButton, {
                   size: 'small',
                   loading: checking,
-                  disabled: props.platform.login_available === false || disconnecting,
+                  disabled: props.platform.login_available === false || lifecycleBusy || frozen,
                   onClick: () => emit('check', account, props.platform)
                 }, () => props.platform.login_available === false ? '检测不可用' : '检测登录'),
-                h(ElButton, {
-                  size: 'small', type: 'primary', plain: true,
-                  disabled: props.platform.login_available === false || lifecycleBusy,
-                  onClick: () => emit('login', props.platform, account)
-                }, () => '重新登录'),
+                frozen
+                  ? h(ElButton, {
+                      size: 'small', type: 'warning', plain: true,
+                      loading: resolvingRisk,
+                      disabled: props.platform.login_available === false || checking || disconnecting,
+                      onClick: () => emit('recover', account, props.platform)
+                    }, () => supportsInPlaceReauth(props.platform)
+                      ? riskActionCopy(risk.category)
+                      : '解绑后重新连接')
+                  : h(ElButton, {
+                      size: 'small', type: 'primary', plain: true,
+                      disabled: props.platform.login_available === false || lifecycleBusy,
+                      onClick: () => emit('reconnect', account, props.platform)
+                    }, () => supportsInPlaceReauth(props.platform) ? '重新登录' : '解绑后重连'),
                 h(ElButton, {
                   size: 'small', type: 'danger', plain: true,
                   loading: disconnecting,
-                  disabled: checking,
+                  disabled: checking || resolvingRisk,
                   onClick: () => emit('disconnect', account, props.platform)
                 }, () => '退出 / 解绑')
-              ])
+              ]),
+              risk
+                ? h('aside', {
+                    class: ['account-risk-rail', `risk-${risk.severity || 'warning'}`],
+                    role: risk.frozen ? 'alert' : 'status'
+                  }, [
+                    h('div', { class: 'risk-rail-head' }, [
+                      h('span', `RISK / ${String(risk.category || 'unknown').toUpperCase()}`),
+                      h('time', formatCheckedAt(risk.occurred_at))
+                    ]),
+                    h('strong', risk.reason || copy.note),
+                    risk.evidence ? h('p', [h('b', '捕获信息：'), risk.evidence]) : null,
+                    h('p', [h('b', '下一步：'), risk.recommended_action || '按平台提示处理后重新检测。'])
+                  ])
+                : null
             ])
           }))
         : h('div', { class: 'platform-empty' }, [
@@ -350,7 +411,7 @@ const PlatformCard = defineComponent({
               size: 'small', type: 'primary', plain: true,
               disabled: props.platform.login_available === false,
               onClick: () => emit('login', props.platform)
-            }, () => props.platform.login_available === false ? '运行时不可用' : '添加 / 登录')
+            }, () => props.platform.login_available === false ? '运行时不可用' : '添加账号')
           ])
     ])
   }
@@ -364,6 +425,7 @@ const capabilitiesLoadError = ref(false)
 const lastSyncedAt = ref(null)
 const checkingIds = ref(new Set())
 const disconnectingIds = ref(new Set())
+const resolvingRiskIds = ref(new Set())
 const loginDialogVisible = ref(false)
 const loginStage = ref('idle')
 const qrCodeData = ref('')
@@ -526,14 +588,27 @@ const checkAccount = async (account, platform) => {
     ElMessage.warning(platform?.unavailable_reason || '该平台登录运行时当前不可用')
     return
   }
-  if (checkingIds.value.has(account.id) || disconnectingIds.value.has(account.id)) return
+  if (
+    checkingIds.value.has(account.id)
+    || disconnectingIds.value.has(account.id)
+    || resolvingRiskIds.value.has(account.id)
+  ) return
   checkingIds.value = new Set([...checkingIds.value, account.id])
   try {
     const response = await accountApi.checkMediaAccount(account.id)
-    ElMessage.success(response.data?.check_message || '登录状态检测完成')
+    if (response.data?.status === 'connected') {
+      ElMessage.success(response.data?.check_message || '登录状态正常')
+    } else {
+      ElMessage.warning(response.data?.check_message || '账号需要重新验证')
+    }
     await fetchOverview()
   } catch (error) {
-    ElMessage.error(error?.message || '平台状态检测失败，请稍后重试')
+    const risk = error?.response?.data?.data?.risk_event
+    const message = risk
+      ? `${risk.label}：${risk.recommended_action}`
+      : (error?.response?.data?.msg || error?.message || '平台状态检测失败，请稍后重试')
+    ElMessage.error(message)
+    await fetchOverview()
   } finally {
     const next = new Set(checkingIds.value)
     next.delete(account.id)
@@ -541,7 +616,7 @@ const checkAccount = async (account, platform) => {
   }
 }
 
-const openLogin = (platform = null, account = null) => {
+const openLogin = (platform = null, account = null, suggestedAccountName = '') => {
   if (platform && platform.login_available !== true) {
     ElMessage.warning(platform.unavailable_reason || '该平台登录运行时当前不可用')
     return
@@ -552,11 +627,21 @@ const openLogin = (platform = null, account = null) => {
   }
   if (
     account
-    && (checkingIds.value.has(account.id) || disconnectingIds.value.has(account.id))
+    && (
+      checkingIds.value.has(account.id)
+      || disconnectingIds.value.has(account.id)
+      || resolvingRiskIds.value.has(account.id)
+    )
   ) return
+  if (account && !supportsInPlaceReauth(platform)) {
+    ElMessage.warning('该平台需要先通过“解绑后重连”移除旧绑定，不能直接复用原账号记录')
+    return
+  }
   loginForm.platformType = platform?.type || null
-  loginForm.accountName = account?.account_name || ''
-  loginForm.existingAccountId = account?.id || null
+  loginForm.accountName = account?.account_name || suggestedAccountName || ''
+  loginForm.existingAccountId = account && supportsInPlaceReauth(platform)
+    ? account.id
+    : null
   loginStage.value = 'idle'
   qrCodeData.value = ''
   loginEventMessage.value = ''
@@ -570,8 +655,114 @@ const openLogin = (platform = null, account = null) => {
   loginDialogVisible.value = true
 }
 
+const replaceAccountBinding = async (account, platform, { riskRecovery = false } = {}) => {
+  if (
+    !account
+    || disconnectingIds.value.has(account.id)
+    || checkingIds.value.has(account.id)
+    || resolvingRiskIds.value.has(account.id)
+  ) return
+  if (platform?.login_available !== true) {
+    ElMessage.warning(platform?.unavailable_reason || '该平台登录运行时当前不可用')
+    return
+  }
+
+  const risk = account.risk_event
+  const permanent = riskRecovery && risk?.category === 'permanent_ban'
+  try {
+    await ElMessageBox.confirm(
+      permanent
+        ? `仅当“${account.account_name}”的官方申诉已经通过后继续。软件将先退出并解绑旧账号，再打开新的独立登录；不会复用受封禁凭证、自动换号或绕过平台限制。`
+        : `该平台暂不支持安全地覆盖原账号凭证。继续后会先从本机移除“${account.account_name}”的旧凭证、解除待发布任务绑定，再打开一个新的独立登录。`,
+      permanent ? '确认官方申诉已通过？' : `解绑后重新连接${platform.name}？`,
+      {
+        confirmButtonText: '解绑旧账号并继续',
+        cancelButtonText: '保留旧账号',
+        type: 'warning',
+        distinguishCancelAndClose: true
+      }
+    )
+  } catch {
+    return
+  }
+
+  disconnectingIds.value = new Set([...disconnectingIds.value, account.id])
+  try {
+    const response = await accountApi.disconnectMediaAccount(account.id)
+    await fetchOverview()
+    if (response.data?.cleanup_pending) {
+      ElMessage.warning(response.msg || '旧凭证仍待清理，本次未打开新登录，请稍后重试')
+      return
+    }
+    ElMessage.success('旧账号已明确解绑，请完成新的独立账号登录')
+    openLogin(platform, null, account.account_name)
+  } catch (error) {
+    ElMessage.error(error?.response?.data?.msg || '旧账号未能安全解绑，本次没有打开新登录')
+  } finally {
+    const next = new Set(disconnectingIds.value)
+    next.delete(account.id)
+    disconnectingIds.value = next
+  }
+}
+
+const reconnectAccount = async (account, platform) => {
+  if (supportsInPlaceReauth(platform)) {
+    openLogin(platform, account)
+    return
+  }
+  await replaceAccountBinding(account, platform)
+}
+
+const recoverAccount = async (account, platform) => {
+  const risk = account?.risk_event
+  if (!risk || resolvingRiskIds.value.has(account.id)) return
+  if (platform?.login_available !== true) {
+    ElMessage.warning(platform?.unavailable_reason || '该平台登录运行时当前不可用')
+    return
+  }
+  if (!supportsInPlaceReauth(platform)) {
+    await replaceAccountBinding(account, platform, { riskRecovery: true })
+    return
+  }
+  const permanent = risk.category === 'permanent_ban'
+  try {
+    await ElMessageBox.confirm(
+      permanent
+        ? `仅当“${account.account_name}”的官方申诉已经通过并确认账号恢复后继续。软件不会绕过封禁，也不会自动改用其他账号。`
+        : `请先在${platform.name}完成平台要求的处理。继续后只会清除本机风险拦截，并打开该账号的重新登录流程。`,
+      permanent ? '确认官方申诉已通过？' : '确认平台侧处理已完成？',
+      {
+        confirmButtonText: permanent ? '申诉已通过，重新验证' : '已处理，重新验证',
+        cancelButtonText: '暂不处理',
+        type: 'warning',
+        distinguishCancelAndClose: true
+      }
+    )
+  } catch {
+    return
+  }
+
+  resolvingRiskIds.value = new Set([...resolvingRiskIds.value, account.id])
+  try {
+    const response = await accountApi.resolveMediaAccountRisk(account.id, risk.category)
+    ElMessage.success(response.msg || '风险记录已确认，请重新登录验证')
+    await fetchOverview()
+    openLogin(platform, account)
+  } catch (error) {
+    ElMessage.error(error?.response?.data?.msg || '风险状态未能更新，请稍后重试')
+  } finally {
+    const next = new Set(resolvingRiskIds.value)
+    next.delete(account.id)
+    resolvingRiskIds.value = next
+  }
+}
+
 const disconnectAccount = async (account, platform) => {
-  if (disconnectingIds.value.has(account.id) || checkingIds.value.has(account.id)) return
+  if (
+    disconnectingIds.value.has(account.id)
+    || checkingIds.value.has(account.id)
+    || resolvingRiskIds.value.has(account.id)
+  ) return
   disconnectingIds.value = new Set([...disconnectingIds.value, account.id])
   try {
     try {
@@ -1000,6 +1191,7 @@ onBeforeUnmount(() => {
 .note-icon { display: grid; place-items: center; width: 34px; height: 34px; flex: 0 0 auto; border: 1px solid #80bbb7; color: #087f81; }
 .safety-note strong { font-size: 13px; }
 .safety-note p { margin: 4px 0 0; color: #597177; font-size: 12px; line-height: 1.6; }
+.safety-note p + p { margin-top: 8px; padding-top: 8px; border-top: 1px solid #c9dedb; }
 .capability-warning { margin-top: 12px; padding: 13px 16px; border: 1px solid #ddc49d; background: #fff9ef; }
 .capability-warning strong { color: #6f5027; font-size: 12px; }
 .capability-warning p { margin: 4px 0 0; color: #7b684d; font-size: 11px; line-height: 1.55; }
@@ -1019,20 +1211,34 @@ onBeforeUnmount(() => {
 :deep(.platform-code) { display: grid; place-items: center; width: 40px; height: 40px; color: white; background: var(--ink); font-weight: 800; }
 :deep(.platform-card-head h3) { margin: 3px 0 0; font-size: 18px; }
 :deep(.platform-card-head small) { color: #719093; font: 700 9px "Cascadia Mono", monospace; }
+:deep(.platform-head-actions) { display: grid; justify-items: end; gap: 7px; }
+:deep(.platform-head-actions .el-button) { margin: 0; }
 :deep(.platform-runtime-note) { display: grid; grid-template-columns: auto 1fr; gap: 6px 12px; padding: 10px 18px; border-bottom: 1px solid #ecd9b8; background: #fff9ef; }
 :deep(.platform-runtime-note strong) { color: #735126; font-size: 10px; }
 :deep(.platform-runtime-note span) { color: #806d51; font-size: 10px; line-height: 1.5; }
 :deep(.account-stack) { padding: 0 18px; }
-:deep(.account-entry) { display: flex; justify-content: space-between; gap: 16px; padding: 15px 0; border-bottom: 1px solid #e1e8e6; }
+:deep(.account-entry) { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px 16px; padding: 15px 0; border-bottom: 1px solid #e1e8e6; }
 :deep(.account-entry:last-child) { border-bottom: 0; }
 :deep(.account-identity strong) { margin-right: 8px; font-size: 13px; }
 :deep(.status-chip) { display: inline-flex; padding: 3px 6px; color: #637578; background: #e8eeec; font-size: 9px; font-weight: 700; }
 :deep(.status-chip.connected) { color: #08746f; background: #d9f2ee; }
 :deep(.status-chip.expired), :deep(.status-chip.missing_cookie) { color: #a06119; background: #f8ead7; }
+:deep(.status-chip.permanent_ban) { color: #fff; background: #9b3e36; }
+:deep(.status-chip.temporary_restriction),
+:deep(.status-chip.verification_required),
+:deep(.status-chip.session_expired) { color: #7b4c16; background: #f7e6ca; }
 :deep(.account-identity p) { margin: 7px 0 2px; color: #5e7378; font-size: 11px; }
 :deep(.account-identity time) { color: #839194; font: 9px "Cascadia Mono", monospace; }
 :deep(.account-actions) { display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex: 0 0 auto; flex-wrap: wrap; max-width: 250px; }
 :deep(.account-actions .el-button + .el-button) { margin-left: 0; }
+:deep(.account-risk-rail) { grid-column: 1 / -1; padding: 11px 13px; border-left: 3px solid #c68a36; background: #fff8ed; }
+:deep(.account-risk-rail.risk-critical) { border-left-color: #bd594f; background: #fff2f0; }
+:deep(.account-risk-rail.risk-blocked) { border-left-color: #c4742f; background: #fff6e9; }
+:deep(.risk-rail-head) { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
+:deep(.risk-rail-head span) { color: #9a493f; font: 700 8px "Cascadia Mono", monospace; letter-spacing: .1em; }
+:deep(.risk-rail-head time) { color: #8e7c72; font: 9px "Cascadia Mono", monospace; }
+:deep(.account-risk-rail > strong) { display: block; color: #6f352f; font-size: 12px; }
+:deep(.account-risk-rail p) { margin: 5px 0 0; color: #725c50; font-size: 11px; line-height: 1.55; overflow-wrap: anywhere; }
 :deep(.platform-empty) { display: flex; align-items: center; justify-content: space-between; gap: 14px; min-height: 62px; padding: 13px 18px; }
 :deep(.platform-empty p) { margin: 0; color: var(--muted); font-size: 12px; }
 
@@ -1107,9 +1313,10 @@ onBeforeUnmount(() => {
   .account-metrics article:last-child { grid-column: 1 / -1; border-bottom: 0; }
   .section-heading { align-items: flex-start; }
   .section-heading > small { display: none; }
-  :deep(.account-entry) { align-items: flex-start; flex-direction: column; }
+  :deep(.account-entry) { align-items: flex-start; grid-template-columns: 1fr; }
   :deep(.account-actions) { width: 100%; }
   :deep(.account-actions .el-button) { flex: 1; }
+  :deep(.account-risk-rail) { grid-column: 1; }
   .login-progress { padding: 14px; }
   .login-stage-rail li { font-size: 9px; }
   .login-status-meta { align-items: flex-start; flex-direction: column; gap: 3px; }

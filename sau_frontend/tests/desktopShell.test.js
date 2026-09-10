@@ -50,7 +50,8 @@ test('real publishing UI binds capability, account, task version and fingerprint
   assert.match(distributionSource, /const selectedPlatforms = ref\(\[\]\)/)
   assert.match(distributionSource, /selectedAccountIds\[platform\.key\] = null/)
   assert.doesNotMatch(distributionSource, /selectedAccountIds\[[^\]]+\] = accounts\[0\]/)
-  assert.match(distributionSource, /&& !videoUploading\.value/)
+  assert.match(distributionSource, /if \(videoUploading\.value\) add\('video_upload', '视频仍在上传', 'video'\)/)
+  assert.match(distributionSource, /const canDispatch = computed\(\(\) => dispatchBlockers\.value\.length === 0\)/)
   assert.match(distributionSource, /v-if="scheduleEnabled && demoAvailable"/)
   assert.match(distributionSource, /到点后等待人工确认/)
   assert.match(distributionSource, /auto_execute: demoAvailable\.value && confirmedAutoExecute/)
@@ -99,7 +100,7 @@ test('first-run copy describes the local visibility workflow', () => {
 })
 
 
-test('AI settings exposes one protected engine for writing, tuning and retesting', () => {
+test('AI settings exposes protected role routing with explicit writer fallback', () => {
   const settingsSource = readFileSync(
     new URL('../src/views/SystemSettings.vue', import.meta.url),
     'utf8'
@@ -109,9 +110,11 @@ test('AI settings exposes one protected engine for writing, tuning and retesting
     'utf8'
   )
 
-  assert.match(settingsSource, /ONE ENGINE \/ ALL WORKFLOWS/)
+  assert.match(settingsSource, /ROLE ROUTER \/ SECURE MODEL BUS/)
   assert.match(settingsSource, /Windows DPAPI/)
-  assert.match(settingsSource, /写稿、调优与回测/)
+  assert.match(settingsSource, /写稿、调优、回测与生图可以独立配置/)
+  assert.match(settingsSource, /未配置的角色会明确回退到写稿模型/)
+  assert.match(settingsSource, /本版本封面仍由本地确定性绘图生成/)
   assert.match(settingsSource, /测试连接只会向当前模型发送固定合成文本/)
   assert.doesNotMatch(settingsSource, /Vercel Production/)
   assert.doesNotMatch(settingsSource, /仅当前标签页/)

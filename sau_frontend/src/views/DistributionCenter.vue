@@ -15,6 +15,63 @@
       </div>
     </header>
 
+    <section id="publish-command-bar" class="publish-command-bar" aria-label="发布控制台">
+      <div class="command-identity">
+        <span>AUTOMATION / READY CHECK</span>
+        <strong>发布控制台</strong>
+        <small>先自动补齐可安全推断的配置，再由你确认真实发送。</small>
+      </div>
+      <div class="command-metrics" aria-live="polite">
+        <button type="button" @click="focusDispatchSection('article')">
+          <span>稿件</span><strong>{{ selectedArticleIds.length }}</strong>
+        </button>
+        <button type="button" @click="focusDispatchSection('platform')">
+          <span>渠道</span><strong>{{ selectedPlatforms.length }}</strong>
+        </button>
+        <button type="button" @click="focusDispatchSection('account')">
+          <span>账号覆盖</span><strong>{{ accountCoverageLabel }}</strong>
+        </button>
+        <button
+          type="button"
+          :class="{ blocked: dispatchBlockers.length > 0 }"
+          @click="focusFirstBlocker"
+        >
+          <span>阻塞项</span><strong>{{ dispatchBlockers.length }}</strong>
+        </button>
+      </div>
+      <div class="command-actions">
+        <el-button plain :disabled="articlesLoading || platformsLoadError" @click="autoConfigureDispatch">
+          自动配置可用路径
+        </el-button>
+        <el-tooltip
+          placement="bottom-end"
+          :disabled="canDispatch"
+          :content="dispatchBlockerSummary"
+        >
+          <span class="command-publish-trigger">
+            <el-button
+              type="primary"
+              size="large"
+              :icon="Promotion"
+              :loading="dispatching"
+              :disabled="!canDispatch"
+              @click="dispatchArticle"
+            >
+              {{ dispatchButtonLabel }}
+            </el-button>
+          </span>
+        </el-tooltip>
+      </div>
+      <button
+        v-if="dispatchBlockers.length"
+        type="button"
+        class="command-blocker-copy"
+        @click="focusFirstBlocker"
+      >
+        {{ dispatchBlockers[0].message }}<span v-if="dispatchBlockers.length > 1">，另有 {{ dispatchBlockers.length - 1 }} 项</span> ↘
+      </button>
+    </section>
+
     <section
       v-if="accountBindingRequired"
       :class="['publish-mode-banner', publishingRuntimeReady ? 'armed' : 'blocked']"
@@ -59,14 +116,17 @@
           </div>
         </div>
 
-        <div class="field-block">
-          <label for="article-select">就绪稿件</label>
+        <div id="dispatch-article" class="field-block">
+          <label for="article-select">就绪稿件 <small>最多一次选择 {{ MAX_BATCH_ARTICLES }} 篇</small></label>
           <el-select
             id="article-select"
-            v-model="selectedArticleId"
+            v-model="selectedArticleIds"
+            multiple
+            collapse-tags
+            collapse-tags-tooltip
             filterable
             clearable
-            placeholder="选择一篇已标记就绪的文章"
+            placeholder="选择一篇或多篇已标记就绪的文章"
             :loading="articlesLoading"
             :disabled="articlesLoading || articlesLoadError"
           >
@@ -105,7 +165,7 @@
           </div>
         </article>
 
-        <fieldset class="platform-fieldset">
+        <fieldset id="dispatch-platform" class="platform-fieldset">
           <legend>分发渠道</legend>
           <p>平台能力由后端统一声明；图文渠道和视频渠道会分别校验所需素材。</p>
           <div class="platform-grid">
@@ -252,7 +312,7 @@
           </div>
         </section>
 
-        <section v-if="accountBindingRequired && manifestPlatforms.length" class="account-routing" aria-labelledby="account-routing-title">
+        <section id="dispatch-account" v-if="accountBindingRequired && manifestPlatforms.length" class="account-routing" aria-labelledby="account-routing-title">
           <div class="asset-heading">
             <span class="asset-code">ACCOUNT / BIND</span>
             <div>
@@ -291,6 +351,7 @@
         </section>
 
         <section
+          id="dispatch-image"
           :class="['asset-panel', { required: imageRequired, missing: imageRequired && !selectedImage && !autoImage }]"
           aria-labelledby="asset-title"
         >
@@ -356,6 +417,7 @@
         </section>
 
         <section
+          id="dispatch-video"
           v-if="videoRequired"
           :class="['asset-panel', 'video-panel', { required: true, missing: !selectedVideo }]"
           aria-labelledby="video-asset-title"
@@ -412,7 +474,7 @@
           <p>以上频率是 GEO 软件保守建议，不是平台官方配额或发布通过保证；新账号、重复内容和短时批量操作应进一步降频，账号运营方需自行承担限流、处罚或封禁风险。</p>
         </section>
 
-        <div class="schedule-panel">
+        <div id="dispatch-schedule" class="schedule-panel">
           <div>
             <strong>定时发布</strong>
             <span>{{ demoAvailable ? '演示任务可选择到点自动执行。' : '真实任务到点后只进入队列，等待人工单项或批次确认。' }}</span>
@@ -442,20 +504,11 @@
           </div>
         </div>
 
-        <div class="dispatch-actions">
+        <div class="dispatch-actions dispatch-actions-relocated">
           <p>
-            {{ dispatchModeCopy }}
+            {{ dispatchModeCopy }} 主发布操作已固定在页面顶部；此处保留任务边界说明。
           </p>
-          <el-button
-            type="primary"
-            size="large"
-            :icon="Promotion"
-            :loading="dispatching"
-            :disabled="!canDispatch"
-            @click="dispatchArticle"
-          >
-            {{ dispatchButtonLabel }}
-          </el-button>
+          <el-button text @click="focusDispatchSection('top')">返回顶部发布控制台 ↑</el-button>
         </div>
       </div>
 
@@ -463,7 +516,7 @@
         <div class="manifest-heading">
           <span>ROUTE / 02</span>
           <h2>渠道路由</h2>
-          <p>一篇稿件，多条独立轨迹。</p>
+          <p>{{ selectedArticleIds.length > 1 ? '多篇稿件，逐条生成独立轨迹。' : '一篇稿件，多条独立轨迹。' }}</p>
         </div>
 
         <div v-if="manifestPlatforms.length" class="route-line">
@@ -487,8 +540,8 @@
 
         <div class="manifest-summary">
           <div>
-            <span>ARTICLE</span>
-            <strong>{{ selectedArticle ? `A-${String(selectedArticle.id).padStart(4, '0')}` : '—' }}</strong>
+            <span>ARTICLES</span>
+            <strong>{{ selectedArticleIds.length || '—' }}</strong>
           </div>
           <div>
             <span>CHANNELS</span>
@@ -836,6 +889,7 @@ const articles = ref([])
 const articlesLoading = ref(false)
 const articlesLoadError = ref(false)
 const selectedArticleId = ref(null)
+const selectedArticleIds = ref([])
 const selectedPlatforms = ref([])
 const platformDrafts = reactive({})
 const automaticPlatformVariants = reactive({})
@@ -892,9 +946,16 @@ const ACTIVE_JOB_STATUSES = new Set(['queued', 'processing'])
 const JOB_POLL_INTERVAL_MS = 5000
 const JOB_POLL_MAX_ATTEMPTS = 120
 const JOB_POLL_MAX_CONSECUTIVE_FAILURES = 3
+const MAX_BATCH_ARTICLES = 20
 
 const selectedArticle = computed(() => (
   articles.value.find(article => article.id === selectedArticleId.value) || null
+))
+
+const selectedArticles = computed(() => (
+  selectedArticleIds.value
+    .map(id => articles.value.find(article => article.id === id))
+    .filter(Boolean)
 ))
 
 const manifestPlatforms = computed(() => (
@@ -984,28 +1045,64 @@ const assetSummary = computed(() => {
   return parts.join(' + ') || 'NONE'
 })
 
-const canDispatch = computed(() => Boolean(
-  capabilitiesLoaded.value
-  && !platformsLoadError.value
-  && selectedArticleId.value
-  && selectedPlatforms.value.length
-  && manifestPlatforms.value.every(platform => platform.task_creation_available === true)
-  && (!imageRequired.value || selectedImage.value || autoImage.value)
-  && (!videoRequired.value || selectedVideo.value)
-  && platformCopiesReady.value
-  && accountsReady.value
-  && (!scheduleEnabled.value || publishAt.value)
-  && !imageUploading.value
-  && !videoUploading.value
-  && !dispatching.value
+const accountCoverageLabel = computed(() => {
+  if (demoAvailable.value) return 'DEMO'
+  if (!selectedPlatforms.value.length) return '0/0'
+  const covered = manifestPlatforms.value.filter(platform => selectedAccountFor(platform.key)).length
+  return `${covered}/${manifestPlatforms.value.length}`
+})
+
+const dispatchBlockers = computed(() => {
+  const blockers = []
+  const add = (code, message, section) => blockers.push({ code, message, section })
+  if (!capabilitiesLoaded.value || platformsLoadError.value) {
+    add('capabilities', '发布能力清单未载入', 'top')
+  } else if (!platforms.value.some(item => item.task_creation_available === true)) {
+    add('runtime', publishingBlockedReason.value, 'platform')
+  }
+  if (!selectedArticleIds.value.length) add('article', '请选择至少一篇就绪稿件', 'article')
+  if (selectedArticleIds.value.length > MAX_BATCH_ARTICLES) {
+    add('article_limit', `一次最多选择 ${MAX_BATCH_ARTICLES} 篇稿件`, 'article')
+  }
+  if (!selectedPlatforms.value.length) add('platform', '请选择至少一个发布渠道', 'platform')
+  if (manifestPlatforms.value.some(platform => platform.task_creation_available !== true)) {
+    add('platform_unavailable', '所选渠道包含当前不可用的平台', 'platform')
+  }
+  if (preflightLoading.value) add('preflight_running', '平台短版正在预检', 'platform')
+  else if (preflightError.value) add('preflight_error', preflightError.value, 'platform')
+  else if (selectedPlatforms.value.length && !platformCopiesReady.value) {
+    add('content_rules', '平台短版、离线规则或 AI 可引用性尚未通过', 'platform')
+  }
+  if (!accountsReady.value) add('account', '请补齐或明确选择每个平台的可用账号', 'account')
+  if (imageRequired.value && !selectedImage.value && !autoImage.value) {
+    add('image', '所选渠道缺少图片素材', 'image')
+  }
+  if (videoRequired.value && !selectedVideo.value) add('video', '所选渠道缺少视频素材', 'video')
+  if (scheduleEnabled.value && !publishAt.value) add('schedule', '请选择计划发布时间', 'schedule')
+  if (imageUploading.value) add('image_upload', '图片仍在上传', 'image')
+  if (videoUploading.value) add('video_upload', '视频仍在上传', 'video')
+  if (dispatching.value) add('dispatching', '任务正在创建，请等待本批次完成', 'top')
+  return blockers
+})
+
+const dispatchBlockerSummary = computed(() => (
+  dispatchBlockers.value.length
+    ? dispatchBlockers.value.slice(0, 4).map(item => item.message).join('；')
+    : '发布预检已通过'
 ))
+
+const dispatchTaskCount = computed(() => (
+  selectedArticleIds.value.length * selectedPlatforms.value.length
+))
+
+const canDispatch = computed(() => dispatchBlockers.value.length === 0)
 
 const dispatchButtonLabel = computed(() => {
   if (platformsLoadError.value) return '发布能力未载入'
   if (capabilitiesLoaded.value && !platforms.value.some(item => item.task_creation_available === true)) {
     return realPublishingAuthorized.value ? '发布运行时未就绪' : '当前构建未开放发布'
   }
-  if (!selectedArticleId.value) return '先选择就绪稿件'
+  if (!selectedArticleIds.value.length) return '先选择就绪稿件'
   if (!selectedPlatforms.value.length) return '至少选择一个渠道'
   if (preflightLoading.value) return '正在生成平台短版'
   if (preflightError.value) return '平台短版预检失败'
@@ -1023,11 +1120,11 @@ const dispatchButtonLabel = computed(() => {
   if (videoRequired.value && !selectedVideo.value) return '先补齐渠道视频'
   if (scheduleEnabled.value && !publishAt.value) return '选择计划发布时间'
   if (scheduleEnabled.value && demoAvailable.value && autoExecuteAtDue.value) {
-    return `创建 ${selectedPlatforms.value.length} 个自动计划任务`
+    return `创建 ${dispatchTaskCount.value} 个自动计划任务`
   }
   return scheduleEnabled.value
-    ? `创建 ${selectedPlatforms.value.length} 个计划任务`
-    : `分发到 ${selectedPlatforms.value.length} 个渠道`
+    ? `创建 ${dispatchTaskCount.value} 个计划任务`
+    : `创建 ${dispatchTaskCount.value} 个发布任务`
 })
 
 const activeJobCount = computed(() => (
@@ -1096,6 +1193,7 @@ const fetchArticles = async () => {
     const queryId = Number(route.query.article_id)
     if (!selectedArticleId.value && Number.isInteger(queryId) && articles.value.some(item => item.id === queryId)) {
       selectedArticleId.value = queryId
+      selectedArticleIds.value = [queryId]
     }
   } catch (error) {
     articlesLoadError.value = true
@@ -1289,6 +1387,60 @@ const accountDisplayName = account => `${account.account_name} · ID ${account.i
 const selectedAccountFor = platformKey => {
   const accountId = Number(selectedAccountIds[platformKey])
   return connectedAccounts(platformKey).find(account => account.id === accountId) || null
+}
+
+const focusDispatchSection = section => {
+  const targets = {
+    top: 'publish-command-bar',
+    article: 'dispatch-article',
+    platform: 'dispatch-platform',
+    account: 'dispatch-account',
+    image: 'dispatch-image',
+    video: 'dispatch-video',
+    schedule: 'dispatch-schedule'
+  }
+  const element = document.getElementById(targets[section] || targets.top)
+  element?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+}
+
+const focusFirstBlocker = () => {
+  focusDispatchSection(dispatchBlockers.value[0]?.section || 'top')
+}
+
+const autoConfigureDispatch = async () => {
+  if (!selectedArticleIds.value.length && articles.value.length) {
+    selectedArticleIds.value = [articles.value[0].id]
+  } else if (selectedArticleIds.value.length > MAX_BATCH_ARTICLES) {
+    selectedArticleIds.value = selectedArticleIds.value.slice(0, MAX_BATCH_ARTICLES)
+  }
+  if (accountBindingRequired.value) await fetchAccounts()
+
+  const candidates = platforms.value.filter(platform => (
+    isPlatformSelectable(platform)
+    && (!platform.requires_video || Boolean(selectedVideo.value))
+  ))
+  const accountReady = accountBindingRequired.value
+    ? candidates.filter(platform => connectedAccounts(platform.key).length > 0)
+    : candidates
+  const selected = accountReady.length ? accountReady : candidates
+  selectedPlatforms.value = selected.map(platform => platform.key)
+  autoImage.value = true
+
+  for (const platform of selected) {
+    const accounts = connectedAccounts(platform.key)
+    const current = selectedAccountFor(platform.key)
+    if (!current && accounts.length === 1) {
+      selectedAccountIds[platform.key] = accounts.at(0)?.id || null
+    }
+  }
+  await refreshPublishPreflight({ preserveEdits: false })
+  if (!selected.length) {
+    ElMessage.warning('没有可自动配置的渠道；请先查看运行时或账号阻塞项')
+  } else if (accountBindingRequired.value && selected.some(platform => connectedAccounts(platform.key).length > 1 && !selectedAccountFor(platform.key))) {
+    ElMessage.warning('已配置可用渠道；存在多个账号的平台仍需由你明确选择目标账号')
+  } else {
+    ElMessage.success(`已自动配置 ${selected.length} 个可用渠道；真实发送前仍需最终确认`)
+  }
 }
 
 const requestPlatformLogin = async (platform, job = null) => {
@@ -1549,22 +1701,46 @@ const clearSelectedVideo = () => {
   videoUploadProgress.value = 0
 }
 
+const resolveArticleDispatchDrafts = async articleId => {
+  if (Number(articleId) === Number(selectedArticleId.value)) {
+    return Object.fromEntries(selectedPlatforms.value.map(platform => [platform, platformDrafts[platform]]))
+  }
+  const response = await publishApi.previewVariants({
+    article_id: articleId,
+    platforms: [...selectedPlatforms.value]
+  })
+  const drafts = Object.fromEntries((response.data?.variants || []).map(variant => (
+    [variant.platform, refreshEditableVariant(variant)]
+  )))
+  const invalid = selectedPlatforms.value.filter(platform => (
+    !platformDraftReadyForDispatch(drafts[platform])
+  ))
+  if (invalid.length) {
+    throw new Error(`${invalid.map(platformName).join('、')}的平台短版预检未通过`)
+  }
+  return drafts
+}
+
 const dispatchArticle = async () => {
-  if (!canDispatch.value) return
+  if (!canDispatch.value) {
+    ElMessage.warning(dispatchBlockerSummary.value)
+    focusFirstBlocker()
+    return
+  }
   if (!demoAvailable.value) {
     const selectedNames = manifestPlatforms.value.map(platform => platform.name).join('、')
     try {
       await ElMessageBox.confirm(
         h('div', { style: { lineHeight: '1.65' } }, [
-          h('p', { style: { margin: '0 0 8px' } }, `将为 ${selectedNames} 创建真实发布任务。创建任务本身不会绕过平台验证。`),
+          h('p', { style: { margin: '0 0 8px' } }, `将用 ${selectedArticles.value.length} 篇稿件为 ${selectedNames} 创建 ${dispatchTaskCount.value} 个独立真实发布任务。创建任务本身不会绕过平台验证。`),
           h('p', { style: { margin: '0 0 8px', color: '#985b16', fontWeight: '700' } },
             '执行时可能弹出短信验证码、扫码、滑块或安全确认，请保持绑定手机和对应 App 可用。'),
           h('p', { style: { margin: 0, fontSize: '11px', color: '#6d6a61' } },
-            'GEO 的每日条数和发布间隔仅为软件保守建议，不是平台官方配额；遇到验证、限流或审核异常时应停止批量操作。')
+            '每篇稿件都会独立执行平台字数、标题、来源与可引用性预检。同一账号严格串行；遇到验证、限流或审核异常时停止该账号后续执行。')
         ]),
         '发布前检查 · 可能需要本人验证',
         {
-          confirmButtonText: '已准备好，创建任务',
+          confirmButtonText: `已核对，创建 ${dispatchTaskCount.value} 项`,
           cancelButtonText: '稍后再发',
           type: 'warning'
         }
@@ -1577,7 +1753,7 @@ const dispatchArticle = async () => {
   if (scheduleEnabled.value && demoAvailable.value && autoExecuteAtDue.value) {
     try {
       await ElMessageBox.confirm(
-        `这将授权系统在 ${publishAt.value} 到达后自动执行 ${selectedPlatforms.value.length} 个演示任务；不会访问真实平台。是否确认？`,
+        `这将授权系统在 ${publishAt.value} 到达后自动执行 ${dispatchTaskCount.value} 个演示任务；不会访问真实平台。是否确认？`,
         '确认定时演示任务',
         {
           confirmButtonText: '确认到点执行演示',
@@ -1597,32 +1773,45 @@ const dispatchArticle = async () => {
   let demoCount = 0
   const creationFailures = []
 
-  for (const platform of selectedPlatforms.value) {
+  for (const articleId of selectedArticleIds.value) {
+    const article = articles.value.find(item => item.id === articleId)
+    let drafts
     try {
-      const capability = platforms.value.find(item => item.key === platform)
-      const response = await publishApi.createJob({
-        article_id: selectedArticleId.value,
-        platform,
-        images: selectedImage.value ? [selectedImage.value.filename] : [],
-        video: capability?.requires_video ? (selectedVideo.value?.filename || '') : '',
-        auto_image: autoImage.value,
-        publish_at: scheduleEnabled.value ? publishAt.value : null,
-        auto_execute: demoAvailable.value && confirmedAutoExecute,
-        account_id: selectedAccountIds[platform] || null,
-        publish_title: platformDrafts[platform]?.editable_title ?? null,
-        publish_content: platformDrafts[platform]?.editable_content ?? null
-      })
-      let job = response.data
-      createdCount += 1
-      if (job.demo) demoCount += 1
-      if (job.demo && job.status === 'queued') {
-        const executed = await publishApi.executeDemoJob(job.job_id)
-        job = executed.data
-      }
+      drafts = await resolveArticleDispatchDrafts(articleId)
     } catch (error) {
-      failedCount += 1
-      creationFailures.push(`${platformName(platform)}：${batchFailureMessage(error)}`)
-      console.error(`创建 ${platform} 发布任务失败:`, error)
+      failedCount += selectedPlatforms.value.length
+      creationFailures.push(`${article?.title || `文章 #${articleId}`}：${batchFailureMessage(error)}`)
+      console.error(`文章 ${articleId} 平台预检失败:`, error)
+      continue
+    }
+
+    for (const platform of selectedPlatforms.value) {
+      try {
+        const capability = platforms.value.find(item => item.key === platform)
+        const response = await publishApi.createJob({
+          article_id: articleId,
+          platform,
+          images: selectedImage.value ? [selectedImage.value.filename] : [],
+          video: capability?.requires_video ? (selectedVideo.value?.filename || '') : '',
+          auto_image: autoImage.value,
+          publish_at: scheduleEnabled.value ? publishAt.value : null,
+          auto_execute: demoAvailable.value && confirmedAutoExecute,
+          account_id: selectedAccountIds[platform] || null,
+          publish_title: drafts[platform]?.editable_title ?? null,
+          publish_content: drafts[platform]?.editable_content ?? null
+        })
+        let job = response.data
+        createdCount += 1
+        if (job.demo) demoCount += 1
+        if (job.demo && job.status === 'queued') {
+          const executed = await publishApi.executeDemoJob(job.job_id)
+          job = executed.data
+        }
+      } catch (error) {
+        failedCount += 1
+        creationFailures.push(`${article?.title || `文章 #${articleId}`} / ${platformName(platform)}：${batchFailureMessage(error)}`)
+        console.error(`创建文章 ${articleId} / ${platform} 发布任务失败:`, error)
+      }
     }
   }
 
@@ -1635,9 +1824,9 @@ const dispatchArticle = async () => {
         : `${createdCount} 个发布任务已创建`
     )
   } else if (createdCount) {
-    ElMessage.warning(`已创建 ${createdCount} 个任务，${failedCount} 个渠道创建失败`)
+    ElMessage.warning(`已创建 ${createdCount} 个任务，${failedCount} 个任务创建失败`)
   } else if (failedCount) {
-    ElMessage.error(`${failedCount} 个渠道均未创建任务`)
+    ElMessage.error(`${failedCount} 个任务均未创建`)
   }
   if (creationFailures.length) {
     await ElMessageBox.alert(
@@ -1742,7 +1931,7 @@ const executeRealBatch = async () => {
               `${preparationIssues.length} 个已变化任务将跳过，不会访问平台。`)
           : null,
         h('p', { style: { margin: '8px 0 0', color: '#985b16', fontWeight: '700' } },
-          '每项独立执行：失败、验证码、待核验或状态未知不会阻塞后续，也不会自动重试同一任务。平台可能弹出本人验证窗口。'),
+          '每项独立执行：普通单项失败不拖住其他账号，也不会自动重试；若识别到封禁、限制、登录失效或本人验证，则冻结该账号余下任务。平台可能弹出本人验证窗口。'),
         h('p', { style: { margin: '8px 0 0' } }, `请输入“${confirmationPhrase}”继续。`)
       ]),
       '强确认 · 连续真实发布',
@@ -2328,6 +2517,7 @@ onMounted(async () => {
         ElMessage.warning(requestedPlatform.unavailable_reason || '原任务平台当前不可用，无法重建')
       } else {
         selectedArticleId.value = requestedJob.article_id
+        selectedArticleIds.value = [requestedJob.article_id]
         selectedPlatforms.value = [requestedJob.platform]
         selectedAccountIds[requestedJob.platform] = null
         ElMessage.info('已定位原稿件与平台；请重新选择账号并核对素材后创建新任务')
@@ -2348,6 +2538,19 @@ watch(activeJobCount, (count, previousCount) => {
   }
   scheduleJobPoll({ resetWindow: previousCount === 0 || count > previousCount })
 })
+
+watch(selectedArticleIds, values => {
+  const normalized = [...new Set((values || []).map(Number).filter(Number.isInteger))]
+    .slice(0, MAX_BATCH_ARTICLES)
+  if (normalized.length !== (values || []).length) {
+    selectedArticleIds.value = normalized
+    ElMessage.warning(`一次最多选择 ${MAX_BATCH_ARTICLES} 篇就绪稿件`)
+    return
+  }
+  if (!normalized.includes(Number(selectedArticleId.value))) {
+    selectedArticleId.value = normalized.at(0) || null
+  }
+}, { deep: true })
 
 watch(selectedArticleId, async value => {
   selectedImage.value = null
@@ -2400,6 +2603,94 @@ onBeforeUnmount(() => {
   padding: 8px 4px 18px;
   border-bottom: 1px solid #cad6d2;
 }
+
+.publish-command-bar {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  display: grid;
+  grid-template-columns: minmax(210px, 0.9fr) minmax(360px, 1.25fr) auto;
+  gap: 12px 22px;
+  align-items: center;
+  margin: 0 0 18px;
+  padding: 13px 15px;
+  border: 1px solid #b8c9c5;
+  border-top: 3px solid var(--signal);
+  background: rgba(249, 252, 250, 0.97);
+  box-shadow: 0 12px 26px rgba(10, 34, 39, 0.12);
+  backdrop-filter: blur(12px);
+}
+
+.command-identity {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 2px;
+
+  > span { color: #328c87; font: 800 9px/1.2 "Cascadia Mono", monospace; letter-spacing: 0.12em; }
+  > strong { color: var(--harbor-deep); font-size: 16px; }
+  > small { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+}
+
+.command-metrics {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(74px, 1fr));
+  border: 1px solid var(--rule);
+  background: #fff;
+
+  button {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding: 9px 11px;
+    border: 0;
+    border-right: 1px solid var(--rule);
+    background: transparent;
+    color: var(--ink);
+    cursor: pointer;
+  }
+
+  button:last-child { border-right: 0; }
+  button:hover,
+  button:focus-visible { background: #edf6f4; outline: 2px solid rgba(57, 184, 178, 0.32); outline-offset: -2px; }
+  button.blocked { background: #fff5f1; color: #9f4139; }
+  span { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+  strong { font: 800 15px/1 "Cascadia Mono", monospace; }
+}
+
+.command-actions {
+  display: flex;
+  align-items: stretch;
+  justify-content: flex-end;
+  gap: 8px;
+
+  :deep(.el-button) { height: 40px; border-radius: 3px; }
+  :deep(.el-button--primary) { min-width: 190px; background: var(--harbor); border-color: var(--harbor); }
+  :deep(.el-button--primary:hover) { background: #17434a; border-color: #17434a; }
+}
+
+.command-publish-trigger {
+  display: inline-flex;
+
+  :deep(.el-button) { width: 100%; }
+}
+
+.command-blocker-copy {
+  grid-column: 1 / -1;
+  justify-self: stretch;
+  padding: 7px 10px;
+  border: 1px solid #efc5bc;
+  background: #fff5f1;
+  color: #9f4139;
+  font-size: 11px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.command-blocker-copy:hover,
+.command-blocker-copy:focus-visible { border-color: #c15454; outline: 2px solid rgba(193, 84, 84, 0.18); }
 
 .publish-mode-banner {
   display: grid;
@@ -2551,6 +2842,8 @@ onBeforeUnmount(() => {
 
   :deep(.el-select) { width: 100%; }
   :deep(.el-select__wrapper) { min-height: 44px; border-radius: 3px; }
+
+  label small { margin-left: 6px; color: var(--muted); font-size: 10px; font-weight: 500; }
 }
 
 .article-option {
@@ -3286,6 +3579,11 @@ onBeforeUnmount(() => {
   &.action_required > span { background: var(--amber); }
 }
 
+.dispatch-actions-relocated {
+  :deep(.el-button) { min-width: 0; background: transparent; border-color: transparent; color: #2f7773; }
+  :deep(.el-button:hover) { background: #edf6f4; border-color: transparent; color: var(--harbor); }
+}
+
 .job-identity,
 .job-article,
 .job-time {
@@ -3444,6 +3742,9 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 1180px) {
+  .publish-command-bar { grid-template-columns: minmax(220px, 0.75fr) minmax(420px, 1.25fr); }
+  .command-actions { grid-column: 1 / -1; }
+  .command-publish-trigger { flex: 1; }
   .platform-grid { grid-template-columns: repeat(3, 1fr); }
   .job-row { grid-template-columns: 78px 126px minmax(160px, 1fr) minmax(180px, 1fr); padding: 15px 0; }
   .job-time { grid-column: 3; }
@@ -3451,6 +3752,9 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 900px) {
+  .publish-command-bar { position: relative; grid-template-columns: 1fr; }
+  .command-actions { grid-column: auto; justify-content: stretch; }
+  .command-actions :deep(.el-button) { flex: 1; }
   .dispatch-console { grid-template-columns: 1fr; }
   .route-manifest { min-height: 420px; }
   .page-heading, .board-toolbar { align-items: flex-start; flex-direction: column; }
@@ -3459,6 +3763,11 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 680px) {
+  .command-metrics { grid-template-columns: repeat(2, 1fr); }
+  .command-metrics button:nth-child(2) { border-right: 0; }
+  .command-metrics button:nth-child(-n + 2) { border-bottom: 1px solid var(--rule); }
+  .command-actions { flex-direction: column; }
+  .command-publish-trigger { width: 100%; }
   .page-heading { gap: 18px; }
   .live-indicator { width: 100%; box-sizing: border-box; }
   .dispatch-form, .route-manifest { padding: 20px; }

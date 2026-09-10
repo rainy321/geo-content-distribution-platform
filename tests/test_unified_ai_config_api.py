@@ -53,6 +53,22 @@ class UnifiedAIConfigApiTests(unittest.TestCase):
                     ),
                 )
                 self.project_id = int(cursor.lastrowid)
+                article = conn.execute(
+                    """
+                    INSERT INTO articles (
+                        project_id, title, summary, content, tags, status
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        self.project_id,
+                        "Synthetic article",
+                        "Synthetic summary",
+                        "Synthetic Company provides Synthetic Product for controlled tests.",
+                        "[]",
+                        "draft",
+                    ),
+                )
+                self.article_id = int(article.lastrowid)
         self.config_path = root / "config" / "ai.json"
         self.config_service = UnifiedAIConfigService(
             self.config_path,
@@ -115,6 +131,102 @@ class UnifiedAIConfigApiTests(unittest.TestCase):
         self.assertFalse(cleared.get_json()["data"]["saved_configured"])
         self.assertFalse(self.config_path.exists())
 
+    def test_role_config_status_and_clear_are_secret_free(self):
+        self.client.put("/api/ai/config", json=self.save_payload())
+        evaluator_saved = self.client.put(
+            "/api/ai/config/roles/evaluator",
+            json={
+                "provider": "custom",
+                "base_url": "https://evaluation.example.test/v1",
+                "model": "synthetic-evaluator-model",
+                "api_key": "synthetic-evaluator-secret",
+                "reuse_writer_credential": False,
+            },
+        )
+        self.assertEqual(evaluator_saved.status_code, 200)
+
+        saved = self.client.put(
+            "/api/ai/config/roles/reviewer",
+            json={
+                "provider": "qwen",
+                "base_url": "https://api.example.test/compatible-mode/v1",
+                "model": "synthetic-reviewer-model",
+                "reuse_writer_credential": True,
+            },
+        )
+
+        self.assertEqual(saved.status_code, 200)
+        roles = saved.get_json()["data"]["roles"]
+        self.assertTrue(roles["reviewer"]["configured"])
+        self.assertFalse(roles["reviewer"]["fallback"])
+        self.assertFalse(roles["reviewer"]["same_as_writer"])
+        self.assertEqual(
+            self.config_service.load_settings("reviewer").api_key,
+            self.save_payload()["api_key"],
+        )
+        self.assertNotIn(self.save_payload()["api_key"], saved.get_data(as_text=True))
+
+        cleared = self.client.delete("/api/ai/config/roles/reviewer")
+        self.assertEqual(cleared.status_code, 200)
+        reviewer = cleared.get_json()["data"]["roles"]["reviewer"]
+        self.assertFalse(reviewer["configured"])
+        self.assertTrue(reviewer["fallback"])
+        self.assertEqual(
+            self.config_service.load_settings("writer").model,
+            "synthetic-model",
+        )
+        self.assertEqual(
+            self.config_service.load_settings("evaluator").model,
+            "synthetic-evaluator-model",
+        )
+        self.assertTrue(cleared.get_json()["data"]["roles"]["evaluator"]["configured"])
+        self.assertNotIn(
+            "synthetic-evaluator-secret",
+            cleared.get_data(as_text=True),
+        )
+
+    def test_role_config_rejects_cross_provider_credential_reuse(self):
+        self.client.put("/api/ai/config", json=self.save_payload())
+
+        response = self.client.put(
+            "/api/ai/config/roles/image",
+            json={
+                "provider": "custom",
+                "base_url": "https://images.example.test/v1",
+                "model": "synthetic-image-model",
+                "reuse_writer_credential": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertNotIn(self.save_payload()["api_key"], response.get_data(as_text=True))
+
+    @patch("sau_backend.generate_article_cover")
+    def test_local_cover_reports_configured_image_role_as_not_invoked(self, generate):
+        self.config_service.save(**self.save_payload())
+        self.config_service.save_role(
+            "image",
+            provider="custom",
+            base_url="https://images.example.test/v1",
+            model="image-model",
+            api_key="image-secret",
+        )
+        generate.return_value = {"id": 77, "source": "generated"}
+
+        response = self.client.post(
+            f"/api/articles/{self.article_id}/images/generate"
+        )
+
+        self.assertEqual(response.status_code, 201)
+        data = response.get_json()["data"]
+        self.assertEqual(data["generation_mode"], "local_deterministic")
+        self.assertEqual(
+            data["ai_role"]["execution"],
+            "configured_but_not_invoked",
+        )
+        self.assertEqual(data["ai_role"]["model"], "image-model")
+        self.assertNotIn("image-secret", response.get_data(as_text=True))
+
     def test_invalid_save_does_not_replace_existing_good_config(self):
         self.client.post("/api/ai/config", json=self.save_payload())
 
@@ -129,6 +241,26 @@ class UnifiedAIConfigApiTests(unittest.TestCase):
             settings.base_url,
             "https://api.example.test/compatible-mode/v1",
         )
+
+    def test_writer_endpoint_change_without_new_key_is_rejected_without_overwrite(self):
+        original = self.save_payload()
+        self.client.put("/api/ai/config", json=original)
+
+        response = self.client.put(
+            "/api/ai/config",
+            json={
+                "provider": "custom",
+                "base_url": "https://other.example.test/v1",
+                "model": "other-model",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        settings = self.config_service.load_settings("writer")
+        self.assertEqual(settings.base_url, original["base_url"])
+        self.assertEqual(settings.model, original["model"])
+        self.assertEqual(settings.api_key, original["api_key"])
+        self.assertNotIn(original["api_key"], response.get_data(as_text=True))
 
     def test_content_engine_health_uses_saved_unified_configuration(self):
         self.config_service.save(**self.save_payload())
@@ -167,6 +299,28 @@ class UnifiedAIConfigApiTests(unittest.TestCase):
         self.assertFalse(data["data_disclosure"]["project_data_sent"])
         self.assertFalse(data["data_disclosure"]["api_key_returned"])
         self.assertNotIn(self.save_payload()["api_key"], response.get_data(as_text=True))
+
+    @patch("sau_backend.sample_ai_prompt_detailed")
+    def test_connection_test_resolves_requested_role_and_reports_fallback(self, sample):
+        self.config_service.save(**self.save_payload())
+        sample.return_value = AICompletionResult(
+            content="OK",
+            model="synthetic-model",
+            provider_request_id="provider-role-test-1",
+            elapsed_ms=4,
+            usage={"total_tokens": 3},
+        )
+
+        response = self.client.post(
+            "/api/ai/config/test",
+            json={"confirm_external_call": True, "role": "reviewer"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(sample.call_args.kwargs["settings"].model, "synthetic-model")
+        role = response.get_json()["data"]["ai_role"]
+        self.assertEqual(role["role"], "reviewer")
+        self.assertTrue(role["fallback"])
 
     @patch("sau_backend.sample_ai_prompt_detailed")
     def test_connection_test_rejects_invalid_explicit_draft_as_bad_request(self, sample):
@@ -234,6 +388,44 @@ class UnifiedAIConfigApiTests(unittest.TestCase):
             response.get_data(as_text=True),
         )
 
+    @patch("services.ai_visibility_sampling_service.sample_ai_prompt_detailed")
+    def test_visibility_sampling_uses_independent_evaluator_role(self, sampler):
+        self.config_service.save(**self.save_payload())
+        self.config_service.save_role(
+            "evaluator",
+            provider="deepseek",
+            base_url="https://evaluation.example.test/v1",
+            model="evaluation-model",
+            api_key="evaluation-secret",
+        )
+        sampler.return_value = AICompletionResult(
+            content="Synthetic Product",
+            model="evaluation-model",
+            provider_request_id="provider-evaluation-1",
+            elapsed_ms=3,
+            usage={"total_tokens": 2},
+        )
+
+        response = self.client.post(
+            "/api/geo/visibility/sample",
+            json={
+                "project_id": self.project_id,
+                "prompt": "Which synthetic product is visible?",
+                "sample_count": 1,
+                "persist": False,
+                "confirm_external_call": True,
+            },
+            headers={
+                "X-Request-ID": "evaluator-role-sample-1",
+                "Idempotency-Key": "evaluator-role-sample-key-1",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(sampler.call_args.kwargs["settings"].model, "evaluation-model")
+        self.assertEqual(response.get_json()["data"]["ai_role"]["role"], "evaluator")
+        self.assertFalse(response.get_json()["data"]["ai_role"]["fallback"])
+
     @patch("sau_backend._create_content_generation_service")
     def test_content_generation_uses_same_saved_config(self, factory):
         self.config_service.save(**self.save_payload())
@@ -262,6 +454,70 @@ class UnifiedAIConfigApiTests(unittest.TestCase):
             self.save_payload()["api_key"],
             response.get_data(as_text=True),
         )
+
+    @patch("sau_backend._create_content_generation_service")
+    def test_content_generation_routes_writer_and_tracks_diversity(self, factory):
+        self.config_service.save(**self.save_payload())
+        factory.return_value.generate.return_value = {
+            "title": "Synthetic title",
+            "summary": "",
+            "content": "Synthetic body",
+            "tags": [],
+            "faq": [],
+            "generation": {},
+        }
+
+        response = self.client.post(
+            "/api/articles/generate",
+            json={
+                "project_id": self.project_id,
+                "topic": "Synthetic topic",
+                "diversity_seed": "stable-diversity-seed",
+            },
+            headers={
+                "X-Request-ID": "writer-role-request-1",
+                "Idempotency-Key": "writer-role-key-1",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        request_value = factory.return_value.generate.call_args.args[0]
+        self.assertEqual(
+            request_value.diversity_profile["fact_policy"],
+            "input_only_no_invention",
+        )
+        self.assertIn("不得为了差异化虚构", request_value.template_instruction)
+        self.assertEqual(request_value.ai_role["role"], "writer")
+        self.assertFalse(request_value.ai_role["fallback"])
+        role = response.get_json()["data"]["generation"]["ai_role"]
+        self.assertEqual(role["role"], "writer")
+        self.assertFalse(role["fallback"])
+
+    @patch("sau_backend.optimize_geo_content")
+    def test_optimization_uses_independent_reviewer_role(self, optimize):
+        self.config_service.save(**self.save_payload())
+        self.config_service.save_role(
+            "reviewer",
+            provider="deepseek",
+            base_url="https://review.example.test/v1",
+            model="review-model",
+            api_key="review-secret",
+        )
+        optimize.return_value = {
+            "title": "Reviewed synthetic article",
+            "summary": "Reviewed summary",
+            "content": "Synthetic Company provides Synthetic Product for controlled tests.",
+            "tags": [],
+            "faq": [],
+        }
+
+        response = self.client.post(f"/api/articles/{self.article_id}/optimize")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(optimize.call_args.kwargs["settings"].model, "review-model")
+        role = response.get_json()["data"]["ai_role"]
+        self.assertEqual(role["role"], "reviewer")
+        self.assertFalse(role["fallback"])
 
     @patch("sau_backend._create_content_generation_service")
     def test_explicit_request_config_overrides_saved_config(self, factory):

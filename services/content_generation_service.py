@@ -211,6 +211,8 @@ class ContentGenerationService:
             result = replace(
                 result,
                 elapsed_ms=round((time.perf_counter() - started_at) * 1000),
+                diversity_profile=dict(request.diversity_profile or {}),
+                ai_role=dict(request.ai_role or {}),
             )
             score = score_geo_content(
                 title=result.title,
@@ -232,6 +234,8 @@ class ContentGenerationService:
                 "dimensions": score["dimensions"],
                 "suggestions": score["suggestions"],
                 "citeability": citeability,
+                "diversity_profile": dict(request.diversity_profile or {}),
+                "ai_role": dict(request.ai_role or {}),
             }
             return mark_succeeded(
                 self.database_path,

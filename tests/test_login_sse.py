@@ -524,6 +524,33 @@ class LoginSseTests(unittest.TestCase):
             self.assertEqual(response.status_code, 409)
             thread.assert_not_called()
 
+    def test_kuaishou_existing_account_id_is_rejected_before_thread(self):
+        with closing(sqlite3.connect(self.database_path)) as connection:
+            account_id = connection.execute(
+                """
+                INSERT INTO user_info (type, filePath, userName, status)
+                VALUES (?, ?, ?, ?)
+                """,
+                (4, "old-kuaishou.json", "快手主号", 0),
+            ).lastrowid
+            connection.commit()
+
+        with patch("sau_backend.threading.Thread") as thread:
+            response = self.client.get(
+                "/login",
+                query_string={
+                    "type": 4,
+                    "id": "快手主号",
+                    "existing_account_id": account_id,
+                },
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("先退出并解绑旧账号", response.get_json()["msg"])
+        thread.assert_not_called()
+        with active_queues_lock:
+            self.assertEqual(active_queues, {})
+
     def test_disconnected_or_checking_existing_account_cannot_start_relogin(self):
         with closing(sqlite3.connect(self.database_path)) as connection:
             disconnected_id = connection.execute(

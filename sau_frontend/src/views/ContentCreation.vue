@@ -208,6 +208,24 @@
             </el-form-item>
           </div>
 
+          <section class="diversity-mixer" aria-label="内容差异化编排">
+            <div>
+              <span>AUTO MIX / TRACEABLE</span>
+              <strong>自动变化角度、结构、语气和证据侧重</strong>
+              <p>只改变表达组合，不会补造输入中没有的数据、来源、案例或日期。</p>
+            </div>
+            <button type="button" :disabled="generating" @click="rotateDiversitySeed">
+              <el-icon><Refresh /></el-icon>
+              下一稿换一组
+            </button>
+            <dl v-if="generationReceipt?.diversityProfile?.version">
+              <div><dt>角度</dt><dd>{{ generationReceipt.diversityProfile.angle?.label || '已编排' }}</dd></div>
+              <div><dt>结构</dt><dd>{{ generationReceipt.diversityProfile.structure?.label || '已编排' }}</dd></div>
+              <div><dt>语气</dt><dd>{{ generationReceipt.diversityProfile.tone?.label || '已编排' }}</dd></div>
+              <div><dt>追踪码</dt><dd>{{ generationReceipt.diversityProfile.seed_fingerprint || '—' }}</dd></div>
+            </dl>
+          </section>
+
           <section class="blueprint-preview" aria-labelledby="blueprint-title">
             <header>
               <div>
@@ -392,6 +410,13 @@
               <div>
                 <dt>版本</dt>
                 <dd>{{ displayMetric(generationReceipt.version) }}</dd>
+              </div>
+              <div>
+                <dt>模型角色</dt>
+                <dd>
+                  {{ generationReceipt.aiRole?.role || 'writer' }}
+                  <small v-if="generationReceipt.aiRole?.fallback"> · fallback</small>
+                </dd>
               </div>
               <div>
                 <dt>耗时</dt>
@@ -771,6 +796,7 @@ const geoBlueprint = ref(null)
 const blueprintLoading = ref(false)
 const blueprintError = ref('')
 const blueprintStale = ref(false)
+const diversitySeed = ref('')
 let blueprintRequestSequence = 0
 
 const generating = computed(() => generationPhase.value === 'requesting')
@@ -1101,6 +1127,11 @@ const removeTemplate = async (item) => {
   }
 }
 
+const rotateDiversitySeed = () => {
+  diversitySeed.value = makeRequestId()
+  ElMessage.success('下一稿将使用新的内容编排组合')
+}
+
 const fetchUnifiedAIStatus = async () => {
   unifiedAIStatusLoading.value = true
   try {
@@ -1161,6 +1192,7 @@ const generateBatch = async () => {
   batchGenerating.value = true
   batchResult.value = null
   const batchRequestId = makeRequestId()
+  const activeDiversitySeed = diversitySeed.value || batchRequestId
   try {
     const response = await articleApi.generateBatch({
       project_id: brief.project_id,
@@ -1169,7 +1201,8 @@ const generateBatch = async () => {
       length: brief.length,
       content_type: brief.content_type,
       target_platform: brief.target_platform,
-      template_id: brief.template_id
+      template_id: brief.template_id,
+      diversity_seed: activeDiversitySeed
     }, {
       suppressGlobalError: true,
       headers: {
@@ -1178,6 +1211,7 @@ const generateBatch = async () => {
       }
     })
     batchResult.value = normalizeBatchGenerationResult(response.data)
+    diversitySeed.value = makeRequestId()
     ElMessage.success(`已保存 ${batchResult.value.created_count} 篇批量草稿`)
   } catch (error) {
     console.error('批量生成失败:', error)
@@ -1248,6 +1282,7 @@ const generateDraft = async () => {
   generationNotice.value = null
   scoreError.value = ''
   activeRequestId.value = makeRequestId()
+  const activeDiversitySeed = diversitySeed.value || activeRequestId.value
   generationController = new AbortController()
   startGenerationTimer()
   try {
@@ -1258,7 +1293,8 @@ const generateDraft = async () => {
       length: brief.length,
       content_type: brief.content_type,
       target_platform: brief.target_platform,
-      template_id: brief.template_id
+      template_id: brief.template_id,
+      diversity_seed: activeDiversitySeed
     }, {
       signal: generationController.signal,
       suppressGlobalError: true,
@@ -1292,6 +1328,7 @@ const generateDraft = async () => {
       tags: article.tags || brief.keywords
     })
     generationReceipt.value = receipt
+    diversitySeed.value = makeRequestId()
     generationNotice.value = receipt.fallbackUsed
       ? {
           kind: 'fallback',
@@ -1927,6 +1964,57 @@ onBeforeUnmount(() => {
   :deep(.el-input-number) {
     width: 100%;
   }
+}
+
+.diversity-mixer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px 16px;
+  margin: 2px 0 18px;
+  padding: 14px;
+  border: 1px solid var(--geo-line);
+  border-left: 3px solid var(--geo-line-strong);
+  border-radius: 8px;
+  background: #fff;
+
+  > div:first-child { display: grid; gap: 4px; }
+  > div:first-child > span {
+    color: var(--geo-muted);
+    font: 700 8px/1 "Cascadia Mono", monospace;
+    letter-spacing: .12em;
+  }
+  strong { font-size: 12px; }
+  p { margin: 0; color: var(--geo-muted); font-size: 10px; line-height: 1.55; }
+
+  > button {
+    display: inline-flex;
+    align-items: center;
+    align-self: center;
+    gap: 5px;
+    padding: 7px 9px;
+    border: 1px solid var(--geo-line);
+    border-radius: 5px;
+    color: var(--geo-ink);
+    background: var(--geo-canvas);
+    font-size: 9px;
+    font-weight: 700;
+    cursor: pointer;
+  }
+  > button:disabled { cursor: not-allowed; opacity: .55; }
+  > button:focus-visible { outline: 2px solid var(--geo-ink); outline-offset: 2px; }
+
+  dl {
+    display: grid;
+    grid-column: 1 / -1;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1px;
+    margin: 0;
+    border: 1px solid var(--geo-line);
+    background: var(--geo-line);
+  }
+  dl > div { min-width: 0; padding: 8px 9px; background: var(--geo-canvas); }
+  dt { color: var(--geo-muted); font: 700 8px/1.2 "Cascadia Mono", monospace; }
+  dd { overflow: hidden; margin: 4px 0 0; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
 }
 
 .creation-engine-bus {
@@ -3333,6 +3421,13 @@ onBeforeUnmount(() => {
 
   .form-pair {
     grid-template-columns: 1fr;
+  }
+
+  .diversity-mixer {
+    grid-template-columns: 1fr;
+
+    > button { justify-self: start; }
+    dl { grid-template-columns: 1fr; }
   }
 
   .template-form-row { grid-template-columns: 1fr; }

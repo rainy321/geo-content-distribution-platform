@@ -392,6 +392,14 @@ def _serialize_article(row: sqlite3.Row) -> dict[str, Any]:
             "sources": generation_result.get("sources")
             if isinstance(generation_result.get("sources"), list)
             else [],
+            "diversity_profile": generation_result.get("generation", {}).get(
+                "diversity_profile", {}
+            )
+            if isinstance(generation_result.get("generation"), dict)
+            else {},
+            "ai_role": generation_result.get("generation", {}).get("ai_role", {})
+            if isinstance(generation_result.get("generation"), dict)
+            else {},
         }
     for field in tuple(article):
         if field.startswith("generation_") and field != "generation_run_id":

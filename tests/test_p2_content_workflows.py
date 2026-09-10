@@ -110,9 +110,16 @@ class P2ContentWorkflowApiTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
+        request_envelope = factory.return_value.generate.call_args.args[0]
+        self.assertTrue(
+            request_envelope.template_instruction.startswith(
+                "按目标、过程、结果和限制组织内容。"
+            )
+        )
+        self.assertIn("本次内容差异化编排", request_envelope.template_instruction)
         self.assertEqual(
-            factory.return_value.generate.call_args.args[0].template_instruction,
-            "按目标、过程、结果和限制组织内容。",
+            request_envelope.diversity_profile["fact_policy"],
+            "input_only_no_invention",
         )
         updated = self.client.put(
             f"/api/content-templates/{template['id']}",

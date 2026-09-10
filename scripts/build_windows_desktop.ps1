@@ -139,7 +139,10 @@ try {
             tests.test_geo_article_compiler_service `
             tests.test_geo_article_compiler_api `
             tests.test_ai_service `
+            tests.test_unified_ai_config_service `
+            tests.test_unified_ai_config_api `
             tests.test_content_engine_contract `
+            tests.test_content_diversity_service `
             tests.test_content_hygiene_service `
             tests.test_content_generation_service `
             tests.test_content_generation_api_v1 `
@@ -163,6 +166,9 @@ try {
             tests.test_publish_scheduler_service `
             tests.test_worker_entrypoint `
             tests.test_media_publisher_adapters `
+            tests.test_media_account_service `
+            tests.test_media_accounts_api `
+            tests.test_media_account_risk_service `
             tests.test_media_account_disconnect `
             tests.test_all_platform_login_cancel `
             tests.test_bilibili_runtime `
@@ -178,6 +184,7 @@ try {
             tests.test_toutiao_article_topics `
             tests.test_toutiao_publish_flow `
             tests.test_xiaohongshu_uploader `
+            tests.test_kuaishou_account_risk `
             tests.test_xiaohongshu_publish_flow `
             tests.test_zhihu_publish_flow `
             tests.test_tencent_publish_safety `
@@ -466,10 +473,15 @@ try {
             publish_outcome_version = "publish-outcome-1.0.0"
             content_hygiene_version = "content-hygiene-1.1.0"
             geo_blackbox_panel_version = "geo-blackbox-panel-1.0.0"
+            media_account_risk_version = "media-account-risk-1.0.0"
+            unified_ai_role_router_version = "unified-ai-role-router-1.0.0"
+            content_diversity_version = "content-diversity-1.0.0"
             unified_ai_config_storage = "windows_dpapi_current_user"
             channel_recommendations = $true
             bounded_topic_matching = $true
             per_call_token_and_cost_receipts = $true
+            batch_dispatch_max_articles = 20
+            automatic_account_rotation = $false
             non_model_publish_token_semantics = "not_applicable"
         }
         packaged_smoke = [ordered]@{

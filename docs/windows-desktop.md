@@ -6,7 +6,7 @@
 
 本阶段交付对象只有 Windows EXE、校验清单和随附文档；正式网站、网页部署、服务器发布与服务器数据库迁移都不属于这份桌面交付，也不是启动或使用 EXE 的前置条件。
 
-当前产品版本为 `1.2.3`，构建时必须选择不可变的发布 profile：默认 `safe` 版不带真实发布运行时；`authorized_real` 版带经过成品探针验收的真实发布运行面。两种构建使用不同的产物目录和 ZIP 名称，不能靠 Windows 环境变量把 `safe` 版改成真实发布版。EXE 没有安装向导、自动更新器、Windows 服务或开机启动项；同一数据目录一次只允许一个实例运行。
+当前产品版本为 `1.2.4`，构建时必须选择不可变的发布 profile：默认 `safe` 版不带真实发布运行时；`authorized_real` 版带经过成品探针验收的真实发布运行面。两种构建使用不同的产物目录和 ZIP 名称，不能靠 Windows 环境变量把 `safe` 版改成真实发布版。EXE 没有安装向导、自动更新器、Windows 服务或开机启动项；同一数据目录一次只允许一个实例运行。
 
 同事交接 ZIP 未包含 `LICENSE` 或 `NOTICE`。在取得权利人的书面内部授权或补齐可核验的许可声明前，包含其 Python 移植算法的构建只用于内部受控 Beta，不作为已完成外部商业分发授权的版本。
 
@@ -131,7 +131,7 @@ GEO 诊断对项目定位、可发现性基础、竞品参照、内容资产就�
 
 产物目录形如：
 
-- `release\windows\GEO-Content-Platform-1.2.3-<safe或authorized-real>-<UTC时间>-<提交短SHA>\GEO-Content-Platform.exe`
+- `release\windows\GEO-Content-Platform-1.2.4-<safe或authorized-real>-<UTC时间>-<提交短SHA>\GEO-Content-Platform.exe`
 - 同目录的 ZIP、`GEO-Content-Platform.sha256.txt`、`GEO-Content-Platform.manifest.json`、`build-info.json`、`首次使用.md`、`AI可见度接口契约.md`、`GEO诊断与成本台账.md`、`Windows桌面技术说明.md`、`LICENSE.txt` 和 `THIRD-PARTY-NOTICES.txt`
 
 只有在同一提交上已经独立跑完回归时，才可显式使用 `-SkipTests`；manifest 会如实记录该状态。该参数仍不会跳过两个成品 EXE 冒烟测试。默认拒绝脏工作树，构建成功也不等于完成代码签名；签名状态会写入 manifest，外部商业交付仍必须单独完成签名与许可门禁。

@@ -44,7 +44,8 @@ test('batch execution isolates failures and always reports each prepared item', 
   assert.match(source, /const outcomeLines = outcomes\.map/)
   assert.match(source, /summarizePublishOutcomes\(outcomes\)/)
   assert.match(source, /分母仅含本次强确认后实际请求的/)
-  assert.match(source, /不会阻塞后续，也不会自动重试同一任务/)
+  assert.match(source, /普通单项失败不拖住其他账号，也不会自动重试/)
+  assert.match(source, /封禁、限制、登录失效或本人验证，则冻结该账号余下任务/)
 })
 
 

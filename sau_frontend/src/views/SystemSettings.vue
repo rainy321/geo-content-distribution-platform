@@ -5,7 +5,7 @@
         <span class="eyebrow">SYSTEM / UNIFIED AI BUS</span>
         <h1>系统设置</h1>
         <p>
-          只配置一次，写稿、调优与 AI 可见度回测共用同一个模型。
+          写稿模型作为安全默认值；调优、回测和生图可以独立配置，也可以明确回退。
           API Key 由当前 Windows 用户加密保护，界面和状态接口都不会回显明文。
         </p>
       </div>
@@ -20,11 +20,11 @@
       <section class="config-card" v-loading="statusLoading">
         <header class="section-heading">
           <div>
-            <span class="section-kicker">ONE ENGINE / ALL WORKFLOWS</span>
-            <h2>统一 AI 引擎</h2>
+            <span class="section-kicker">ROLE ROUTER / SECURE MODEL BUS</span>
+            <h2>{{ activeRoleDefinition.label }}</h2>
           </div>
-          <el-tag :type="aiStatus.configured ? 'success' : 'info'" effect="plain">
-            {{ unifiedAIStatusLabel(aiStatus) }}
+          <el-tag :type="activeRoleStatus.effectiveConfigured ? 'success' : 'info'" effect="plain">
+            {{ activeRoleStateLabel }}
           </el-tag>
         </header>
 
@@ -32,20 +32,44 @@
           <div class="bus-line" aria-hidden="true"><i :class="{ live: aiStatus.configured }" /></div>
           <article>
             <span>SECURE VAULT</span>
-            <strong>{{ unifiedAICredentialLabel(aiStatus) }}</strong>
+            <strong>{{ activeCredentialLabel }}</strong>
             <small>{{ credentialStorageLabel }}</small>
           </article>
           <article>
             <span>MODEL CORE</span>
-            <strong>{{ aiStatus.model || '等待配置' }}</strong>
-            <small>{{ aiStatus.providerLabel || 'OpenAI-compatible' }}</small>
+            <strong>{{ activeRoleStatus.model || '等待配置' }}</strong>
+            <small>{{ activeRoleStatus.providerLabel || 'OpenAI-compatible' }}</small>
           </article>
           <article class="bus-output">
-            <span>SHARED OUTPUT</span>
-            <strong>写稿 · 调优 · 回测</strong>
-            <small>三个功能使用同一设置</small>
+            <span>ROLE OUTPUT</span>
+            <strong>{{ activeRoleDefinition.code }} · {{ activeRoleStatus.fallback ? 'FALLBACK' : 'DIRECT' }}</strong>
+            <small>{{ activeRoleDefinition.description }}</small>
           </article>
         </section>
+
+        <nav class="role-switcher" aria-label="AI 模型角色">
+          <button
+            v-for="role in roleDefinitions"
+            :key="role.id"
+            type="button"
+            :class="{ active: selectedRole === role.id }"
+            :aria-current="selectedRole === role.id ? 'true' : undefined"
+            @click="selectRole(role.id)"
+          >
+            <span>{{ role.code }}</span>
+            <strong>{{ role.label }}</strong>
+            <small>{{ aiStatus.roles[role.id]?.configured ? '独立配置' : (role.id === 'writer' ? '等待配置' : '回退到写稿') }}</small>
+          </button>
+        </nav>
+
+        <div v-if="reviewerSimilarityRisk" class="role-risk" role="status">
+          <strong>调优模型与写稿模型相同</strong>
+          <span>可以继续使用，但两次输出更容易同质化；建议为 REVIEW 配置不同模型或服务商。</span>
+        </div>
+        <div v-if="selectedRole === 'image'" class="role-runtime-note" role="note">
+          <strong>生图连接当前不会被自动调用</strong>
+          <span>本版本封面仍由本地确定性绘图生成。这里保存的 IMAGE 配置会标记为 configured-but-not-invoked，不会虚报模型调用或费用。</span>
+        </div>
 
         <div v-if="statusError" class="config-error" role="status">
           {{ statusError }}
@@ -103,7 +127,7 @@
               <el-input
                 v-model="form.apiKey"
                 type="password"
-                :placeholder="aiStatus.savedConfigured && aiStatus.apiKeyConfigured ? '已安全保存；留空继续使用现有密钥' : '首次保存必须填写 API Key'"
+                :placeholder="activeRoleStatus.configured && activeRoleStatus.apiKeyConfigured ? '已安全保存；连接不变时可留空' : (canReuseWriterCredential ? '可复用写稿密钥，或填写独立 API Key' : '首次保存必须填写 API Key')"
                 autocomplete="new-password"
                 show-password
                 clearable
@@ -112,13 +136,21 @@
               </el-input>
             </el-form-item>
           </div>
+          <el-checkbox
+            v-if="selectedRole !== 'writer'"
+            v-model="form.reuseWriterCredential"
+            :disabled="!canReuseWriterCredential || saving"
+            class="credential-reuse"
+          >
+            同一服务地址时复用写稿模型密钥
+          </el-checkbox>
         </el-form>
 
         <div class="session-note">
           <el-icon><Lock /></el-icon>
           <div>
-            <strong>{{ aiStatus.savedConfigured && aiStatus.apiKeyConfigured ? '凭据已经安全保存' : '首次保存需要 API Key' }}</strong>
-            <p>密钥经 Windows DPAPI 加密后只供当前用户使用；修改地址或模型时可留空继续使用原密钥。</p>
+            <strong>{{ activeCredentialLabel }}</strong>
+            <p>密钥经 Windows DPAPI 加密后只供当前用户使用；状态接口仅返回“已配置”，不会返回密钥。</p>
           </div>
         </div>
 
@@ -131,11 +163,11 @@
         </div>
 
         <footer class="form-actions">
-          <el-button :disabled="!aiStatus.savedConfigured || clearing" :loading="clearing" @click="clearConfig">清除统一配置</el-button>
+          <el-button :disabled="!canClearActiveRole || clearing" :loading="clearing" @click="clearConfig">{{ clearButtonLabel }}</el-button>
           <div>
-            <el-button :loading="testing" :disabled="!aiStatus.configured" @click="testConnection">测试连接</el-button>
+            <el-button :loading="testing" :disabled="!activeRoleStatus.effectiveConfigured" @click="testConnection">测试此角色</el-button>
             <el-button type="primary" :loading="saving" :disabled="!aiStatus.saveSupported" @click="saveConfig">
-              保存统一引擎
+              {{ saveButtonLabel }}
             </el-button>
           </div>
         </footer>
@@ -211,8 +243,8 @@
             <article class="route-node provider-node">
               <span class="node-index">03</span>
               <div>
-                <strong>统一模型总线</strong>
-                <p>内容生成、调优与手动确认的可见度采样共用同一连接。</p>
+                <strong>角色路由总线</strong>
+                <p>写稿、调优、回测与生图可以独立配置；未配置的角色会明确回退到写稿模型。</p>
               </div>
               <el-icon><Promotion /></el-icon>
             </article>
@@ -257,12 +289,12 @@ import { articleApi } from '@/api/article'
 import { aiConfigApi } from '@/api/aiConfig'
 import { authApi } from '@/api/auth'
 import {
+  AI_ROLE_DEFINITIONS,
   UNIFIED_AI_PROVIDER_PRESETS,
   applyUnifiedAIProviderPreset,
+  buildUnifiedAIRoleConfigPayload,
   buildUnifiedAIConfigPayload,
-  normalizeUnifiedAIStatus,
-  unifiedAICredentialLabel,
-  unifiedAIStatusLabel
+  normalizeUnifiedAIStatus
 } from '@/utils/aiConfig'
 
 const formRef = ref(null)
@@ -277,13 +309,73 @@ const engineStatusError = ref('')
 const engineStatus = ref(null)
 const connectionResult = ref(null)
 const providerPresets = UNIFIED_AI_PROVIDER_PRESETS
+const roleDefinitions = AI_ROLE_DEFINITIONS
+const selectedRole = ref('writer')
 const aiStatus = reactive(normalizeUnifiedAIStatus({}))
 const form = reactive({
   provider: 'qwen',
   baseUrl: '',
   apiKey: '',
-  model: ''
+  model: '',
+  reuseWriterCredential: true
 })
+
+const activeRoleDefinition = computed(() => (
+  roleDefinitions.find(item => item.id === selectedRole.value) || roleDefinitions[0]
+))
+const emptyRoleStatus = Object.freeze({
+  configured: false,
+  effectiveConfigured: false,
+  fallback: false,
+  sourceRole: '',
+  provider: '',
+  providerLabel: '',
+  baseUrl: '',
+  model: '',
+  apiKeyConfigured: false,
+  credentialStorage: ''
+})
+const activeRoleStatus = computed(() => aiStatus.roles?.[selectedRole.value] || emptyRoleStatus)
+const writerRoleStatus = computed(() => aiStatus.roles?.writer || emptyRoleStatus)
+const normalizedEndpoint = value => String(value || '').trim().replace(/\/+$/, '')
+const canReuseWriterCredential = computed(() => (
+  selectedRole.value !== 'writer'
+  && writerRoleStatus.value.apiKeyConfigured
+  && String(form.provider || '').trim().toLowerCase() === writerRoleStatus.value.provider
+  && normalizedEndpoint(form.baseUrl) === normalizedEndpoint(writerRoleStatus.value.baseUrl)
+))
+const canReuseActiveCredential = computed(() => (
+  activeRoleStatus.value.configured
+  && activeRoleStatus.value.apiKeyConfigured
+  && String(form.provider || '').trim().toLowerCase() === activeRoleStatus.value.provider
+  && normalizedEndpoint(form.baseUrl) === normalizedEndpoint(activeRoleStatus.value.baseUrl)
+))
+const activeRoleStateLabel = computed(() => {
+  if (!activeRoleStatus.value.effectiveConfigured) return '尚未配置'
+  if (activeRoleStatus.value.fallback) return '回退到写稿模型'
+  return '独立配置已生效'
+})
+const activeCredentialLabel = computed(() => {
+  if (activeRoleStatus.value.apiKeyConfigured) return '•••••••• · 已受保护'
+  if (activeRoleStatus.value.effectiveConfigured) return '由默认角色提供'
+  return '未保存凭据'
+})
+const reviewerSimilarityRisk = computed(() => Boolean(
+  aiStatus.roles?.reviewer?.sameAsWriter
+))
+const canClearActiveRole = computed(() => (
+  selectedRole.value === 'writer'
+    ? aiStatus.savedConfigured
+    : activeRoleStatus.value.configured
+))
+const clearButtonLabel = computed(() => (
+  selectedRole.value === 'writer' ? '清除全部本机配置' : '改为回退到写稿模型'
+))
+const saveButtonLabel = computed(() => (
+  selectedRole.value === 'writer'
+    ? '保存写稿模型'
+    : `保存${activeRoleDefinition.value.label}`
+))
 
 const validateBaseUrl = (rule, value, callback) => {
   try {
@@ -324,8 +416,14 @@ const rules = {
   apiKey: [
     {
       validator: (rule, value, callback) => {
-        if (!String(value || '').trim() && !(aiStatus.savedConfigured && aiStatus.apiKeyConfigured)) {
-          callback(new Error('首次保存需要填写 API Key'))
+        const hasReusableKey = selectedRole.value === 'writer'
+          ? canReuseActiveCredential.value
+          : (
+              canReuseActiveCredential.value
+              || (form.reuseWriterCredential && canReuseWriterCredential.value)
+            )
+        if (!String(value || '').trim() && !hasReusableKey) {
+          callback(new Error('首次配置该连接需要填写 API Key'))
           return
         }
         callback()
@@ -354,7 +452,7 @@ const credentialStorageLabel = computed(() => ({
   windows_dpapi_current_user: 'Windows 当前用户专属加密',
   environment: '由运行环境安全提供',
   unavailable: '当前环境无法安全保存'
-}[aiStatus.credentialStorage] || '密钥不会通过状态接口返回'))
+}[activeRoleStatus.value.credentialStorage] || '密钥不会通过状态接口返回'))
 
 const engineHealthTone = computed(() => {
   if (!engineStatus.value || engineStatusError.value) return 'unknown'
@@ -388,18 +486,32 @@ const fallbackStatusLabel = computed(() => {
     : '已启用'
 })
 
+const loadActiveRoleForm = () => {
+  const status = activeRoleStatus.value
+  Object.assign(form, {
+    provider: status.provider || writerRoleStatus.value.provider || 'qwen',
+    baseUrl: status.baseUrl || writerRoleStatus.value.baseUrl || '',
+    model: status.model || writerRoleStatus.value.model || '',
+    apiKey: '',
+    reuseWriterCredential: selectedRole.value !== 'writer'
+  })
+  connectionResult.value = null
+  formRef.value?.clearValidate()
+}
+
+const selectRole = roleId => {
+  if (!roleDefinitions.some(item => item.id === roleId)) return
+  selectedRole.value = roleId
+  loadActiveRoleForm()
+}
+
 const loadAIStatus = async () => {
   statusLoading.value = true
   statusError.value = ''
   try {
     const response = await aiConfigApi.get({ suppressGlobalError: true })
     Object.assign(aiStatus, normalizeUnifiedAIStatus(response))
-    Object.assign(form, {
-      provider: aiStatus.provider || 'qwen',
-      baseUrl: aiStatus.baseUrl,
-      model: aiStatus.model,
-      apiKey: ''
-    })
+    loadActiveRoleForm()
   } catch (error) {
     statusError.value = readableError(error, '统一 AI 配置状态读取失败')
   } finally {
@@ -416,6 +528,7 @@ const readableError = (error, fallback) => (
 
 const selectProvider = providerId => {
   Object.assign(form, applyUnifiedAIProviderPreset(form, providerId))
+  form.reuseWriterCredential = selectedRole.value !== 'writer'
   connectionResult.value = null
   formRef.value?.clearValidate()
 }
@@ -469,13 +582,20 @@ const saveConfig = async () => {
   if (!valid) return
   saving.value = true
   try {
-    const payload = buildUnifiedAIConfigPayload(form, aiStatus)
-    const response = await aiConfigApi.save(payload, { suppressGlobalError: true })
+    const payload = selectedRole.value === 'writer'
+      ? buildUnifiedAIConfigPayload(form, aiStatus)
+      : buildUnifiedAIRoleConfigPayload(
+          form,
+          activeRoleStatus.value,
+          writerRoleStatus.value
+        )
+    const response = selectedRole.value === 'writer'
+      ? await aiConfigApi.save(payload, { suppressGlobalError: true })
+      : await aiConfigApi.saveRole(selectedRole.value, payload, { suppressGlobalError: true })
     Object.assign(aiStatus, normalizeUnifiedAIStatus(response))
-    form.apiKey = ''
-    connectionResult.value = null
+    loadActiveRoleForm()
     window.dispatchEvent(new CustomEvent('geo-unified-ai-config-changed'))
-    ElMessage.success('统一 AI 引擎已安全保存，写稿、调优与回测将自动使用')
+    ElMessage.success(`${activeRoleDefinition.value.label}已安全保存`)
   } catch (error) {
     ElMessage.error(readableError(error, '统一 AI 配置保存失败'))
   } finally {
@@ -484,11 +604,14 @@ const saveConfig = async () => {
 }
 
 const testConnection = async () => {
-  if (!aiStatus.configured || testing.value) return
+  if (!activeRoleStatus.value.effectiveConfigured || testing.value) return
   testing.value = true
   connectionResult.value = null
   try {
-    const response = await aiConfigApi.test({ suppressGlobalError: true })
+    const response = await aiConfigApi.test(
+      { suppressGlobalError: true },
+      selectedRole.value
+    )
     const data = response.data || {}
     connectionResult.value = {
       ok: Boolean(data.ok),
@@ -497,7 +620,7 @@ const testConnection = async () => {
       model: data.model || aiStatus.model,
       elapsedMs: Number(data.elapsed_ms) || 0
     }
-    ElMessage.success('统一 AI 引擎连接正常')
+    ElMessage.success(`${activeRoleDefinition.value.label}连接正常`)
   } catch (error) {
     const message = readableError(error, '统一 AI 引擎连接失败')
     connectionResult.value = { ok: false, message }
@@ -508,10 +631,13 @@ const testConnection = async () => {
 }
 
 const clearConfig = async () => {
+  const clearingWriter = selectedRole.value === 'writer'
   try {
     await ElMessageBox.confirm(
-      '清除后，写稿、调优和回测将回退到运行环境配置；若环境也未配置，这些功能会停用。',
-      '清除统一 AI 配置',
+      clearingWriter
+        ? '清除后，所有角色将回退到运行环境；若环境也未配置，AI 功能会停用。'
+        : `${activeRoleDefinition.value.label}将不再独立调用，并明确回退到写稿模型。`,
+      clearingWriter ? '清除全部本机 AI 配置' : `清除${activeRoleDefinition.value.label}`,
       {
         confirmButtonText: '清除配置',
         cancelButtonText: '保留',
@@ -523,18 +649,17 @@ const clearConfig = async () => {
   }
   clearing.value = true
   try {
-    const response = await aiConfigApi.clear({ suppressGlobalError: true })
+    const response = clearingWriter
+      ? await aiConfigApi.clear({ suppressGlobalError: true })
+      : await aiConfigApi.clearRole(selectedRole.value, { suppressGlobalError: true })
     Object.assign(aiStatus, normalizeUnifiedAIStatus(response))
-    Object.assign(form, {
-      provider: aiStatus.provider || 'qwen',
-      baseUrl: aiStatus.baseUrl,
-      apiKey: '',
-      model: aiStatus.model
-    })
-    connectionResult.value = null
-    formRef.value?.clearValidate()
+    loadActiveRoleForm()
     window.dispatchEvent(new CustomEvent('geo-unified-ai-config-changed'))
-    ElMessage.success(aiStatus.configured ? '本机配置已清除，已回退到运行环境' : '统一 AI 配置已清除')
+    ElMessage.success(
+      clearingWriter
+        ? (aiStatus.configured ? '本机配置已清除，已回退到运行环境' : '统一 AI 配置已清除')
+        : `${activeRoleDefinition.value.label}已回退到写稿模型`
+    )
   } catch (error) {
     ElMessage.error(readableError(error, '统一 AI 配置清除失败'))
   } finally {
@@ -741,6 +866,73 @@ onMounted(() => {
   small { color: rgba(255, 255, 255, .64); }
 }
 
+.role-switcher {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0 0 20px;
+  border: 1px solid var(--geo-line);
+  border-radius: 10px;
+  background: var(--geo-line);
+  gap: 1px;
+  overflow: hidden;
+}
+
+.role-switcher button {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  min-height: 84px;
+  align-content: center;
+  gap: 5px;
+  padding: 13px 14px;
+  border: 0;
+  color: var(--geo-ink);
+  text-align: left;
+  background: #fff;
+  cursor: pointer;
+
+  &::before {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: 3px;
+    background: transparent;
+    content: "";
+  }
+
+  span {
+    color: var(--geo-muted);
+    font: 700 8px/1.2 "Cascadia Mono", monospace;
+    letter-spacing: .12em;
+  }
+
+  strong { overflow: hidden; font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
+  small { color: var(--geo-muted); font-size: 10px; }
+
+  &.active { background: var(--geo-soft); }
+  &.active::before { background: var(--geo-ink); }
+  &:focus-visible { z-index: 1; outline: 2px solid var(--geo-line-strong); outline-offset: -2px; }
+}
+
+.role-risk,
+.role-runtime-note {
+  display: grid;
+  grid-template-columns: minmax(150px, .42fr) minmax(0, 1fr);
+  gap: 14px;
+  margin: 0 0 18px;
+  padding: 13px 15px;
+  border-left: 3px solid var(--geo-warning);
+  color: #684b1d;
+  background: #fff9ee;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.role-runtime-note {
+  border-left-color: var(--geo-line-strong);
+  color: var(--geo-ink);
+  background: var(--geo-soft);
+}
+
 .provider-picker {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -828,6 +1020,11 @@ onMounted(() => {
 
 .config-form {
   padding-top: 24px;
+}
+
+.credential-reuse {
+  margin: 0 0 12px;
+  color: var(--geo-muted);
 }
 
 .field-grid {
@@ -1111,9 +1308,16 @@ onMounted(() => {
   .config-card { padding: 24px 20px; }
   .active-source { min-width: 0; }
   .engine-bus,
+  .role-switcher,
   .provider-picker { grid-template-columns: 1fr; }
+  .role-risk,
+  .role-runtime-note { grid-template-columns: 1fr; gap: 4px; }
   .field-grid { grid-template-columns: 1fr; gap: 0; }
   .form-actions > div { display: grid; gap: 8px; }
   .form-actions :deep(.el-button) { margin-left: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bus-line i { transition: none; }
 }
 </style>

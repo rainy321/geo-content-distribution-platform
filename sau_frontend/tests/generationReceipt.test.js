@@ -115,6 +115,28 @@ test('GEO scoring uses the immutable run snapshot when a run id exists', () => {
   )
 })
 
+test('generation receipt retains model role and deterministic diversity trace', () => {
+  const receipt = normalizeGenerationReceipt({
+    engine: 'qwen',
+    engine_version: 'writer-model',
+    ai_role: { role: 'writer', fallback: false },
+    diversity_profile: {
+      version: 'content-diversity-v1',
+      seed_fingerprint: '123456789abc',
+      angle: { id: 'risk_boundary', label: '风险边界' }
+    }
+  }, {
+    summary: '摘要',
+    tags: ['GEO'],
+    content: '## FAQ\n问：如何核验？\n答：查看来源。',
+    sources: [{ title: 'source' }]
+  })
+
+  assert.equal(receipt.aiRole.role, 'writer')
+  assert.equal(receipt.diversityProfile.version, 'content-diversity-v1')
+  assert.equal(receipt.diversityProfile.seed_fingerprint, '123456789abc')
+})
+
 
 test('GEO scoring keeps draft evidence but does not override immutable run context', () => {
   const sources = [{ title: '产品事实页', url: 'https://example.test/facts' }]

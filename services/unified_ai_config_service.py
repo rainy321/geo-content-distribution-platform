@@ -1,10 +1,13 @@
-"""Per-user AI configuration with OS-protected credential persistence.
+"""Per-user AI role configuration with OS-protected credential persistence.
 
-The desktop product uses one OpenAI-compatible model for content generation,
-optimization and controlled AI-visibility sampling.  Endpoint, model and
-provider labels are not secrets and may be stored as JSON.  The API key is
-never persisted directly: on Windows it is protected with DPAPI for the
-current user before the atomic config file is written.
+The desktop product keeps ``writer`` as its backwards-compatible default and
+can optionally route review/optimization, evaluation, and image-generation to
+separate OpenAI-compatible services.  An unconfigured optional role resolves
+explicitly to ``writer``; callers can surface that fallback instead of silently
+pretending independent models are in use.  Endpoint, model and provider labels
+are not secrets and may be stored as JSON.  API keys are never persisted
+directly: on Windows they are protected with DPAPI for the current user before
+the atomic config file is written.
 
 Non-Windows runtimes deliberately fail closed unless a protector is injected
 (for example by a platform integration or unit test).  Server deployments keep
@@ -34,8 +37,12 @@ from services.ai_service import (
 )
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
+LEGACY_SCHEMA_VERSION = 1
 MAX_PROVIDER_LENGTH = 64
+AI_ROLE_IDS = ("writer", "reviewer", "evaluator", "image")
+OPTIONAL_AI_ROLE_IDS = ("reviewer", "evaluator", "image")
+AI_ROLE_ALIASES = {"optimizer": "reviewer"}
 _DPAPI_DESCRIPTION = "GEO Content Platform unified AI credential"
 _DPAPI_ENTROPY = b"geo-content-platform:unified-ai-config:v1"
 _CRYPTPROTECT_UI_FORBIDDEN = 0x01
@@ -197,6 +204,36 @@ def create_platform_secret_protector() -> SecretProtector | None:
 
 
 @dataclass(frozen=True)
+class UnifiedAIRoleStatus:
+    role: str
+    configured: bool
+    effective_configured: bool
+    provider: str
+    base_url: str
+    model: str
+    api_key_configured: bool
+    credential_storage: str
+    updated_at: str
+    fallback: bool
+    source_role: str
+
+    def public_dict(self) -> dict[str, Any]:
+        return {
+            "role": self.role,
+            "configured": self.configured,
+            "effective_configured": self.effective_configured,
+            "provider": self.provider,
+            "base_url": self.base_url,
+            "model": self.model,
+            "api_key_configured": self.api_key_configured,
+            "credential_storage": self.credential_storage,
+            "updated_at": self.updated_at,
+            "fallback": self.fallback,
+            "source_role": self.source_role,
+        }
+
+
+@dataclass(frozen=True)
 class UnifiedAIConfigStatus:
     configured: bool
     save_supported: bool
@@ -206,11 +243,12 @@ class UnifiedAIConfigStatus:
     api_key_configured: bool
     credential_storage: str
     updated_at: str
+    roles: tuple[UnifiedAIRoleStatus, ...] = ()
 
     def public_dict(self) -> dict[str, Any]:
         """Return only fields that are safe for an authenticated API response."""
 
-        return {
+        payload = {
             "configured": self.configured,
             "save_supported": self.save_supported,
             "provider": self.provider,
@@ -220,10 +258,22 @@ class UnifiedAIConfigStatus:
             "credential_storage": self.credential_storage,
             "updated_at": self.updated_at,
         }
+        payload["roles"] = {item.role: item.public_dict() for item in self.roles}
+        writer = payload["roles"].get("writer")
+        reviewer = payload["roles"].get("reviewer")
+        if writer and reviewer:
+            reviewer["same_as_writer"] = bool(
+                reviewer["effective_configured"]
+                and writer["effective_configured"]
+                and reviewer["provider"] == writer["provider"]
+                and reviewer["base_url"] == writer["base_url"]
+                and reviewer["model"] == writer["model"]
+            )
+        return payload
 
 
 class UnifiedAIConfigService:
-    """Own one protected, per-user OpenAI-compatible model configuration."""
+    """Own protected, per-user OpenAI-compatible role configurations."""
 
     def __init__(
         self,
@@ -243,6 +293,13 @@ class UnifiedAIConfigService:
     def status(self) -> UnifiedAIConfigStatus:
         with self._lock:
             if not self.config_path.exists():
+                roles = tuple(
+                    _empty_role_status(
+                        role,
+                        save_supported=self.protector is not None,
+                    )
+                    for role in AI_ROLE_IDS
+                )
                 return UnifiedAIConfigStatus(
                     configured=False,
                     save_supported=self.protector is not None,
@@ -254,9 +311,59 @@ class UnifiedAIConfigService:
                         self.protector.name if self.protector is not None else "unavailable"
                     ),
                     updated_at="",
+                    roles=roles,
                 )
             payload = self._read_unlocked()
             credential = payload["credential"]
+            writer_status = UnifiedAIRoleStatus(
+                role="writer",
+                configured=True,
+                effective_configured=True,
+                provider=payload["provider"],
+                base_url=payload["base_url"],
+                model=payload["model"],
+                api_key_configured=bool(credential["protected_data"]),
+                credential_storage=credential["protection"],
+                updated_at=payload["updated_at"],
+                fallback=False,
+                source_role="writer",
+            )
+            optional_statuses = []
+            configured_roles = payload.get("roles", {})
+            for role in OPTIONAL_AI_ROLE_IDS:
+                record = configured_roles.get(role)
+                if record is None:
+                    optional_statuses.append(
+                        UnifiedAIRoleStatus(
+                            role=role,
+                            configured=False,
+                            effective_configured=True,
+                            provider=writer_status.provider,
+                            base_url=writer_status.base_url,
+                            model=writer_status.model,
+                            api_key_configured=writer_status.api_key_configured,
+                            credential_storage=writer_status.credential_storage,
+                            updated_at=writer_status.updated_at,
+                            fallback=True,
+                            source_role="writer",
+                        )
+                    )
+                    continue
+                optional_statuses.append(
+                    UnifiedAIRoleStatus(
+                        role=role,
+                        configured=True,
+                        effective_configured=True,
+                        provider=record["provider"],
+                        base_url=record["base_url"],
+                        model=record["model"],
+                        api_key_configured=bool(record["credential"]["protected_data"]),
+                        credential_storage=record["credential"]["protection"],
+                        updated_at=record["updated_at"],
+                        fallback=False,
+                        source_role=role,
+                    )
+                )
             return UnifiedAIConfigStatus(
                 configured=True,
                 save_supported=self.protector is not None,
@@ -266,29 +373,25 @@ class UnifiedAIConfigService:
                 api_key_configured=bool(credential["protected_data"]),
                 credential_storage=credential["protection"],
                 updated_at=payload["updated_at"],
+                roles=(writer_status, *optional_statuses),
             )
 
-    def load_settings(self) -> AISettings:
+    def load_settings(self, role: object = "writer") -> AISettings:
         with self._lock:
             if not self.config_path.exists():
                 raise AIConfigurationError("尚未保存统一 AI 配置")
             payload = self._read_unlocked()
-            protector = self._require_matching_protector(payload)
-            try:
-                ciphertext = base64.b64decode(
-                    payload["credential"]["protected_data"],
-                    validate=True,
-                )
-                plaintext = protector.unprotect(ciphertext)
-                api_key = plaintext.decode("utf-8")
-            except (ValueError, UnicodeError, UnifiedAIConfigError) as exc:
-                raise UnifiedAIConfigDataError("统一 AI 凭据无法解密") from exc
+            normalized_role = _normalize_role(role)
+            record = payload
+            if normalized_role != "writer":
+                record = payload.get("roles", {}).get(normalized_role) or payload
+            api_key = self._decrypt_record(record)
             return AISettings.from_mapping(
                 {
-                    "base_url": payload["base_url"],
+                    "base_url": record["base_url"],
                     "api_key": api_key,
-                    "model": payload["model"],
-                    "provider": payload["provider"],
+                    "model": record["model"],
+                    "provider": record["provider"],
                 }
             )
 
@@ -310,8 +413,127 @@ class UnifiedAIConfigService:
                 )
 
             normalized_api_key = str(api_key or "").strip()
-            if not normalized_api_key and self.config_path.exists():
-                normalized_api_key = self.load_settings().api_key
+            # Validate and normalize the candidate connection before deciding
+            # whether an existing secret is safe to reuse.  A key saved for one
+            # endpoint must never be silently forwarded to another provider.
+            candidate_settings = AISettings.from_mapping(
+                {
+                    "base_url": base_url,
+                    "api_key": normalized_api_key or "credential-reuse-check",
+                    "model": model,
+                    "provider": provider,
+                }
+            )
+            normalized_provider = _normalize_provider(provider)
+            if not normalized_provider:
+                normalized_provider = provider_label_for_settings(candidate_settings)
+            existing_payload: dict[str, Any] | None = None
+            if self.config_path.exists():
+                try:
+                    existing_payload = self._read_unlocked()
+                except UnifiedAIConfigDataError:
+                    # Supplying a new credential is the only safe recovery path
+                    # for a corrupt local config.
+                    if not normalized_api_key:
+                        raise
+            if not normalized_api_key and existing_payload is not None:
+                same_connection = bool(
+                    normalized_provider == existing_payload["provider"]
+                    and candidate_settings.base_url.rstrip("/")
+                    == existing_payload["base_url"].rstrip("/")
+                )
+                if same_connection:
+                    normalized_api_key = self._decrypt_record(existing_payload)
+            settings = AISettings.from_mapping(
+                {
+                    "base_url": candidate_settings.base_url,
+                    "api_key": normalized_api_key,
+                    "model": candidate_settings.model,
+                    "provider": candidate_settings.provider,
+                }
+            )
+            now = _utc_now()
+            created_at = (
+                existing_payload["created_at"] if existing_payload is not None else now
+            )
+            protected_data = protector.protect(settings.api_key.encode("utf-8"))
+            preserved_roles: dict[str, Any] = dict(
+                existing_payload.get("roles", {}) if existing_payload is not None else {}
+            )
+            payload = {
+                "schema_version": SCHEMA_VERSION,
+                "provider": normalized_provider,
+                "base_url": settings.base_url,
+                "model": settings.model,
+                "credential": {
+                    "protection": protector.name,
+                    "protected_data": base64.b64encode(protected_data).decode("ascii"),
+                },
+                "created_at": created_at,
+                "updated_at": now,
+                "roles": preserved_roles,
+            }
+            self._write_atomic_unlocked(payload)
+            return self.status()
+
+    def save_role(
+        self,
+        role: object,
+        *,
+        provider: object,
+        base_url: object,
+        model: object,
+        api_key: object = None,
+        reuse_writer_credential: bool = True,
+    ) -> UnifiedAIConfigStatus:
+        """Save one optional role while retaining every other configuration."""
+
+        normalized_role = _normalize_role(role)
+        if normalized_role == "writer":
+            return self.save(
+                provider=provider,
+                base_url=base_url,
+                model=model,
+                api_key=api_key,
+            )
+        with self._lock:
+            if self.protector is None:
+                raise UnifiedAIConfigStorageUnavailableError(
+                    "当前运行环境没有可用的系统级凭据保护，未保存 API Key"
+                )
+            if not self.config_path.exists():
+                raise UnifiedAIConfigDataError("请先配置默认写稿模型")
+            payload = self._read_unlocked()
+            existing = payload.get("roles", {}).get(normalized_role)
+            normalized_api_key = str(api_key or "").strip()
+            credential_source = normalized_role
+            candidate_provider = _normalize_provider(provider)
+            candidate_base_url = str(base_url or "").strip().rstrip("/")
+            existing_connection_matches = bool(
+                existing is not None
+                and candidate_provider == existing["provider"]
+                and candidate_base_url == existing["base_url"].rstrip("/")
+            )
+            if not normalized_api_key and existing_connection_matches:
+                normalized_api_key = self._decrypt_record(existing)
+                credential_source = str(
+                    existing.get("credential_source") or normalized_role
+                )
+            if not normalized_api_key and reuse_writer_credential:
+                writer_settings = AISettings.from_mapping(
+                    {
+                        "provider": payload["provider"],
+                        "base_url": payload["base_url"],
+                        "model": payload["model"],
+                        "api_key": self._decrypt_record(payload),
+                    }
+                )
+                if (
+                    candidate_provider == payload["provider"]
+                    and candidate_base_url == writer_settings.base_url.rstrip("/")
+                ):
+                    normalized_api_key = writer_settings.api_key
+                    credential_source = "writer"
             settings = AISettings.from_mapping(
                 {
                     "base_url": base_url,
@@ -324,29 +546,40 @@ class UnifiedAIConfigService:
             if not normalized_provider:
                 normalized_provider = provider_label_for_settings(settings)
             now = _utc_now()
-            created_at = now
-            if self.config_path.exists():
-                try:
-                    created_at = self._read_unlocked()["created_at"]
-                except UnifiedAIConfigDataError:
-                    # A complete replacement with a new credential is a safe
-                    # recovery path for a corrupted local file. Reusing an old
-                    # key already failed above before reaching this branch.
-                    if not str(api_key or "").strip():
-                        raise
-            protected_data = protector.protect(settings.api_key.encode("utf-8"))
-            payload = {
-                "schema_version": SCHEMA_VERSION,
+            created_at = existing["created_at"] if existing is not None else now
+            protected_data = self.protector.protect(settings.api_key.encode("utf-8"))
+            roles = dict(payload.get("roles", {}))
+            roles[normalized_role] = {
                 "provider": normalized_provider,
                 "base_url": settings.base_url,
                 "model": settings.model,
                 "credential": {
-                    "protection": protector.name,
+                    "protection": self.protector.name,
                     "protected_data": base64.b64encode(protected_data).decode("ascii"),
                 },
+                "credential_source": credential_source,
                 "created_at": created_at,
                 "updated_at": now,
             }
+            payload["schema_version"] = SCHEMA_VERSION
+            payload["roles"] = roles
+            payload["updated_at"] = now
+            self._write_atomic_unlocked(payload)
+            return self.status()
+
+    def clear_role(self, role: object) -> UnifiedAIConfigStatus:
+        normalized_role = _normalize_role(role)
+        if normalized_role == "writer":
+            return self.clear()
+        with self._lock:
+            if not self.config_path.exists():
+                return self.status()
+            payload = self._read_unlocked()
+            roles = dict(payload.get("roles", {}))
+            roles.pop(normalized_role, None)
+            payload["schema_version"] = SCHEMA_VERSION
+            payload["roles"] = roles
+            payload["updated_at"] = _utc_now()
             self._write_atomic_unlocked(payload)
             return self.status()
 
@@ -371,11 +604,30 @@ class UnifiedAIConfigService:
             )
         return protector
 
+    def _decrypt_record(self, record: dict[str, Any]) -> str:
+        protector = self._require_matching_protector(record)
+        try:
+            ciphertext = base64.b64decode(
+                record["credential"]["protected_data"],
+                validate=True,
+            )
+            plaintext = protector.unprotect(ciphertext)
+            return plaintext.decode("utf-8")
+        except (ValueError, UnicodeError, UnifiedAIConfigError) as exc:
+            raise UnifiedAIConfigDataError("统一 AI 凭据无法解密") from exc
+
     def _read_unlocked(self) -> dict[str, Any]:
         try:
             payload = json.loads(self.config_path.read_text(encoding="utf-8"))
             return _validate_payload(payload)
-        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        except (
+            OSError,
+            UnicodeError,
+            json.JSONDecodeError,
+            TypeError,
+            ValueError,
+            AIConfigurationError,
+        ) as exc:
             raise UnifiedAIConfigDataError("统一 AI 配置文件无效") from exc
 
     def _write_atomic_unlocked(self, payload: dict[str, Any]) -> None:
@@ -429,9 +681,63 @@ def _normalize_provider(value: object) -> str:
     return normalized
 
 
+def _normalize_role(value: object) -> str:
+    normalized = str(value or "writer").strip().lower()
+    normalized = AI_ROLE_ALIASES.get(normalized, normalized)
+    if normalized not in AI_ROLE_IDS:
+        raise AIConfigurationError("AI 角色仅支持 writer、reviewer、evaluator、image")
+    return normalized
+
+
+def _empty_role_status(
+    role: str,
+    *,
+    save_supported: bool,
+) -> UnifiedAIRoleStatus:
+    return UnifiedAIRoleStatus(
+        role=role,
+        configured=False,
+        effective_configured=False,
+        provider="",
+        base_url="",
+        model="",
+        api_key_configured=False,
+        credential_storage=("unavailable" if not save_supported else ""),
+        updated_at="",
+        fallback=role != "writer",
+        source_role="writer" if role != "writer" else "",
+    )
+
+
 def _validate_payload(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or value.get("schema_version") != SCHEMA_VERSION:
+    if not isinstance(value, dict) or value.get("schema_version") not in {
+        LEGACY_SCHEMA_VERSION,
+        SCHEMA_VERSION,
+    }:
         raise ValueError("unsupported schema")
+    root = _validate_config_record(value)
+    roles_value = value.get("roles", {})
+    if not isinstance(roles_value, dict):
+        raise ValueError("roles is invalid")
+    roles: dict[str, Any] = {}
+    for raw_role, raw_record in roles_value.items():
+        role = _normalize_role(raw_role)
+        if role == "writer":
+            raise ValueError("writer must use the root configuration")
+        roles[role] = _validate_config_record(raw_record)
+        roles[role]["credential_source"] = str(
+            raw_record.get("credential_source") or role
+        )
+    return {
+        "schema_version": SCHEMA_VERSION,
+        **root,
+        "roles": roles,
+    }
+
+
+def _validate_config_record(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("config record is invalid")
     provider = _normalize_provider(value.get("provider"))
     if not provider:
         raise ValueError("provider is missing")
@@ -474,7 +780,6 @@ def _validate_payload(value: Any) -> dict[str, Any]:
     if not isinstance(updated_at, str) or not updated_at:
         raise ValueError("updated_at is missing")
     return {
-        "schema_version": SCHEMA_VERSION,
         "provider": provider,
         "base_url": validated_settings.base_url,
         "model": validated_settings.model,
@@ -494,11 +799,14 @@ def _utc_now() -> str:
 
 
 __all__ = [
+    "AI_ROLE_IDS",
+    "OPTIONAL_AI_ROLE_IDS",
     "SecretProtector",
     "UnifiedAIConfigDataError",
     "UnifiedAIConfigError",
     "UnifiedAIConfigService",
     "UnifiedAIConfigStatus",
+    "UnifiedAIRoleStatus",
     "UnifiedAIConfigStorageUnavailableError",
     "WindowsDPAPIProtector",
     "create_platform_secret_protector",

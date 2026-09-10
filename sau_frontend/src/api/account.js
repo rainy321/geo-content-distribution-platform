@@ -26,6 +26,15 @@ export const accountApi = {
     )
   },
 
+  // 仅确认平台侧风险已处理；账号仍需重新登录，不会自动解冻或切换账号。
+  resolveMediaAccountRisk(id, category) {
+    return http.post(
+      `/api/media-accounts/${id}/risk/resolve`,
+      { confirm_recovery: true, category },
+      { suppressGlobalError: true }
+    )
+  },
+
   // 获取有效账号列表（带验证）
   getValidAccounts() {
     return http.get('/getValidAccounts')

@@ -101,6 +101,8 @@ export const normalizeGenerationReceipt = (
     warnings: [...new Set(warnings)],
     providerGeoScore: source.provider_geo_score ?? nestedGeneration.provider_geo_score
       ?? result.provider_geo_score ?? article.provider_geo_score ?? null,
+    diversityProfile: asObject(source.diversity_profile || nestedGeneration.diversity_profile),
+    aiRole: asObject(source.ai_role || nestedGeneration.ai_role),
     sources
   }
 }

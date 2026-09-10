@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hmac
+import logging
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -11,6 +12,7 @@ from services.geo_article_compiler_service import (
     GEOArticleCompilerError,
 )
 from services.project_service import ProjectNotFoundError, get_project
+from services.media_account_risk_service import record_publish_job_account_risk
 from services.publish_job_service import (
     ConcurrentPublishJobUpdateError,
     PUBLISH_AUTHORIZATION_MISMATCH_MESSAGE,
@@ -36,6 +38,7 @@ from services.publish_preflight_service import (
 
 PublisherFactory = Callable[[dict[str, Any]], PublisherAdapter]
 DEFAULT_MEDIA_ROOT = Path(__file__).resolve().parent.parent / "videoFile"
+logger = logging.getLogger(__name__)
 
 
 class PublisherNotConfiguredError(RuntimeError):
@@ -178,6 +181,10 @@ def execute_publish_job(
         )
     except Exception as exc:
         detail = str(exc).strip() or exc.__class__.__name__
+        # Bind visible platform restrictions to the exact account selected by
+        # this job. Unknown errors are ignored; classified blocks freeze only
+        # that account's pending work and never rotate to another account.
+        _record_account_risk_best_effort(database_path, job_id, detail)
         return transition_publish_job(
             database_path,
             job_id,
@@ -333,6 +340,18 @@ def _persist_result(
     if result.success != expected_success:
         raise ValueError("发布结果的 success 与 status 不一致")
 
+    # Most browser adapters report a truthful PublishResult instead of raising
+    # when the platform shows a ban, login expiry or human-verification gate.
+    # Bind that visible outcome to the selected account before persisting the
+    # job status, so later queued work is frozen without silently rotating to a
+    # different account.
+    if not result.success:
+        _record_account_risk_best_effort(
+            database_path,
+            job["id"],
+            result.message,
+        )
+
     if result.status in {"success", "failed", "need_action"}:
         return transition_publish_job(
             database_path,
@@ -351,3 +370,20 @@ def _persist_result(
             expected_state_version=job["state_version"],
         )
     raise ValueError(f"即时发布不能返回 {result.status} 状态")
+
+
+def _record_account_risk_best_effort(
+    database_path: str | Path,
+    job_id: int,
+    detail: Any,
+) -> None:
+    """Persist account risk without masking the primary publish outcome."""
+
+    try:
+        record_publish_job_account_risk(database_path, job_id, detail)
+    except Exception as exc:  # pragma: no cover - defensive storage boundary
+        logger.warning(
+            "Unable to persist media-account risk for publish job %s: %s",
+            job_id,
+            exc,
+        )

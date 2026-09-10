@@ -23,7 +23,8 @@ test('visible queued real jobs can be selected and executed as one confirmed seq
   assert.match(distributionSource, /formatPublishOutcomeSummary\(batchSummary\)/)
   assert.match(distributionSource, /不包含页面上的其他历史任务/)
   assert.match(distributionSource, /await fetchJobs\(true\)/)
-  assert.match(distributionSource, /不会阻塞后续，也不会自动重试同一任务/)
+  assert.match(distributionSource, /普通单项失败不拖住其他账号，也不会自动重试/)
+  assert.match(distributionSource, /封禁、限制、登录失效或本人验证，则冻结该账号余下任务/)
 })
 
 

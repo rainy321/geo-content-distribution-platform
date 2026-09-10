@@ -15,6 +15,54 @@
       </div>
     </header>
 
+    <section class="blackbox-protocol" aria-labelledby="blackbox-title">
+      <header>
+        <div>
+          <span>MEASUREMENT / BLACK-BOX LOOP</span>
+          <h2 id="blackbox-title">把“分数增长”绑定到真实回测证据</h2>
+          <p>基线、优化组、未发布对照组和复测必须使用相同问题、模型、入口与重复次数；缺少证据时显示“未测量”，不会自动补零或制造提升。</p>
+        </div>
+        <div class="blackbox-actions">
+          <el-button :loading="blackboxLoading" @click="loadBlackboxTruth">刷新能力边界</el-button>
+          <el-button type="primary" :loading="blackboxEvaluating" @click="blackboxFileInput?.click()">导入回测面板</el-button>
+          <input ref="blackboxFileInput" class="visually-hidden" type="file" accept="application/json,.json" @change="importBlackboxPanel" />
+        </div>
+      </header>
+
+      <ol class="blackbox-flow" aria-label="GEO 黑盒回测步骤">
+        <li><span>01</span><strong>基线</strong><small>Day 0 · 发布前</small></li>
+        <li><span>02</span><strong>证据资产</strong><small>处理组 / 对照组</small></li>
+        <li><span>03</span><strong>同口径复测</strong><small>Day 7 / 14 / 30</small></li>
+        <li><span>04</span><strong>净变化</strong><small>处理变化 − 对照变化</small></li>
+      </ol>
+
+      <div v-if="blackboxError" class="blackbox-alert" role="alert">{{ blackboxError }}</div>
+      <div v-if="blackboxResult" class="blackbox-result" aria-live="polite">
+        <div class="result-status">
+          <span>IMPORTED PANEL</span>
+          <strong>{{ blackboxResult.status === 'READY_FOR_DESCRIPTIVE_COMPARISON' ? '证据槽位完整' : '面板尚不完整' }}</strong>
+          <small>{{ blackboxResult.claim_boundary }}</small>
+        </div>
+        <article v-for="checkpoint in blackboxResult.checkpoint_comparisons || []" :key="checkpoint.checkpoint_day">
+          <span>DAY {{ checkpoint.checkpoint_day }}</span>
+          <strong>{{ checkpoint.status === 'COMPARABLE' ? `${checkpoint.matched_key_count} 组可比样本` : blackboxCheckpointLabel(checkpoint) }}</strong>
+          <small v-if="checkpoint.status === 'COMPARABLE'">差分结果已按指标保留；它是描述性观察，不等于因果证明。</small>
+          <small v-else>缺少槽位或采样口径不一致时不计算增长。</small>
+        </article>
+      </div>
+
+      <details class="truth-matrix" :open="Boolean(blackboxError)">
+        <summary>查看 {{ blackboxTruth.rows?.length || 0 }} 项指标能力与不可观测边界</summary>
+        <div class="truth-grid">
+          <article v-for="row in blackboxTruth.rows || []" :key="row.capability">
+            <span>{{ blackboxCapabilityLabel(row.capability) }}</span>
+            <strong :class="blackboxStateTone(row.state_after_this_service)">{{ blackboxStateLabel(row.state_after_this_service) }}</strong>
+            <small>{{ row.boundary }}</small>
+          </article>
+        </div>
+      </details>
+    </section>
+
     <section class="analysis-console" aria-labelledby="input-title">
       <div class="signal-rail" aria-hidden="true">
         <span class="rail-node active">1</span>
@@ -1033,6 +1081,12 @@ const samplingOverrideExpanded = ref(false)
 const unifiedAIStatusLoading = ref(false)
 const unifiedAIStatusError = ref('')
 const unifiedAIStatus = reactive(normalizeUnifiedAIStatus({}))
+const blackboxFileInput = ref(null)
+const blackboxLoading = ref(false)
+const blackboxEvaluating = ref(false)
+const blackboxError = ref('')
+const blackboxTruth = ref({ rows: [], state_semantics: {} })
+const blackboxResult = ref(null)
 let historyRequestSequence = 0
 let commercialRequestSequence = 0
 
@@ -1558,9 +1612,93 @@ const competitorSummary = mentions => {
   return mentions.map(item => `${item.name}${item.mentions > 1 ? ` × ${item.mentions}` : ''}`).join('、')
 }
 
+const blackboxCapabilityLabel = capability => ({
+  question_clusters: '问题簇',
+  brand_evidence_graph: '品牌证据图谱',
+  recall_citation_separation: '召回 / 引用分离',
+  public: '公开可访问',
+  crawl: '抓取资格',
+  index: '索引状态',
+  retrieval: '候选召回',
+  citation: '正式引用',
+  brand_mention: '品牌提及',
+  prominence: '答案显著度',
+  fact_accuracy: '事实准确率',
+  recommendation_share: '推荐份额',
+  retest_day_7_14_30: '7 / 14 / 30 天复测',
+  matched_control: '匹配对照组'
+}[capability] || capability)
+
+const blackboxStateLabel = state => ({
+  IMPLEMENTED: '已测量',
+  IMPLEMENTED_IMPORT_ONLY: '导入后可测',
+  PARTIAL: '代理指标',
+  NOT_MEASURED: '未测量',
+  MISSING: '尚未实现',
+  UNOBSERVABLE_INTERNAL: '黑盒不可观测'
+}[state] || state)
+
+const blackboxStateTone = state => ({
+  implemented: state === 'IMPLEMENTED',
+  partial: ['IMPLEMENTED_IMPORT_ONLY', 'PARTIAL'].includes(state),
+  unknown: ['NOT_MEASURED', 'MISSING', 'UNOBSERVABLE_INTERNAL'].includes(state)
+})
+
+const blackboxCheckpointLabel = checkpoint => {
+  if (checkpoint.status === 'INCOMPLETE') return `缺 ${checkpoint.missing_slots?.length || 0} 个证据槽位`
+  if (checkpoint.status === 'NO_EXACT_MATCHES') return '没有同口径样本'
+  return checkpoint.status || '待检查'
+}
+
+const loadBlackboxTruth = async () => {
+  if (blackboxLoading.value) return
+  blackboxLoading.value = true
+  blackboxError.value = ''
+  try {
+    const response = await visibilityApi.getBlackboxTruthMatrix({ suppressGlobalError: true })
+    blackboxTruth.value = response.data || { rows: [], state_semantics: {} }
+  } catch (error) {
+    blackboxError.value = `回测能力边界未载入：${readableError(error)}`
+  } finally {
+    blackboxLoading.value = false
+  }
+}
+
+const importBlackboxPanel = async event => {
+  const input = event.target
+  const file = input.files?.[0]
+  input.value = ''
+  if (!file || blackboxEvaluating.value) return
+  if (file.size > 8 * 1024 * 1024) {
+    blackboxError.value = '回测面板不能超过 8 MB。'
+    return
+  }
+  blackboxEvaluating.value = true
+  blackboxError.value = ''
+  try {
+    const parsed = JSON.parse(await file.text())
+    const snapshots = Array.isArray(parsed) ? parsed : parsed?.snapshots
+    if (!Array.isArray(snapshots)) throw new Error('JSON 根节点必须是 snapshots 数组或直接数组')
+    const response = await visibilityApi.evaluateBlackboxPanel(snapshots, { suppressGlobalError: true })
+    blackboxResult.value = response.data || null
+    if (blackboxResult.value?.truth_matrix) blackboxTruth.value = blackboxResult.value.truth_matrix
+    ElMessage.success(
+      blackboxResult.value?.status === 'READY_FOR_DESCRIPTIVE_COMPARISON'
+        ? '回测面板已导入，处理组与对照组可以同口径比较'
+        : '回测面板已导入；缺失证据保持为阻塞项'
+    )
+  } catch (error) {
+    blackboxResult.value = null
+    blackboxError.value = `无法导入回测面板：${readableError(error)}`
+  } finally {
+    blackboxEvaluating.value = false
+  }
+}
+
 onMounted(() => {
   void loadProjects()
   void loadUnifiedAIStatus()
+  void loadBlackboxTruth()
   window.addEventListener('geo-unified-ai-config-changed', handleUnifiedAIConfigChanged)
 })
 onBeforeUnmount(() => {
@@ -1619,6 +1757,124 @@ onBeforeUnmount(() => {
   strong { font-size: 12px; }
   small { color: var(--muted); font-size: 9px; }
   &.unsafe { border-color: #aeb0b3; background: #f5f5f2; .seal-pulse { background: var(--ink); box-shadow: 0 0 0 4px rgba(17, 18, 20, 0.12); } }
+}
+
+.blackbox-protocol {
+  margin-top: 22px;
+  padding: 22px 24px;
+  border: 1px solid var(--rule);
+  border-top: 4px solid var(--ink);
+  border-radius: 9px;
+  background: #fafaf8;
+
+  > header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 24px;
+
+    > div:first-child { max-width: 820px; }
+    span { color: #77797e; font: 700 9px/1.2 "Cascadia Mono", monospace; letter-spacing: 0.13em; }
+    h2 { margin: 8px 0 0; font-size: 22px; letter-spacing: -0.02em; }
+    p { margin: 8px 0 0; color: var(--muted); font-size: 12px; line-height: 1.65; }
+  }
+}
+
+.blackbox-actions { display: flex; flex: 0 0 auto; gap: 8px; }
+
+.blackbox-flow {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  margin: 20px 0 0;
+  padding: 0;
+  border: 1px solid var(--rule);
+  list-style: none;
+  background: #fff;
+
+  li {
+    position: relative;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 3px 10px;
+    padding: 13px 15px;
+    border-right: 1px solid var(--rule);
+  }
+  li:last-child { border-right: 0; }
+  span { grid-row: 1 / 3; color: #8b8d90; font: 700 10px/1.3 "Cascadia Mono", monospace; }
+  strong { font-size: 12px; }
+  small { color: var(--muted); font-size: 9px; }
+}
+
+.blackbox-alert {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-left: 3px solid var(--red);
+  background: #fff3f2;
+  color: #914743;
+  font-size: 11px;
+}
+
+.blackbox-result {
+  display: grid;
+  grid-template-columns: minmax(250px, 1.15fr) repeat(3, 1fr);
+  gap: 1px;
+  margin-top: 12px;
+  border: 1px solid var(--rule);
+  background: var(--rule);
+
+  > div,
+  > article {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 5px;
+    padding: 13px;
+    background: #fff;
+  }
+  span { color: #77797e; font: 700 8px/1.2 "Cascadia Mono", monospace; letter-spacing: 0.1em; }
+  strong { font-size: 12px; }
+  small { color: var(--muted); font-size: 9px; line-height: 1.5; }
+}
+
+.truth-matrix {
+  margin-top: 12px;
+
+  summary { color: #4f5155; font-size: 11px; cursor: pointer; }
+}
+
+.truth-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  margin-top: 10px;
+  border: 1px solid var(--rule);
+  background: var(--rule);
+
+  article {
+    display: grid;
+    grid-template-columns: minmax(130px, auto) auto;
+    gap: 6px 12px;
+    padding: 11px 12px;
+    background: #fff;
+  }
+  span { font-size: 11px; font-weight: 700; }
+  strong { justify-self: end; color: #66696d; font: 700 9px/1.3 "Cascadia Mono", monospace; }
+  strong.implemented { color: #21806f; }
+  strong.partial { color: #9a661e; }
+  strong.unknown { color: #98524e; }
+  small { grid-column: 1 / -1; color: var(--muted); font-size: 9px; line-height: 1.5; }
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
 }
 
 .analysis-console {
@@ -2438,6 +2694,8 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 1180px) {
+  .blackbox-result { grid-template-columns: repeat(3, 1fr); }
+  .blackbox-result .result-status { grid-column: 1 / -1; }
   .proof-grid { grid-template-columns: 1fr; }
   .sampling-config-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .metric-track { grid-template-columns: repeat(3, 1fr); }
@@ -2446,6 +2704,13 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 900px) {
+  .blackbox-protocol > header { flex-direction: column; }
+  .blackbox-actions { width: 100%; }
+  .blackbox-actions :deep(.el-button) { flex: 1; }
+  .blackbox-flow { grid-template-columns: repeat(2, 1fr); }
+  .blackbox-flow li:nth-child(2) { border-right: 0; }
+  .blackbox-flow li:nth-child(-n + 2) { border-bottom: 1px solid var(--rule); }
+  .truth-grid { grid-template-columns: 1fr; }
   .page-heading { align-items: flex-start; flex-direction: column; }
   .local-engine-seal { width: 100%; box-sizing: border-box; }
   .result-grid { grid-template-columns: 1fr; }
@@ -2456,6 +2721,10 @@ onBeforeUnmount(() => {
 }
 
 @media (max-width: 760px) {
+  .blackbox-protocol { padding: 18px 14px; }
+  .blackbox-actions { flex-direction: column; }
+  .blackbox-result { grid-template-columns: 1fr; }
+  .blackbox-result .result-status { grid-column: auto; }
   .commercial-proof { padding: 20px 16px; }
   .proof-heading, .proof-actions { align-items: flex-start; flex-direction: column; }
   .proof-actions { width: 100%; }

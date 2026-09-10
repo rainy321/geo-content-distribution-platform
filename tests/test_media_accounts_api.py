@@ -8,6 +8,7 @@ from db.createTable import initialize_database
 from sau_backend import app
 from services.media_account_service import (
     MediaAccountCheckError,
+    MediaAccountFrozenError,
     MediaAccountNotFoundError,
     MediaAccountRuntimeDisabledError,
 )
@@ -88,6 +89,64 @@ class MediaAccountsApiTests(unittest.TestCase):
 
         self.assertEqual(missing.status_code, 404)
         self.assertEqual(failed.status_code, 502)
+
+    def test_check_returns_structured_risk_when_account_is_frozen(self):
+        risk_event = {
+            "category": "permanent_ban",
+            "label": "账号永久封禁",
+            "recommended_action": "前往平台安全中心申诉",
+            "frozen": True,
+        }
+        with patch(
+            "sau_backend.check_media_account",
+            new=AsyncMock(
+                side_effect=MediaAccountFrozenError(
+                    "账号永久封禁",
+                    risk_event=risk_event,
+                )
+            ),
+        ):
+            response = self.client.post("/api/media-accounts/7/check")
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.get_json()["data"]["risk_event"]["category"],
+            "permanent_ban",
+        )
+
+    def test_risk_resolution_requires_confirmation_and_keeps_login_required(self):
+        missing_confirmation = self.client.post(
+            "/api/media-accounts/7/risk/resolve",
+            json={"category": "verification_required"},
+        )
+        self.assertEqual(missing_confirmation.status_code, 400)
+
+        service_result = {
+            "account_id": 7,
+            "resolved_count": 1,
+            "requires_login": True,
+            "account_enabled": False,
+        }
+        with patch(
+            "sau_backend.resolve_media_account_risks",
+            return_value=service_result,
+        ) as mocked:
+            response = self.client.post(
+                "/api/media-accounts/7/risk/resolve",
+                json={
+                    "confirm_recovery": True,
+                    "category": "verification_required",
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.get_json()["data"]["requires_login"])
+        self.assertFalse(response.get_json()["data"]["account_enabled"])
+        mocked.assert_called_once_with(
+            self.db_path,
+            7,
+            category="verification_required",
+        )
 
     def test_check_maps_disabled_bilibili_runtime_without_calling_platform(self):
         with patch(

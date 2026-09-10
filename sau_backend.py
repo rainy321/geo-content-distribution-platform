@@ -86,6 +86,11 @@ from services.content_template_service import (
     list_content_templates,
     update_content_template,
 )
+from services.content_diversity_service import (
+    ContentDiversityError,
+    build_content_diversity_profile,
+    build_diversity_instruction,
+)
 from services.cover_image_service import (
     ensure_article_cover,
     generate_article_cover,
@@ -128,6 +133,7 @@ from services.media_account_service import (
     MediaAccountBusyError,
     MediaAccountCheckError,
     MediaAccountDisconnectError,
+    MediaAccountFrozenError,
     MediaAccountInvalidCookiePathError,
     MediaAccountNotFoundError,
     MediaAccountRuntimeDisabledError,
@@ -135,6 +141,13 @@ from services.media_account_service import (
     cleanup_disconnected_account_files,
     disconnect_media_account,
     get_media_accounts_overview,
+)
+from services.media_account_risk_service import (
+    FROZEN_RISK_CATEGORIES,
+    get_active_media_account_risks,
+    record_media_account_risk,
+    resolve_media_account_risks,
+    resolve_recoverable_media_account_risks,
 )
 from services.platform_capability_service import (
     BILIBILI_ACCOUNT_TYPE,
@@ -345,6 +358,11 @@ LOGIN_COMPAT_QUEUE_MAX_COUNT = 4
 # The desktop host has eight Waitress threads. Reserve at least half for API
 # requests and cancellation/status calls while headed logins are waiting.
 LOGIN_MAX_ACTIVE_STREAMS = 4
+# Only Zhihu's login helper atomically replaces the credential bound to an
+# exact user_info row.  Every other helper creates a new row, so accepting an
+# existing_account_id for those platforms would silently leave the old account
+# (and its risk/task bindings) behind.
+IN_PLACE_REAUTH_ACCOUNT_TYPES = frozenset({"9"})
 active_login_stream_transports = {}
 app = Flask(__name__)
 
@@ -1166,6 +1184,16 @@ def generate_article():
     request_id, idempotency_key, identity_error = _generation_request_identity(data)
     if identity_error is not None:
         return identity_error
+    try:
+        diversity_profile, diversity_instruction = _generation_diversity(
+            data,
+            fallback_seed=idempotency_key,
+            topic=generation["topic"],
+            content_type=generation["content_type"],
+            target_platform=generation["target_platform"],
+        )
+    except ContentDiversityError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
     content_request = ContentGenerationRequest.create(
         project_context=generation["project"],
         topic=generation["topic"],
@@ -1173,7 +1201,19 @@ def generate_article():
         length=generation["length"],
         content_type=generation["content_type"],
         target_platform=generation["target_platform"],
-        template_instruction=generation["template_instruction"],
+        template_instruction="\n\n".join(
+            item
+            for item in (
+                generation["template_instruction"],
+                diversity_instruction,
+            )
+            if item
+        ),
+        diversity_profile=diversity_profile,
+        ai_role=_public_ai_role_resolution(
+            "writer",
+            explicit_request=data.get("ai_config") is not None,
+        ),
         request_id=request_id,
         idempotency_key=idempotency_key,
     )
@@ -1213,6 +1253,12 @@ def generate_article():
     effective_idempotency_key = str(
         (run or {}).get("idempotency_key") or idempotency_key
     )
+    if isinstance(article.get("generation"), dict):
+        if not article["generation"].get("ai_role"):
+            article["generation"]["ai_role"] = _public_ai_role_resolution(
+                "writer",
+                explicit_request=data.get("ai_config") is not None,
+            )
     response = jsonify({"code": 200, "msg": "success", "data": article})
     response.headers["X-Request-ID"] = effective_request_id
     response.headers["Idempotency-Key"] = effective_idempotency_key
@@ -1343,6 +1389,16 @@ def generate_article_batch():
     for index, topic in enumerate(normalized_topics, start=1):
         child_request_id = f"{base_request_id}:{index}"
         child_idempotency_key = f"{base_idempotency_key}:{index}"
+        try:
+            diversity_profile, diversity_instruction = _generation_diversity(
+                data,
+                fallback_seed=child_idempotency_key,
+                topic=topic,
+                content_type=generation["content_type"],
+                target_platform=generation["target_platform"],
+            )
+        except ContentDiversityError as exc:
+            return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
         content_request = ContentGenerationRequest.create(
             project_context=generation["project"],
             topic=topic,
@@ -1350,7 +1406,19 @@ def generate_article_batch():
             length=generation["length"],
             content_type=generation["content_type"],
             target_platform=generation["target_platform"],
-            template_instruction=generation["template_instruction"],
+            template_instruction="\n\n".join(
+                item
+                for item in (
+                    generation["template_instruction"],
+                    diversity_instruction,
+                )
+                if item
+            ),
+            diversity_profile=diversity_profile,
+            ai_role=_public_ai_role_resolution(
+                "writer",
+                explicit_request=data.get("ai_config") is not None,
+            ),
             request_id=child_request_id,
             idempotency_key=child_idempotency_key,
         )
@@ -1414,6 +1482,12 @@ def generate_article_batch():
                         app.config["DATABASE_PATH"],
                         int(current_run["article_id"]),
                     )
+                    if isinstance(article.get("generation"), dict):
+                        if not article["generation"].get("ai_role"):
+                            article["generation"]["ai_role"] = _public_ai_role_resolution(
+                                "writer",
+                                explicit_request=data.get("ai_config") is not None,
+                            )
                     items.append(
                         {
                             "topic": topic,
@@ -1438,6 +1512,12 @@ def generate_article_batch():
                 status="draft",
                 generation_run_id=run_id,
             )
+            if isinstance(article.get("generation"), dict):
+                if not article["generation"].get("ai_role"):
+                    article["generation"]["ai_role"] = _public_ai_role_resolution(
+                        "writer",
+                        explicit_request=data.get("ai_config") is not None,
+                    )
             items.append(
                 {
                     "topic": topic,
@@ -1575,7 +1655,7 @@ def _prepare_generation_request(data):
         except ContentTemplateNotFoundError as exc:
             return None, (jsonify({"code": 404, "msg": str(exc), "data": None}), 404)
     try:
-        ai_settings = _request_ai_settings(data)
+        ai_settings = _request_ai_settings(data, role="writer")
     except AIConfigurationError as exc:
         status_code = 400 if data.get("ai_config") is not None else 503
         return None, (
@@ -1601,6 +1681,26 @@ def _prepare_generation_request(data):
         "template_instruction": template_instruction,
         "settings": ai_settings,
     }, None
+
+
+def _generation_diversity(
+    data,
+    *,
+    fallback_seed,
+    topic,
+    content_type,
+    target_platform,
+):
+    supplied_seed = data.get("diversity_seed")
+    if supplied_seed is not None and not isinstance(supplied_seed, str):
+        raise ContentDiversityError("diversity_seed 必须是字符串")
+    profile = build_content_diversity_profile(
+        seed=(supplied_seed or fallback_seed),
+        topic=topic,
+        content_type=content_type,
+        target_platform=target_platform,
+    )
+    return profile, build_diversity_instruction(profile)
 
 
 @app.route('/api/content-templates', methods=['GET'])
@@ -1690,6 +1790,26 @@ def _unified_ai_config_status_data():
     service = app.config.get("UNIFIED_AI_CONFIG_SERVICE")
     environment_configured = AISettings.environment_is_configured()
     if service is None:
+        environment_provider = str(os.getenv("AI_PROVIDER", "")).strip().lower()
+        environment_model = str(os.getenv("AI_MODEL", "")).strip()
+        roles = {}
+        for role in ("writer", "reviewer", "evaluator", "image"):
+            roles[role] = {
+                "role": role,
+                "configured": role == "writer" and environment_configured,
+                "effective_configured": environment_configured,
+                "provider": environment_provider,
+                "base_url": "",
+                "model": environment_model,
+                "api_key_configured": environment_configured,
+                "credential_storage": (
+                    "environment" if environment_configured else "unavailable"
+                ),
+                "updated_at": "",
+                "fallback": role != "writer" and environment_configured,
+                "source_role": "writer" if environment_configured else "",
+            }
+        roles["reviewer"]["same_as_writer"] = environment_configured
         return {
             "server_configured": environment_configured,
             "custom_config_supported": True,
@@ -1704,9 +1824,34 @@ def _unified_ai_config_status_data():
             "api_key_configured": environment_configured,
             "credential_storage": "environment" if environment_configured else "unavailable",
             "updated_at": "",
+            "roles": roles,
         }
     status = service.status()
     public = status.public_dict()
+    if environment_configured and not public["configured"]:
+        environment_provider = str(os.getenv("AI_PROVIDER", "")).strip().lower()
+        environment_model = str(os.getenv("AI_MODEL", "")).strip()
+        public["roles"] = {
+            role: {
+                "role": role,
+                "configured": role == "writer",
+                "effective_configured": True,
+                "provider": environment_provider,
+                "base_url": "",
+                "model": environment_model,
+                "api_key_configured": True,
+                "credential_storage": "environment",
+                "updated_at": "",
+                "fallback": role != "writer",
+                "source_role": "writer",
+                **(
+                    {"same_as_writer": True}
+                    if role == "reviewer"
+                    else {}
+                ),
+            }
+            for role in ("writer", "reviewer", "evaluator", "image")
+        }
     return {
         "server_configured": environment_configured,
         "custom_config_supported": True,
@@ -1719,6 +1864,50 @@ def _unified_ai_config_status_data():
             if public["configured"]
             else ("environment" if environment_configured else "none")
         ),
+    }
+
+
+def _normalize_ai_role(value, *, optional_only=False):
+    role = str(value or "writer").strip().lower()
+    if role == "optimizer":
+        role = "reviewer"
+    allowed = {"reviewer", "evaluator", "image"} if optional_only else {
+        "writer",
+        "reviewer",
+        "evaluator",
+        "image",
+    }
+    if role not in allowed:
+        raise AIConfigurationError(
+            "AI 角色仅支持 writer、reviewer、evaluator、image"
+        )
+    return role
+
+
+def _public_ai_role_resolution(role, *, explicit_request=False):
+    normalized_role = _normalize_ai_role(role)
+    if explicit_request:
+        return {
+            "role": normalized_role,
+            "configured": True,
+            "fallback": False,
+            "source_role": "request",
+            "provider": "request_scoped",
+            "model": "request_scoped",
+        }
+    try:
+        status = _unified_ai_config_status_data()
+    except UnifiedAIConfigError:
+        status = {}
+    role_status = dict((status.get("roles") or {}).get(normalized_role) or {})
+    return {
+        "role": normalized_role,
+        "configured": bool(role_status.get("configured")),
+        "effective_configured": bool(role_status.get("effective_configured")),
+        "fallback": bool(role_status.get("fallback")),
+        "source_role": str(role_status.get("source_role") or normalized_role),
+        "provider": str(role_status.get("provider") or ""),
+        "model": str(role_status.get("model") or ""),
     }
 
 
@@ -1783,6 +1972,110 @@ def save_ai_config():
     return jsonify({"code": 200, "msg": "统一 AI 配置已安全保存", "data": status}), 200
 
 
+@app.route('/api/ai/config/roles/<role>', methods=['PUT'])
+def save_ai_role_config(role):
+    """Save one non-default AI role without exposing any credential."""
+
+    try:
+        normalized_role = _normalize_ai_role(role, optional_only=True)
+    except AIConfigurationError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
+    unsupported = sorted(
+        set(data)
+        - {
+            "provider",
+            "base_url",
+            "model",
+            "api_key",
+            "reuse_writer_credential",
+        }
+    )
+    if unsupported:
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "AI 角色配置包含不支持的字段: " + ", ".join(unsupported),
+                "data": None,
+            }
+        ), 400
+    for field in ("provider", "base_url", "model"):
+        if not isinstance(data.get(field), str):
+            return jsonify(
+                {"code": 400, "msg": f"{field} 必须是字符串", "data": None}
+            ), 400
+    if "api_key" in data and data["api_key"] is not None and not isinstance(
+        data["api_key"], str
+    ):
+        return jsonify(
+            {"code": 400, "msg": "api_key 必须是字符串", "data": None}
+        ), 400
+    reuse_writer = data.get("reuse_writer_credential", True)
+    if not isinstance(reuse_writer, bool):
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "reuse_writer_credential 必须是布尔值",
+                "data": None,
+            }
+        ), 400
+    service = app.config.get("UNIFIED_AI_CONFIG_SERVICE")
+    if service is None:
+        return jsonify(
+            {"code": 503, "msg": "当前运行方式不支持保存 AI 角色配置", "data": None}
+        ), 503
+    try:
+        service.save_role(
+            normalized_role,
+            provider=data.get("provider"),
+            base_url=data.get("base_url"),
+            model=data.get("model"),
+            api_key=data.get("api_key"),
+            reuse_writer_credential=reuse_writer,
+        )
+        status = _unified_ai_config_status_data()
+    except AIConfigurationError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    except UnifiedAIConfigStorageUnavailableError as exc:
+        return jsonify({"code": 503, "msg": str(exc), "data": None}), 503
+    except UnifiedAIConfigError as exc:
+        return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
+    return jsonify(
+        {
+            "code": 200,
+            "msg": f"{normalized_role} 角色配置已安全保存",
+            "data": status,
+        }
+    ), 200
+
+
+@app.route('/api/ai/config/roles/<role>', methods=['DELETE'])
+def clear_ai_role_config(role):
+    try:
+        normalized_role = _normalize_ai_role(role, optional_only=True)
+    except AIConfigurationError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    service = app.config.get("UNIFIED_AI_CONFIG_SERVICE")
+    if service is None:
+        return jsonify(
+            {"code": 503, "msg": "当前运行方式没有本地 AI 角色配置", "data": None}
+        ), 503
+    try:
+        service.clear_role(normalized_role)
+        status = _unified_ai_config_status_data()
+    except UnifiedAIConfigError as exc:
+        return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
+    return jsonify(
+        {
+            "code": 200,
+            "msg": f"{normalized_role} 已回退到默认写稿模型",
+            "data": status,
+        }
+    ), 200
+
+
 @app.route('/api/ai/config', methods=['DELETE'])
 def clear_ai_config():
     service = app.config.get("UNIFIED_AI_CONFIG_SERVICE")
@@ -1805,7 +2098,7 @@ def test_ai_config_connection():
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
-    unsupported = sorted(set(data) - {"confirm_external_call", "ai_config"})
+    unsupported = sorted(set(data) - {"confirm_external_call", "ai_config", "role"})
     if unsupported:
         return jsonify(
             {
@@ -1823,7 +2116,8 @@ def test_ai_config_connection():
             }
         ), 400
     try:
-        settings = _request_ai_settings(data)
+        role = _normalize_ai_role(data.get("role", "writer"))
+        settings = _request_ai_settings(data, role=role)
         if settings is None:
             settings = AISettings.from_environment()
     except AIConfigurationError as exc:
@@ -1856,6 +2150,11 @@ def test_ai_config_connection():
                 "message": "固定合成测试已收到模型响应",
                 "provider": provider_label_for_settings(settings),
                 "model": result.model,
+                "role": role,
+                "ai_role": _public_ai_role_resolution(
+                    role,
+                    explicit_request=data.get("ai_config") is not None,
+                ),
                 "elapsed_ms": result.elapsed_ms,
                 "provider_request_id": result.provider_request_id,
                 "data_disclosure": {
@@ -2093,14 +2392,67 @@ async def check_media_account_status(account_id):
         )
     except MediaAccountNotFoundError as exc:
         return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except MediaAccountFrozenError as exc:
+        return jsonify(
+            {
+                "code": 409,
+                "msg": str(exc),
+                "data": {"risk_event": exc.risk_event},
+            }
+        ), 409
     except MediaAccountRuntimeDisabledError as exc:
         return jsonify({"code": 403, "msg": str(exc), "data": None}), 403
     except MediaAccountCheckError as exc:
-        return jsonify({"code": 502, "msg": str(exc), "data": None}), 502
+        return jsonify(
+            {
+                "code": 502,
+                "msg": str(exc),
+                "data": {"risk_event": exc.risk_event} if exc.risk_event else None,
+            }
+        ), 502
     finally:
         with active_queues_lock:
             active_account_checks.discard(account_id)
     return jsonify({"code": 200, "msg": "success", "data": account}), 200
+
+
+@app.route('/api/media-accounts/<int:account_id>/risk/resolve', methods=['POST'])
+def resolve_media_account_risk(account_id):
+    """Acknowledge official platform recovery without silently enabling login."""
+
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict) or payload.get("confirm_recovery") is not True:
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "请确认已在平台完成申诉或本人验证",
+                "data": None,
+            }
+        ), 400
+    try:
+        result = resolve_media_account_risks(
+            app.config["DATABASE_PATH"],
+            account_id,
+            category=payload.get("category"),
+        )
+    except LookupError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except ValueError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    except sqlite3.Error:
+        app.logger.exception(
+            "media account risk resolution failed account_id=%s", account_id
+        )
+        return jsonify(
+            {"code": 500, "msg": "账号风险状态未能更新，请稍后重试", "data": None}
+        ), 500
+    return jsonify(
+        {
+            "code": 200,
+            "msg": "风险记录已确认；账号仍保持停用，请重新登录验证后再创建任务",
+            "data": result,
+        }
+    ), 200
 
 
 @app.route('/api/media-accounts/<int:account_id>/disconnect', methods=['POST'])
@@ -2565,7 +2917,7 @@ def sample_geo_visibility():
         ), 400
 
     try:
-        ai_settings = _request_ai_settings(data)
+        ai_settings = _request_ai_settings(data, role="evaluator")
     except AIConfigurationError as exc:
         status_code = 400 if data.get("ai_config") is not None else 503
         return jsonify(
@@ -2654,7 +3006,14 @@ def sample_geo_visibility():
         response.headers["Idempotency-Replayed"] = "false"
         return response, 503
 
-    response = jsonify(sampling["payload"])
+    sampling_payload = dict(sampling["payload"])
+    sampling_data = dict(sampling_payload.get("data") or {})
+    sampling_data["ai_role"] = _public_ai_role_resolution(
+        "evaluator",
+        explicit_request=data.get("ai_config") is not None,
+    )
+    sampling_payload["data"] = sampling_data
+    response = jsonify(sampling_payload)
     response.headers["X-Request-ID"] = sampling["request_id"]
     response.headers["Idempotency-Key"] = sampling["idempotency_key"]
     response.headers["Idempotency-Replayed"] = (
@@ -3092,6 +3451,25 @@ def create_article_cover_image(article_id):
         article=article,
         project=project,
     )
+    ai_status = _unified_ai_config_status_data()
+    image_role = dict((ai_status.get("roles") or {}).get("image") or {})
+    record = {
+        **record,
+        "generation_mode": "local_deterministic",
+        "ai_role": {
+            "role": "image",
+            "configured": bool(image_role.get("configured")),
+            "fallback": bool(image_role.get("fallback")),
+            "provider": str(image_role.get("provider") or ""),
+            "model": str(image_role.get("model") or ""),
+            "execution": (
+                "configured_but_not_invoked"
+                if image_role.get("configured")
+                else "fallback_not_invoked"
+            ),
+            "message": "当前封面由本地确定性绘图生成，未调用生图服务且未产生模型费用。",
+        },
+    }
     return jsonify({"code": 201, "msg": "文章封面已生成", "data": record}), 201
 
 
@@ -3178,7 +3556,7 @@ def optimize_article(article_id):
         sources=generation_sources,
     )
     try:
-        ai_settings = _request_ai_settings(data)
+        ai_settings = _request_ai_settings(data, role="reviewer")
     except AIConfigurationError as exc:
         status_code = 400 if data.get("ai_config") is not None else 503
         return jsonify(
@@ -3277,12 +3655,16 @@ def optimize_article(article_id):
                 "after": after_score,
                 "ai_usage": ai_usage_record,
                 "warnings": ai_usage_warnings,
+                "ai_role": _public_ai_role_resolution(
+                    "reviewer",
+                    explicit_request=data.get("ai_config") is not None,
+                ),
             },
         }
     ), 200
 
 
-def _request_ai_settings(data):
+def _request_ai_settings(data, *, role="writer"):
     if "ai_config" in data and data["ai_config"] is not None:
         return AISettings.from_mapping(data["ai_config"])
     service = app.config.get("UNIFIED_AI_CONFIG_SERVICE")
@@ -3290,7 +3672,8 @@ def _request_ai_settings(data):
         return None
     try:
         status = service.status()
-        return service.load_settings() if status.configured else None
+        normalized_role = _normalize_ai_role(role)
+        return service.load_settings(normalized_role) if status.configured else None
     except UnifiedAIConfigError as exc:
         raise AIConfigurationError(
             "统一 AI 配置不可用，请在系统设置中重新保存或清除"
@@ -4612,8 +4995,16 @@ async def getValidAccounts():
         )
         rows = cursor.fetchall()
 
+    active_risks = get_active_media_account_risks(
+        app.config["DATABASE_PATH"],
+        [int(row[0]) for row in rows],
+    )
+
     for row in rows:
         account_id = int(row[0])
+        active_risk = active_risks.get(account_id)
+        if active_risk and active_risk["category"] in FROZEN_RISK_CATEGORIES:
+            continue
         if (
             row[1] == BILIBILI_ACCOUNT_TYPE
             and not app.config.get("ENABLE_BILIBILI_RUNTIME", False)
@@ -4633,7 +5024,19 @@ async def getValidAccounts():
                 row[2],
                 cookies_directory=app.config["COOKIES_DIRECTORY"],
             )
-            new_status = 1 if flag else 0
+            if flag:
+                resolve_recoverable_media_account_risks(
+                    app.config["DATABASE_PATH"], account_id
+                )
+                new_status = 1
+            else:
+                record_media_account_risk(
+                    app.config["DATABASE_PATH"],
+                    account_id,
+                    source="login_check",
+                    error_text="登录会话已失效，需要重新登录",
+                )
+                new_status = 0
             with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
                 with conn:
                     conn.execute(
@@ -4648,6 +5051,19 @@ async def getValidAccounts():
                             DISCONNECTED_ACCOUNT_STATUS,
                         ),
                     )
+        except Exception as exc:
+            # Keep the historical batch best-effort behavior, but preserve any
+            # recognizable platform risk for the account card and preflight.
+            try:
+                record_media_account_risk(
+                    app.config["DATABASE_PATH"],
+                    account_id,
+                    source="login_check",
+                    error_text=str(exc),
+                )
+            except (LookupError, sqlite3.Error, ValueError):
+                pass
+            continue
         finally:
             with active_queues_lock:
                 active_account_checks.discard(account_id)
@@ -4809,6 +5225,17 @@ def login():
             ), 400
     if login_type not in {str(value) for value in range(1, 11)}:
         return jsonify({"code": 400, "msg": "不支持的平台类型", "data": None}), 400
+    if (
+        existing_account_id is not None
+        and login_type not in IN_PLACE_REAUTH_ACCOUNT_TYPES
+    ):
+        return jsonify(
+            {
+                "code": 409,
+                "msg": "该平台暂不支持原位重新登录；请先退出并解绑旧账号，再添加新账号",
+                "data": None,
+            }
+        ), 409
     if (
         login_type == str(BILIBILI_ACCOUNT_TYPE)
         and not app.config.get("ENABLE_BILIBILI_RUNTIME", False)

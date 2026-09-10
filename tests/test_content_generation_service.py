@@ -102,6 +102,12 @@ class ContentGenerationServiceTests(unittest.TestCase):
             length=length,
             content_type="行业科普",
             target_platform="zhihu",
+            ai_role={
+                "role": "writer",
+                "configured": True,
+                "fallback": False,
+                "source_role": "writer",
+            },
             request_id=request_id,
             idempotency_key=idempotency_key,
         )
@@ -122,10 +128,16 @@ class ContentGenerationServiceTests(unittest.TestCase):
         )
         self.assertIsNone(result["generation"]["usage"])
         self.assertEqual(result["generation"]["usage_status"], "unknown")
+        self.assertEqual(result["generation"]["ai_role"]["role"], "writer")
+        self.assertFalse(result["generation"]["ai_role"]["fallback"])
         run = get_run(self.db_path, result["generation"]["run_id"])
         self.assertEqual(run["status"], "succeeded")
         self.assertIsNone(run["usage"])
         self.assertEqual(run["provider_geo_score"], None)
+        self.assertEqual(
+            run["result_payload"]["generation"]["ai_role"]["source_role"],
+            "writer",
+        )
 
     def test_success_removes_unfinished_placeholders_before_persistence(self):
         payload = engine_payload()

@@ -86,6 +86,8 @@ class ContentGenerationRequest:
     content_type: str
     target_platform: str = ""
     template_instruction: str = ""
+    diversity_profile: Mapping[str, Any] = field(default_factory=dict)
+    ai_role: Mapping[str, Any] = field(default_factory=dict)
     request_id: str = field(default_factory=lambda: str(uuid.uuid4()))
     idempotency_key: str = ""
 
@@ -112,6 +114,8 @@ class ContentGenerationRequest:
         content_type: str,
         target_platform: str = "",
         template_instruction: str = "",
+        diversity_profile: Mapping[str, Any] | None = None,
+        ai_role: Mapping[str, Any] | None = None,
         request_id: str = "",
         idempotency_key: str = "",
     ) -> "ContentGenerationRequest":
@@ -123,6 +127,8 @@ class ContentGenerationRequest:
             content_type=str(content_type or "").strip(),
             target_platform=str(target_platform or "").strip(),
             template_instruction=str(template_instruction or "").strip(),
+            diversity_profile=dict(diversity_profile or {}),
+            ai_role=dict(ai_role or {}),
             request_id=str(request_id or uuid.uuid4()).strip(),
             idempotency_key=str(idempotency_key or "").strip(),
         )
@@ -139,6 +145,7 @@ class ContentGenerationRequest:
                 "content_type": self.content_type,
                 "target_platform": self.target_platform,
                 "template_instruction": self.template_instruction,
+                "diversity_profile": dict(self.diversity_profile),
             },
         }
 
@@ -175,6 +182,8 @@ class ContentGenerationResult:
     warnings: tuple[str, ...] = ()
     fallback_used: bool = False
     fallback_from: str = ""
+    diversity_profile: Mapping[str, Any] = field(default_factory=dict)
+    ai_role: Mapping[str, Any] = field(default_factory=dict)
 
     @classmethod
     def from_payload(
@@ -278,6 +287,8 @@ class ContentGenerationResult:
                 "fallback_used": self.fallback_used,
                 "fallback_from": self.fallback_from,
                 "warnings": list(self.warnings),
+                "diversity_profile": dict(self.diversity_profile),
+                "ai_role": dict(self.ai_role),
             },
         }
 

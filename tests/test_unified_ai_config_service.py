@@ -87,6 +87,130 @@ class UnifiedAIConfigServiceTests(unittest.TestCase):
         self.assertNotIn(secret, json.dumps(status.public_dict()))
         self.assertEqual(self.service.load_settings().api_key, secret)
 
+    def test_writer_key_is_not_reused_after_provider_or_endpoint_changes(self):
+        secret = "writer-secret-for-original-endpoint"
+        self.service.save(
+            provider="qwen",
+            base_url="https://api.example.test/v1",
+            model="writer-model",
+            api_key=secret,
+        )
+
+        with self.assertRaises(AIConfigurationError):
+            self.service.save(
+                provider="custom",
+                base_url="https://other.example.test/v1",
+                model="replacement-model",
+            )
+
+        settings = self.service.load_settings("writer")
+        self.assertEqual(settings.base_url, "https://api.example.test/v1")
+        self.assertEqual(settings.model, "writer-model")
+        self.assertEqual(settings.api_key, secret)
+
+    def test_optional_roles_fallback_to_writer_until_independently_configured(self):
+        self.service.save(
+            provider="qwen",
+            base_url="https://api.example.test/v1",
+            model="writer-model",
+            api_key="writer-secret",
+        )
+
+        initial = self.service.status().public_dict()
+
+        self.assertTrue(initial["roles"]["reviewer"]["fallback"])
+        self.assertEqual(initial["roles"]["reviewer"]["source_role"], "writer")
+        self.assertEqual(self.service.load_settings("reviewer").model, "writer-model")
+        self.assertTrue(initial["roles"]["reviewer"]["same_as_writer"])
+
+        self.service.save_role(
+            "reviewer",
+            provider="deepseek",
+            base_url="https://review.example.test/v1",
+            model="review-model",
+            api_key="review-secret",
+        )
+        reviewer = self.service.load_settings("optimizer")
+        configured = self.service.status().public_dict()
+
+        self.assertEqual(reviewer.model, "review-model")
+        self.assertEqual(reviewer.api_key, "review-secret")
+        self.assertTrue(configured["roles"]["reviewer"]["configured"])
+        self.assertFalse(configured["roles"]["reviewer"]["fallback"])
+        self.assertFalse(configured["roles"]["reviewer"]["same_as_writer"])
+        serialized = self.config_path.read_text(encoding="utf-8")
+        self.assertNotIn("writer-secret", serialized)
+        self.assertNotIn("review-secret", serialized)
+
+    def test_role_can_reuse_writer_credential_only_for_same_service(self):
+        self.service.save(
+            provider="qwen",
+            base_url="https://api.example.test/v1",
+            model="writer-model",
+            api_key="writer-secret",
+        )
+
+        self.service.save_role(
+            "evaluator",
+            provider="qwen",
+            base_url="https://api.example.test/v1",
+            model="evaluation-model",
+        )
+
+        evaluator = self.service.load_settings("evaluator")
+        self.assertEqual(evaluator.api_key, "writer-secret")
+        self.assertEqual(evaluator.model, "evaluation-model")
+        with self.assertRaises(AIConfigurationError):
+            self.service.save_role(
+                "image",
+                provider="custom",
+                base_url="https://images.example.test/v1",
+                model="image-model",
+            )
+
+    def test_clear_optional_role_restores_explicit_fallback(self):
+        self.service.save(
+            provider="qwen",
+            base_url="https://api.example.test/v1",
+            model="writer-model",
+            api_key="writer-secret",
+        )
+        self.service.save_role(
+            "image",
+            provider="custom",
+            base_url="https://images.example.test/v1",
+            model="image-model",
+            api_key="image-secret",
+        )
+
+        status = self.service.clear_role("image").public_dict()
+
+        self.assertFalse(status["roles"]["image"]["configured"])
+        self.assertTrue(status["roles"]["image"]["fallback"])
+        self.assertEqual(self.service.load_settings("image").model, "writer-model")
+
+    def test_reads_legacy_schema_one_and_upgrades_on_next_save(self):
+        self.service.save(
+            provider="qwen",
+            base_url="https://api.example.test/v1",
+            model="writer-model",
+            api_key="writer-secret",
+        )
+        legacy = json.loads(self.config_path.read_text(encoding="utf-8"))
+        legacy["schema_version"] = 1
+        legacy.pop("roles", None)
+        self.config_path.write_text(json.dumps(legacy), encoding="utf-8")
+
+        self.assertEqual(self.service.load_settings().model, "writer-model")
+        self.service.save(
+            provider="qwen",
+            base_url="https://api.example.test/v1",
+            model="writer-model-v2",
+        )
+        upgraded = json.loads(self.config_path.read_text(encoding="utf-8"))
+        self.assertEqual(upgraded["schema_version"], 2)
+        self.assertEqual(upgraded["roles"], {})
+
     def test_clear_removes_config_and_returns_empty_status(self):
         self.service.save(
             provider="qwen",

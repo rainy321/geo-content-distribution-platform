@@ -288,6 +288,34 @@ class KSBaseUploader(BaseVideoUploader):
         self.local_executable_path = LOCAL_CHROME_PATH
         self.date_format = "%Y-%m-%d %H:%M"
 
+    async def _raise_if_visible_account_risk(
+        self,
+        page: Page,
+        *,
+        include_verification: bool = False,
+    ) -> None:
+        """Stop bounded automation when the page itself reports an account block.
+
+        Only visible body text is inspected and the retained evidence is capped
+        and sanitised by the shared account-risk classifier.  This deliberately
+        does not attempt to bypass a restriction or rotate to another account.
+        """
+        try:
+            body_text = await page.locator("body").inner_text(timeout=1500)
+        except Exception:
+            return
+        from services.media_account_risk_service import classify_media_account_risk
+
+        risk = classify_media_account_risk(body_text)
+        if not risk or risk["category"] == "network_error":
+            return
+        if risk["category"] == "verification_required" and not include_verification:
+            return
+        evidence = risk.get("evidence") or risk.get("reason") or "平台未返回具体原因"
+        raise RuntimeError(
+            f"快手账号风险[{risk['category']}]：{evidence}"
+        )
+
     async def validate_base_args(self):
         if not os.path.exists(self.account_file):
             raise RuntimeError(f"cookie文件不存在，请先完成快手登录: {self.account_file}")
@@ -755,7 +783,14 @@ class KSVideo(KSBaseUploader):
             await page.wait_for_url(KUAISHOU_UPLOAD_URL_PATTERN)
 
             upload_button = page.locator("button[class^='_upload-btn']")
-            await upload_button.wait_for(state="visible", timeout=10000)
+            try:
+                await upload_button.wait_for(state="visible", timeout=10000)
+            except Exception:
+                await self._raise_if_visible_account_risk(
+                    page,
+                    include_verification=True,
+                )
+                raise
 
             async with page.expect_file_chooser() as fc_info:
                 await upload_button.click()
@@ -846,6 +881,8 @@ class KSVideo(KSBaseUploader):
                 while publish_retry_count < max_publish_retries:
                     publish_retry_count += 1
                     try:
+                        if publish_retry_count == 1 or publish_retry_count % 5 == 0:
+                            await self._raise_if_visible_account_risk(page)
                         # 检测验证码弹窗
                         if not verification_waited:
                             verification_indicators = ['text="获取验证码"', 'text="请输入验证码"', 'text="安全验证"',
@@ -878,7 +915,9 @@ class KSVideo(KSBaseUploader):
                                     if wait_i % 20 == 0 and wait_i > 0:
                                         kuaishou_logger.info(_msg("⏳", f"仍在等待验证完成...已等待{wait_i // 2}秒"))
                                 else:
-                                    verification_waited = True
+                                    raise RuntimeError(
+                                        "快手要求本人验证，180 秒内未完成；任务已暂停，不会继续点击发布"
+                                    )
 
                         if not publish_clicked:
                             publish_clicked = await self._click_publish_button(page)
@@ -894,12 +933,22 @@ class KSVideo(KSBaseUploader):
                         kuaishou_logger.success(_msg("🥳", "视频发布成功，小人开心收工"))
                         break
                     except Exception as exc:
+                        if "180 秒内未完成" in str(exc):
+                            raise
+                        await self._raise_if_visible_account_risk(
+                            page,
+                            include_verification=publish_retry_count >= max_publish_retries,
+                        )
                         if publish_retry_count % 10 == 0:
                             kuaishou_logger.info(_msg("🏃", f"小人正在冲刺发布视频（第{publish_retry_count}次）"))
                         if self.debug and publish_retry_count <= 5:
                             await page.screenshot(full_page=True)
                         await asyncio.sleep(1)
                 else:
+                    await self._raise_if_visible_account_risk(
+                        page,
+                        include_verification=True,
+                    )
                     kuaishou_logger.error(_msg("❌", f"发布超时：{max_publish_retries}次尝试后仍未成功"))
                     raise RuntimeError("快手已点击发布一次但最终状态未知；为避免重复发布，未自动重试")
 
@@ -973,7 +1022,14 @@ class KSNote(KSBaseUploader):
 
         kuaishou_logger.info(_msg("📤", "小人正在上传图片"))
         upload_button = page.locator("button[class^='_upload-btn']").filter(has_text="上传图片")
-        await upload_button.wait_for(state="visible", timeout=10000)
+        try:
+            await upload_button.wait_for(state="visible", timeout=10000)
+        except Exception:
+            await self._raise_if_visible_account_risk(
+                page,
+                include_verification=True,
+            )
+            raise
 
         async with page.expect_file_chooser() as fc_info:
             await upload_button.click()
@@ -1052,6 +1108,8 @@ class KSNote(KSBaseUploader):
         while publish_retry_count < max_publish_retries:
             publish_retry_count += 1
             try:
+                if publish_retry_count == 1 or publish_retry_count % 5 == 0:
+                    await self._raise_if_visible_account_risk(page)
                 # 检测验证码弹窗
                 if not verification_waited:
                     verification_indicators = ['text="获取验证码"', 'text="请输入验证码"', 'text="安全验证"',
@@ -1084,7 +1142,9 @@ class KSNote(KSBaseUploader):
                             if wait_i % 20 == 0 and wait_i > 0:
                                 kuaishou_logger.info(_msg("⏳", f"仍在等待验证完成...已等待{wait_i // 2}秒"))
                         else:
-                            verification_waited = True
+                            raise RuntimeError(
+                                "快手要求本人验证，180 秒内未完成；任务已暂停，不会继续点击发布"
+                            )
 
                 if not publish_clicked:
                     publish_clicked = await self._click_publish_button(page)
@@ -1100,12 +1160,22 @@ class KSNote(KSBaseUploader):
                 kuaishou_logger.success(_msg("🥳", "图文发布成功，小人开心收工"))
                 break
             except Exception as exc:
+                if "180 秒内未完成" in str(exc):
+                    raise
+                await self._raise_if_visible_account_risk(
+                    page,
+                    include_verification=publish_retry_count >= max_publish_retries,
+                )
                 if publish_retry_count % 10 == 0:
                     kuaishou_logger.info(_msg("🏃", f"小人正在冲刺发布图文（第{publish_retry_count}次）"))
                 if self.debug and publish_retry_count <= 5:
                     await page.screenshot(full_page=True)
                 await asyncio.sleep(1)
         else:
+            await self._raise_if_visible_account_risk(
+                page,
+                include_verification=True,
+            )
             kuaishou_logger.error(_msg("❌", f"发布超时：{max_publish_retries}次尝试后仍未成功"))
             raise RuntimeError("快手图文已点击发布一次但最终状态未知；为避免重复发布，未自动重试")
 
@@ -1134,7 +1204,14 @@ class KSNote(KSBaseUploader):
             kuaishou_logger.info(_msg("🧭", "小人正在赶往快手图文发布页"))
             await page.wait_for_url(KUAISHOU_UPLOAD_URL_PATTERN)
 
-            await self.upload_note_content(page)
+            try:
+                await self.upload_note_content(page)
+            except Exception:
+                await self._raise_if_visible_account_risk(
+                    page,
+                    include_verification=True,
+                )
+                raise
             upload_success = True
         finally:
             if upload_success:

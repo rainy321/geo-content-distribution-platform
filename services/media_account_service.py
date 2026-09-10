@@ -12,6 +12,13 @@ from services.platform_capability_service import (
     BILIBILI_RUNTIME_DISABLED_MESSAGE,
     PLATFORM_CAPABILITIES,
 )
+from services.media_account_risk_service import (
+    FROZEN_RISK_CATEGORIES,
+    get_active_media_account_risk,
+    get_active_media_account_risks,
+    record_media_account_risk,
+    resolve_recoverable_media_account_risks,
+)
 
 
 PLATFORM_DEFINITIONS = tuple(
@@ -33,6 +40,14 @@ class MediaAccountNotFoundError(LookupError):
 
 class MediaAccountCheckError(RuntimeError):
     """Raised when a platform login check cannot produce a reliable result."""
+
+    def __init__(self, message: str, *, risk_event: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.risk_event = risk_event
+
+
+class MediaAccountFrozenError(MediaAccountCheckError):
+    """Raised before network access when an active risk freezes the account."""
 
 
 class MediaAccountRuntimeDisabledError(MediaAccountCheckError):
@@ -68,7 +83,18 @@ def get_media_accounts_overview(
             (DISCONNECTED_ACCOUNT_STATUS,),
         ).fetchall()
 
-    accounts = [_serialize_account(row, cookie_dir) for row in rows]
+    active_risks = get_active_media_account_risks(
+        database_path,
+        [int(row["id"]) for row in rows],
+    )
+    accounts = [
+        _serialize_account(
+            row,
+            cookie_dir,
+            risk_event=active_risks.get(int(row["id"])),
+        )
+        for row in rows
+    ]
     platforms = []
     for definition in PLATFORM_DEFINITIONS:
         platform_accounts = [
@@ -90,7 +116,15 @@ def get_media_accounts_overview(
             "total": len(accounts),
             "connected": sum(account["status"] == "connected" for account in accounts),
             "needs_action": sum(
-                account["status"] in {"expired", "missing_cookie"}
+                account["status"]
+                in {
+                    "expired",
+                    "missing_cookie",
+                    "permanent_ban",
+                    "temporary_restriction",
+                    "verification_required",
+                    "session_expired",
+                }
                 for account in accounts
             ),
             "checking": sum(account["status"] == "checking" for account in accounts),
@@ -116,6 +150,12 @@ async def check_media_account(
         raise MediaAccountNotFoundError("媒体账号不存在")
     if row["status"] == DISCONNECTED_ACCOUNT_STATUS:
         raise MediaAccountNotFoundError("媒体账号已在本机解绑")
+    active_risk = get_active_media_account_risk(database_path, account_id)
+    if active_risk and active_risk["category"] in FROZEN_RISK_CATEGORIES:
+        raise MediaAccountFrozenError(
+            f"{active_risk['label']}：{active_risk['recommended_action']}",
+            risk_event=active_risk,
+        )
     if row["type"] == BILIBILI_ACCOUNT_TYPE and not enable_bilibili_runtime:
         raise MediaAccountRuntimeDisabledError(BILIBILI_RUNTIME_DISABLED_MESSAGE)
 
@@ -124,13 +164,69 @@ async def check_media_account(
     if not cookie_path.is_file():
         connected = False
         message = "Cookie 文件不存在，请重新登录或上传 Cookie"
+        risk_event = record_media_account_risk(
+            database_path,
+            account_id,
+            source="login_check",
+            error_text="登录会话已失效：Cookie 文件不存在",
+            occurred_at=timestamp,
+        )
     else:
         try:
             result = checker(row["type"], row["filePath"])
-            connected = bool(await result) if inspect.isawaitable(result) else bool(result)
+            resolved_result = await result if inspect.isawaitable(result) else result
+            if isinstance(resolved_result, dict):
+                connected = bool(resolved_result.get("connected"))
+                result_detail = str(
+                    resolved_result.get("message")
+                    or resolved_result.get("reason")
+                    or ""
+                ).strip()
+            else:
+                connected = bool(resolved_result)
+                result_detail = ""
         except Exception as exc:
+            risk_event = record_media_account_risk(
+                database_path,
+                account_id,
+                source="login_check",
+                error_text=str(exc),
+                occurred_at=timestamp,
+            )
+            if risk_event is not None:
+                error_type = (
+                    MediaAccountFrozenError
+                    if risk_event["frozen"]
+                    else MediaAccountCheckError
+                )
+                raise error_type(
+                    f"{risk_event['label']}：{risk_event['recommended_action']}",
+                    risk_event=risk_event,
+                ) from exc
             raise MediaAccountCheckError("平台登录状态检测失败，请稍后重试") from exc
         message = "登录状态正常" if connected else "登录已失效，需要重新登录"
+        if connected:
+            resolve_recoverable_media_account_risks(
+                database_path,
+                account_id,
+                resolved_at=timestamp,
+            )
+            risk_event = None
+        else:
+            risk_event = record_media_account_risk(
+                database_path,
+                account_id,
+                source="login_check",
+                error_text=(
+                    "登录会话已失效，需要重新登录。"
+                    f"平台返回：{result_detail}"
+                    if result_detail
+                    else "登录会话已失效，需要重新登录"
+                ),
+                occurred_at=timestamp,
+            )
+            if risk_event is not None:
+                message = risk_event["reason"]
 
     with closing(_connect(database_path)) as conn:
         with conn:
@@ -152,7 +248,8 @@ async def check_media_account(
     if updated is None or updated["status"] == DISCONNECTED_ACCOUNT_STATUS:
         raise MediaAccountNotFoundError("媒体账号已在检测期间解绑")
 
-    account = _serialize_account(updated, cookie_dir)
+    current_risk = get_active_media_account_risk(database_path, account_id)
+    account = _serialize_account(updated, cookie_dir, risk_event=current_risk)
     account["check_message"] = message
     return account
 
@@ -412,7 +509,12 @@ def cleanup_disconnected_account_files(
     return {"removed": removed, "remaining": remaining}
 
 
-def _serialize_account(row: sqlite3.Row, cookie_dir: Path) -> dict[str, Any]:
+def _serialize_account(
+    row: sqlite3.Row,
+    cookie_dir: Path,
+    *,
+    risk_event: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     definition = _PLATFORM_BY_TYPE.get(
         row["type"],
         {
@@ -431,6 +533,15 @@ def _serialize_account(row: sqlite3.Row, cookie_dir: Path) -> dict[str, Any]:
         status = "connected"
     else:
         status = "expired"
+    if (
+        risk_event
+        and risk_event.get("frozen")
+        and not (
+            status == "missing_cookie"
+            and risk_event.get("category") == "session_expired"
+        )
+    ):
+        status = str(risk_event["category"])
     return {
         "id": row["id"],
         "type": row["type"],
@@ -441,6 +552,7 @@ def _serialize_account(row: sqlite3.Row, cookie_dir: Path) -> dict[str, Any]:
         "status": status,
         "cookie_present": cookie_present,
         "last_checked_at": row["last_checked_at"],
+        "risk_event": risk_event,
     }
 
 

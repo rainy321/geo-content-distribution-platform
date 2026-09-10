@@ -95,6 +95,7 @@ class PublishJobExecutorTests(unittest.TestCase):
         platform="zhihu",
         publish_title=None,
         publish_content=None,
+        account_id=None,
     ):
         return create_publish_job(
             self.db_path,
@@ -106,7 +107,19 @@ class PublishJobExecutorTests(unittest.TestCase):
             demo=demo,
             publish_title=publish_title,
             publish_content=publish_content,
+            account_id=account_id,
         )
+
+    def _create_connected_account(self, *, account_type=9, name="主账号"):
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                return conn.execute(
+                    """
+                    INSERT INTO user_info (type, filePath, userName, status)
+                    VALUES (?, ?, ?, 1)
+                    """,
+                    (account_type, f"account-{name}", name),
+                ).lastrowid
 
     def _article_status(self):
         with closing(sqlite3.connect(self.db_path)) as conn:
@@ -405,6 +418,99 @@ class PublishJobExecutorTests(unittest.TestCase):
         self.assertEqual(result["message"], "已点击发布，等待平台确认")
         self.assertIsNotNone(result["finished_at"])
         self.assertEqual(self._article_status(), "ready")
+
+    def test_need_action_result_records_and_freezes_selected_account(self):
+        account_id = self._create_connected_account()
+        job = self._create_job(account_id=account_id)
+        publisher = StubPublisher(
+            "zhihu",
+            PublishResult(
+                success=False,
+                platform="zhihu",
+                status="need_action",
+                message="平台要求接收短信验证码后继续",
+            ),
+        )
+
+        result = execute_publish_job(
+            self.db_path,
+            job["id"],
+            publisher_factory=lambda _job: publisher,
+        )
+
+        self.assertEqual(result["status"], "need_action")
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            account_status = conn.execute(
+                "SELECT status FROM user_info WHERE id = ?", (account_id,)
+            ).fetchone()[0]
+            risk_category = conn.execute(
+                """
+                SELECT category FROM media_account_risk_events
+                WHERE account_id = ? AND active = 1
+                """,
+                (account_id,),
+            ).fetchone()[0]
+        self.assertEqual(account_status, 0)
+        self.assertEqual(risk_category, "verification_required")
+
+    def test_failed_result_with_network_error_does_not_freeze_account(self):
+        account_id = self._create_connected_account()
+        job = self._create_job(account_id=account_id)
+        publisher = StubPublisher(
+            "zhihu",
+            PublishResult(
+                success=False,
+                platform="zhihu",
+                status="failed",
+                message="网络异常：连接被重置",
+            ),
+        )
+
+        result = execute_publish_job(
+            self.db_path,
+            job["id"],
+            publisher_factory=lambda _job: publisher,
+        )
+
+        self.assertEqual(result["status"], "failed")
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            account_status = conn.execute(
+                "SELECT status FROM user_info WHERE id = ?", (account_id,)
+            ).fetchone()[0]
+            risk_category = conn.execute(
+                """
+                SELECT category FROM media_account_risk_events
+                WHERE account_id = ? AND active = 1
+                """,
+                (account_id,),
+            ).fetchone()[0]
+        self.assertEqual(account_status, 1)
+        self.assertEqual(risk_category, "network_error")
+
+    def test_risk_journal_failure_never_leaves_publish_job_processing(self):
+        job = self._create_job()
+        publisher = StubPublisher(
+            "zhihu",
+            PublishResult(
+                success=False,
+                platform="zhihu",
+                status="need_action",
+                message="需要本人验证",
+            ),
+        )
+
+        with patch(
+            "services.publish_job_executor.record_publish_job_account_risk",
+            side_effect=sqlite3.OperationalError("database is locked"),
+        ):
+            result = execute_publish_job(
+                self.db_path,
+                job["id"],
+                publisher_factory=lambda _job: publisher,
+            )
+
+        self.assertEqual(result["status"], "need_action")
+        self.assertEqual(get_publish_job(self.db_path, job["id"]), result)
 
     def test_manual_intervention_exception_needs_action(self):
         job = self._create_job()

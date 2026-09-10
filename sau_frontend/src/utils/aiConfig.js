@@ -27,6 +27,13 @@ export const UNIFIED_AI_PROVIDER_PRESETS = Object.freeze([
   })
 ])
 
+export const AI_ROLE_DEFINITIONS = Object.freeze([
+  Object.freeze({ id: 'writer', label: '写稿模型', code: 'WRITE', description: '生成文章与批量草稿' }),
+  Object.freeze({ id: 'reviewer', label: '调优模型', code: 'REVIEW', description: '复核结构、证据和表达' }),
+  Object.freeze({ id: 'evaluator', label: '回测模型', code: 'EVAL', description: 'AI 可见度真实采样' }),
+  Object.freeze({ id: 'image', label: '生图模型', code: 'IMAGE', description: '为后续外部生图预留' })
+])
+
 export const unifiedAIProviderPreset = id => (
   UNIFIED_AI_PROVIDER_PRESETS.find(item => item.id === id)
   || UNIFIED_AI_PROVIDER_PRESETS.at(-1)
@@ -36,6 +43,28 @@ export const normalizeUnifiedAIStatus = value => {
   const root = objectValue(value)
   const source = objectValue(root.data || root)
   const provider = String(source.provider || '').trim().toLowerCase()
+  const rawRoles = objectValue(source.roles)
+  const roles = Object.fromEntries(AI_ROLE_DEFINITIONS.map(definition => {
+    const item = objectValue(rawRoles[definition.id])
+    const roleProvider = String(item.provider || (source.configured ? provider : '')).trim().toLowerCase()
+    const configured = Boolean(item.configured ?? (definition.id === 'writer' && source.configured))
+    const effectiveConfigured = Boolean(item.effective_configured ?? source.configured)
+    return [definition.id, {
+      ...definition,
+      configured,
+      effectiveConfigured,
+      fallback: Boolean(item.fallback ?? (definition.id !== 'writer' && source.configured)),
+      sourceRole: String(item.source_role || (configured ? definition.id : 'writer')),
+      provider: roleProvider,
+      providerLabel: roleProvider ? unifiedAIProviderPreset(roleProvider).label : '',
+      baseUrl: String(item.base_url || (source.configured ? source.base_url : '')).trim(),
+      model: String(item.model || (source.configured ? source.model : '')).trim(),
+      apiKeyConfigured: Boolean(item.api_key_configured ?? source.api_key_configured),
+      credentialStorage: String(item.credential_storage || source.credential_storage || ''),
+      updatedAt: String(item.updated_at || ''),
+      sameAsWriter: Boolean(item.same_as_writer)
+    }]
+  }))
   return {
     configured: Boolean(source.configured),
     savedConfigured: Boolean(source.saved_configured),
@@ -48,7 +77,8 @@ export const normalizeUnifiedAIStatus = value => {
     model: String(source.model || '').trim(),
     apiKeyConfigured: Boolean(source.api_key_configured),
     credentialStorage: String(source.credential_storage || source.custom_key_storage || ''),
-    updatedAt: String(source.updated_at || '')
+    updatedAt: String(source.updated_at || ''),
+    roles
   }
 }
 
@@ -60,8 +90,41 @@ export const buildUnifiedAIConfigPayload = (draft, status = {}) => {
   }
   const apiKey = String(draft?.apiKey || '').trim()
   if (apiKey) payload.api_key = apiKey
-  if (!apiKey && !(status?.savedConfigured && status?.apiKeyConfigured)) {
-    throw new Error('首次保存需要填写 API Key')
+  const sameSavedConnection = (
+    payload.provider === String(status?.provider || '').trim().toLowerCase()
+    && payload.base_url === String(status?.baseUrl || '').trim().replace(/\/+$/, '')
+  )
+  if (!apiKey && !(status?.savedConfigured && status?.apiKeyConfigured && sameSavedConnection)) {
+    throw new Error('首次保存或切换服务地址时需要填写 API Key')
+  }
+  return payload
+}
+
+export const buildUnifiedAIRoleConfigPayload = (draft, roleStatus = {}, writerStatus = {}) => {
+  const payload = {
+    provider: String(draft?.provider || 'custom').trim().toLowerCase(),
+    base_url: String(draft?.baseUrl || '').trim().replace(/\/+$/, ''),
+    model: String(draft?.model || '').trim(),
+    reuse_writer_credential: Boolean(draft?.reuseWriterCredential)
+  }
+  const apiKey = String(draft?.apiKey || '').trim()
+  if (apiKey) payload.api_key = apiKey
+  const sameSavedRoleConnection = (
+    payload.provider === String(roleStatus?.provider || '').trim().toLowerCase()
+    && payload.base_url === String(roleStatus?.baseUrl || '').trim().replace(/\/+$/, '')
+  )
+  const canReuseSavedRole = Boolean(
+    roleStatus?.configured
+    && roleStatus?.apiKeyConfigured
+    && sameSavedRoleConnection
+  )
+  const sameWriterConnection = (
+    payload.provider === String(writerStatus?.provider || '').trim().toLowerCase()
+    && payload.base_url === String(writerStatus?.baseUrl || '').trim().replace(/\/+$/, '')
+  )
+  const canReuseWriter = payload.reuse_writer_credential && sameWriterConnection && writerStatus?.apiKeyConfigured
+  if (!apiKey && !canReuseSavedRole && !canReuseWriter) {
+    throw new Error('首次配置该角色需要 API Key；同服务地址可选择复用写稿模型密钥')
   }
   return payload
 }
