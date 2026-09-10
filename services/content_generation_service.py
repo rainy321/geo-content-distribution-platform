@@ -35,6 +35,7 @@ from services.content_generation_run_service import (
 from services.content_hygiene_service import (
     authoring_visible_length,
     constrain_generated_content_length,
+    ensure_owned_website_reference,
     sanitize_generated_content,
 )
 from services.geo_score_service import score_geo_content
@@ -248,6 +249,34 @@ class ContentGenerationService:
                             ]
                         )
                     ),
+                )
+            owned_reference = ensure_owned_website_reference(
+                result.content,
+                website=request.project_context.get("website"),
+                brand=request.project_context.get("name"),
+            )
+            if owned_reference.source is not None:
+                sources = list(result.sources)
+                if not any(
+                    str(item.get("url") or "").casefold()
+                    == owned_reference.source["url"].casefold()
+                    for item in sources
+                ):
+                    sources.append(owned_reference.source)
+                warnings = [
+                    warning
+                    for warning in result.warnings
+                    if warning != "引擎未返回来源信息"
+                ]
+                if owned_reference.appended:
+                    warnings.append(
+                        "已附加项目配置中的 HTTPS 自有官网；该来源不代表第三方背书"
+                    )
+                result = replace(
+                    result,
+                    content=owned_reference.content,
+                    sources=tuple(sources),
+                    warnings=tuple(dict.fromkeys(warnings)),
                 )
             if length_context["source"] == "platform_safe_limit":
                 result = replace(
@@ -542,6 +571,8 @@ class ContentGenerationService:
                 writer_result,
                 reviewed_article,
                 effective_length=effective_length,
+                website=request.project_context.get("website"),
+                brand=request.project_context.get("name"),
             )
             reviewer_score, reviewer_citeability = self._score_result(
                 reviewer_result,
@@ -668,6 +699,8 @@ class ContentGenerationService:
         reviewed_article: Mapping[str, Any],
         *,
         effective_length: int,
+        website: object = "",
+        brand: object = "",
     ) -> ContentGenerationResult:
         candidate_payload = dict(reviewed_article or {})
         if not str(candidate_payload.get("summary") or "").strip():
@@ -700,8 +733,17 @@ class ContentGenerationService:
         hygiene = sanitize_generated_content(normalized.content)
         if hygiene.changed:
             warnings.append("reviewer 优化稿中的未完成占位标记已在本地移除")
-        length_guard = constrain_generated_content_length(
+        owned_reference = ensure_owned_website_reference(
             hygiene.content,
+            website=website,
+            brand=brand,
+        )
+        if owned_reference.appended:
+            warnings.append(
+                "reviewer 优化稿已恢复项目 HTTPS 自有官网引用；该来源不代表第三方背书"
+            )
+        length_guard = constrain_generated_content_length(
+            owned_reference.content,
             effective_length,
         )
         if length_guard.changed:

@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from urllib.parse import urlsplit, urlunsplit
 
 
-CONTENT_HYGIENE_VERSION = "content-hygiene-1.2.0"
+CONTENT_HYGIENE_VERSION = "content-hygiene-1.3.0"
 
 _METADATA_PLACEHOLDER_LINE = re.compile(
     r"^\s*[*_]*\s*(?:作者|更新时间|更新日期|发布日期)\s*[:：]\s*"
@@ -51,6 +52,78 @@ class ContentLengthResult:
     @property
     def changed(self) -> bool:
         return self.final_length < self.original_length
+
+
+@dataclass(frozen=True)
+class OwnedWebsiteReferenceResult:
+    """A project-owned HTTPS reference attached without claiming endorsement."""
+
+    content: str
+    source: dict[str, str] | None
+    appended: bool
+
+
+def ensure_owned_website_reference(
+    value: str,
+    *,
+    website: object,
+    brand: object = "",
+) -> OwnedWebsiteReferenceResult:
+    """Attach the configured HTTPS project site as an explicitly owned source.
+
+    This helper performs no network request and never turns an HTTP URL into
+    HTTPS.  It only makes a user-configured, already-public project identity
+    visible to readers and labels it as self-owned evidence rather than an
+    independent endorsement.
+    """
+
+    content = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    canonical = _safe_public_https_url(website)
+    if not canonical:
+        return OwnedWebsiteReferenceResult(content, None, False)
+
+    label = re.sub(r"\s+", " ", str(brand or "")).strip()[:60]
+    source_title = f"{label}官网" if label else "项目官网"
+    source = {"title": source_title, "url": canonical}
+    if canonical.casefold() in content.casefold():
+        return OwnedWebsiteReferenceResult(content, source, False)
+
+    reference = f"参考资料（项目自有来源）：{source_title} {canonical}"
+    if authoring_visible_length(reference) > 120:
+        reference = f"项目官网：{canonical}"
+    if authoring_visible_length(reference) > 120:
+        # Preserve the structured source receipt, but do not crowd an article
+        # with an unusually long URL that cannot survive the short-copy guard.
+        return OwnedWebsiteReferenceResult(content, source, False)
+    joined = f"{content}\n\n{reference}" if content else reference
+    return OwnedWebsiteReferenceResult(joined, source, True)
+
+
+def _safe_public_https_url(value: object) -> str:
+    raw = str(value or "").strip()
+    if not raw or len(raw) > 2_048 or any(ord(character) < 32 for character in raw):
+        return ""
+    try:
+        parsed = urlsplit(raw)
+        port = parsed.port
+    except ValueError:
+        return ""
+    if (
+        parsed.scheme.casefold() != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or port not in (None, 443)
+    ):
+        return ""
+    try:
+        host = parsed.hostname.encode("idna").decode("ascii").casefold()
+    except UnicodeError:
+        return ""
+    if "." not in host or host.startswith(".") or host.endswith("."):
+        return ""
+    netloc = host if port is None else f"{host}:{port}"
+    return urlunsplit(("https", netloc, parsed.path or "", parsed.query, ""))
 
 
 def authoring_visible_length(value: str) -> int:
@@ -127,18 +200,23 @@ def constrain_generated_content_length(value: str, limit: int) -> ContentLengthR
         shortened = normalized[:limit].rstrip()
         return ContentLengthResult(shortened, original_length, len(shortened), limit)
 
-    tail_index: int | None = None
-    tail_budget = min(120, max(0, limit // 4))
+    tail_indices: list[int] = []
+    tail_budget = min(140, max(0, (limit * 2) // 5))
+    tail_used = 0
     for index in range(len(pieces) - 1, 1, -1):
         piece = pieces[index]
+        piece_length = authoring_visible_length(piece)
         if (
             _EVIDENCE_OR_BOUNDARY.search(piece)
-            and authoring_visible_length(piece) <= tail_budget
+            and piece_length <= tail_budget - tail_used
         ):
-            tail_index = index
-            break
+            tail_indices.insert(0, index)
+            tail_used += piece_length
+            if len(tail_indices) == 2:
+                break
 
-    tail = pieces[tail_index] if tail_index is not None else ""
+    tail_index_set = set(tail_indices)
+    tail = "\n".join(pieces[index] for index in tail_indices)
     tail_length = authoring_visible_length(tail)
     separator = "\n" if tail else ""
     head_budget = limit - tail_length
@@ -146,7 +224,7 @@ def constrain_generated_content_length(value: str, limit: int) -> ContentLengthR
     selected: list[str] = []
     used = 0
     for index, piece in enumerate(pieces):
-        if index == tail_index:
+        if index in tail_index_set:
             continue
         piece_length = authoring_visible_length(piece)
         if used + piece_length <= head_budget:

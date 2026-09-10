@@ -194,6 +194,7 @@ from services.content_generation_service import (
 )
 from services.content_hygiene_service import (
     constrain_generated_content_length,
+    ensure_owned_website_reference,
     sanitize_generated_content,
 )
 from services.project_service import (
@@ -3850,6 +3851,22 @@ def optimize_article(article_id):
             {
                 "code": "optimization_placeholders_removed",
                 "message": "优化稿中的未完成作者、日期或证据占位标记已在本地移除。",
+            }
+        )
+    owned_reference = ensure_owned_website_reference(
+        optimized["content"],
+        website=scoring_project.get("website"),
+        brand=score_brand,
+    )
+    optimized["content"] = owned_reference.content
+    if owned_reference.appended:
+        ai_usage_warnings.append(
+            {
+                "code": "optimization_owned_website_attached",
+                "message": (
+                    "已补入项目配置中的 HTTPS 自有官网；"
+                    "该来源用于实体归因，不代表第三方背书。"
+                ),
             }
         )
     if target_length is not None:

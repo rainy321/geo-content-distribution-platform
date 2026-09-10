@@ -88,12 +88,13 @@ class ContentGenerationServiceTests(unittest.TestCase):
         topic="测试主题",
         length=1000,
         target_platform="zhihu",
+        website="https://example.test",
     ):
         return ContentGenerationRequest.create(
             project_context={
                 "id": self.project_id,
                 "name": "XX科技",
-                "website": "https://example.test",
+                "website": website,
                 "product": "企业 AI Agent",
                 "industry": "人工智能",
                 "description": "帮助企业构建智能服务流程。",
@@ -132,6 +133,14 @@ class ContentGenerationServiceTests(unittest.TestCase):
         self.assertEqual(result["generation"]["usage_status"], "unknown")
         self.assertEqual(result["generation"]["ai_role"]["role"], "writer")
         self.assertFalse(result["generation"]["ai_role"]["fallback"])
+        self.assertIn("https://example.test", result["content"])
+        self.assertEqual(
+            result["sources"],
+            [{"title": "XX科技官网", "url": "https://example.test"}],
+        )
+        self.assertTrue(
+            any("不代表第三方背书" in item for item in result["generation"]["warnings"])
+        )
         run = get_run(self.db_path, result["generation"]["run_id"])
         self.assertEqual(run["status"], "succeeded")
         self.assertIsNone(run["usage"])
@@ -427,12 +436,13 @@ class ContentGenerationServiceTests(unittest.TestCase):
         self.assertGreater(original_length, 200)
         self.assertLessEqual(authoring_visible_length(result["content"]), 200)
         self.assertIn("限制与风险", result["content"])
+        self.assertIn("https://example.test", result["content"])
         warning = next(
             item
             for item in result["generation"]["warnings"]
             if "自动压缩" in item
         )
-        self.assertIn(f"{original_length} →", warning)
+        self.assertIn("→ 200 字", warning)
         persisted = get_run(self.db_path, result["generation"]["run_id"])
         self.assertEqual(persisted["result_payload"]["content"], result["content"])
 
@@ -444,7 +454,7 @@ class ContentGenerationServiceTests(unittest.TestCase):
         primary = MockContentEngineAdapter([payload])
 
         result = ContentGenerationService(self.db_path, primary).generate(
-            self.request(length=200)
+            self.request(length=200, website="")
         )
 
         self.assertEqual(result["content"], payload["content"].strip())

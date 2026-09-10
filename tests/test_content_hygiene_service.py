@@ -3,10 +3,50 @@ import unittest
 from services.content_hygiene_service import (
     authoring_visible_length,
     constrain_generated_content_length,
+    ensure_owned_website_reference,
 )
 
 
 class ContentLengthConstraintTests(unittest.TestCase):
+    def test_owned_https_site_is_attached_once_and_explicitly_self_owned(self):
+        first = ensure_owned_website_reference(
+            "直接回答。",
+            website="https://Brand.Example/guide#section",
+            brand="示例品牌",
+        )
+        second = ensure_owned_website_reference(
+            first.content,
+            website="https://brand.example/guide",
+            brand="示例品牌",
+        )
+
+        self.assertTrue(first.appended)
+        self.assertIn("项目自有来源", first.content)
+        self.assertIn("https://brand.example/guide", first.content)
+        self.assertEqual(
+            first.source,
+            {"title": "示例品牌官网", "url": "https://brand.example/guide"},
+        )
+        self.assertFalse(second.appended)
+        self.assertEqual(second.content.count("https://brand.example/guide"), 1)
+
+    def test_owned_reference_never_upgrades_http_or_accepts_credentials(self):
+        for website in (
+            "http://example.com",
+            "https://user:secret@example.com",
+            "https://localhost",
+            "https://example.com:8443",
+        ):
+            with self.subTest(website=website):
+                result = ensure_owned_website_reference(
+                    "正文",
+                    website=website,
+                    brand="示例品牌",
+                )
+                self.assertFalse(result.appended)
+                self.assertIsNone(result.source)
+                self.assertEqual(result.content, "正文")
+
     def test_short_content_is_unchanged(self):
         result = constrain_generated_content_length("完整短文。", 200)
 

@@ -656,6 +656,47 @@ class ContentGenerationApiV1Tests(unittest.TestCase):
         self.assertIn("optimization_length_constrained", warning_codes)
         self.assertEqual(data["after"]["length_profile"]["target_length"], 200)
 
+    def test_optimize_restores_configured_https_owned_source(self):
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE projects SET website = ? WHERE id = ?",
+                    ("https://example.com/product", self.project_id),
+                )
+        saved = self.client.post(
+            "/api/articles",
+            json={
+                "project_id": self.project_id,
+                "title": "AI Agent 适合谁？",
+                "summary": "受控测试。",
+                "content": "XX科技的 AI Agent 适合先验证小范围流程的团队。",
+                "tags": ["AI Agent"],
+                "status": "ready",
+                "target_length": 200,
+            },
+        ).get_json()["data"]
+
+        with patch(
+            "sau_backend.optimize_geo_content",
+            return_value={
+                "title": "AI Agent 适合谁？",
+                "summary": "受控测试。",
+                "content": "XX科技的 AI Agent 适合先验证小范围流程的团队。",
+                "tags": ["AI Agent"],
+                "faq": [],
+                "sources": [],
+            },
+        ), patch("sau_backend._enforce_ai_rate_limit", return_value=None):
+            response = self.client.post(f"/api/articles/{saved['id']}/optimize", json={})
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()["data"]
+        self.assertIn("https://example.com/product", data["optimized"]["content"])
+        self.assertIn(
+            "optimization_owned_website_attached",
+            {item["code"] for item in data["warnings"]},
+        )
+
     def test_only_connection_failure_uses_fallback(self):
         primary = MockContentEngineAdapter(
             [ContentEngineUnavailableError("连接失败")],
