@@ -648,8 +648,11 @@ class TiktokVideo(object):
 
     async def click_publish(self, page):
         publish_button = self.locator_base.locator(
+            'button[data-e2e="post_video_button"], '
+            'button[data-e2e*="post-button"], '
             'div.button-group > button:has-text("Post"), '
-            'div.button-group > button:has-text("发布")'
+            'div.button-group > button:has-text("发布"), '
+            'button:has-text("Post"), button:has-text("发布")'
         ).first
         await publish_button.wait_for(state="visible", timeout=10000)
         if await publish_button.get_attribute("disabled") is not None:
@@ -766,25 +769,48 @@ class TiktokVideo(object):
         # The upload form can be localized, and a missing Post button must not
         # be interpreted as "ready". Poll for a visible, enabled button with a
         # bounded timeout so a worker cannot spin forever.
+        upload_retry_count = 0
         for _ in range(300):
             try:
                 post_button = self.locator_base.locator(
+                    'button[data-e2e="post_video_button"], '
+                    'button[data-e2e*="post-button"], '
                     'div.button-group > button:has-text("Post"), '
-                    'div.button-group > button:has-text("发布")'
+                    'div.button-group > button:has-text("发布"), '
+                    'button:has-text("Post"), button:has-text("发布")'
                 ).first
                 if await post_button.count() and await post_button.is_visible():
                     if await post_button.get_attribute("disabled") is None:
                         tiktok_logger.info("  [-]video uploaded.")
                         return
-                if await self.locator_base.locator(
-                    'button[aria-label="Select file"], button:has-text("选择文件")'
-                ).count():
-                    tiktok_logger.info("  [-] found some error while uploading now retry...")
+                upload_error = self.locator_base.locator(
+                    '[role="alert"]:visible, [data-e2e*="upload-error"]:visible, '
+                    '[class*="upload-error"]:visible, [class*="error"]:visible'
+                ).filter(
+                    has_text=re.compile(
+                        r"(upload failed|failed to upload|上传失败|重新上传|网络错误)",
+                        re.IGNORECASE,
+                    )
+                ).first
+                if await upload_error.count() and await upload_error.is_visible():
+                    if upload_retry_count >= 1:
+                        error_text = " ".join((await upload_error.inner_text()).split())[:240]
+                        raise RuntimeError(
+                            f"TikTok 页面明确报告上传失败，单次文件重选仍未恢复: {error_text}"
+                        )
+                    upload_retry_count += 1
+                    tiktok_logger.warning(
+                        "TikTok reported an explicit upload error; reselecting the file once"
+                    )
                     await self.handle_upload_error(page)
                 else:
+                    # The Select-video control can remain mounted after a valid
+                    # selection.  Its mere presence is not upload-failure proof.
                     tiktok_logger.info("  [-] video uploading...")
-                    await asyncio.sleep(2)
+                await asyncio.sleep(2)
             except Exception:
+                if upload_retry_count >= 1:
+                    raise
                 tiktok_logger.info("  [-] video uploading...")
                 await asyncio.sleep(2)
         raise RuntimeError("TikTok video upload did not reach a ready state within 10 minutes")

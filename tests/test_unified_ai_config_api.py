@@ -9,7 +9,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from db.createTable import initialize_database
-from sau_backend import app
+from sau_backend import _create_content_generation_service, app
 from services.ai_service import AICompletionResult, AISettings
 from services.unified_ai_config_service import UnifiedAIConfigService
 
@@ -185,6 +185,35 @@ class UnifiedAIConfigApiTests(unittest.TestCase):
             cleared.get_data(as_text=True),
         )
 
+    @patch("sau_backend.ContentGenerationService.from_environment")
+    def test_generation_factory_only_wires_explicit_reviewer_role(self, build):
+        self.config_service.save(**self.save_payload())
+        writer_settings = self.config_service.load_settings("writer")
+
+        _create_content_generation_service(writer_settings)
+
+        first_kwargs = build.call_args.kwargs
+        self.assertIsNone(first_kwargs["reviewer_settings"])
+        self.assertFalse(first_kwargs["reviewer_role"]["configured"])
+        self.assertTrue(first_kwargs["reviewer_role"]["fallback"])
+
+        self.config_service.save_role(
+            "reviewer",
+            provider="deepseek",
+            base_url="https://review.example.test/v1",
+            model="review-model",
+            api_key="review-secret",
+        )
+        _create_content_generation_service(writer_settings)
+
+        second_kwargs = build.call_args.kwargs
+        self.assertEqual(second_kwargs["qwen_settings"].model, "synthetic-model")
+        self.assertEqual(second_kwargs["reviewer_settings"].model, "review-model")
+        self.assertEqual(second_kwargs["reviewer_settings"].api_key, "review-secret")
+        self.assertTrue(second_kwargs["reviewer_role"]["configured"])
+        self.assertFalse(second_kwargs["reviewer_role"]["fallback"])
+        self.assertFalse(second_kwargs["reviewer_role"]["same_as_writer"])
+
     def test_role_config_rejects_cross_provider_credential_reuse(self):
         self.client.put("/api/ai/config", json=self.save_payload())
 
@@ -299,6 +328,48 @@ class UnifiedAIConfigApiTests(unittest.TestCase):
         self.assertFalse(data["data_disclosure"]["project_data_sent"])
         self.assertFalse(data["data_disclosure"]["api_key_returned"])
         self.assertNotIn(self.save_payload()["api_key"], response.get_data(as_text=True))
+
+    @patch("sau_backend.sample_ai_prompt_detailed")
+    def test_ark_config_keeps_api_v3_endpoint_for_connection_test(self, sample):
+        secret = "synthetic-ark-secret"
+        saved = self.client.put(
+            "/api/ai/config",
+            json={
+                "provider": "doubao",
+                "base_url": "https://ark.cn-beijing.volces.com/api/v3/",
+                "model": "ep-synthetic-endpoint",
+                "api_key": secret,
+            },
+        )
+        self.assertEqual(saved.status_code, 200)
+        self.assertEqual(
+            saved.get_json()["data"]["base_url"],
+            "https://ark.cn-beijing.volces.com/api/v3",
+        )
+        sample.return_value = AICompletionResult(
+            content="OK",
+            model="ep-synthetic-endpoint",
+            provider_request_id="provider-ark-test-1",
+            elapsed_ms=5,
+            usage={"total_tokens": 3},
+        )
+
+        response = self.client.post(
+            "/api/ai/config/test",
+            json={"confirm_external_call": True},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        settings = sample.call_args.kwargs["settings"]
+        self.assertEqual(settings.provider, "doubao")
+        self.assertEqual(settings.base_url, "https://ark.cn-beijing.volces.com/api/v3")
+        self.assertEqual(settings.model, "ep-synthetic-endpoint")
+        self.assertEqual(settings.api_key, secret)
+        self.assertEqual(
+            response.get_json()["data"]["endpoint"],
+            "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+        )
+        self.assertNotIn(secret, response.get_data(as_text=True))
 
     @patch("sau_backend.sample_ai_prompt_detailed")
     def test_connection_test_resolves_requested_role_and_reports_fallback(self, sample):

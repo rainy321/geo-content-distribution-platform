@@ -1,4 +1,107 @@
 const objectValue = value => (value && typeof value === 'object' ? value : {})
+const CHAT_COMPLETIONS_SUFFIX = '/chat/completions'
+
+export const normalizeUnifiedAIBaseUrl = value => {
+  const raw = String(value || '').trim()
+  const parsed = new URL(raw)
+  const host = parsed.hostname.toLowerCase().replace(/\.$/, '')
+  const isInternalHost = (
+    host === 'localhost'
+    || host.endsWith('.localhost')
+    || host.endsWith('.local')
+    || host.endsWith('.internal')
+    || !host.includes('.')
+  )
+  if (
+    parsed.protocol !== 'https:'
+    || parsed.username
+    || parsed.password
+    || parsed.search
+    || parsed.hash
+    || isInternalHost
+  ) {
+    throw new Error('请输入不含账号密码的公开 HTTPS 地址')
+  }
+
+  let path = parsed.pathname.replace(/\/{2,}/g, '/').replace(/\/+$/, '')
+  let foldedPath = path.toLowerCase()
+  const repeatedSuffix = CHAT_COMPLETIONS_SUFFIX + CHAT_COMPLETIONS_SUFFIX
+  while (foldedPath.endsWith(repeatedSuffix)) {
+    path = path.slice(0, -CHAT_COMPLETIONS_SUFFIX.length)
+    foldedPath = path.toLowerCase()
+  }
+  if (foldedPath.includes(CHAT_COMPLETIONS_SUFFIX) && !foldedPath.endsWith(CHAT_COMPLETIONS_SUFFIX)) {
+    throw new Error('Base URL 中的 /chat/completions 位置无效')
+  }
+  if (foldedPath.endsWith(CHAT_COMPLETIONS_SUFFIX)) {
+    path = path.slice(0, -CHAT_COMPLETIONS_SUFFIX.length) + CHAT_COMPLETIONS_SUFFIX
+  }
+  return `${parsed.origin}${path}`
+}
+
+export const resolveUnifiedAIChatEndpoint = value => {
+  const baseUrl = normalizeUnifiedAIBaseUrl(value)
+  const parsed = new URL(baseUrl)
+  const path = parsed.pathname.replace(/\/+$/, '')
+  if (path.toLowerCase().endsWith(CHAT_COMPLETIONS_SUFFIX)) return baseUrl
+  if (path) return `${baseUrl}${CHAT_COMPLETIONS_SUFFIX}`
+  if (knownProviderForHost(parsed.hostname) === 'deepseek') {
+    return `${parsed.origin}${CHAT_COMPLETIONS_SUFFIX}`
+  }
+  return `${parsed.origin}/v1${CHAT_COMPLETIONS_SUFFIX}`
+}
+
+const knownProviderForHost = hostname => {
+  const host = String(hostname || '').toLowerCase().replace(/\.$/, '')
+  if (host.endsWith('.aliyuncs.com')) return 'qwen'
+  if (host === 'api.deepseek.com') return 'deepseek'
+  if (host.endsWith('.volces.com')) return 'doubao'
+  return ''
+}
+
+export const validateUnifiedAIProviderBinding = (provider, baseUrl) => {
+  const normalizedProvider = String(provider || '').trim().toLowerCase()
+  const normalizedBaseUrl = normalizeUnifiedAIBaseUrl(baseUrl)
+  if (!['qwen', 'deepseek', 'doubao'].includes(normalizedProvider)) return normalizedBaseUrl
+  const detectedProvider = knownProviderForHost(new URL(normalizedBaseUrl).hostname)
+  if (detectedProvider && detectedProvider !== normalizedProvider) {
+    throw new Error('当前服务商与 Base URL 不匹配，请重新选择服务商')
+  }
+  if (
+    normalizedProvider === 'doubao'
+    && detectedProvider === 'doubao'
+    && !new URL(resolveUnifiedAIChatEndpoint(normalizedBaseUrl)).pathname
+      .toLowerCase()
+      .endsWith('/api/v3/chat/completions')
+  ) {
+    throw new Error('火山方舟 Base URL 应以 /api/v3 结尾')
+  }
+  if (
+    normalizedProvider === 'qwen'
+    && detectedProvider === 'qwen'
+    && !new URL(resolveUnifiedAIChatEndpoint(normalizedBaseUrl)).pathname
+      .toLowerCase()
+      .endsWith('/compatible-mode/v1/chat/completions')
+  ) {
+    throw new Error('千问 OpenAI 兼容 Base URL 应以 /compatible-mode/v1 结尾')
+  }
+  return normalizedBaseUrl
+}
+
+export const unifiedAIProviderConfigurationHint = provider => ({
+  qwen: '模型名称示例：qwen-plus；Base URL 通常以 /compatible-mode/v1 结尾。',
+  deepseek: '填写当前控制台可用的模型 ID；官方根地址会解析到 /chat/completions。',
+  doubao: '模型名称请填写火山方舟控制台的模型或接入点 ID；Base URL 应以 /api/v3 结尾。',
+  custom: '填写 OpenAI-compatible API 根路径；也可粘贴完整 /chat/completions 地址。'
+}[String(provider || '').trim().toLowerCase()] || '请确认 Base URL 与模型 ID 属于同一服务。')
+
+const endpointIdentity = value => {
+  try {
+    return resolveUnifiedAIChatEndpoint(value)
+  } catch {
+    return String(value || '').trim().replace(/\/+$/, '')
+  }
+}
 
 export const UNIFIED_AI_PROVIDER_PRESETS = Object.freeze([
   Object.freeze({
@@ -85,14 +188,14 @@ export const normalizeUnifiedAIStatus = value => {
 export const buildUnifiedAIConfigPayload = (draft, status = {}) => {
   const payload = {
     provider: String(draft?.provider || 'custom').trim().toLowerCase(),
-    base_url: String(draft?.baseUrl || '').trim().replace(/\/+$/, ''),
+    base_url: validateUnifiedAIProviderBinding(draft?.provider || 'custom', draft?.baseUrl),
     model: String(draft?.model || '').trim()
   }
   const apiKey = String(draft?.apiKey || '').trim()
   if (apiKey) payload.api_key = apiKey
   const sameSavedConnection = (
     payload.provider === String(status?.provider || '').trim().toLowerCase()
-    && payload.base_url === String(status?.baseUrl || '').trim().replace(/\/+$/, '')
+    && endpointIdentity(payload.base_url) === endpointIdentity(status?.baseUrl)
   )
   if (!apiKey && !(status?.savedConfigured && status?.apiKeyConfigured && sameSavedConnection)) {
     throw new Error('首次保存或切换服务地址时需要填写 API Key')
@@ -103,7 +206,7 @@ export const buildUnifiedAIConfigPayload = (draft, status = {}) => {
 export const buildUnifiedAIRoleConfigPayload = (draft, roleStatus = {}, writerStatus = {}) => {
   const payload = {
     provider: String(draft?.provider || 'custom').trim().toLowerCase(),
-    base_url: String(draft?.baseUrl || '').trim().replace(/\/+$/, ''),
+    base_url: validateUnifiedAIProviderBinding(draft?.provider || 'custom', draft?.baseUrl),
     model: String(draft?.model || '').trim(),
     reuse_writer_credential: Boolean(draft?.reuseWriterCredential)
   }
@@ -111,7 +214,7 @@ export const buildUnifiedAIRoleConfigPayload = (draft, roleStatus = {}, writerSt
   if (apiKey) payload.api_key = apiKey
   const sameSavedRoleConnection = (
     payload.provider === String(roleStatus?.provider || '').trim().toLowerCase()
-    && payload.base_url === String(roleStatus?.baseUrl || '').trim().replace(/\/+$/, '')
+    && endpointIdentity(payload.base_url) === endpointIdentity(roleStatus?.baseUrl)
   )
   const canReuseSavedRole = Boolean(
     roleStatus?.configured
@@ -120,7 +223,7 @@ export const buildUnifiedAIRoleConfigPayload = (draft, roleStatus = {}, writerSt
   )
   const sameWriterConnection = (
     payload.provider === String(writerStatus?.provider || '').trim().toLowerCase()
-    && payload.base_url === String(writerStatus?.baseUrl || '').trim().replace(/\/+$/, '')
+    && endpointIdentity(payload.base_url) === endpointIdentity(writerStatus?.baseUrl)
   )
   const canReuseWriter = payload.reuse_writer_credential && sameWriterConnection && writerStatus?.apiKeyConfigured
   if (!apiKey && !canReuseSavedRole && !canReuseWriter) {

@@ -3,11 +3,13 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import re
 import sqlite3
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 from services.article_service import ArticleNotFoundError
 from services.platform_capability_service import (
@@ -35,6 +37,76 @@ _RETRYABLE_STATUSES = frozenset({"failed", "need_action"})
 PUBLISH_AUTHORIZATION_MISMATCH_MESSAGE = (
     "定时自动执行授权后，文章内容或分发参数已变化；未访问平台，请重新确认"
 )
+
+# Manual reconciliation links are durable evidence, not arbitrary destinations.
+# Keep this allowlist intentionally narrower than each platform's general domain:
+# creator centres, login pages, short-link redirectors and unrelated official
+# pages must never be recorded as proof that a particular work is public.
+_PUBLIC_WORK_URL_RULES = {
+    "zhihu": (
+        ("zhuanlan.zhihu.com", re.compile(r"/p/[1-9]\d*/?")),
+        # Kept for existing, working Zhihu article links used by the product.
+        ("www.zhihu.com", re.compile(r"/p/[1-9]\d*/?")),
+    ),
+    "toutiao": (
+        (
+            "www.toutiao.com",
+            re.compile(r"/(?:article|item)/[1-9]\d*/?"),
+        ),
+        ("toutiao.com", re.compile(r"/(?:article|item)/[1-9]\d*/?")),
+    ),
+    "baijiahao": (
+        ("baijiahao.baidu.com", re.compile(r"/s/?")),
+    ),
+    "sohu": (
+        ("www.sohu.com", re.compile(r"/a/[1-9]\d*_[1-9]\d*/?")),
+        ("sohu.com", re.compile(r"/a/[1-9]\d*_[1-9]\d*/?")),
+    ),
+    "xiaohongshu": (
+        (
+            "www.xiaohongshu.com",
+            re.compile(r"/(?:explore|discovery/item)/[0-9A-Fa-f]{24}/?"),
+        ),
+        (
+            "xiaohongshu.com",
+            re.compile(r"/(?:explore|discovery/item)/[0-9A-Fa-f]{24}/?"),
+        ),
+    ),
+    "douyin": (
+        ("www.douyin.com", re.compile(r"/(?:video|note)/[1-9]\d*/?")),
+        ("douyin.com", re.compile(r"/(?:video|note)/[1-9]\d*/?")),
+    ),
+    "kuaishou": (
+        (
+            "www.kuaishou.com",
+            re.compile(r"/short-video/[0-9A-Za-z_-]{6,128}/?"),
+        ),
+        (
+            "kuaishou.com",
+            re.compile(r"/short-video/[0-9A-Za-z_-]{6,128}/?"),
+        ),
+    ),
+    "bilibili": (
+        (
+            "www.bilibili.com",
+            re.compile(r"/video/(?:BV[0-9A-Za-z]{10}|av[1-9]\d*)/?"),
+        ),
+        (
+            "bilibili.com",
+            re.compile(r"/video/(?:BV[0-9A-Za-z]{10}|av[1-9]\d*)/?"),
+        ),
+    ),
+    "tiktok": (
+        (
+            "www.tiktok.com",
+            re.compile(
+                r"/@[0-9A-Za-z_](?:[0-9A-Za-z._]{0,22}[0-9A-Za-z_])?"
+                r"/video/[1-9]\d*/?"
+            ),
+        ),
+    ),
+}
+_PLATFORMS_WITHOUT_STABLE_PUBLIC_WORK_URL = frozenset({"channels"})
 
 
 class PublishJobNotFoundError(LookupError):
@@ -739,13 +811,16 @@ def reconcile_publish_job_success(
     """Correct an ambiguous/failed local result using explicit platform proof."""
 
     normalized_url = _normalize_text(result_url)
-    if not normalized_url.startswith(("https://", "http://")):
-        raise ValueError("平台对账成功必须提供 http(s) 文章链接")
     with closing(_connect(database_path)) as conn:
         with conn:
             current_row = _fetch_job(conn, job_id)
             if current_row is None:
                 raise PublishJobNotFoundError("发布任务不存在")
+            _validate_reconciliation_result_url(
+                platform=current_row["platform"],
+                result_url=normalized_url,
+                allow_empty=False,
+            )
             stale_row = _resolve_expected_state(
                 current_row,
                 expected_state_version,
@@ -811,14 +886,17 @@ def reconcile_publish_job_platform_success(
     if not normalized_message:
         raise ValueError("平台后台对账成功必须提供核验说明")
     normalized_url = _normalize_text(result_url)
-    if normalized_url and not normalized_url.startswith(("https://", "http://")):
-        raise ValueError("平台后台对账链接必须是 http(s) 地址")
 
     with closing(_connect(database_path)) as conn:
         with conn:
             current_row = _fetch_job(conn, job_id)
             if current_row is None:
                 raise PublishJobNotFoundError("发布任务不存在")
+            _validate_reconciliation_result_url(
+                platform=current_row["platform"],
+                result_url=normalized_url,
+                allow_empty=True,
+            )
             stale_row = _resolve_expected_state(
                 current_row,
                 expected_state_version,
@@ -926,6 +1004,75 @@ def reconcile_publish_job_failure(
             _sync_article_status(conn, current_row["article_id"])
             updated_row = _fetch_job(conn, job_id)
     return _serialize_job(updated_row)
+
+
+def _validate_reconciliation_result_url(
+    *,
+    platform: str,
+    result_url: str,
+    allow_empty: bool,
+) -> None:
+    """Require an exact public-work URL owned by the job's platform."""
+
+    normalized_platform = _normalize_platform(platform)
+    platform_name = str(PLATFORM_BY_KEY[normalized_platform]["name"])
+    if not result_url:
+        if (
+            allow_empty
+            and normalized_platform in _PLATFORMS_WITHOUT_STABLE_PUBLIC_WORK_URL
+        ):
+            return
+        raise ValueError(
+            f"{platform_name}人工成功核验必须提供 HTTPS 官方公开文章链接或作品链接"
+        )
+    if len(result_url) > 2048:
+        raise ValueError("平台公开作品链接过长")
+    if any(
+        character.isspace() or ord(character) < 0x20
+        for character in result_url
+    ):
+        raise ValueError("平台公开作品链接不能包含空白或控制字符")
+
+    try:
+        parsed = urlsplit(result_url)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("平台公开作品链接格式无效") from exc
+
+    if parsed.scheme.casefold() != "https":
+        raise ValueError("平台公开作品链接必须使用 HTTPS")
+    if not hostname:
+        raise ValueError("平台公开作品链接缺少有效域名")
+    if parsed.username is not None or parsed.password is not None:
+        raise ValueError("平台公开作品链接不能包含用户信息")
+    if port not in {None, 443}:
+        raise ValueError("平台公开作品链接不能使用非标准端口")
+
+    rules = _PUBLIC_WORK_URL_RULES.get(normalized_platform, ())
+    normalized_hostname = hostname.casefold()
+    normalized_authority = parsed.netloc.casefold()
+    if normalized_authority not in {
+        normalized_hostname,
+        f"{normalized_hostname}:443",
+    }:
+        raise ValueError("平台公开作品链接包含异常端口或域名格式")
+    matches_public_work = any(
+        normalized_hostname == allowed_hostname
+        and path_pattern.fullmatch(parsed.path) is not None
+        for allowed_hostname, path_pattern in rules
+    )
+    if matches_public_work and normalized_platform == "baijiahao":
+        article_ids = parse_qs(parsed.query, keep_blank_values=True).get("id", [])
+        matches_public_work = (
+            len(article_ids) == 1
+            and re.fullmatch(r"[1-9]\d*", article_ids[0]) is not None
+        )
+    if not matches_public_work:
+        raise ValueError(
+            f"公开链接必须是{platform_name}官方公开作品链接，"
+            "不能使用管理、登录或其他平台地址"
+        )
 
 
 def _state_version(row: sqlite3.Row) -> int:

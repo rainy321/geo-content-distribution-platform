@@ -12,6 +12,7 @@ from services.content_engine_contract import (
     ContentGenerationResult,
 )
 from services.content_generation_run_service import begin_or_replay, mark_succeeded
+from services.geo_score_service import GEO_SCORE_VERSION
 
 
 class ArticlesApiTests(unittest.TestCase):
@@ -63,8 +64,12 @@ class ArticlesApiTests(unittest.TestCase):
         self.assertNotEqual(article["geo_score"], 100)
         self.assertIn("dimensions", article["geo_analysis"])
         self.assertEqual(
+            article["geo_analysis"]["base_score"],
+            {"version": GEO_SCORE_VERSION, "score": article["geo_score"]},
+        )
+        self.assertEqual(
             article["geo_analysis"]["citeability"]["version"],
-            "ai-citeability-rules-2.1.1",
+            "ai-citeability-rules-2.2.0",
         )
         self.assertEqual(article["status"], "draft")
 
@@ -116,6 +121,47 @@ class ArticlesApiTests(unittest.TestCase):
         self.assertEqual(stored[0], "企业 AI Agent 落地指南")
         self.assertEqual(json.loads(stored[1]), ["AI Agent", "企业智能体"])
         self.assertEqual(stored[2:], (100, "ready"))
+
+    def test_manual_article_persists_target_length_profile_across_edits(self):
+        content = (
+            "XX科技 AI Agent 面向需要梳理业务流程的企业团队，"
+            "用于辅助确认需求、组织内容与复核结果。"
+            "使用前应核对公开产品说明、适用条件和数据边界。\n\n"
+            "资料来源：https://example.com/product"
+        )
+        created_response = self.client.post(
+            "/api/articles",
+            json={
+                "project_id": self.project_id,
+                "title": "XX科技 AI Agent 是什么？",
+                "summary": "面向企业流程梳理的简短说明。",
+                "content": content,
+                "tags": ["AI Agent"],
+                "target_length": 200,
+            },
+        )
+        self.assertEqual(created_response.status_code, 201)
+        created = created_response.get_json()["data"]
+        self.assertEqual(
+            created["geo_analysis"]["length_profile"]["target_length"],
+            200,
+        )
+        self.assertEqual(
+            created["geo_analysis"]["length_profile"]["key"],
+            "compact",
+        )
+
+        updated_response = self.client.put(
+            f"/api/articles/{created['id']}",
+            json={"summary": "已经人工复核的简短说明。"},
+        )
+        self.assertEqual(updated_response.status_code, 200)
+        updated = updated_response.get_json()["data"]
+        self.assertEqual(
+            updated["geo_analysis"]["length_profile"]["target_length"],
+            200,
+        )
+        self.assertEqual(updated["geo_score"], created["geo_score"])
 
     def test_rejects_unknown_project_and_article(self):
         create_response = self.client.post(
@@ -199,7 +245,8 @@ class ArticlesApiTests(unittest.TestCase):
             },
             topic="快照评分",
             keywords=["独立关键词"],
-            length=600,
+            target_platform="快手",
+            length=1000,
             content_type="行业科普",
             idempotency_key="article-save-snapshot-test",
         )
@@ -233,6 +280,7 @@ class ArticlesApiTests(unittest.TestCase):
                 "summary": result.summary,
                 "content": result.content,
                 "tags": list(result.tags),
+                "target_length": 1000,
             },
         )
         self.assertEqual(first.status_code, 201)
@@ -244,6 +292,26 @@ class ArticlesApiTests(unittest.TestCase):
         self.assertEqual(
             article["geo_analysis"]["citeability"]["signals"]["citation_count"],
             0,
+        )
+        self.assertEqual(
+            article["geo_analysis"]["length_profile"]["target_length"],
+            1000,
+        )
+        self.assertEqual(
+            article["geo_analysis"]["length_profile"]["effective_target_length"],
+            380,
+        )
+        self.assertEqual(
+            article["geo_analysis"]["length_profile"]["source"],
+            "platform_safe_limit",
+        )
+        self.assertEqual(
+            article["geo_analysis"]["citeability"]["length_profile"]["target_length"],
+            1000,
+        )
+        self.assertEqual(
+            article["geo_analysis"]["citeability"]["length_profile"]["effective_target_length"],
+            380,
         )
         score_before = article["geo_score"]
 
@@ -267,6 +335,39 @@ class ArticlesApiTests(unittest.TestCase):
         )
         self.assertEqual(updated.status_code, 200)
         self.assertEqual(updated.get_json()["data"]["geo_score"], score_before)
+        self.assertEqual(
+            updated.get_json()["data"]["geo_analysis"]["length_profile"]["target_length"],
+            1000,
+        )
+        self.assertEqual(
+            updated.get_json()["data"]["geo_analysis"]["length_profile"]["effective_target_length"],
+            380,
+        )
+        self.assertEqual(
+            updated.get_json()["data"]["geo_analysis"]["length_profile"]["source"],
+            "platform_safe_limit",
+        )
+
+        shortened = self.client.put(
+            f"/api/articles/{article['id']}",
+            json={"target_length": 200},
+        )
+        self.assertEqual(shortened.status_code, 200)
+        shortened_profile = shortened.get_json()["data"]["geo_analysis"]["length_profile"]
+        self.assertEqual(shortened_profile["target_length"], 200)
+        self.assertEqual(shortened_profile["requested_target_length"], 200)
+        self.assertEqual(shortened_profile["effective_target_length"], 200)
+        self.assertEqual(shortened_profile["source"], "explicit")
+
+        preserved = self.client.put(
+            f"/api/articles/{article['id']}",
+            json={"summary": "再次更新摘要"},
+        )
+        self.assertEqual(preserved.status_code, 200)
+        preserved_profile = preserved.get_json()["data"]["geo_analysis"]["length_profile"]
+        self.assertEqual(preserved_profile["target_length"], 200)
+        self.assertEqual(preserved_profile["effective_target_length"], 200)
+        self.assertEqual(preserved_profile["source"], "explicit")
 
         duplicate = self.client.post(
             "/api/articles",

@@ -531,11 +531,17 @@ class SohuPublisherAdapterTests(unittest.TestCase):
 
     def test_success_without_public_url_remains_processing(self):
         result = self._adapter(
-            publish_runner=lambda *_args: {"status": "success"}
+            publish_runner=lambda *_args: {
+                "status": "success",
+                "message": "发布成功",
+            }
         ).publish(self.content)
 
         self.assertFalse(result.success)
         self.assertEqual(result.status, "processing")
+        self.assertIn("未返回可核验", result.message)
+        self.assertIn("不会自动重试", result.message)
+        self.assertNotEqual(result.message, "发布成功")
 
     def test_timeout_remains_processing_to_prevent_blind_retry(self):
         async def slow_publish(*_args):
@@ -631,6 +637,20 @@ class BaijiahaoPublisherAdapterTests(unittest.TestCase):
         ).publish(self.content)
 
         self.assertTrue(result.success)
+
+    def test_success_without_public_url_remains_processing(self):
+        result = self._adapter(
+            publish_runner=lambda *_args: {
+                "status": "success",
+                "message": "发布成功",
+            }
+        ).publish(self.content)
+
+        self.assertFalse(result.success)
+        self.assertEqual(result.status, "processing")
+        self.assertIn("未返回可核验", result.message)
+        self.assertIn("不会自动重试", result.message)
+        self.assertNotEqual(result.message, "发布成功")
 
     @patch("uploader.baijiahao_uploader.main.BaiJiaHaoArticle")
     def test_default_runner_uses_cover_and_ai_declaration(self, article_class):

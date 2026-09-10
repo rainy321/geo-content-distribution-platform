@@ -4,10 +4,26 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
+from PIL import Image
 from db.createTable import initialize_database
-from sau_backend import app
+from sau_backend import (
+    PRODUCT_PUBLISH_IMAGE_MAX_BYTES,
+    PRODUCT_PUBLISH_VIDEO_MAX_BYTES,
+    app,
+)
 from services.publish_job_service import transition_publish_job
+
+
+def _test_image_bytes(*, image_format="PNG"):
+    payload = io.BytesIO()
+    Image.new("RGB", (2, 2), color=(32, 96, 160)).save(
+        payload,
+        format=image_format,
+    )
+    return payload.getvalue()
 
 
 class PublishJobsApiTests(unittest.TestCase):
@@ -47,6 +63,10 @@ class PublishJobsApiTests(unittest.TestCase):
         app.config["MEDIA_ROOT"] = self.original_media_root
         app.testing = self.original_testing
         self.temp_dir.cleanup()
+
+    def test_product_media_byte_caps_match_the_upload_ui_contract(self):
+        self.assertEqual(PRODUCT_PUBLISH_IMAGE_MAX_BYTES, 5 * 1024 * 1024)
+        self.assertEqual(PRODUCT_PUBLISH_VIDEO_MAX_BYTES, 150 * 1024 * 1024)
 
     def test_creates_and_reads_demo_job_from_server_configuration(self):
         response = self.client.post(
@@ -177,7 +197,7 @@ class PublishJobsApiTests(unittest.TestCase):
         self.assertTrue(result["finished_at"])
 
     def test_accepts_existing_material_images_and_exposes_them_in_payload(self):
-        (self.media_root / "cover.png").write_bytes(b"test-image")
+        (self.media_root / "cover.png").write_bytes(_test_image_bytes())
 
         response = self.client.post(
             "/api/publish",
@@ -191,10 +211,30 @@ class PublishJobsApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 201)
         self.assertEqual(response.get_json()["data"]["images"], ["cover.png"])
 
+    def test_accepts_decodable_jpg_and_jpeg_images(self):
+        jpeg_payload = _test_image_bytes(image_format="JPEG")
+        (self.media_root / "cover.jpg").write_bytes(jpeg_payload)
+        (self.media_root / "detail.JPEG").write_bytes(jpeg_payload)
+
+        response = self.client.post(
+            "/api/publish",
+            json={
+                "article_id": self.article_id,
+                "platform": "zhihu",
+                "images": ["cover.jpg", "detail.JPEG"],
+            },
+        )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(
+            response.get_json()["data"]["images"],
+            ["cover.jpg", "detail.JPEG"],
+        )
+
     def test_uploaded_material_flows_into_image_backed_publish_job(self):
         upload = self.client.post(
             "/uploadSave",
-            data={"file": (io.BytesIO(b"test-image"), "geo-cover.png")},
+            data={"file": (io.BytesIO(_test_image_bytes()), "geo-cover.png")},
             content_type="multipart/form-data",
         )
         filename = upload.get_json()["data"]["filepath"]
@@ -241,6 +281,139 @@ class PublishJobsApiTests(unittest.TestCase):
         self.assertEqual(missing.status_code, 400)
         self.assertEqual(unsupported.status_code, 400)
         self.assertEqual(unsafe.status_code, 400)
+
+    def test_rejects_unreadable_mismatched_and_oversized_images_before_task_creation(self):
+        (self.media_root / "empty.png").write_bytes(b"")
+        (self.media_root / "corrupt.png").write_bytes(b"not-an-image")
+        (self.media_root / "renamed.png").write_bytes(
+            _test_image_bytes(image_format="JPEG")
+        )
+        (self.media_root / "large.png").write_bytes(_test_image_bytes())
+        payload = {"article_id": self.article_id, "platform": "tiktok"}
+
+        with (
+            patch("sau_backend.create_publish_job") as create_job,
+            patch("sau_backend.create_real_publisher_factory") as browser_factory,
+        ):
+            empty = self.client.post(
+                "/api/publish", json={**payload, "images": ["empty.png"]}
+            )
+            corrupt = self.client.post(
+                "/api/publish", json={**payload, "images": ["corrupt.png"]}
+            )
+            mismatched = self.client.post(
+                "/api/publish", json={**payload, "images": ["renamed.png"]}
+            )
+            with patch("sau_backend.PRODUCT_PUBLISH_IMAGE_MAX_BYTES", 16):
+                oversized = self.client.post(
+                    "/api/publish", json={**payload, "images": ["large.png"]}
+                )
+
+        self.assertEqual(empty.status_code, 400)
+        self.assertIn("不能为空", empty.get_json()["msg"])
+        self.assertEqual(corrupt.status_code, 400)
+        self.assertIn("无法解码", corrupt.get_json()["msg"])
+        self.assertEqual(mismatched.status_code, 400)
+        self.assertIn("实际格式不一致", mismatched.get_json()["msg"])
+        self.assertEqual(oversized.status_code, 400)
+        self.assertIn("产品侧保守上限", oversized.get_json()["msg"])
+        self.assertIn("不是平台官方上限", oversized.get_json()["msg"])
+        create_job.assert_not_called()
+        browser_factory.assert_not_called()
+
+    def test_accepts_video_only_after_positive_basic_metadata_is_read(self):
+        (self.media_root / "clip.mp4").write_bytes(b"non-empty-video")
+        capture = MagicMock()
+        capture.isOpened.return_value = True
+        width_property = object()
+        height_property = object()
+        frame_count_property = object()
+        fps_property = object()
+        capture.get.side_effect = lambda prop: {
+            width_property: 1920,
+            height_property: 1080,
+            frame_count_property: 300,
+            fps_property: 25,
+        }[prop]
+        fake_cv2 = SimpleNamespace(
+            CAP_PROP_FRAME_WIDTH=width_property,
+            CAP_PROP_FRAME_HEIGHT=height_property,
+            CAP_PROP_FRAME_COUNT=frame_count_property,
+            CAP_PROP_FPS=fps_property,
+            VideoCapture=MagicMock(return_value=capture),
+        )
+
+        with patch.dict("sys.modules", {"cv2": fake_cv2}):
+            response = self.client.post(
+                "/api/publish",
+                json={
+                    "article_id": self.article_id,
+                    "platform": "tiktok",
+                    "video": "clip.mp4",
+                },
+            )
+
+        self.assertEqual(response.status_code, 201)
+        self.assertEqual(response.get_json()["data"]["video"], "clip.mp4")
+        fake_cv2.VideoCapture.assert_called_once_with(
+            str((self.media_root / "clip.mp4").resolve())
+        )
+        capture.release.assert_called_once_with()
+
+    def test_video_preflight_fails_closed_before_task_or_browser_start(self):
+        (self.media_root / "empty.mp4").write_bytes(b"")
+        (self.media_root / "unreadable.mp4").write_bytes(b"not-a-video")
+        (self.media_root / "large.mp4").write_bytes(b"12")
+        payload = {"article_id": self.article_id, "platform": "tiktok"}
+
+        with (
+            patch("sau_backend.create_publish_job") as create_job,
+            patch("sau_backend.create_real_publisher_factory") as browser_factory,
+        ):
+            empty = self.client.post(
+                "/api/publish", json={**payload, "video": "empty.mp4"}
+            )
+            with patch.dict("sys.modules", {"cv2": None}):
+                unreadable = self.client.post(
+                    "/api/publish",
+                    json={**payload, "video": "unreadable.mp4"},
+                )
+            nonpositive_metadata = []
+            for field in ("width", "height", "duration_seconds"):
+                metadata = {
+                    "width": 1920,
+                    "height": 1080,
+                    "duration_seconds": 12,
+                }
+                metadata[field] = 0
+                with patch(
+                    "sau_backend._read_publish_video_metadata",
+                    return_value=metadata,
+                ):
+                    nonpositive_metadata.append(
+                        self.client.post(
+                            "/api/publish",
+                            json={**payload, "video": "unreadable.mp4"},
+                        )
+                    )
+            with patch("sau_backend.PRODUCT_PUBLISH_VIDEO_MAX_BYTES", 1):
+                oversized = self.client.post(
+                    "/api/publish", json={**payload, "video": "large.mp4"}
+                )
+
+        self.assertEqual(empty.status_code, 400)
+        self.assertIn("不能为空", empty.get_json()["msg"])
+        self.assertEqual(unreadable.status_code, 400)
+        self.assertIn("无法读取有效的宽高和时长元数据", unreadable.get_json()["msg"])
+        self.assertIn("产品级", unreadable.get_json()["msg"])
+        for response in nonpositive_metadata:
+            self.assertEqual(response.status_code, 400)
+            self.assertIn("必须大于 0", response.get_json()["msg"])
+        self.assertEqual(oversized.status_code, 400)
+        self.assertIn("产品侧保守上限", oversized.get_json()["msg"])
+        self.assertIn("不是平台官方上限", oversized.get_json()["msg"])
+        create_job.assert_not_called()
+        browser_factory.assert_not_called()
 
     def test_real_image_backed_platform_requires_an_image_at_job_creation(self):
         app.config["DEMO_MODE"] = False
@@ -322,6 +495,47 @@ class PublishJobsApiTests(unittest.TestCase):
             payload["data"]["action"], "content_optimization_required"
         )
         self.assertFalse(payload["data"]["citeability"]["passed"])
+        self.assertFalse(payload["data"]["citeability"]["publish_gate_passed"])
+
+    def test_authorized_real_job_creation_allows_score_71_without_p0(self):
+        original_authorized = app.config.get("REAL_PUBLISHING_AUTHORIZED")
+        original_allow = app.config.get("ALLOW_REAL_PUBLISHING")
+        original_runtime = app.config.get("PUBLISHING_RUNTIME_READY")
+        app.config["DEMO_MODE"] = False
+        app.config["REAL_PUBLISHING_AUTHORIZED"] = True
+        app.config["ALLOW_REAL_PUBLISHING"] = False
+        app.config["PUBLISHING_RUNTIME_READY"] = True
+        try:
+            with patch(
+                "sau_backend.evaluate_publish_citeability",
+                return_value={
+                    "score": 71,
+                    "pass_score": 75,
+                    "passed": False,
+                    "publish_gate_passed": True,
+                    "blocking_issues": [],
+                    "warnings": [
+                        {
+                            "code": "quality.score_below_target",
+                            "priority": "P1",
+                            "message": "质量分低于建议目标。",
+                            "action": "建议继续优化。",
+                        }
+                    ],
+                    "suggestions": [],
+                },
+            ):
+                response = self.client.post(
+                    "/api/publish",
+                    json={"article_id": self.article_id, "platform": "zhihu"},
+                )
+        finally:
+            app.config["REAL_PUBLISHING_AUTHORIZED"] = original_authorized
+            app.config["ALLOW_REAL_PUBLISHING"] = original_allow
+            app.config["PUBLISHING_RUNTIME_READY"] = original_runtime
+
+        self.assertEqual(response.status_code, 201)
+        self.assertFalse(response.get_json()["data"]["demo"])
 
     def test_scheduled_job_waits_instead_of_executing_early(self):
         response = self.client.post(

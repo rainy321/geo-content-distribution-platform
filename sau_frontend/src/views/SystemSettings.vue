@@ -108,14 +108,18 @@
             >
               <template #prefix><el-icon><Connection /></el-icon></template>
             </el-input>
-            <p class="field-help">必须使用公开 HTTPS 地址；系统会自动补齐 /chat/completions。</p>
+            <p class="field-help">必须使用公开 HTTPS 地址；系统会自动且只补一次 /chat/completions。</p>
+            <p v-if="resolvedEndpointPreview" class="field-help endpoint-preview">
+              实际请求地址：<code>{{ resolvedEndpointPreview }}</code>
+            </p>
+            <p class="field-help provider-hint">{{ providerConfigurationHint }}</p>
           </el-form-item>
 
           <div class="field-grid">
             <el-form-item label="模型名称" prop="model">
               <el-input
                 v-model="form.model"
-                placeholder="例如 qwen3.8-max"
+                :placeholder="modelPlaceholder"
                 autocomplete="off"
                 clearable
               >
@@ -160,12 +164,13 @@
           <small v-if="connectionResult.ok">
             {{ connectionResult.provider }} · {{ connectionResult.model }} · {{ connectionResult.elapsedMs }} ms
           </small>
+          <small v-if="connectionResult.ok && connectionResult.endpoint">{{ connectionResult.endpoint }}</small>
         </div>
 
         <footer class="form-actions">
           <el-button :disabled="!canClearActiveRole || clearing" :loading="clearing" @click="clearConfig">{{ clearButtonLabel }}</el-button>
           <div>
-            <el-button :loading="testing" :disabled="!activeRoleStatus.effectiveConfigured" @click="testConnection">测试此角色</el-button>
+            <el-button :loading="testing" :disabled="!activeRoleStatus.effectiveConfigured" @click="testConnection">测试已保存角色</el-button>
             <el-button type="primary" :loading="saving" :disabled="!aiStatus.saveSupported" @click="saveConfig">
               {{ saveButtonLabel }}
             </el-button>
@@ -273,7 +278,8 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Cloudy,
@@ -294,9 +300,13 @@ import {
   applyUnifiedAIProviderPreset,
   buildUnifiedAIRoleConfigPayload,
   buildUnifiedAIConfigPayload,
-  normalizeUnifiedAIStatus
+  normalizeUnifiedAIStatus,
+  resolveUnifiedAIChatEndpoint,
+  unifiedAIProviderConfigurationHint,
+  validateUnifiedAIProviderBinding
 } from '@/utils/aiConfig'
 
+const route = useRoute()
 const formRef = ref(null)
 const saving = ref(false)
 const clearing = ref(false)
@@ -337,7 +347,29 @@ const emptyRoleStatus = Object.freeze({
 })
 const activeRoleStatus = computed(() => aiStatus.roles?.[selectedRole.value] || emptyRoleStatus)
 const writerRoleStatus = computed(() => aiStatus.roles?.writer || emptyRoleStatus)
-const normalizedEndpoint = value => String(value || '').trim().replace(/\/+$/, '')
+const normalizedEndpoint = value => {
+  try {
+    return resolveUnifiedAIChatEndpoint(value)
+  } catch {
+    return String(value || '').trim().replace(/\/+$/, '')
+  }
+}
+const resolvedEndpointPreview = computed(() => {
+  try {
+    return resolveUnifiedAIChatEndpoint(form.baseUrl)
+  } catch {
+    return ''
+  }
+})
+const providerConfigurationHint = computed(() => (
+  unifiedAIProviderConfigurationHint(form.provider)
+))
+const modelPlaceholder = computed(() => ({
+  qwen: '例如 qwen-plus',
+  deepseek: '例如 deepseek-chat',
+  doubao: '填写控制台模型或接入点 ID',
+  custom: '填写兼容服务提供的模型 ID'
+}[String(form.provider || '').trim().toLowerCase()] || '填写模型 ID'))
 const canReuseWriterCredential = computed(() => (
   selectedRole.value !== 'writer'
   && writerRoleStatus.value.apiKeyConfigured
@@ -379,28 +411,10 @@ const saveButtonLabel = computed(() => (
 
 const validateBaseUrl = (rule, value, callback) => {
   try {
-    const parsed = new URL(String(value || '').trim())
-    const host = parsed.hostname.toLowerCase().replace(/\.$/, '')
-    const isInternalHost = (
-      host === 'localhost'
-      || host.endsWith('.localhost')
-      || host.endsWith('.local')
-      || host.endsWith('.internal')
-      || !host.includes('.')
-    )
-    if (
-      parsed.protocol !== 'https:'
-      || parsed.username
-      || parsed.password
-      || parsed.search
-      || parsed.hash
-      || isInternalHost
-    ) {
-      throw new Error('invalid provider URL')
-    }
+    validateUnifiedAIProviderBinding(form.provider, value)
     callback()
-  } catch {
-    callback(new Error('请输入不含账号密码的公开 HTTPS 地址'))
+  } catch (error) {
+    callback(new Error(error?.message || '请输入不含账号密码的公开 HTTPS 地址'))
   }
 }
 
@@ -501,6 +515,13 @@ const loadActiveRoleForm = () => {
 
 const selectRole = roleId => {
   if (!roleDefinitions.some(item => item.id === roleId)) return
+  selectedRole.value = roleId
+  loadActiveRoleForm()
+}
+
+const selectRoleFromRoute = () => {
+  const roleId = String(route.query.role || '').trim().toLowerCase()
+  if (!roleDefinitions.some(item => item.id === roleId) || selectedRole.value === roleId) return
   selectedRole.value = roleId
   loadActiveRoleForm()
 }
@@ -618,6 +639,7 @@ const testConnection = async () => {
       message: data.message || '固定合成测试已收到模型响应',
       provider: data.provider || aiStatus.providerLabel,
       model: data.model || aiStatus.model,
+      endpoint: data.endpoint || resolvedEndpointPreview.value,
       elapsedMs: Number(data.elapsed_ms) || 0
     }
     ElMessage.success(`${activeRoleDefinition.value.label}连接正常`)
@@ -673,10 +695,13 @@ const logoutSession = async () => {
 }
 
 onMounted(() => {
+  selectRoleFromRoute()
   loadAIStatus()
   loadSecurityStatus()
   loadEngineStatus()
 })
+
+watch(() => route.query.role, selectRoleFromRoute)
 </script>
 
 <style lang="scss" scoped>
@@ -1039,6 +1064,18 @@ onMounted(() => {
   font-size: 11px;
   line-height: 1.5;
 }
+
+.endpoint-preview {
+  max-width: 100%;
+
+  code {
+    overflow-wrap: anywhere;
+    color: var(--geo-ink);
+    font-family: "Cascadia Mono", monospace;
+  }
+}
+
+.provider-hint { margin-top: 3px; }
 
 :deep(.el-input__wrapper) {
   min-height: 44px;

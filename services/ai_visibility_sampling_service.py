@@ -61,6 +61,32 @@ class VisibilitySamplingInProgressError(RuntimeError):
         self.record = dict(record)
 
 
+class VisibilitySamplingRequestNotFoundError(LookupError):
+    """Raised when a persisted sampling request identity does not exist."""
+
+
+def get_ai_visibility_sample_request(
+    database_path: str | Path,
+    request_id: Any,
+) -> dict[str, Any]:
+    """Read one durable sampling request without invoking the AI provider.
+
+    This is the safe resume seam used by the desktop UI after route changes or
+    window reloads.  A ``started`` row is reported as in progress; a completed
+    row returns the exact persisted response envelope.
+    """
+
+    normalized_request_id = _request_identifier(request_id, "X-Request-ID", 128)
+    with closing(_connect(database_path)) as conn:
+        row = conn.execute(
+            "SELECT * FROM ai_visibility_sample_requests WHERE request_id = ?",
+            (normalized_request_id,),
+        ).fetchone()
+    if row is None:
+        raise VisibilitySamplingRequestNotFoundError("可见度采样请求不存在")
+    return _serialize_request(row)
+
+
 def run_ai_visibility_sample(
     database_path: str | Path,
     *,
@@ -644,6 +670,8 @@ __all__ = [
     "VISIBILITY_SAMPLING_VERSION",
     "VisibilitySamplingConflictError",
     "VisibilitySamplingInProgressError",
+    "VisibilitySamplingRequestNotFoundError",
     "VisibilitySamplingValidationError",
+    "get_ai_visibility_sample_request",
     "run_ai_visibility_sample",
 ]

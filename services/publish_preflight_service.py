@@ -3,6 +3,10 @@ from __future__ import annotations
 import re
 from typing import Any, Iterable
 
+from services.ai_visibility_service import (
+    VisibilityAnalysisError,
+    normalize_citation_url,
+)
 from services.content_hygiene_service import sanitize_generated_content
 from services.platform_capability_service import normalize_platform_key
 from services.platform_publish_policy_service import (
@@ -12,7 +16,7 @@ from services.platform_publish_policy_service import (
 )
 
 
-PUBLISH_CONTENT_POLICY_VERSION = "2026-09-10.4"
+PUBLISH_CONTENT_POLICY_VERSION = "2026-09-11.1"
 
 
 class PublishContentLimitError(ValueError):
@@ -20,6 +24,50 @@ class PublishContentLimitError(ValueError):
 
 
 _CONTENT_POLICIES: dict[str, dict[str, Any]] = {
+    "zhihu": {
+        "content_mode": "article",
+        "hard_limit": None,
+        "default_safe_limit": 3000,
+        "fixed_reserve": 0,
+        "tags_share_content_limit": False,
+        "label": "文章正文",
+        "counting_note": "3000 字是产品侧保守安全线，不是知乎官方上限",
+        "basis": "not_verified",
+        "safe_limit_basis": "product_conservative_guardrail",
+    },
+    "toutiao": {
+        "content_mode": "article",
+        "hard_limit": None,
+        "default_safe_limit": 3000,
+        "fixed_reserve": 0,
+        "tags_share_content_limit": False,
+        "label": "文章正文",
+        "counting_note": "3000 字是产品侧保守安全线，不是今日头条官方上限",
+        "basis": "not_verified",
+        "safe_limit_basis": "product_conservative_guardrail",
+    },
+    "baijiahao": {
+        "content_mode": "image_article",
+        "hard_limit": None,
+        "default_safe_limit": 3000,
+        "fixed_reserve": 0,
+        "tags_share_content_limit": False,
+        "label": "文章正文",
+        "counting_note": "3000 字是产品侧保守安全线，不是百家号官方上限",
+        "basis": "not_verified",
+        "safe_limit_basis": "product_conservative_guardrail",
+    },
+    "sohu": {
+        "content_mode": "article",
+        "hard_limit": None,
+        "default_safe_limit": 3000,
+        "fixed_reserve": 0,
+        "tags_share_content_limit": False,
+        "label": "文章正文",
+        "counting_note": "3000 字是产品侧保守安全线，不是搜狐号官方上限",
+        "basis": "not_verified",
+        "safe_limit_basis": "product_conservative_guardrail",
+    },
     "xiaohongshu": {
         "content_mode": "image_note",
         "hard_limit": 1000,
@@ -67,6 +115,28 @@ _CONTENT_POLICIES: dict[str, dict[str, Any]] = {
         "basis": "existing_repository_policy",
         "safe_limit_basis": "existing_repository_policy",
     },
+    "channels": {
+        "content_mode": "video_description",
+        "hard_limit": None,
+        "default_safe_limit": 800,
+        "fixed_reserve": 0,
+        "tags_share_content_limit": False,
+        "label": "视频简介",
+        "counting_note": "800 字是产品侧保守安全线，不是视频号官方上限",
+        "basis": "not_verified",
+        "safe_limit_basis": "product_conservative_guardrail",
+    },
+    "tiktok": {
+        "content_mode": "video_description",
+        "hard_limit": None,
+        "default_safe_limit": 800,
+        "fixed_reserve": 0,
+        "tags_share_content_limit": False,
+        "label": "视频简介",
+        "counting_note": "800 字是产品侧保守安全线，不是 TikTok 官方上限",
+        "basis": "not_verified",
+        "safe_limit_basis": "product_conservative_guardrail",
+    },
 }
 
 
@@ -82,6 +152,36 @@ _TITLE_POLICIES: dict[str, dict[str, Any]] = {
     "sohu": {"hard_limit": 72, "safe_limit": 72, "min_length": 5},
     "baijiahao": {"hard_limit": 64, "safe_limit": 64, "min_length": 2},
     "xiaohongshu": {"hard_limit": 20, "safe_limit": 20, "min_length": 1},
+    # The remaining values are product-side conservative guardrails. Their
+    # platform hard limits have not been verified in this repository.
+    "kuaishou": {
+        "hard_limit": None,
+        "safe_limit": 20,
+        "min_length": 1,
+        "basis": "not_verified",
+        "safe_limit_basis": "product_conservative_guardrail",
+    },
+    "bilibili": {
+        "hard_limit": None,
+        "safe_limit": 80,
+        "min_length": 1,
+        "basis": "not_verified",
+        "safe_limit_basis": "product_conservative_guardrail",
+    },
+    "channels": {
+        "hard_limit": None,
+        "safe_limit": 30,
+        "min_length": 1,
+        "basis": "not_verified",
+        "safe_limit_basis": "product_conservative_guardrail",
+    },
+    "tiktok": {
+        "hard_limit": None,
+        "safe_limit": 80,
+        "min_length": 1,
+        "basis": "not_verified",
+        "safe_limit_basis": "product_conservative_guardrail",
+    },
 }
 
 _PLAIN_TEXT_CONTENT_PLATFORMS = frozenset(
@@ -103,6 +203,10 @@ _GEO_PRESERVATION_PATTERN = re.compile(
     r"(?:https?://|参考(?:资料|来源)?|来源|证据|适用(?:条件|范围)|"
     r"限制|边界|风险|注意事项|常见问题|FAQ|问[:：]|答[:：])",
     flags=re.IGNORECASE,
+)
+_OUTBOUND_PUBLIC_URL_PATTERN = re.compile(
+    r"(?:https?://|www\.)[^\s<>\]\[()（），。；：！？、“”‘’]+",
+    re.IGNORECASE,
 )
 
 
@@ -184,13 +288,18 @@ def get_publish_content_policy(
         if tags_share_content_limit
         else 0
     )
-    hard_limit = int(configured["hard_limit"])
+    configured_hard_limit = configured.get("hard_limit")
+    hard_limit = (
+        int(configured_hard_limit) if configured_hard_limit is not None else None
+    )
     fixed_reserve = int(configured["fixed_reserve"])
     reserved_characters = fixed_reserve + tag_characters
-    safe_limit = min(
-        int(configured["default_safe_limit"]),
-        hard_limit - reserved_characters,
-    )
+    safe_limit = int(configured["default_safe_limit"])
+    if hard_limit is not None:
+        safe_limit = min(
+            safe_limit,
+            hard_limit - reserved_characters,
+        )
     if safe_limit < 80:
         raise PublishContentLimitError(
             f"{normalized_platform} 话题占用过多，无法为正文保留安全空间；"
@@ -207,6 +316,8 @@ def get_publish_content_policy(
         "tag_characters": tag_characters,
         "tag_count_used": len(normalized_tags),
         "tag_count_dropped": int(tag_preview["dropped_count"]),
+        "tag_count_truncated": int(tag_preview["truncated_count"]),
+        "tag_adaptation_audit": tag_preview["audit"],
         "reserved_characters": reserved_characters,
         "tags_share_content_limit": tags_share_content_limit,
         "counting_note": configured["counting_note"],
@@ -223,14 +334,31 @@ def get_publish_title_policy(platform: str) -> dict[str, Any] | None:
     configured = _TITLE_POLICIES.get(normalized_platform)
     if configured is None:
         return None
+    platform_title_policy = get_platform_publish_policy(normalized_platform)["title"]
+    configured_hard_limit = configured.get("hard_limit")
+    hard_limit = (
+        int(configured_hard_limit) if configured_hard_limit is not None else None
+    )
     return {
         "version": PUBLISH_CONTENT_POLICY_VERSION,
         "field": "title",
         "label": "发布标题",
-        "hard_limit": int(configured["hard_limit"]),
+        "hard_limit": hard_limit,
         "safe_limit": int(configured["safe_limit"]),
         "min_length": int(configured["min_length"]),
-        "counting_note": "按 Unicode 字符计数；超限时在创建任务前生成并展示短标题",
+        "counting_note": (
+            "按 Unicode 字符计数；超限时在创建任务前生成并展示短标题；"
+            + (
+                "该安全线是产品侧保守值，不是平台官方上限"
+                if hard_limit is None
+                else "限制来自仓库内发布器校验"
+            )
+        ),
+        "basis": platform_title_policy.get("basis", "not_verified"),
+        "safe_limit_basis": platform_title_policy.get(
+            "safe_limit_basis",
+            platform_title_policy.get("basis", "not_verified"),
+        ),
     }
 
 
@@ -298,6 +426,10 @@ def build_platform_publish_variant(
 
     policy = get_publish_content_policy(normalized_platform, tags=tags)
     title_policy = get_publish_title_policy(normalized_platform)
+    if policy is None or title_policy is None:  # pragma: no cover - matrix invariant
+        raise PublishContentLimitError(
+            f"{normalized_platform} 缺少发布标题或正文安全策略"
+        )
     title_manually_edited = publish_title is not None
     if title_manually_edited:
         actual_title = str(publish_title or "").strip()
@@ -346,13 +478,20 @@ def build_platform_publish_variant(
                 f"{normalized_platform} 发布标题当前 {title_length} 字，"
                 f"请缩短至 {title_policy['safe_limit']} 字以内"
             )
-    if actual_length > 50_000:
-        raise PublishContentLimitError("平台发布副本不能超过 50000 字")
-    if policy is not None and actual_length > policy["safe_limit"]:
+    if actual_length > policy["safe_limit"]:
+        if policy["hard_limit"] is None:
+            limit_context = (
+                f"超过产品侧 {policy['safe_limit']} 字保守安全线"
+                "（不是平台官方上限）"
+            )
+        else:
+            limit_context = (
+                f"为避免超过平台 {policy['hard_limit']} 字上限"
+                "（含话题和计数余量）"
+            )
         raise PublishContentLimitError(
             f"{normalized_platform} 平台副本当前 {actual_length} 字，"
-            f"为避免超过平台 {policy['hard_limit']} 字上限（含话题和计数余量），"
-            f"请缩短至 {policy['safe_limit']} 字以内"
+            f"{limit_context}，请缩短至 {policy['safe_limit']} 字以内"
         )
 
     adapted = actual_content != original_content
@@ -363,9 +502,9 @@ def build_platform_publish_variant(
             "已移除未完成的作者、日期或证据占位标记；"
             "平台账号和文章记录仍保留正式作者与时间信息"
         )
-    elif adapted and policy is not None:
+    elif adapted:
         adaptation_reason = (
-            f"已移除不适合图片笔记的 Markdown 标记，并自动缩至 "
+            f"已移除平台编辑器不需要的 Markdown 标记，并自动缩至 "
             f"{policy['safe_limit']} 字安全线内"
         )
     elif adapted and normalized_platform in _PLAIN_TEXT_CONTENT_PLATFORMS:
@@ -457,28 +596,98 @@ def evaluate_publish_citeability(
     product: str = "",
     website: str = "",
     keywords: Iterable[Any] | None = None,
+    target_length: int | None = None,
+    sources: Iterable[Any] | None = None,
 ) -> dict[str, Any]:
     """Score only fields that the current publisher actually sends.
 
-    Article summaries and generation-receipt sources are intentionally absent:
-    they cannot improve a platform copy when they are not part of its outbound
-    title/body contract. Inline public URLs remain visible to the scorer.
+    Article summaries are intentionally absent because they are not part of the
+    outbound title/body contract. Immutable generation-receipt sources may
+    validate a risky claim only while that source's canonical public URL is
+    still visible in the exact outbound body. A platform-shortened copy that
+    drops the URL therefore cannot inherit the source claim.
     """
 
     # Imported lazily because the article compiler reuses this module's pure
     # platform-limit policies while constructing generation instructions.
     from services.geo_article_compiler_service import score_ai_citeability
 
-    return score_ai_citeability(
+    outbound_content = str(content or "").strip()
+    outbound_visible_length = len(re.sub(r"\s+", "", outbound_content))
+    outbound_target_length = None
+    if target_length is not None:
+        if isinstance(target_length, bool) or not isinstance(target_length, int):
+            raise ValueError("target_length 必须是整数")
+        outbound_target_length = max(200, min(3000, outbound_visible_length))
+    matched_sources, source_filter = filter_sources_for_outbound_copy(
+        sources,
+        outbound_content,
+    )
+    result = score_ai_citeability(
         title=str(title or "").strip(),
         summary="",
-        content=str(content or "").strip(),
+        content=outbound_content,
         brand=str(brand or "").strip(),
         product=str(product or "").strip(),
         website=str(website or "").strip(),
         keywords=_normalize_tags(keywords),
-        sources=[],
+        sources=matched_sources,
+        target_length=outbound_target_length,
     )
+    if (
+        outbound_target_length is not None
+        and result["length_profile"].get("source") == "explicit"
+    ):
+        result["length_profile"]["source"] = "outbound_copy"
+    result["outbound_source_filter"] = source_filter
+    return result
+
+
+def filter_sources_for_outbound_copy(
+    sources: Iterable[Any] | None,
+    outbound_content: str,
+) -> tuple[list[Any], dict[str, Any]]:
+    """Keep structured claims only for URLs still visible in the sent body.
+
+    Publication and diagnostics share this pure local filter so the same exact
+    copy cannot receive contradictory evidence decisions.  It does not fetch
+    a URL or infer that a public-looking URL is truthful.
+    """
+
+    source_items = (
+        list(sources)
+        if sources is not None and not isinstance(sources, (str, bytes))
+        else []
+    )
+    outbound_urls: set[str] = set()
+    for match in _OUTBOUND_PUBLIC_URL_PATTERN.finditer(str(outbound_content or "")):
+        raw_url = match.group(0).rstrip(".,;:!?，。；：！？'\"")
+        try:
+            outbound_urls.add(normalize_citation_url(raw_url)["canonical_url"])
+        except (VisibilityAnalysisError, KeyError, TypeError, ValueError):
+            continue
+
+    matched: list[Any] = []
+    for item in source_items:
+        if isinstance(item, dict):
+            raw_url = item.get("url") or item.get("canonical_url")
+        else:
+            raw_url = item
+        if not isinstance(raw_url, str) or not raw_url.strip():
+            continue
+        try:
+            canonical_url = normalize_citation_url(raw_url)["canonical_url"]
+        except (VisibilityAnalysisError, KeyError, TypeError, ValueError):
+            continue
+        if canonical_url in outbound_urls:
+            matched.append(item)
+
+    return matched, {
+        "provided_count": len(source_items),
+        "matched_count": len(matched),
+        "visible_url_count": len(outbound_urls),
+        "policy": "structured_claim_requires_url_in_exact_outbound_copy",
+    }
 
 
 def character_count(value: Any) -> int:

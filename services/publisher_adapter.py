@@ -678,40 +678,12 @@ class SohuPublisherAdapter(PublisherAdapter):
         )
 
     def _normalize_publish_result(self, raw_result: Any) -> PublishResult:
-        if isinstance(raw_result, PublishResult):
-            if raw_result.platform != self.platform:
-                return self._failed("搜狐号发布器返回了错误的平台标识")
-            if raw_result.status == "success" and not _is_public_sohu_url(
-                raw_result.url
-            ):
-                return PublishResult(
-                    success=False,
-                    platform=self.platform,
-                    status="processing",
-                    message="搜狐号未返回可核验的公开文章链接，请到平台后台确认",
-                )
-            return raw_result
-        if isinstance(raw_result, Mapping):
-            raw_status = str(raw_result.get("status") or "processing").strip().lower()
-            if raw_status not in PUBLISH_RESULT_STATUSES:
-                return self._failed(f"搜狐号发布器返回了未知状态：{raw_status}")
-            url = str(raw_result.get("url") or raw_result.get("result_url") or "").strip()
-            if raw_status == "success" and not _is_public_sohu_url(url):
-                raw_status = "processing"
-            success = raw_status == "success"
-            return PublishResult(
-                success=success,
-                platform=self.platform,
-                status=raw_status,
-                url=url,
-                message=str(raw_result.get("message") or "").strip(),
-                published_at=_utc_now_iso() if success else "",
-            )
-        return PublishResult(
-            success=False,
+        return _normalize_guarded_public_result(
+            raw_result,
             platform=self.platform,
-            status="processing",
-            message="已执行搜狐号发布流程，但未取得可核验的平台结果",
+            platform_name="搜狐号",
+            public_url_checker=_is_public_sohu_url,
+            explain_reconciliation=True,
         )
 
     def _exception_result(self, exc: Exception, *, prefix: str) -> PublishResult:
@@ -845,6 +817,7 @@ class BaijiahaoPublisherAdapter(PublisherAdapter):
             platform=self.platform,
             platform_name="百家号",
             public_url_checker=_is_public_baijiahao_url,
+            explain_reconciliation=True,
         )
 
     def _exception_result(self, exc: Exception, *, prefix: str) -> PublishResult:
@@ -1154,7 +1127,9 @@ async def _default_sohu_publish_runner(
     observed_result: dict[str, Any] = {}
 
     async def click_publish(page: Any) -> None:
-        observed_result.update(await click_exact_publish_and_observe(page))
+        observed_result.update(
+            await click_exact_publish_and_observe(page, title=content.title)
+        )
 
     publisher.publish = click_publish
     return await _finish_observed_publish(
@@ -1196,7 +1171,9 @@ async def _default_baijiahao_publish_runner(
     observed_result: dict[str, Any] = {}
 
     async def click_publish(page: Any) -> None:
-        observed_result.update(await click_exact_publish_and_observe(page))
+        observed_result.update(
+            await click_exact_publish_and_observe(page, title=content.title)
+        )
 
     publisher.publish = click_publish
     return await _finish_observed_publish(
@@ -1361,6 +1338,7 @@ def _normalize_guarded_public_result(
     platform: str,
     platform_name: str,
     public_url_checker: Callable[[str], bool],
+    explain_reconciliation: bool = False,
 ) -> PublishResult:
     if isinstance(raw_result, PublishResult):
         if raw_result.platform != platform:
@@ -1371,11 +1349,17 @@ def _normalize_guarded_public_result(
                 message=f"{platform_name}发布器返回了错误的平台标识",
             )
         if raw_result.status == "success" and not public_url_checker(raw_result.url):
+            message = f"{platform_name}未返回可核验的公开内容链接，请到平台后台确认"
+            if explain_reconciliation:
+                message = (
+                    f"{platform_name}返回成功标记，但未返回可核验的公开内容链接；"
+                    "请先到平台后台核验，系统不会自动重试"
+                )
             return PublishResult(
                 False,
                 platform,
                 "processing",
-                message=f"{platform_name}未返回可核验的公开内容链接，请到平台后台确认",
+                message=message,
             )
         return raw_result
     if isinstance(raw_result, Mapping):
@@ -1388,23 +1372,35 @@ def _normalize_guarded_public_result(
                 message=f"{platform_name}发布器返回了未知状态：{raw_status}",
             )
         url = str(raw_result.get("url") or raw_result.get("result_url") or "").strip()
-        if raw_status == "success" and not public_url_checker(url):
+        demoted_unverified_success = (
+            raw_status == "success" and not public_url_checker(url)
+        )
+        if demoted_unverified_success:
             raw_status = "processing"
         success = raw_status == "success"
+        message = str(raw_result.get("message") or "").strip()
+        if demoted_unverified_success and explain_reconciliation:
+            message = (
+                f"{platform_name}返回成功标记，但未返回可核验的公开内容链接；"
+                "请先到平台后台核验，系统不会自动重试"
+            )
+        elif raw_status == "processing" and not message and explain_reconciliation:
+            message = (
+                f"{platform_name}提交结果尚未核验；"
+                "请先到平台后台核验，系统不会自动重试"
+            )
         return PublishResult(
             success=success,
             platform=platform,
             status=raw_status,
             url=url,
-            message=str(raw_result.get("message") or "").strip(),
+            message=message,
             published_at=_utc_now_iso() if success else "",
         )
-    return PublishResult(
-        False,
-        platform,
-        "processing",
-        message=f"已执行{platform_name}发布流程，但未取得可核验的平台结果",
-    )
+    message = f"已执行{platform_name}发布流程，但未取得可核验的平台结果"
+    if explain_reconciliation:
+        message += "；请先到平台后台核验，系统不会自动重试"
+    return PublishResult(False, platform, "processing", message=message)
 
 
 def classify_publisher_error(error: Exception | str) -> str:

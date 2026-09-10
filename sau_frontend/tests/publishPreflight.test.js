@@ -5,6 +5,7 @@ import test from 'node:test'
 import {
   countPublishCharacters,
   frequencyGuidanceLabel,
+  isPublishVariantReady,
   refreshEditableVariant
 } from '../src/utils/publishPreflight.js'
 
@@ -64,10 +65,54 @@ test('citeability receipt is valid only for the exact visible outbound snapshot'
 
   assert.equal(scored.citeability_current, true)
   assert.equal(scored.citeability_passed, true)
+  assert.equal(scored.citeability_publish_gate_passed, true)
   assert.equal(scored.citeability_score, 82)
   assert.equal(edited.citeability_current, false)
   assert.equal(edited.citeability_passed, false)
+  assert.equal(edited.citeability_publish_gate_passed, false)
   assert.deepEqual(edited.citeability_suggestions, ['补充来源'])
+})
+
+
+test('quality score below 75 remains publishable when the hard gate has no P0 issue', () => {
+  const draft = refreshEditableVariant({
+    title: 'DongClaw 部署说明',
+    publish_content: '北京同于野科技有限公司提供适用范围与可核验来源。',
+    citeability: {
+      score: 71,
+      pass_score: 75,
+      passed: false,
+      publish_gate_passed: true,
+      blocking_issues: [],
+      suggestions: ['补充一项独立来源。']
+    }
+  })
+
+  assert.equal(draft.citeability_passed, false)
+  assert.equal(draft.citeability_publish_gate_passed, true)
+  assert.equal(isPublishVariantReady(draft), true)
+})
+
+
+test('a P0 citeability issue blocks task creation even if the score is high', () => {
+  const draft = refreshEditableVariant({
+    title: 'DongClaw 部署说明',
+    publish_content: '正文包含尚未证实的绝对化主张。',
+    citeability: {
+      score: 92,
+      pass_score: 75,
+      passed: true,
+      publish_gate_passed: true,
+      blocking_issues: [{
+        code: 'unsupported-claim',
+        priority: 'P0',
+        message: '绝对化主张缺少证据。'
+      }]
+    }
+  })
+
+  assert.equal(draft.citeability_publish_gate_passed, false)
+  assert.equal(isPublishVariantReady(draft), false)
 })
 
 
@@ -125,6 +170,10 @@ test('distribution center previews per-platform copies and warns about human ver
   assert.match(source, /offline_preflight_disclaimer/)
   assert.match(source, /title_overrides/)
   assert.match(source, /citeability_current/)
+  assert.match(source, /isPublishVariantReady/)
+  assert.match(source, /citeability_publish_gate_passed/)
+  assert.match(source, /可发布，建议先优化/)
+  assert.match(source, /发布硬门禁未通过/)
   assert.match(source, /内容编辑后正在重新检查/)
   assert.match(apiSource, /\/api\/publish\/preflight/)
 })

@@ -343,6 +343,36 @@ class TiktokPublishSafetyTests(unittest.IsolatedAsyncioTestCase):
             has_text="GEO 内容生成与分发链路测试说明"
         )
 
+    async def test_persistent_select_file_control_does_not_trigger_reupload(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            publisher = self._publisher(Path(temp_dir) / "account.json")
+            post_button = MagicMock()
+            post_button.count = AsyncMock(return_value=1)
+            post_button.is_visible = AsyncMock(return_value=True)
+            post_button.get_attribute = AsyncMock(side_effect=["disabled", None])
+            post_result = MagicMock()
+            post_result.first = post_button
+            absent_error = MagicMock()
+            absent_error.count = AsyncMock(return_value=0)
+            error_result = MagicMock()
+            error_result.filter.return_value.first = absent_error
+            publisher.locator_base = MagicMock()
+            publisher.locator_base.locator.side_effect = [
+                post_result,
+                error_result,
+                post_result,
+            ]
+            publisher.handle_upload_error = AsyncMock()
+
+            from unittest.mock import patch
+            with patch(
+                "uploader.tk_uploader.main_chrome.asyncio.sleep",
+                new=AsyncMock(),
+            ):
+                await publisher.detect_upload_status(MagicMock())
+
+        publisher.handle_upload_error.assert_not_awaited()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -303,6 +303,10 @@
               </div>
             </div>
 
+            <p v-if="samplingResumeMessage" class="sampling-resume" role="status">
+              {{ samplingResumeMessage }}
+            </p>
+
             <article
               v-if="liveSamplingReceipt || samplingError"
               class="sampling-receipt"
@@ -1076,6 +1080,7 @@ const commercialError = ref('')
 const samplingLoading = ref(false)
 const samplingError = ref('')
 const liveSamplingReceipt = ref(null)
+const samplingResumeMessage = ref('')
 const manualImportSnapshot = ref(null)
 const samplingOverrideExpanded = ref(false)
 const unifiedAIStatusLoading = ref(false)
@@ -1089,6 +1094,9 @@ const blackboxTruth = ref({ rows: [], state_semantics: {} })
 const blackboxResult = ref(null)
 let historyRequestSequence = 0
 let commercialRequestSequence = 0
+let samplingResumeTimer = null
+const SAMPLING_SESSION_KEY = 'geo.ai-visibility.pending-sample.v1'
+const SAMPLING_RESUME_POLL_MS = 2000
 
 const form = reactive({
   projectId: '',
@@ -1394,6 +1402,120 @@ const createSamplingIdentity = () => {
   }
 }
 
+const readPendingSamplingSession = () => {
+  try {
+    const raw = window.sessionStorage?.getItem(SAMPLING_SESSION_KEY)
+    if (!raw) return null
+    const parsed = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object' || !String(parsed.requestId || '').trim()) return null
+    return parsed
+  } catch {
+    return null
+  }
+}
+
+const savePendingSamplingSession = (identity, payload) => {
+  try {
+    window.sessionStorage?.setItem(SAMPLING_SESSION_KEY, JSON.stringify({
+      requestId: identity.requestId,
+      idempotencyKey: identity.idempotencyKey,
+      projectId: payload.project_id,
+      prompt: payload.prompt,
+      aliases: payload.aliases,
+      competitors: payload.competitors,
+      sampleCount: payload.sample_count,
+      persist: payload.persist,
+      useUnifiedEngine: sampling.useUnifiedEngine,
+      startedAt: new Date().toISOString()
+    }))
+  } catch {
+    // Session storage is a convenience only; the server-side idempotency row
+    // remains the authoritative record and provider calls are never retried.
+  }
+}
+
+const clearPendingSamplingSession = () => {
+  try {
+    window.sessionStorage?.removeItem(SAMPLING_SESSION_KEY)
+  } catch {
+    // Ignore unavailable browser storage.
+  }
+  if (samplingResumeTimer) window.clearTimeout(samplingResumeTimer)
+  samplingResumeTimer = null
+  samplingResumeMessage.value = ''
+}
+
+const restoreSamplingForm = pending => {
+  form.projectId = String(pending.projectId || form.projectId || '')
+  form.prompt = String(pending.prompt || form.prompt || '')
+  form.aliases = Array.isArray(pending.aliases) ? pending.aliases : form.aliases
+  form.competitors = Array.isArray(pending.competitors) ? pending.competitors : form.competitors
+  sampling.sampleCount = Number.isInteger(Number(pending.sampleCount))
+    ? Math.max(1, Math.min(5, Number(pending.sampleCount)))
+    : sampling.sampleCount
+  form.persist = pending.persist !== false
+  sampling.useUnifiedEngine = pending.useUnifiedEngine !== false
+}
+
+const scheduleSamplingResumePoll = pending => {
+  if (samplingResumeTimer) window.clearTimeout(samplingResumeTimer)
+  samplingResumeTimer = window.setTimeout(() => {
+    void pollPendingSampling(pending)
+  }, SAMPLING_RESUME_POLL_MS)
+}
+
+const finishRestoredSampling = async responseData => {
+  const receipt = normalizeVisibilitySamplingResponse(responseData)
+  clearPendingSamplingSession()
+  samplingLoading.value = false
+  samplingError.value = ''
+  await applyLiveSamplingOutcome(receipt)
+  if (receipt.status === 'completed') {
+    ElMessage.success(`已恢复真实采样结果：${receipt.completedSampleCount} 条回答。`)
+  } else {
+    ElMessage.warning('已恢复原采样结果；系统没有重复调用模型。')
+  }
+}
+
+const pollPendingSampling = async pending => {
+  if (!pending?.requestId) return
+  samplingLoading.value = true
+  samplingResumeMessage.value = '正在恢复原采样进度；切换页面不会重新调用模型。'
+  try {
+    const response = await diagnosticsApi.getVisibilitySample(pending.requestId, {
+      suppressGlobalError: true
+    })
+    const status = String(response.data?.status || response.data?.data?.status || '')
+    if (status === 'processing') {
+      scheduleSamplingResumePoll(pending)
+      return
+    }
+    await finishRestoredSampling(response.data)
+  } catch (error) {
+    const responseData = error?.response?.data
+    const terminalStatus = String(responseData?.data?.status || '')
+    if (['completed', 'partial', 'need_action'].includes(terminalStatus)) {
+      await finishRestoredSampling(responseData)
+      return
+    }
+    if (error?.response?.status === 404) {
+      clearPendingSamplingSession()
+      samplingLoading.value = false
+      samplingError.value = '原采样记录不存在，未自动重发；请确认桌面数据目录是否已切换。'
+      return
+    }
+    samplingResumeMessage.value = '暂时无法读取原采样进度；将继续查询，不会重新调用模型。'
+    scheduleSamplingResumePoll(pending)
+  }
+}
+
+const restorePendingSampling = () => {
+  const pending = readPendingSamplingSession()
+  if (!pending) return
+  restoreSamplingForm(pending)
+  void pollPendingSampling(pending)
+}
+
 const shortHash = value => {
   const text = String(value || '')
   if (!text) return '未返回'
@@ -1447,7 +1569,9 @@ const startLiveSampling = async () => {
 
   const payload = buildVisibilitySamplingRequest(samplingDraft.value)
   const identity = createSamplingIdentity()
+  savePendingSamplingSession(identity, payload)
   samplingLoading.value = true
+  samplingResumeMessage.value = '采样已登记到本机；离开本页后返回仍会恢复进度，不会重复计费。'
   samplingError.value = ''
   liveSamplingReceipt.value = null
   result.value = null
@@ -1458,6 +1582,7 @@ const startLiveSampling = async () => {
       suppressGlobalError: true
     })
     const receipt = normalizeVisibilitySamplingResponse(response)
+    clearPendingSamplingSession()
     await applyLiveSamplingOutcome(receipt)
     if (receipt.status === 'completed') {
       ElMessage.success(`真实采样完成：${receipt.completedSampleCount} 条回答已在本机分析。`)
@@ -1467,7 +1592,11 @@ const startLiveSampling = async () => {
   } catch (error) {
     const responseData = error?.response?.data
     if (responseData?.data && typeof responseData.data === 'object') {
+      clearPendingSamplingSession()
       await applyLiveSamplingOutcome(normalizeVisibilitySamplingResponse(responseData))
+    } else {
+      samplingResumeMessage.value = '请求连接中断；保留原请求身份并继续查询，不会自动重发。'
+      scheduleSamplingResumePoll(readPendingSamplingSession())
     }
     samplingError.value = readableError(error)
   } finally {
@@ -1699,10 +1828,13 @@ onMounted(() => {
   void loadProjects()
   void loadUnifiedAIStatus()
   void loadBlackboxTruth()
+  restorePendingSampling()
   window.addEventListener('geo-unified-ai-config-changed', handleUnifiedAIConfigChanged)
 })
 onBeforeUnmount(() => {
   sampling.apiKey = ''
+  if (samplingResumeTimer) window.clearTimeout(samplingResumeTimer)
+  samplingResumeTimer = null
   window.removeEventListener('geo-unified-ai-config-changed', handleUnifiedAIConfigChanged)
 })
 </script>
@@ -2143,6 +2275,7 @@ onBeforeUnmount(() => {
 .dispatch-main > pre { max-height: 180px; overflow: auto; margin: 15px 0 0; padding: 14px 15px; border: 1px solid #dedfdb; border-radius: 5px; background: #f5f5f2; color: #1d1e20; font: 11px/1.7 "Cascadia Mono", "Microsoft YaHei UI", monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .privacy-boundary { display: flex; align-items: baseline; gap: 14px; margin-top: 11px; strong { flex: 0 0 auto; color: var(--ink); font-size: 10px; } span { color: var(--muted); font-size: 9px; line-height: 1.55; } }
 .sampling-issues { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 11px; span { padding: 5px 7px; border: 1px solid #e0c9a4; border-radius: 4px; background: #fff8ec; color: #8b6226; font-size: 8px; } }
+.sampling-resume { margin: 12px 0 0; padding: 10px 12px; border-left: 3px solid var(--signal); background: #f3f7f6; color: #365d5b; font-size: 10px; line-height: 1.55; }
 .dispatch-confirm {
   display: flex;
   align-items: center;

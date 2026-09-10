@@ -236,6 +236,26 @@ class DouYinBaseUploader(BaseVideoUploader):
         self.local_executable_path = LOCAL_CHROME_PATH
         self.headless = headless
 
+    async def _raise_if_visible_account_risk(
+        self,
+        page: Page,
+        *,
+        include_verification: bool = False,
+    ) -> None:
+        try:
+            body_text = await page.locator("body").inner_text(timeout=1500)
+        except Exception:
+            return
+        from services.media_account_risk_service import classify_media_account_risk
+
+        risk = classify_media_account_risk(body_text)
+        if not risk or risk["category"] == "network_error":
+            return
+        if risk["category"] == "verification_required" and not include_verification:
+            return
+        evidence = risk.get("evidence") or risk.get("reason") or "平台未返回具体原因"
+        raise RuntimeError(f"抖音账号风险[{risk['category']}]：{evidence}")
+
     async def validate_base_args(self):
         if not os.path.exists(self.account_file):
             raise RuntimeError(f"cookie文件不存在，请先完成抖音登录: {self.account_file}")
@@ -1026,6 +1046,52 @@ class DouYinNote(DouYinBaseUploader):
         self.tags = tags or []
         self.dry_run = bool(dry_run)
         self.ai_generated = bool(ai_generated)
+        # Set immediately before the single remote submit click.  The service
+        # adapter uses this boundary to prevent an ambiguous outcome from being
+        # automatically submitted again.
+        self.submit_click_attempted = False
+
+    async def _switch_to_image_post(self, page: Page) -> None:
+        image_inputs = page.locator('input[type="file"][accept*="image"]')
+        if "/creator-micro/content/post/image" in str(getattr(page, "url", "")):
+            return
+
+        candidates = (
+            page.get_by_text("发布图文", exact=True),
+            page.get_by_role("tab", name="发布图文", exact=True),
+            page.get_by_role("tab", name="图文", exact=True),
+            page.locator('[role="tab"]:has-text("图文")').first,
+            page.locator('button:has-text("发布图文")').first,
+        )
+        for candidate in candidates:
+            try:
+                if not await candidate.count() or not await candidate.first.is_visible():
+                    continue
+                await candidate.first.click(timeout=4_000)
+                await page.wait_for_timeout(500)
+                if await image_inputs.count():
+                    return
+            except Exception:
+                continue
+
+        await self._raise_if_visible_account_risk(page, include_verification=True)
+        raise RuntimeError("抖音页面结构变化：未找到图文发布入口，尚未提交")
+
+    async def _upload_note_images(self, page: Page) -> None:
+        candidates = (
+            page.locator('input[type="file"][accept*="image"]').first,
+            page.locator("div[class^='container'] input[accept*='image']").first,
+            page.locator("div[class*='container'] input[accept*='image']").first,
+        )
+        for candidate in candidates:
+            try:
+                if await candidate.count():
+                    await candidate.set_input_files(self.image_paths)
+                    return
+            except Exception:
+                continue
+        await self._raise_if_visible_account_risk(page, include_verification=True)
+        raise RuntimeError("抖音页面结构变化：未找到图片上传控件，尚未提交")
 
     async def validate_upload_args(self):
         await self.validate_base_args()
@@ -1050,11 +1116,11 @@ class DouYinNote(DouYinBaseUploader):
     async def upload_note_content(self, page: Page) -> None:
         douyin_logger.info(_msg("🏃", f"小人开始搬运图文，共 {len(self.image_paths)} 张图片"))
         douyin_logger.info(_msg("🔀", "小人正在切换到图文发布"))
-        await page.get_by_text("发布图文", exact=True).click()
+        await self._switch_to_image_post(page)
         await page.wait_for_timeout(1000)
 
         douyin_logger.info(_msg("📤", "小人正在上传图片"))
-        await page.locator("div[class^='container'] input[accept*='image']").set_input_files(self.image_paths)
+        await self._upload_note_images(page)
 
         while True:
             try:
@@ -1088,20 +1154,46 @@ class DouYinNote(DouYinBaseUploader):
             await page.wait_for_timeout(120_000)
             return
 
-        publish_button = page.get_by_role("button", name="发布", exact=True)
-        await publish_button.wait_for(state="visible", timeout=10_000)
-        await publish_button.click()
+        publish_candidates = (
+            page.get_by_role("button", name="发布", exact=True),
+            page.locator('button:has-text("发布")').filter(has_not_text="定时").first,
+            page.locator('[class*="footer"] button:has-text("发布")').first,
+        )
+        publish_button = None
+        for candidate in publish_candidates:
+            try:
+                if await candidate.count() and await candidate.first.is_visible():
+                    publish_button = candidate.first
+                    break
+            except Exception:
+                continue
+        if publish_button is None:
+            raise RuntimeError("抖音页面结构变化：未找到可用的图文发布按钮，尚未提交")
+        await publish_button.scroll_into_view_if_needed()
+        self.submit_click_attempted = True
+        await publish_button.click(timeout=10_000)
         douyin_logger.info(_msg("🖱️", "已点击图文发布按钮一次，等待明确结果"))
         try:
             await page.wait_for_url(
-                "**/creator-micro/content/manage?enter_from=publish**",
+                "**/creator-micro/content/manage**",
                 timeout=300_000,
             )
         except Exception as exc:
+            await self._raise_if_visible_account_risk(
+                page,
+                include_verification=True,
+            )
             raise RuntimeError(
                 "抖音图文已点击发布一次但最终状态未知；为避免重复发布，未自动重试"
             ) from exc
         douyin_logger.success(_msg("🥳", "图文发布成功，小人开心收工"))
+        return {
+            "status": "processing",
+            "message": (
+                "抖音已接受提交并进入作品管理，当前可能处于平台处理或审核中；"
+                "请在作品管理核对公开状态，系统不会自动重试"
+            ),
+        }
 
     async def upload(self, playwright: Playwright) -> None:
         douyin_logger.info(_msg("🧍", "小人先检查 cookie、图片和发布时间"))
@@ -1122,7 +1214,7 @@ class DouYinNote(DouYinBaseUploader):
             douyin_logger.info(_msg("🧭", "小人正在赶往图文发布页"))
             await page.wait_for_url("https://creator.douyin.com/creator-micro/content/upload")
 
-            await self.upload_note_content(page)
+            result = await self.upload_note_content(page)
             upload_success = True
         finally:
             if upload_success:
@@ -1131,7 +1223,8 @@ class DouYinNote(DouYinBaseUploader):
                 await asyncio.sleep(2)
             await context.close()
             await browser.close()
+        return result
 
     async def douyin_upload_note(self):
         async with async_playwright() as playwright:
-            await self.upload(playwright)
+            return await self.upload(playwright)

@@ -9,6 +9,7 @@ from services.geo_article_compiler_service import (
     GEOArticleCompilerError,
     build_generation_instructions,
     build_geo_article_blueprint,
+    resolve_generation_length_context,
     score_ai_citeability,
 )
 
@@ -71,8 +72,36 @@ class GEOArticleCompilerServiceTests(unittest.TestCase):
                 "product",
                 "website",
                 "sources",
+                "target_length",
+                "requested_target_length",
+                "source",
             ],
         )
+
+    def test_resolves_requested_and_platform_safe_effective_lengths(self):
+        kuaishou = resolve_generation_length_context(1000, "快手")
+        self.assertEqual(
+            kuaishou,
+            {
+                "requested_length": 1000,
+                "effective_length": 380,
+                "platform_limit": 380,
+                "source": "platform_safe_limit",
+                "platform_key": "kuaishou",
+            },
+        )
+
+        douyin = resolve_generation_length_context(1500, "抖音")
+        self.assertEqual(douyin["requested_length"], 1500)
+        self.assertEqual(douyin["effective_length"], 800)
+        self.assertEqual(douyin["platform_limit"], 800)
+        self.assertEqual(douyin["source"], "platform_safe_limit")
+
+        generic = resolve_generation_length_context(1000)
+        self.assertEqual(generic["requested_length"], 1000)
+        self.assertEqual(generic["effective_length"], 1000)
+        self.assertIsNone(generic["platform_limit"])
+        self.assertEqual(generic["source"], "requested_length")
 
     def test_builds_deterministic_comparison_blueprint_with_platform_limits(self):
         first = build_geo_article_blueprint(
@@ -184,9 +213,69 @@ class GEOArticleCompilerServiceTests(unittest.TestCase):
 
         self.assertEqual(blueprint["length"], 200)
         self.assertIn("只完整回答主查询和优先问题列表第一项", blueprint["instruction"])
-        self.assertIn("2–4 个短段落", blueprint["instruction"])
+        self.assertIn("2–4 个紧凑短段落", blueprint["instruction"])
         self.assertIn("不强制 H2/H3、FAQ", blueprint["instruction"])
         self.assertNotIn("至少覆盖列表前三项", blueprint["instruction"])
+
+    def test_600_character_blueprint_remains_short_form(self):
+        blueprint = build_geo_article_blueprint(
+            self.project(),
+            "DongClaw 是什么？",
+            self.project()["keywords"],
+            "问答",
+            "toutiao",
+            600,
+            12,
+        )
+
+        self.assertIn("最多展开优先问题列表前两项", blueprint["instruction"])
+        self.assertIn("3–6 个清晰段落", blueprint["instruction"])
+        self.assertIn("401–799 字短稿可用少量小标题", blueprint["instruction"])
+        self.assertNotIn("至少覆盖列表前三项", blueprint["instruction"])
+
+    def test_blueprint_uses_effective_platform_length_for_structure(self):
+        kuaishou = build_geo_article_blueprint(
+            self.project(),
+            "DongClaw 是什么？",
+            self.project()["keywords"],
+            "问答",
+            "快手",
+            1000,
+            12,
+        )
+        self.assertEqual(kuaishou["length"], 1000)
+        self.assertEqual(kuaishou["length_context"]["effective_length"], 380)
+        self.assertEqual(kuaishou["length_context"]["source"], "platform_safe_limit")
+        self.assertIn("正文以 380 字为生成、清洗与评分目标", kuaishou["instruction"])
+        self.assertIn("2–4 个紧凑短段落", kuaishou["instruction"])
+        self.assertNotIn("2 个真实 FAQ", kuaishou["instruction"])
+
+        douyin = build_geo_article_blueprint(
+            self.project(),
+            "DongClaw 是什么？",
+            self.project()["keywords"],
+            "问答",
+            "抖音",
+            1500,
+            12,
+        )
+        self.assertEqual(douyin["length_context"]["effective_length"], 800)
+        self.assertIn("正文以 800 字为生成、清洗与评分目标", douyin["instruction"])
+        self.assertIn("3–5 个清晰 H2/H3", douyin["instruction"])
+        self.assertIn("2 个真实 FAQ", douyin["instruction"])
+
+        generic = build_geo_article_blueprint(
+            self.project(),
+            "DongClaw 是什么？",
+            self.project()["keywords"],
+            "问答",
+            "",
+            1500,
+            12,
+        )
+        self.assertEqual(generic["length_context"]["effective_length"], 1500)
+        self.assertIn("5–8 个 H2/H3", generic["instruction"])
+        self.assertIn("3–4 个真实 FAQ", generic["instruction"])
 
     def test_blueprint_accepts_arbitrary_length_inside_range(self):
         blueprint = build_geo_article_blueprint(
@@ -413,6 +502,7 @@ DongClaw 产品页：https://geo.example.com/products/dongclaw
         self.assertEqual(len(result["dimensions"]), 7)
         self.assertGreaterEqual(result["score"], 90)
         self.assertTrue(result["passed"])
+        self.assertTrue(result["publish_gate_passed"])
         self.assertEqual(result["blocking_issues"], [])
         self.assertEqual(result["signals"]["owned_citation_count"], 1)
         self.assertEqual(
@@ -440,6 +530,7 @@ DongClaw 产品页：https://geo.example.com/products/dongclaw
         )
 
         self.assertFalse(sparse["passed"])
+        self.assertFalse(sparse["publish_gate_passed"])
         self.assertTrue(
             any(
                 item["code"] == "entity.canonical_name_absent"
@@ -450,10 +541,27 @@ DongClaw 产品页：https://geo.example.com/products/dongclaw
             item["code"] for item in quantified["blocking_issues"]
         }
         self.assertFalse(quantified["passed"])
+        self.assertFalse(quantified["publish_gate_passed"])
         self.assertIn("risk.unsupported_absolute_claim", quantified_codes)
         self.assertIn("risk.unsupported_quantified_claim", quantified_codes)
         self.assertFalse(quantified["methodology"]["external_model_used"])
         self.assertFalse(quantified["methodology"]["network_accessed"])
+
+    def test_low_quality_score_without_p0_is_warning_not_publish_blocker(self):
+        result = score_ai_citeability(
+            "DongClaw 是什么？",
+            "北京同于野科技有限公司介绍 DongClaw 的适用条件。",
+            "北京同于野科技有限公司",
+            ["DongClaw"],
+            product="DongClaw",
+        )
+
+        self.assertLess(result["score"], result["pass_score"])
+        self.assertFalse(result["passed"])
+        self.assertTrue(result["publish_gate_passed"])
+        self.assertEqual(result["blocking_issues"], [])
+        self.assertEqual(result["warnings"][0]["code"], "quality.score_below_target")
+        self.assertEqual(result["warnings"][0]["priority"], "P1")
 
     def test_risk_disclosures_and_explicit_denials_are_not_assertions(self):
         disclosures = [
@@ -597,6 +705,215 @@ DongClaw 产品页：https://geo.example.com/products/dongclaw
         )
 
         self.assertEqual(result["dimensions"]["structural_extractability"], 80)
+
+    def test_compact_profile_marks_faq_and_long_form_structure_not_applicable(self):
+        result = score_ai_citeability(
+            "DongClaw 适合哪些团队？",
+            (
+                "北京同于野科技有限公司的 DongClaw 面向需要核对部署条件、"
+                "数据边界与责任范围的团队，选择前应以公开资料和实际验证为准。\n\n"
+                "• 先确认真实业务问题。\n"
+                "• 再记录适用条件和验证结果。\n"
+                "官网：https://geo.example.com/products/dongclaw"
+            ),
+            "北京同于野科技有限公司",
+            ["DongClaw", "部署条件"],
+            product="DongClaw",
+            website="https://geo.example.com",
+            target_length=200,
+        )
+
+        profile = result["length_profile"]
+        self.assertEqual(profile["key"], "compact")
+        self.assertEqual(profile["source"], "explicit")
+        self.assertEqual(profile["not_applicable_dimensions"], ["faq_decision_support"])
+        self.assertIsNone(result["dimensions"]["faq_decision_support"])
+        self.assertEqual(result["effective_dimension_weights"]["faq_decision_support"], 0)
+        self.assertFalse(
+            result["dimension_details"]["faq_decision_support"]["applicable"]
+        )
+        for key in ("headings", "summary_section"):
+            check = next(
+                item
+                for item in result["dimension_details"]["structural_extractability"]["checks"]
+                if item["key"] == key
+            )
+            self.assertFalse(check["applicable"])
+            self.assertEqual(check["earned_points"], 0)
+            self.assertEqual(check["max_points"], 0)
+        self.assertFalse(any("FAQ" in item for item in result["suggestions"]))
+        self.assertFalse(any("H2/H3" in item for item in result["suggestions"]))
+
+    def test_citeability_profile_uses_shared_non_whitespace_visible_length(self):
+        content = "## 标题\n\n" + ("字 " * 140)
+
+        result = score_ai_citeability(
+            "短稿",
+            content,
+            "品牌",
+            [],
+            target_length=200,
+        )
+
+        self.assertGreater(len(content), 200)
+        self.assertEqual(result["length_profile"]["actual_length"], 144)
+
+    def test_citeability_scores_effective_platform_length_but_keeps_request(self):
+        result = score_ai_citeability(
+            "DongClaw 适合哪些团队？",
+            (
+                "北京同于野科技有限公司的 DongClaw 适合先核对实际业务问题。\n\n"
+                "团队还应记录部署条件、数据边界和人工复核结果。"
+            ),
+            "北京同于野科技有限公司",
+            ["DongClaw", "部署条件", "数据边界"],
+            product="DongClaw",
+            target_length=380,
+            requested_target_length=1000,
+            source="platform_safe_limit",
+        )
+
+        profile = result["length_profile"]
+        self.assertEqual(profile["key"], "compact")
+        self.assertEqual(profile["target_length"], 1000)
+        self.assertEqual(profile["requested_target_length"], 1000)
+        self.assertEqual(profile["effective_target_length"], 380)
+        self.assertEqual(profile["criteria"]["scoring_target_length"], 380)
+        self.assertEqual(profile["source"], "platform_safe_limit")
+
+    def test_missing_target_preserves_legacy_long_form_contract(self):
+        content = (
+            "北京同于野科技有限公司的 DongClaw 适合先从一个真实流程验证，"
+            "并记录部署条件和数据边界。\n\n"
+            "• 核对公开资料。\n• 人工复核结果。"
+        )
+        result = score_ai_citeability(
+            "DongClaw 如何验证？",
+            content,
+            "北京同于野科技有限公司",
+            ["DongClaw"],
+            product="DongClaw",
+        )
+
+        self.assertEqual(result["length_profile"]["source"], "legacy")
+        self.assertEqual(result["length_profile"]["key"], "legacy")
+        self.assertIsNone(result["length_profile"]["target_length"])
+        self.assertIsInstance(result["dimensions"]["faq_decision_support"], int)
+        self.assertTrue(any("FAQ" in item for item in result["suggestions"]))
+
+    def test_standard_and_long_profiles_keep_long_form_requirements(self):
+        for target, key, paragraphs in ((1000, "standard", 3), (1500, "long", 4)):
+            with self.subTest(target=target):
+                result = score_ai_citeability(
+                    "DongClaw 如何验证？",
+                    "北京同于野科技有限公司介绍 DongClaw 的验证方式。",
+                    "北京同于野科技有限公司",
+                    ["DongClaw"],
+                    product="DongClaw",
+                    target_length=target,
+                )
+                profile = result["length_profile"]
+                self.assertEqual(profile["key"], key)
+                self.assertEqual(profile["criteria"]["minimum_paragraphs"], paragraphs)
+                self.assertTrue(profile["criteria"]["headings_required"])
+                self.assertTrue(profile["criteria"]["faq_required"])
+                self.assertTrue(profile["criteria"]["summary_required"])
+                self.assertIsInstance(result["dimensions"]["faq_decision_support"], int)
+                self.assertTrue(any("FAQ" in item for item in result["suggestions"]))
+
+    def test_custom_target_profile_and_invalid_lengths_are_auditable(self):
+        result = score_ai_citeability(
+            "DongClaw 是什么？",
+            "北京同于野科技有限公司介绍 DongClaw。",
+            "北京同于野科技有限公司",
+            ["DongClaw"],
+            target_length=750,
+        )
+        self.assertEqual(result["length_profile"]["key"], "short")
+        self.assertEqual(result["length_profile"]["criteria"]["preset"], "custom")
+
+        for value in (True, "200", 199, 3001):
+            with self.subTest(value=value):
+                with self.assertRaises(GEOArticleCompilerError):
+                    score_ai_citeability(
+                        "标题",
+                        "正文",
+                        "品牌",
+                        [],
+                        target_length=value,
+                    )
+
+    def test_compact_semantic_coverage_uses_priority_keywords_only(self):
+        keywords = [
+            "核心一",
+            "核心二",
+            "扩展三",
+            "扩展四",
+            "扩展五",
+            "扩展六",
+            "扩展七",
+        ]
+        result = score_ai_citeability(
+            "扩展七是什么？",
+            (
+                "测试品牌用核心一和核心二说明可验证的真实能力。\n\n"
+                "扩展七 扩展七 扩展七。"
+            ),
+            "测试品牌",
+            keywords,
+            target_length=200,
+        )
+
+        criteria = result["length_profile"]["criteria"]
+        self.assertEqual(criteria["evaluated_keywords"], ["核心一", "核心二"])
+        self.assertEqual(criteria["deferred_keyword_count"], 5)
+        coverage = next(
+            item
+            for item in result["dimension_details"]["semantic_coverage"]["checks"]
+            if item["key"] == "keyword_coverage"
+        )
+        self.assertEqual(coverage["score"], 100)
+        stuffing = next(
+            item
+            for item in result["dimension_details"]["semantic_coverage"]["checks"]
+            if item["key"] == "keyword_stuffing_control"
+        )
+        self.assertFalse(stuffing["passed"])
+        self.assertFalse(any("扩展三" in item for item in result["suggestions"]))
+
+    def test_short_citeability_detects_obfuscated_keyword_stuffing(self):
+        result = score_ai_citeability(
+            "AI Agent 是什么？",
+            "测试品牌介绍 Ai Agent，\nAI\u200b Agent；ai-agent。",
+            "测试品牌",
+            ["AI Agent"],
+            target_length=200,
+        )
+        stuffing = next(
+            item
+            for item in result["dimension_details"]["semantic_coverage"]["checks"]
+            if item["key"] == "keyword_stuffing_control"
+        )
+        self.assertFalse(stuffing["passed"])
+        self.assertEqual(stuffing["earned_points"], 0)
+
+    def test_actual_length_upgrades_compact_citeability_requirements(self):
+        result = score_ai_citeability(
+            "DongClaw 是什么？",
+            "北京同于野科技有限公司介绍 DongClaw。" + "真实正文" * 260,
+            "北京同于野科技有限公司",
+            ["DongClaw"],
+            product="DongClaw",
+            target_length=200,
+        )
+
+        profile = result["length_profile"]
+        self.assertEqual(profile["target_length"], 200)
+        self.assertGreaterEqual(profile["effective_target_length"], 1000)
+        self.assertEqual(profile["source"], "actual_length_upgrade")
+        self.assertTrue(profile["over_target"])
+        self.assertIn(profile["key"], {"standard", "long"})
+        self.assertIsInstance(result["dimensions"]["faq_decision_support"], int)
 
     def test_unrelated_url_cannot_validate_absolute_or_quantified_claims(self):
         result = score_ai_citeability(

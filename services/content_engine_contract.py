@@ -228,8 +228,6 @@ class ContentGenerationResult:
         if not summary:
             warnings.append("引擎未返回摘要，可在编辑器中补充")
         faq = _normalize_faq(data.get("faq"))
-        if not faq:
-            warnings.append("引擎未返回 FAQ")
         sources = _normalize_sources(data.get("sources"))
         if not sources:
             warnings.append("引擎未返回来源信息")

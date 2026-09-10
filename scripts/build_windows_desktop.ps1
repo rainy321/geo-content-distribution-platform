@@ -15,6 +15,7 @@ $buildRoot = Join-Path $projectRoot ".build\pyinstaller"
 $specPath = Join-Path $projectRoot "desktop\GEO-Desktop.spec"
 $buildInfoPath = Join-Path $projectRoot ".build\desktop-build-info.json"
 $stagingRoot = $null
+$releaseVersionRegistry = $null
 
 function Assert-NativeSuccess {
     param(
@@ -37,6 +38,40 @@ try {
         throw "Unable to read project version from pyproject.toml"
     }
     $version = $versionMatch.Groups[1].Value
+
+    # Fail before dependency installation when any user-visible or PE version
+    # has drifted from the package version.
+    $desktopSource = Get-Content -Raw -LiteralPath (Join-Path $projectRoot "geo_desktop.py")
+    $desktopVersionMatch = [regex]::Match(
+        $desktopSource,
+        '(?m)^APP_VERSION\s*=\s*"([^"]+)"'
+    )
+    if (-not $desktopVersionMatch.Success -or $desktopVersionMatch.Groups[1].Value -ne $version) {
+        throw "geo_desktop.py APP_VERSION does not match project version $version"
+    }
+    $frontendPackage = Get-Content -Raw -LiteralPath (Join-Path $frontendRoot "package.json") | ConvertFrom-Json
+    $frontendLock = Get-Content -Raw -LiteralPath (Join-Path $frontendRoot "package-lock.json") | ConvertFrom-Json
+    if ($frontendPackage.version -ne $version -or $frontendLock.version -ne $version) {
+        throw "Frontend package versions do not match project version $version"
+    }
+    $versionParts = @($version.Split('.') | ForEach-Object { [int]$_ })
+    while ($versionParts.Count -lt 4) {
+        $versionParts += 0
+    }
+    $versionTuple = '({0}, {1}, {2}, {3})' -f $versionParts[0], $versionParts[1], $versionParts[2], $versionParts[3]
+    $versionInfo = Get-Content -Raw -LiteralPath (Join-Path $projectRoot "desktop\version_info.txt")
+    if (
+        $versionInfo -notmatch ('filevers=' + [regex]::Escape($versionTuple)) -or
+        $versionInfo -notmatch ('prodvers=' + [regex]::Escape($versionTuple)) -or
+        $versionInfo -notmatch ("FileVersion', u'" + [regex]::Escape($version) + "'") -or
+        $versionInfo -notmatch ("ProductVersion', u'" + [regex]::Escape($version) + "'")
+    ) {
+        throw "desktop/version_info.txt does not match project version $version"
+    }
+    $aboutSource = Get-Content -Raw -LiteralPath (Join-Path $frontendRoot "src\views\About.vue")
+    if ($aboutSource -notmatch ('版本\s+' + [regex]::Escape($version) + '\s+·')) {
+        throw "About.vue visible version does not match project version $version"
+    }
     $sourceCommit = (git rev-parse HEAD).Trim()
     if ($LASTEXITCODE -ne 0 -or -not $sourceCommit) {
         throw "Unable to resolve source commit"
@@ -109,6 +144,20 @@ try {
         uv sync --extra desktop --frozen
         Assert-NativeSuccess -Operation "Installing desktop dependencies" -ExitCode $LASTEXITCODE
     }
+    $releaseVersionJson = (
+        & uv run --no-sync python -c `
+            'import json; from services.release_version_registry import release_version_registry; print(json.dumps(release_version_registry(), sort_keys=True))'
+    ) | Out-String
+    Assert-NativeSuccess -Operation "Reading runtime release version registry" -ExitCode $LASTEXITCODE
+    try {
+        $releaseVersionRegistry = $releaseVersionJson.Trim() | ConvertFrom-Json -AsHashtable
+    }
+    catch {
+        throw "Runtime release version registry is not valid JSON: $($_.Exception.Message)"
+    }
+    if (-not $releaseVersionRegistry.algorithm -or -not $releaseVersionRegistry.product_features) {
+        throw "Runtime release version registry is incomplete"
+    }
 
     Write-Host "[2/7] Building the Vue desktop interface"
     Push-Location $frontendRoot
@@ -124,85 +173,9 @@ try {
 
     if (-not $SkipTests) {
         Write-Host "[3/7] Running desktop product regression tests"
-        uv run --no-sync python -m unittest `
-            tests.test_geo_desktop `
-            tests.test_local_auth_service `
-            tests.test_access_control `
-            tests.test_desktop_backup_service `
-            tests.test_ai_visibility_service `
-            tests.test_ai_visibility_api `
-            tests.test_ai_visibility_run_service `
-            tests.test_ai_visibility_sampling_service `
-            tests.test_ai_visibility_sampling_database `
-            tests.test_ai_visibility_sampling_api `
-            tests.test_ai_cost_ledger_service `
-            tests.test_geo_article_compiler_service `
-            tests.test_geo_article_compiler_api `
-            tests.test_ai_service `
-            tests.test_unified_ai_config_service `
-            tests.test_unified_ai_config_api `
-            tests.test_content_engine_contract `
-            tests.test_content_diversity_service `
-            tests.test_content_hygiene_service `
-            tests.test_content_generation_service `
-            tests.test_content_generation_api_v1 `
-            tests.test_articles_api `
-            tests.test_articles_generate_api `
-            tests.test_articles_optimize_api `
-            tests.test_geo_score_service `
-            tests.test_geo_score_api `
-            tests.test_geo_diagnostic_service `
-            tests.test_geo_diagnostic_cost_api `
-            tests.test_dongclaw_evaluation_service `
-            tests.test_real_publish_api `
-            tests.test_real_publisher_factory `
-            tests.test_publish_job_executor `
-            tests.test_publish_job_service `
-            tests.test_publish_jobs_api `
-            tests.test_publish_outcome_service `
-            tests.test_publish_preflight_service `
-            tests.test_platform_publish_policy_service `
-            tests.test_publish_reconcile_api `
-            tests.test_publish_scheduler_service `
-            tests.test_worker_entrypoint `
-            tests.test_media_publisher_adapters `
-            tests.test_media_account_service `
-            tests.test_media_accounts_api `
-            tests.test_media_account_risk_service `
-            tests.test_media_account_disconnect `
-            tests.test_all_platform_login_cancel `
-            tests.test_bilibili_runtime `
-            tests.test_sau_bilibili_cli `
-            tests.test_login_storage_config `
-            tests.test_login_qrcode `
-            tests.test_login_sse `
-            tests.test_toutiao_login `
-            tests.test_zhihu_login `
-            tests.test_baijiahao_article_topics `
-            tests.test_baijiahao_publish_flow `
-            tests.test_sohu_publish_flow `
-            tests.test_toutiao_article_topics `
-            tests.test_toutiao_publish_flow `
-            tests.test_xiaohongshu_uploader `
-            tests.test_kuaishou_account_risk `
-            tests.test_xiaohongshu_publish_flow `
-            tests.test_zhihu_publish_flow `
-            tests.test_tencent_publish_safety `
-            tests.test_tiktok_publish_safety `
-            tests.test_geo_blackbox_experiment_service `
-            tests.test_geo_blackbox_experiment_api `
-            tests.test_material_api `
-            tests.test_p2_content_workflows `
-            tests.test_dashboard_service `
-            tests.test_dashboard_api `
-            tests.test_projects_api `
-            tests.test_database_init `
-            tests.test_desktop_product_flow `
-            tests.test_frontend_delivery `
-            tests.test_health_api `
-            tests.test_delivery_safety `
-            tests.test_sau_web `
-            -v
+        # Discover the complete suite instead of maintaining a hand-written
+        # allow-list that can silently omit new publishing or safety tests.
+        uv run --no-sync python -m unittest discover -s tests -v
         Assert-NativeSuccess -Operation "Running Python regression tests" -ExitCode $LASTEXITCODE
         Push-Location $frontendRoot
         try {
@@ -400,6 +373,26 @@ try {
     else {
         "not_applicable"
     }
+    $algorithmManifest = [ordered]@{}
+    foreach ($key in $releaseVersionRegistry.algorithm.Keys) {
+        $algorithmManifest[$key] = [string]$releaseVersionRegistry.algorithm[$key]
+    }
+    $algorithmManifest["handoff_archive_sha256"] = "2ff20604dad3b68807c47d0f3aef3d59ce613bf927dcde0b90ad80bc4b96e96c"
+    $algorithmManifest["source_rights_status"] = "pending_written_authorization"
+    $algorithmManifest["directly_comparable_to_provider_grounding"] = $false
+
+    $productFeatureManifest = [ordered]@{}
+    foreach ($key in $releaseVersionRegistry.product_features.Keys) {
+        $productFeatureManifest[$key] = [string]$releaseVersionRegistry.product_features[$key]
+    }
+    $productFeatureManifest["unified_ai_config_storage"] = "windows_dpapi_current_user"
+    $productFeatureManifest["channel_recommendations"] = $true
+    $productFeatureManifest["bounded_topic_matching"] = $true
+    $productFeatureManifest["per_call_token_and_cost_receipts"] = $true
+    $productFeatureManifest["batch_dispatch_max_articles"] = 20
+    $productFeatureManifest["automatic_account_rotation"] = $false
+    $productFeatureManifest["non_model_publish_token_semantics"] = "not_applicable"
+
     $releaseManifest = [ordered]@{
         schema_version = 1
         product = "GEO Content Platform"
@@ -458,32 +451,8 @@ try {
                 [string]$report.publishing_runtime_probe.bilibili_runtime.reason
             }
         }
-        algorithm = [ordered]@{
-            integration_version = "ai-visibility-python-port-1.1.0"
-            article_compiler_version = "geo-article-compiler-2.2.0"
-            ai_citeability_version = "ai-citeability-rules-2.1.1"
-            handoff_archive_sha256 = "2ff20604dad3b68807c47d0f3aef3d59ce613bf927dcde0b90ad80bc4b96e96c"
-            source_rights_status = "pending_written_authorization"
-            directly_comparable_to_provider_grounding = $false
-        }
-        product_features = [ordered]@{
-            geo_diagnostic_version = "geo-commercial-diagnostic-1.3.0"
-            ai_cost_ledger_version = "ai-cost-ledger-1.2.0"
-            platform_content_policy_version = "2026-09-10.4"
-            publish_outcome_version = "publish-outcome-1.0.0"
-            content_hygiene_version = "content-hygiene-1.1.0"
-            geo_blackbox_panel_version = "geo-blackbox-panel-1.0.0"
-            media_account_risk_version = "media-account-risk-1.0.0"
-            unified_ai_role_router_version = "unified-ai-role-router-1.0.0"
-            content_diversity_version = "content-diversity-1.0.0"
-            unified_ai_config_storage = "windows_dpapi_current_user"
-            channel_recommendations = $true
-            bounded_topic_matching = $true
-            per_call_token_and_cost_receipts = $true
-            batch_dispatch_max_articles = 20
-            automatic_account_rotation = $false
-            non_model_publish_token_semantics = "not_applicable"
-        }
+        algorithm = $algorithmManifest
+        product_features = $productFeatureManifest
         packaged_smoke = [ordered]@{
             health = "ok"
             database = [string]$report.health.database

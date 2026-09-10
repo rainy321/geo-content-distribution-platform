@@ -165,6 +165,7 @@ test('EXE visibility view defaults to the unified engine and keeps explicit-call
   const viewSource = readFileSync(new URL('../src/views/AiVisibility.vue', import.meta.url), 'utf8')
 
   assert.match(apiSource, /\/api\/geo\/visibility\/sample/)
+  assert.match(apiSource, /getVisibilitySample/)
   assert.match(apiSource, /Idempotency-Key/)
   assert.match(viewSource, /仅发送下面这一段问题/)
   assert.match(viewSource, /项目、文章、账号、Cookie 均不发送/)
@@ -173,4 +174,5 @@ test('EXE visibility view defaults to the unified engine and keeps explicit-call
   assert.match(viewSource, /不会后台自动回测/)
   assert.match(viewSource, /撤销导入/)
   assert.match(viewSource, /不会自动重试/)
+  assert.match(viewSource, /保留原请求身份并继续查询/)
 })

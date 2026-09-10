@@ -1093,7 +1093,7 @@ class SoHuArticle(object):
         else:
             await self.publish(page)
             await page.wait_for_timeout(3000)
-            sohu_logger.success("文章发布流程完成")
+            sohu_logger.info("提交观察流程结束，最终状态以发布中心任务结果为准")
 
         await context.storage_state(path=self.account_file)
         sohu_logger.info("cookie 更新完毕")

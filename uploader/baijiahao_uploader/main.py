@@ -1766,7 +1766,9 @@ class BaiJiaHaoArticle(object):
             if self.publish_date != 0:
                 baijiahao_logger.warning("百家号图文定时发布暂未实现，将立即发布")
             await self.publish(page)
-            baijiahao_logger.success("百家号文章发布流程完成")
+            baijiahao_logger.info(
+                "百家号提交观察流程结束，最终状态以发布中心任务结果为准"
+            )
 
         await context.storage_state(path=self.account_file)
         baijiahao_logger.info("cookie 更新完毕")

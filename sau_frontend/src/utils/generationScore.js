@@ -7,11 +7,16 @@ export const buildGeoScorePayload = ({
   product,
   website,
   keywords,
-  sources
+  sources,
+  targetLength
 }) => {
   const payload = { title, content }
   if (summary) payload.summary = summary
   if (Array.isArray(sources) && sources.length) payload.sources = sources.map(item => ({ ...item }))
+  const normalizedTargetLength = Number(targetLength)
+  if (Number.isInteger(normalizedTargetLength) && normalizedTargetLength >= 200 && normalizedTargetLength <= 3000) {
+    payload.target_length = normalizedTargetLength
+  }
   if (generationRunId !== null && generationRunId !== undefined && generationRunId !== '') {
     payload.generation_run_id = generationRunId
     return payload

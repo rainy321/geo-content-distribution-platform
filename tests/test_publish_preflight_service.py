@@ -3,6 +3,7 @@ import unittest
 from services.publish_preflight_service import (
     PublishContentLimitError,
     build_platform_publish_variant,
+    evaluate_publish_citeability,
     get_platform_frequency_guidance,
     get_platform_verification_policy,
 )
@@ -179,7 +180,7 @@ class PublishPreflightServiceTests(unittest.TestCase):
                 publish_content="字" * 470,
             )
 
-    def test_unbounded_article_platform_cleans_format_without_shortening(self):
+    def test_article_platform_uses_product_safe_limit_and_cleans_format(self):
         original = "## 标题\n\n正文 **强调**"
         result = build_platform_publish_variant(
             platform="zhihu",
@@ -189,7 +190,12 @@ class PublishPreflightServiceTests(unittest.TestCase):
         )
 
         self.assertEqual(result["publish_content"], "标题\n\n正文 强调")
-        self.assertIsNone(result["content_policy"])
+        self.assertEqual(result["content_policy"]["safe_limit"], 3000)
+        self.assertIsNone(result["content_policy"]["hard_limit"])
+        self.assertEqual(
+            result["content_policy"]["safe_limit_basis"],
+            "product_conservative_guardrail",
+        )
         self.assertTrue(result["adapted"])
 
     def test_verification_and_frequency_guidance_are_explicitly_non_official(self):
@@ -201,6 +207,95 @@ class PublishPreflightServiceTests(unittest.TestCase):
         self.assertEqual(frequency["enforcement"], "warning")
         self.assertEqual(frequency["daily_recommended_max"], 3)
         self.assertIn("不是平台官方", frequency["disclaimer"])
+
+    def test_publish_citeability_keeps_legacy_without_saved_target(self):
+        result = evaluate_publish_citeability(
+            title="DongClaw 是什么？",
+            content="北京同于野科技有限公司介绍 DongClaw。",
+            brand="北京同于野科技有限公司",
+            product="DongClaw",
+            keywords=["DongClaw"],
+        )
+
+        self.assertEqual(result["length_profile"]["source"], "legacy")
+        self.assertEqual(result["length_profile"]["key"], "legacy")
+        self.assertIsInstance(result["dimensions"]["faq_decision_support"], int)
+
+    def test_publish_citeability_clamps_saved_target_to_exact_outbound_copy(self):
+        content = (
+            "北京同于野科技有限公司的 DongClaw 用于核对部署条件。\n\n"
+            "• 保留真实边界。\n• 人工复核结果。"
+        )
+        result = evaluate_publish_citeability(
+            title="DongClaw 如何验证？",
+            content=content,
+            brand="北京同于野科技有限公司",
+            product="DongClaw",
+            keywords=["DongClaw"],
+            target_length=1000,
+        )
+
+        self.assertEqual(result["length_profile"]["source"], "outbound_copy")
+        self.assertEqual(result["length_profile"]["key"], "compact")
+        self.assertEqual(result["length_profile"]["target_length"], 200)
+        self.assertIsNone(result["dimensions"]["faq_decision_support"])
+
+    def test_publish_citeability_reuses_claim_only_when_source_url_is_outbound(self):
+        source = {
+            "title": "公开测试报告",
+            "url": "https://example.com/report",
+            "claim": "XX科技在公开测试中将处理效率提升 40%",
+        }
+        result = evaluate_publish_citeability(
+            title="XX科技如何提高处理效率？",
+            content=(
+                "XX科技在公开测试中将处理效率提升 40%，适用范围仅限报告所述环境。"
+                "来源：https://example.com/report"
+            ),
+            brand="XX科技",
+            keywords=["处理效率"],
+            target_length=200,
+            sources=[source],
+        )
+
+        self.assertTrue(result["publish_gate_passed"])
+        self.assertEqual(result["signals"]["unsupported_quantified_claims"], [])
+        self.assertEqual(result["outbound_source_filter"]["provided_count"], 1)
+        self.assertEqual(result["outbound_source_filter"]["matched_count"], 1)
+
+    def test_platform_copy_cannot_inherit_claim_when_shortening_drops_source_url(self):
+        source = {
+            "title": "公开测试报告",
+            "url": "https://example.com/report",
+            "claim": "XX科技在公开测试中将处理效率提升 40%",
+        }
+        original = (
+            "XX科技在公开测试中将处理效率提升 40%，适用范围仅限报告所述环境。"
+            + "这是用于解释实施条件和人工复核边界的普通说明。" * 30
+            + "来源：https://example.com/report；"
+            + "该报告还包含样本、日期、环境、版本与限制条件的完整方法说明。" * 6
+        )
+        variant = build_platform_publish_variant(
+            platform="kuaishou",
+            title="XX科技处理效率测试",
+            content=original,
+            tags=[],
+        )
+        self.assertNotIn("https://example.com/report", variant["publish_content"])
+
+        result = evaluate_publish_citeability(
+            title=variant["title"],
+            content=variant["publish_content"],
+            brand="XX科技",
+            keywords=["处理效率"],
+            target_length=1000,
+            sources=[source],
+        )
+
+        self.assertFalse(result["publish_gate_passed"])
+        self.assertTrue(result["signals"]["unsupported_quantified_claims"])
+        self.assertEqual(result["outbound_source_filter"]["provided_count"], 1)
+        self.assertEqual(result["outbound_source_filter"]["matched_count"], 0)
 
 
 if __name__ == "__main__":

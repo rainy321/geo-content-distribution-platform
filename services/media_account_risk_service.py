@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
+MEDIA_ACCOUNT_RISK_VERSION = "media-account-risk-1.0.0"
+
 RISK_CATEGORIES = (
     "permanent_ban",
     "temporary_restriction",

@@ -26,6 +26,7 @@ from services.ai_visibility_service import (
     classify_citation_source,
     normalize_citation_url,
 )
+from services.content_hygiene_service import authoring_visible_length
 from services.platform_capability_service import (
     get_platform_capability,
     normalize_platform_key,
@@ -34,10 +35,15 @@ from services.publish_preflight_service import (
     get_publish_content_policy,
     get_publish_title_policy,
 )
+from services.keyword_hygiene_service import has_no_keyword_stuffing
+from services.target_length_score_profile import (
+    resolve_effective_length_score_profile,
+    resolve_target_length_score_profile,
+)
 
 
-GEO_ARTICLE_COMPILER_VERSION = "geo-article-compiler-2.2.0"
-AI_CITEABILITY_SCORE_VERSION = "ai-citeability-rules-2.1.1"
+GEO_ARTICLE_COMPILER_VERSION = "geo-article-compiler-2.3.0"
+AI_CITEABILITY_SCORE_VERSION = "ai-citeability-rules-2.2.0"
 DEFAULT_CITEABILITY_PASS_SCORE = 75
 
 QUERY_INTENTS = frozenset(
@@ -231,6 +237,69 @@ class GEOArticleCompilerError(ValueError):
     """Raised when local compiler input violates its public contract."""
 
 
+def resolve_generation_length_context(
+    requested_length: int,
+    target_platform: str = "",
+) -> dict[str, Any]:
+    """Resolve one platform-aware generation and scoring length contract."""
+
+    normalized_requested = _supported_length(requested_length)
+    platform_profile = _platform_profile(target_platform)
+    raw_limit = platform_profile.get("content_safe_limit")
+    platform_limit = (
+        int(raw_limit)
+        if isinstance(raw_limit, int) and not isinstance(raw_limit, bool) and raw_limit > 0
+        else None
+    )
+    effective_length = (
+        min(normalized_requested, platform_limit)
+        if platform_limit is not None
+        else normalized_requested
+    )
+    source = (
+        "platform_safe_limit"
+        if platform_limit is not None and effective_length < normalized_requested
+        else "requested_length"
+    )
+    return {
+        "requested_length": normalized_requested,
+        "effective_length": effective_length,
+        "platform_limit": platform_limit,
+        "source": source,
+        "platform_key": str(platform_profile.get("key") or "generic"),
+    }
+
+
+def resolve_explicit_scoring_length_context(
+    requested_length: int,
+    target_platform: str = "",
+    *,
+    platform_limit: int | None = None,
+) -> dict[str, Any]:
+    """Apply an editor override without discarding an immutable run limit."""
+
+    resolved = resolve_generation_length_context(requested_length, target_platform)
+    stored_limit = (
+        int(platform_limit)
+        if isinstance(platform_limit, int)
+        and not isinstance(platform_limit, bool)
+        and MIN_ARTICLE_LENGTH <= platform_limit <= MAX_ARTICLE_LENGTH
+        else None
+    )
+    if stored_limit is not None:
+        resolved["platform_limit"] = stored_limit
+        resolved["effective_length"] = min(
+            resolved["requested_length"],
+            stored_limit,
+        )
+    resolved["source"] = (
+        "platform_safe_limit"
+        if resolved["effective_length"] < resolved["requested_length"]
+        else "explicit"
+    )
+    return resolved
+
+
 def build_geo_article_blueprint(
     project: Mapping[str, Any],
     topic: str,
@@ -317,6 +386,10 @@ def build_geo_article_blueprint(
         competitor_domains=competitor_domains,
     )
     platform_profile = _platform_profile(target_platform)
+    length_context = resolve_generation_length_context(
+        normalized_length,
+        target_platform,
+    )
     visibility_result = project.get(
         "latest_visibility_result", project.get("visibility_result")
     )
@@ -452,6 +525,7 @@ def build_geo_article_blueprint(
         "topic": normalized_topic,
         "content_type": normalized_content_type,
         "length": normalized_length,
+        "length_context": length_context,
         "keywords": normalized_keywords,
         "query_matrix": query_matrix,
         "entity": entity,
@@ -536,13 +610,24 @@ def build_generation_instructions(blueprint: Mapping[str, Any]) -> str:
     )
     title_limit = platform.get("title_safe_limit")
     content_limit = platform.get("content_safe_limit")
+    length_context = blueprint.get("length_context")
+    effective_length_value = (
+        length_context.get("effective_length")
+        if isinstance(length_context, Mapping)
+        else blueprint.get("length", 1000)
+    )
     target_length = _bounded_int(
-        blueprint.get("length", 1000),
-        "length",
+        effective_length_value,
+        "length_context.effective_length",
         minimum=MIN_ARTICLE_LENGTH,
         maximum=MAX_ARTICLE_LENGTH,
     )
-    short_form = target_length <= 400
+    score_length_profile = resolve_target_length_score_profile(target_length)
+    length_band = str(score_length_profile["band"])
+    minimum_generation_length = max(
+        int(score_length_profile["minimum_content_length"]),
+        (target_length * 4 + 4) // 5,
+    )
     limit_lines = []
     if title_limit is not None:
         limit_lines.append(f"发布标题不超过 {title_limit} 个 Unicode 字符。")
@@ -557,24 +642,39 @@ def build_generation_instructions(blueprint: Mapping[str, Any]) -> str:
             "竞品优劣结论；信息不足时直接说明“暂无可核验公开证据”，不得输出待补充占位符。"
         )
     )
-    if short_form:
+    if length_band == "compact":
         query_coverage_instruction = (
-            "短内容只完整回答主查询和优先问题列表第一项；其余问题留给独立文章，"
+            "精简稿只完整回答主查询和优先问题列表第一项；其余问题留给独立文章，"
             "不得为了覆盖问题簇而堆砌关键词。"
         )
         opening_instruction = (
             "开头 40–80 字直接回答主查询，并自然写出标准品牌/产品名。"
         )
         body_instruction = (
-            "正文压缩为 2–4 个短段落：直接结论、实现机制或判断标准、"
+            "正文压缩为 2–4 个紧凑短段落：直接结论、实现机制或判断标准、"
             "可核验证据与适用边界；最后给一个明确下一步。"
         )
         structure_instruction = (
-            "200–400 字短稿不强制 H2/H3、FAQ、参考资料标题或重复总结；"
+            "200–400 字精简稿不强制 H2/H3、FAQ、参考资料标题或重复总结；"
             "有公开证据时仍须保留对应 URL，没有证据就明确边界。正文不得输出作者、"
             "更新时间、链接或证据的待补充/占位标记；作者与发布时间由发布平台元数据提供。"
         )
-    else:
+    elif length_band == "short":
+        query_coverage_instruction = (
+            "短稿完整回答主查询，并最多展开优先问题列表前两项；其余问题拆成独立文章。"
+        )
+        opening_instruction = (
+            "开头 40–100 字直接回答主查询，并自然写出标准品牌/产品名。"
+        )
+        body_instruction = (
+            "正文使用 3–6 个清晰段落，可加入必要清单，展开机制、判断标准、"
+            "真实证据和适用边界。"
+        )
+        structure_instruction = (
+            "401–799 字短稿可用少量小标题但不强制 H2/H3、FAQ 或重复总结；"
+            "不得为了凑结构虚构证据。正文不得输出作者、更新时间或其他占位标记。"
+        )
+    elif length_band in {"standard", "legacy"}:
         query_coverage_instruction = (
             "用独立小标题或 FAQ 明确回答上述优先问题；至少覆盖列表前三项，"
             "不得仅重复关键词或把问题原文堆入正文。"
@@ -587,8 +687,24 @@ def build_generation_instructions(blueprint: Mapping[str, Any]) -> str:
             "限制、FAQ、参考资料和总结。"
         )
         structure_instruction = (
-            "保留清晰的 H2/H3、2–4 个真实 FAQ 和参考资料段。正文不得输出作者、"
+            "800–1199 字标准稿使用 3–5 个清晰 H2/H3、2 个真实 FAQ、"
+            "参考资料段和简洁总结。正文不得输出作者、"
             "更新时间、链接或证据的待补充/占位标记；作者与发布时间由发布平台元数据提供。"
+        )
+    else:
+        query_coverage_instruction = (
+            "用独立小标题和 FAQ 完整覆盖优先问题列表前五项，保持每个答案可独立提取。"
+        )
+        opening_instruction = (
+            "文章开头 80–150 字先给结论并自然写出标准品牌/产品名。"
+        )
+        body_instruction = (
+            "正文分层展开定义、机制、证据、对比维度、适用场景、实施步骤、"
+            "限制与决策清单，避免用重复段落凑长度。"
+        )
+        structure_instruction = (
+            "1200–3000 字长稿使用 5–8 个 H2/H3、3–4 个真实 FAQ、参考资料和总结；"
+            "每个重要主张写明证据与边界。正文不得输出作者、更新时间或其他占位标记。"
         )
     return "\n".join(
         [
@@ -611,6 +727,17 @@ def build_generation_instructions(blueprint: Mapping[str, Any]) -> str:
             "不得编造来源、URL、数据、客户评价、媒体背书或平台/模型采纳结果。",
             "表格中的关键结论必须在相邻纯文本中再说明一次，确保分段后仍可理解和引用。",
             f"平台要求：{platform.get('directive', _PLATFORM_DIRECTIVES['generic'])}",
+            (
+                "生成长度上下文 JSON："
+                f"{json.dumps(dict(length_context), ensure_ascii=False, separators=(',', ':'))}"
+                if isinstance(length_context, Mapping)
+                else f"生成有效正文长度：{target_length} 字。"
+            ),
+            (
+                f"正文以 {target_length} 字为生成、清洗与评分目标；可见正文必须在 "
+                f"{minimum_generation_length}–{target_length} 字之间，不能只返回摘要，"
+                "也不得用重复句或关键词堆砌凑字数。"
+            ),
             *limit_lines,
             *[f"可见度回测提示：{item}" for item in visibility_directives],
             structure_instruction,
@@ -627,6 +754,9 @@ def score_ai_citeability(
     product: str = "",
     website: str = "",
     sources: Sequence[Any] = (),
+    target_length: int | None = None,
+    requested_target_length: int | None = None,
+    source: str | None = None,
 ) -> dict[str, Any]:
     """Score whether an article is easy to extract and cite, without I/O.
 
@@ -645,6 +775,26 @@ def score_ai_citeability(
         maximum_items=MAX_KEYWORDS,
         maximum_length=160,
     )
+    actual_visible_length = authoring_visible_length(normalized_content)
+    try:
+        if requested_target_length is not None:
+            resolve_target_length_score_profile(requested_target_length)
+        scoring_target_length = (
+            target_length if target_length is not None else requested_target_length
+        )
+        length_profile = resolve_effective_length_score_profile(
+            scoring_target_length,
+            actual_length=actual_visible_length,
+        )
+    except ValueError as exc:
+        raise GEOArticleCompilerError(str(exc)) from exc
+    applicable = length_profile["applicable_checks"]
+    keyword_limit = length_profile.get("keyword_limit")
+    evaluated_keywords = (
+        normalized_keywords[: int(keyword_limit)]
+        if isinstance(keyword_limit, int)
+        else normalized_keywords
+    )
 
     normalized_sources, invalid_source_count = _normalize_score_sources(
         sources, website=website
@@ -660,11 +810,12 @@ def score_ai_citeability(
     first_folded = first_paragraph.casefold()
 
     direct_points = 0
+    direct_maximum = 16 + (4 if applicable["summary"] else 0)
     if _QUESTION_TITLE_PATTERN.search(normalized_title):
         direct_points += 4
-    if len(_visible_text(normalized_summary)) >= 20:
+    if applicable["summary"] and authoring_visible_length(normalized_summary) >= 20:
         direct_points += 4
-    first_length = len(_visible_text(first_paragraph))
+    first_length = authoring_visible_length(first_paragraph)
     if 40 <= first_length <= 300:
         direct_points += 6
     early_terms = [normalized_brand, normalized_product, *normalized_keywords]
@@ -696,32 +847,46 @@ def score_ai_citeability(
         evidence_points += 4
 
     structure_points = 0
+    structure_maximum = 7
+    if applicable["headings"]:
+        structure_maximum += 5
+    if applicable["summary"]:
+        structure_maximum += 3
     paragraph_count = _paragraph_count(normalized_content)
-    if _HEADING_PATTERN.search(normalized_content):
+    has_heading = bool(_HEADING_PATTERN.search(normalized_content))
+    has_summary = bool(_SUMMARY_PATTERN.search(normalized_content))
+    has_list = bool(
+        re.search(
+            r"(?m)^\s*(?:[-*+]\s+|[•·]\s*|\d+[.、]\s*)\S",
+            normalized_content,
+        )
+    )
+    if applicable["headings"] and has_heading:
         structure_points += 5
-    if paragraph_count >= 3:
+    if paragraph_count >= int(length_profile["minimum_paragraphs"]):
         structure_points += 4
-    if _SUMMARY_PATTERN.search(normalized_content):
+    if applicable["summary"] and has_summary:
         structure_points += 3
     # Platform plain-text adapters intentionally convert Markdown bullets to
     # the editor-safe `•` glyph.  Treat that as the same extractable list
     # structure instead of making an otherwise identical short copy lose the
     # list signal after adaptation.
-    if re.search(
-        r"(?m)^\s*(?:[-*+]\s+|[•·]\s*|\d+[.、]\s*)\S",
-        normalized_content,
-    ):
+    if has_list:
         structure_points += 3
 
-    if normalized_keywords:
+    if evaluated_keywords:
         covered_keywords = [
             keyword
-            for keyword in normalized_keywords
+            for keyword in evaluated_keywords
             if keyword.casefold() in combined_folded
         ]
     else:
         covered_keywords = []
-    keyword_coverage_points = round(7 * len(covered_keywords) / len(normalized_keywords)) if normalized_keywords else 0
+    keyword_coverage_points = (
+        round(7 * len(covered_keywords) / len(evaluated_keywords))
+        if evaluated_keywords
+        else 0
+    )
     query_answer_coverage = _query_answer_coverage(
         title=normalized_title,
         content=normalized_content,
@@ -729,7 +894,7 @@ def score_ai_citeability(
         product=normalized_product,
     )
     query_answer_points = round(query_answer_coverage["score"] / 100)
-    no_stuffing = _no_keyword_stuffing(normalized_content, normalized_keywords)
+    no_stuffing = has_no_keyword_stuffing(normalized_content, normalized_keywords)
     semantic_points = (
         keyword_coverage_points
         + query_answer_points
@@ -737,14 +902,17 @@ def score_ai_citeability(
     )
 
     faq_points = 0
-    if _FAQ_PATTERN.search(normalized_content):
+    faq_maximum = 10 if applicable["faq"] else 0
+    has_faq_heading = bool(_FAQ_PATTERN.search(normalized_content))
+    if applicable["faq"] and has_faq_heading:
         faq_points += 4
     question_count = len(
         re.findall(r"(?m)^\s*(?:Q\s*[:：]|问\s*[:：]|[^\n]{2,80}[？?]\s*$)", normalized_content, re.IGNORECASE)
     )
-    if question_count >= 2:
+    if applicable["faq"] and question_count >= 2:
         faq_points += 4
-    if _BOUNDARY_PATTERN.search(normalized_content):
+    has_boundary = bool(_BOUNDARY_PATTERN.search(normalized_content))
+    if applicable["faq"] and has_boundary:
         faq_points += 2
 
     strong_claims = _extract_assertive_claims(_STRONG_CLAIM_PATTERN, combined)
@@ -773,24 +941,30 @@ def score_ai_citeability(
     risk_points = max(0, risk_points)
 
     raw_points = {
-        "direct_answer": (direct_points, 20),
+        "direct_answer": (direct_points, direct_maximum),
         "entity_consistency": (entity_points, 15),
         "evidence_traceability": (evidence_points, 20),
-        "structural_extractability": (structure_points, 15),
+        "structural_extractability": (structure_points, structure_maximum),
         "semantic_coverage": (semantic_points, 10),
-        "faq_decision_support": (faq_points, 10),
+        "faq_decision_support": (faq_points, faq_maximum),
         "risk_hygiene": (risk_points, 10),
     }
-    dimensions = {
-        key: round(points * 100 / maximum)
+    dimensions: dict[str, int | None] = {
+        key: round(points * 100 / maximum) if maximum else None
         for key, (points, maximum) in raw_points.items()
     }
+    applicable_weight = sum(
+        CITEABILITY_DIMENSION_WEIGHTS[key]
+        for key, value in dimensions.items()
+        if value is not None
+    )
     score = round(
         sum(
-            dimensions[key] * CITEABILITY_DIMENSION_WEIGHTS[key]
+            int(dimensions[key]) * CITEABILITY_DIMENSION_WEIGHTS[key]
             for key in CITEABILITY_DIMENSION_WEIGHTS
+            if dimensions[key] is not None
         )
-        / 100
+        / applicable_weight
     )
 
     blocking_issues: list[dict[str, str]] = []
@@ -831,15 +1005,21 @@ def score_ai_citeability(
                 "在结构化来源的 claim 字段中写明实体、指标和数值，并补充测试条件、样本量与日期；否则改为非量化陈述。",
             )
         )
-    if dimensions["direct_answer"] < 75:
-        suggestions.append("在开头 80–150 字直接回答标题问题，并写出标准品牌/产品名。")
-    if dimensions["evidence_traceability"] < 75:
+    if int(dimensions["direct_answer"] or 0) < 75:
+        if length_profile["band"] in {"compact", "short"}:
+            suggestions.append("在开头 1–3 句直接回答标题问题，并写出标准品牌/产品名。")
+        else:
+            suggestions.append("在开头 80–150 字直接回答标题问题，并写出标准品牌/产品名。")
+    if int(dimensions["evidence_traceability"] or 0) < 75:
         suggestions.append("增加参考资料段、显式 HTTP(S) 链接和至少一条自有事实来源。")
-    if dimensions["structural_extractability"] < 75:
-        suggestions.append("增加 H2/H3、清单、清晰段落和总结，便于检索分块独立理解。")
+    if int(dimensions["structural_extractability"] or 0) < 75:
+        if length_profile["band"] in {"compact", "short"}:
+            suggestions.append("使用清晰短段落或真实清单，让核心结论能够独立提取。")
+        else:
+            suggestions.append("增加 H2/H3、清单、清晰段落和总结，便于检索分块独立理解。")
     semantic_actions: list[str] = []
-    if dimensions["semantic_coverage"] < 75:
-        missing = [item for item in normalized_keywords if item not in covered_keywords]
+    if int(dimensions["semantic_coverage"] or 0) < 75:
+        missing = [item for item in evaluated_keywords if item not in covered_keywords]
         if missing:
             semantic_actions.append("自然补充未覆盖关键词：" + "、".join(missing))
         if not no_stuffing:
@@ -848,21 +1028,198 @@ def score_ai_citeability(
         semantic_actions.append("正文需要明确回应标题问题，而不是只出现相关关键词")
     if semantic_actions:
         suggestions.append("；".join(semantic_actions))
-    if dimensions["faq_decision_support"] < 75:
+    if (
+        dimensions["faq_decision_support"] is not None
+        and int(dimensions["faq_decision_support"]) < 75
+    ):
         suggestions.append("增加至少 2 个真实 FAQ，并说明适用条件、限制或风险。")
     if not product_present and normalized_product:
         suggestions.append(f"自然加入标准产品名称“{normalized_product}”。")
 
+    publish_gate_passed = not any(
+        str(issue.get("priority") or "").strip().upper() == "P0"
+        for issue in blocking_issues
+    )
     passed = score >= DEFAULT_CITEABILITY_PASS_SCORE and not blocking_issues
+    quality_warnings: list[dict[str, str]] = []
+    if score < DEFAULT_CITEABILITY_PASS_SCORE:
+        quality_warnings.append(
+            _issue(
+                "quality.score_below_target",
+                "P1",
+                (
+                    f"AI 可引用性质量分为 {score}/100，"
+                    f"低于建议目标 {DEFAULT_CITEABILITY_PASS_SCORE}/100。"
+                ),
+                "可继续发布，但建议按分维度提示优化；该质量分不作为平台发布硬阻断。",
+            )
+        )
+    effective_dimension_weights = {
+        key: (
+            round(CITEABILITY_DIMENSION_WEIGHTS[key] * 100 / applicable_weight, 2)
+            if dimensions[key] is not None
+            else 0
+        )
+        for key in CITEABILITY_DIMENSION_WEIGHTS
+    }
+    public_length_profile = _public_citeability_length_profile(
+        length_profile,
+        target_length=(
+            requested_target_length
+            if requested_target_length is not None
+            else scoring_target_length
+        ),
+        actual_length=actual_visible_length,
+        source=(
+            str(length_profile["source"])
+            if length_profile["source"] == "actual_length_upgrade"
+            else str(source or length_profile["source"])
+        ),
+        requested_target_length=(
+            requested_target_length
+            if requested_target_length is not None
+            else length_profile["requested_target_length"]
+        ),
+        effective_target_length=length_profile["effective_target_length"],
+        over_target=bool(length_profile["over_target"]),
+        dimensions=dimensions,
+        effective_dimension_weights=effective_dimension_weights,
+        evaluated_keywords=evaluated_keywords,
+        deferred_keyword_count=len(normalized_keywords) - len(evaluated_keywords),
+    )
     result = {
         "version": AI_CITEABILITY_SCORE_VERSION,
         "score": score,
         "grade": _grade(score),
         "pass_score": DEFAULT_CITEABILITY_PASS_SCORE,
         "passed": passed,
+        "publish_gate_passed": publish_gate_passed,
         "dimensions": dimensions,
         "dimension_weights": dict(CITEABILITY_DIMENSION_WEIGHTS),
+        "effective_dimension_weights": effective_dimension_weights,
+        "length_profile": public_length_profile,
         "dimension_details": {
+            "direct_answer": {
+                "score": dimensions["direct_answer"],
+                "earned_points": direct_points,
+                "max_points": direct_maximum,
+                "checks": [
+                    {
+                        "key": "question_title",
+                        "applicable": True,
+                        "passed": bool(_QUESTION_TITLE_PATTERN.search(normalized_title)),
+                        "earned_points": 4 if _QUESTION_TITLE_PATTERN.search(normalized_title) else 0,
+                        "max_points": 4,
+                    },
+                    {
+                        "key": "summary_answer",
+                        "applicable": bool(applicable["summary"]),
+                        "passed": bool(
+                            applicable["summary"]
+                            and authoring_visible_length(normalized_summary) >= 20
+                        ),
+                        "earned_points": (
+                            4
+                            if applicable["summary"]
+                            and authoring_visible_length(normalized_summary) >= 20
+                            else 0
+                        ),
+                        "max_points": 4 if applicable["summary"] else 0,
+                    },
+                    {
+                        "key": "opening_answer_length",
+                        "applicable": True,
+                        "passed": 40 <= first_length <= 300,
+                        "earned_points": 6 if 40 <= first_length <= 300 else 0,
+                        "max_points": 6,
+                    },
+                    {
+                        "key": "opening_entity_or_keyword",
+                        "applicable": True,
+                        "passed": any(
+                            term and term.casefold() in first_folded
+                            for term in early_terms
+                        ),
+                        "earned_points": (
+                            6
+                            if any(
+                                term and term.casefold() in first_folded
+                                for term in early_terms
+                            )
+                            else 0
+                        ),
+                        "max_points": 6,
+                    },
+                ],
+            },
+            "structural_extractability": {
+                "score": dimensions["structural_extractability"],
+                "earned_points": structure_points,
+                "max_points": structure_maximum,
+                "checks": [
+                    {
+                        "key": "headings",
+                        "applicable": bool(applicable["headings"]),
+                        "passed": bool(applicable["headings"] and has_heading),
+                        "earned_points": 5 if applicable["headings"] and has_heading else 0,
+                        "max_points": 5 if applicable["headings"] else 0,
+                    },
+                    {
+                        "key": "paragraphs",
+                        "applicable": True,
+                        "passed": paragraph_count >= int(length_profile["minimum_paragraphs"]),
+                        "earned_points": (
+                            4
+                            if paragraph_count >= int(length_profile["minimum_paragraphs"])
+                            else 0
+                        ),
+                        "max_points": 4,
+                    },
+                    {
+                        "key": "summary_section",
+                        "applicable": bool(applicable["summary"]),
+                        "passed": bool(applicable["summary"] and has_summary),
+                        "earned_points": 3 if applicable["summary"] and has_summary else 0,
+                        "max_points": 3 if applicable["summary"] else 0,
+                    },
+                    {
+                        "key": "extractable_list",
+                        "applicable": True,
+                        "passed": has_list,
+                        "earned_points": 3 if has_list else 0,
+                        "max_points": 3,
+                    },
+                ],
+            },
+            "faq_decision_support": {
+                "score": dimensions["faq_decision_support"],
+                "earned_points": faq_points,
+                "max_points": faq_maximum,
+                "applicable": bool(applicable["faq"]),
+                "checks": [
+                    {
+                        "key": "faq_heading",
+                        "applicable": bool(applicable["faq"]),
+                        "passed": bool(applicable["faq"] and has_faq_heading),
+                        "earned_points": 4 if applicable["faq"] and has_faq_heading else 0,
+                        "max_points": 4 if applicable["faq"] else 0,
+                    },
+                    {
+                        "key": "two_questions",
+                        "applicable": bool(applicable["faq"]),
+                        "passed": bool(applicable["faq"] and question_count >= 2),
+                        "earned_points": 4 if applicable["faq"] and question_count >= 2 else 0,
+                        "max_points": 4 if applicable["faq"] else 0,
+                    },
+                    {
+                        "key": "boundary_or_risk",
+                        "applicable": bool(applicable["faq"]),
+                        "passed": bool(applicable["faq"] and has_boundary),
+                        "earned_points": 2 if applicable["faq"] and has_boundary else 0,
+                        "max_points": 2 if applicable["faq"] else 0,
+                    },
+                ],
+            },
             "semantic_coverage": {
                 "score": dimensions["semantic_coverage"],
                 "earned_points": semantic_points,
@@ -871,9 +1228,9 @@ def score_ai_citeability(
                     {
                         "key": "keyword_coverage",
                         "score": round(
-                            100 * len(covered_keywords) / len(normalized_keywords)
+                            100 * len(covered_keywords) / len(evaluated_keywords)
                         )
-                        if normalized_keywords
+                        if evaluated_keywords
                         else 0,
                         "earned_points": keyword_coverage_points,
                         "max_points": 7,
@@ -894,14 +1251,18 @@ def score_ai_citeability(
             }
         },
         "blocking_issues": blocking_issues,
+        "warnings": quality_warnings,
         "suggestions": _dedupe_strings(suggestions),
         "signals": {
             "brand_present": brand_present,
             "product_present": product_present,
             "covered_keywords": covered_keywords,
             "keyword_count": len(normalized_keywords),
+            "evaluated_keyword_count": len(evaluated_keywords),
+            "deferred_keyword_count": len(normalized_keywords) - len(evaluated_keywords),
             "query_answer_coverage": query_answer_coverage,
             "paragraph_count": paragraph_count,
+            "actual_visible_length": actual_visible_length,
             "question_count": question_count,
             "citation_count": len(all_citations),
             "owned_citation_count": sum(bool(item.get("is_owned")) for item in all_citations),
@@ -929,6 +1290,62 @@ def score_ai_citeability(
     }
     json.dumps(result, ensure_ascii=False, allow_nan=False)
     return result
+
+
+def _public_citeability_length_profile(
+    profile: Mapping[str, Any],
+    *,
+    target_length: int | None,
+    actual_length: int,
+    source: str,
+    requested_target_length: int | None,
+    effective_target_length: int | None,
+    over_target: bool,
+    dimensions: Mapping[str, int | None],
+    effective_dimension_weights: Mapping[str, float | int],
+    evaluated_keywords: Sequence[str],
+    deferred_keyword_count: int,
+) -> dict[str, Any]:
+    band = str(profile["band"])
+    labels = {
+        "legacy": "兼容长文规则",
+        "compact": "精简稿（200–400字）",
+        "short": "短稿（401–799字）",
+        "standard": "标准稿（800–1199字）",
+        "long": "长稿（1200–3000字）",
+    }
+    applicable_dimensions = [
+        key for key, value in dimensions.items() if value is not None
+    ]
+    not_applicable_dimensions = [
+        key for key, value in dimensions.items() if value is None
+    ]
+    return {
+        "version": profile["version"],
+        "key": band,
+        "label": labels[band],
+        "target_length": target_length,
+        "requested_target_length": requested_target_length,
+        "effective_target_length": effective_target_length,
+        "over_target": over_target,
+        "actual_length": actual_length,
+        "minimum_length": int(profile["minimum_content_length"]),
+        "source": source,
+        "applicable_dimensions": applicable_dimensions,
+        "not_applicable_dimensions": not_applicable_dimensions,
+        "criteria": {
+            "preset": profile["preset"],
+            "scoring_target_length": profile.get("requested_length"),
+            "minimum_paragraphs": int(profile["minimum_paragraphs"]),
+            "headings_required": bool(profile["applicable_checks"]["headings"]),
+            "faq_required": bool(profile["applicable_checks"]["faq"]),
+            "summary_required": bool(profile["applicable_checks"]["summary"]),
+            "effective_dimension_weights": dict(effective_dimension_weights),
+            "evaluated_keywords": list(evaluated_keywords),
+            "deferred_keyword_count": deferred_keyword_count,
+        },
+        "guidance": [str(profile["scoring_policy"])],
+    }
 
 
 def _build_query_items(
@@ -1640,24 +2057,6 @@ def _paragraph_count(content: str) -> int:
     return len(blocks)
 
 
-def _visible_text(value: str) -> str:
-    return re.sub(r"\s+", "", value)
-
-
-def _no_keyword_stuffing(content: str, keywords: Sequence[str]) -> bool:
-    if not keywords:
-        return True
-    folded = content.casefold()
-    visible_length = max(len(_visible_text(content)), 1)
-    keyword_characters = 0
-    for keyword in keywords:
-        token = keyword.casefold()
-        keyword_characters += folded.count(token) * len(token)
-        if re.search(rf"(?:{re.escape(token)}\s*){{3,}}", folded):
-            return False
-    return visible_length < 200 or keyword_characters / visible_length <= 0.08
-
-
 def _normalize_url_or_error(value: str, field: str) -> dict[str, Any]:
     try:
         normalized = normalize_citation_url(value)
@@ -1831,5 +2230,6 @@ __all__ = [
     "QUERY_INTENTS",
     "build_generation_instructions",
     "build_geo_article_blueprint",
+    "resolve_generation_length_context",
     "score_ai_citeability",
 ]

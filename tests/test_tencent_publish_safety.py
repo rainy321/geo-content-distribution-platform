@@ -73,6 +73,61 @@ class TencentPublishSafetyTests(unittest.IsolatedAsyncioTestCase):
 
         publish_button.is_disabled.assert_awaited_once()
 
+    async def test_completed_upload_transport_unblocks_after_two_stable_checks(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            publisher = self._publisher(Path(temp_dir) / "account.json")
+            publisher._upload_transport_completed = True
+            page = MagicMock()
+            absent = MagicMock()
+            absent.first = absent
+            absent.count = AsyncMock(return_value=0)
+            absent.is_visible = AsyncMock(return_value=False)
+            absent.all_inner_texts = AsyncMock(return_value=[])
+            page.get_by_role.return_value = absent
+            page.locator.return_value = absent
+            page.screenshot = AsyncMock()
+
+            with patch(
+                "uploader.tencent_uploader.main.asyncio.sleep",
+                new=AsyncMock(),
+            ) as sleep:
+                await publisher.wait_for_upload_complete(page, max_retries=2)
+
+        sleep.assert_awaited_once_with(2)
+
+    async def test_short_title_is_filled_before_upload_ready_gate(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            publisher = self._publisher(Path(temp_dir) / "account.json")
+            order = []
+            page = MagicMock()
+            publisher.open_upload_page = AsyncMock()
+            publisher.upload_video_file = AsyncMock()
+            publisher.prepare_video_for_publish = AsyncMock()
+            publisher.set_short_title = AsyncMock(
+                side_effect=lambda *_args: order.append("short_title")
+            )
+            publisher.wait_for_upload_complete = AsyncMock(
+                side_effect=lambda *_args: order.append("upload_ready")
+            )
+            publisher.apply_original_statement = AsyncMock()
+            publisher.set_thumbnail = AsyncMock()
+            publisher.validate_upload_args = AsyncMock()
+            page.screenshot = AsyncMock()
+            context = MagicMock()
+            context.new_page = AsyncMock(return_value=page)
+            context.storage_state = AsyncMock()
+            context.close = AsyncMock()
+            browser = MagicMock()
+            browser.new_context = AsyncMock(return_value=context)
+            browser.close = AsyncMock()
+            playwright = MagicMock()
+            playwright.chromium.launch = AsyncMock(return_value=browser)
+            publisher.preview_seconds = 0
+
+            await publisher.upload(playwright)
+
+        self.assertEqual(order, ["short_title", "upload_ready"])
+
     async def test_upload_file_selection_is_verified_and_network_listener_is_installed(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             temp_path = Path(temp_dir)
@@ -106,6 +161,40 @@ class TencentPublishSafetyTests(unittest.IsolatedAsyncioTestCase):
                 "file_selected test.mp4" in item
                 for item in publisher._upload_diagnostics
             )
+        )
+
+    def test_final_multipart_response_marks_transport_complete(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            publisher = self._publisher(Path(temp_dir) / "account.json")
+            listeners = {}
+            page = MagicMock()
+            page.on.side_effect = lambda event, callback: listeners.__setitem__(
+                event,
+                callback,
+            )
+            publisher._install_upload_network_diagnostics(page)
+            request = MagicMock()
+            request.method = "POST"
+            request.resource_type = "xhr"
+            response = MagicMock()
+            response.request = request
+            response.status = 200
+            response.url = (
+                "https://finderassistancea.video.qq.com/completepartuploaddfs"
+                "?upload_token=secret"
+            )
+
+            listeners["response"](response)
+
+        self.assertTrue(publisher._upload_transport_completed)
+        self.assertTrue(
+            any(
+                item.startswith("upload_transport_complete POST 200")
+                for item in publisher._upload_diagnostics
+            )
+        )
+        self.assertTrue(
+            all("upload_token" not in item for item in publisher._upload_diagnostics)
         )
 
     async def test_page_may_clear_file_input_after_accepting_selection(self):

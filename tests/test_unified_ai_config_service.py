@@ -87,6 +87,46 @@ class UnifiedAIConfigServiceTests(unittest.TestCase):
         self.assertNotIn(secret, json.dumps(status.public_dict()))
         self.assertEqual(self.service.load_settings().api_key, secret)
 
+    def test_equivalent_base_and_full_endpoint_share_one_connection_identity(self):
+        secret = "synthetic-equivalent-endpoint-secret"
+        self.service.save(
+            provider="custom",
+            base_url="https://gateway.example.test/openai/v2/chat/completions/",
+            model="model-one",
+            api_key=secret,
+        )
+
+        status = self.service.save(
+            provider="custom",
+            base_url="https://gateway.example.test/openai/v2",
+            model="model-two",
+        )
+
+        self.assertEqual(status.base_url, "https://gateway.example.test/openai/v2")
+        self.assertEqual(self.service.load_settings().api_key, secret)
+
+    def test_role_credential_reuse_compares_resolved_endpoint(self):
+        self.service.save(
+            provider="custom",
+            base_url="https://gateway.example.test/openai/v2",
+            model="writer-model",
+            api_key="writer-secret",
+        )
+
+        self.service.save_role(
+            "reviewer",
+            provider="custom",
+            base_url="https://gateway.example.test/openai/v2/chat/completions",
+            model="reviewer-model",
+        )
+
+        reviewer = self.service.load_settings("reviewer")
+        self.assertEqual(reviewer.api_key, "writer-secret")
+        self.assertEqual(
+            reviewer.base_url,
+            "https://gateway.example.test/openai/v2/chat/completions",
+        )
+
     def test_writer_key_is_not_reused_after_provider_or_endpoint_changes(self):
         secret = "writer-secret-for-original-endpoint"
         self.service.save(

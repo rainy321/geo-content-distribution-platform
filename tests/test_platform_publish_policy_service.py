@@ -11,6 +11,7 @@ from services.publish_preflight_service import (
     PublishContentLimitError,
     build_platform_publish_variant,
     get_publish_content_policy,
+    get_publish_title_policy,
     validate_platform_publish_variant,
 )
 
@@ -32,14 +33,53 @@ class PlatformPublishPolicyServiceTests(unittest.TestCase):
             self.assertFalse(policy["review"]["guaranteed_pass"])
             self.assertIn("不保证审核通过", policy["review"]["disclaimer"])
 
-    def test_unknown_limits_remain_unknown_instead_of_becoming_fake_quotas(self):
+    def test_unknown_hard_limits_use_explicit_product_safe_lines(self):
         zhihu = get_platform_publish_policy("知乎")
         channels = get_platform_publish_policy("视频号")
 
         self.assertIsNone(zhihu["content"]["hard_limit"])
         self.assertEqual(zhihu["content"]["basis"], "not_verified")
+        self.assertEqual(zhihu["content"]["safe_limit"], 3000)
+        self.assertEqual(
+            zhihu["content"]["safe_limit_basis"],
+            "product_conservative_guardrail",
+        )
         self.assertIsNone(channels["title"]["hard_limit"])
         self.assertEqual(channels["title"]["basis"], "not_verified")
+        self.assertEqual(channels["title"]["safe_limit"], 30)
+        self.assertEqual(
+            channels["title"]["safe_limit_basis"],
+            "product_conservative_guardrail",
+        )
+
+    def test_all_ten_platforms_have_title_and_content_safe_limits(self):
+        for platform in SUPPORTED_PUBLISH_PLATFORMS:
+            with self.subTest(platform=platform):
+                canonical = get_platform_publish_policy(platform)
+                title_policy = get_publish_title_policy(platform)
+                content_policy = get_publish_content_policy(platform, tags=[])
+
+                self.assertIsNotNone(title_policy)
+                self.assertIsNotNone(content_policy)
+                self.assertGreater(title_policy["safe_limit"], 0)
+                self.assertGreater(content_policy["safe_limit"], 0)
+                self.assertEqual(
+                    title_policy["safe_limit"],
+                    canonical["title"]["safe_limit"],
+                )
+                self.assertEqual(
+                    content_policy["safe_limit"],
+                    canonical["content"]["safe_limit"],
+                )
+                for field, effective in (
+                    ("title", title_policy),
+                    ("content", content_policy),
+                ):
+                    if canonical[field]["hard_limit"] is None:
+                        self.assertEqual(
+                            effective["safe_limit_basis"],
+                            "product_conservative_guardrail",
+                        )
 
     def test_media_constraints_come_from_capability_registry(self):
         xiaohongshu = get_platform_publish_policy("xiaohongshu")
@@ -110,6 +150,56 @@ class PlatformPublishPolicyServiceTests(unittest.TestCase):
             "product_operational_guardrail",
         )
         self.assertEqual(adapt_tags_for_platform("zhihu", tags)["selected"], [])
+
+    def test_eight_tags_are_bounded_for_douyin_tiktok_and_bilibili(self):
+        tags = [f"标签{index}" for index in range(1, 9)]
+
+        self.assertEqual(
+            adapt_tags_for_platform("douyin", tags)["selected"],
+            tags[:5],
+        )
+        self.assertEqual(
+            adapt_tags_for_platform("tiktok", tags)["selected"],
+            tags[:5],
+        )
+        bilibili = adapt_tags_for_platform("bilibili", tags)
+        self.assertEqual(bilibili["selected"], tags[:6])
+        self.assertEqual(bilibili["dropped_count"], 2)
+        self.assertEqual(bilibili["policy"]["max_count"], 6)
+        self.assertEqual(
+            bilibili["policy"]["basis"],
+            "product_conservative_guardrail",
+        )
+
+    def test_bilibili_long_tag_is_safely_truncated_with_audit(self):
+        long_tag = "超长标签" * 6
+
+        preview = adapt_tags_for_platform("bilibili", [long_tag, "短标签"])
+
+        self.assertEqual(preview["selected"], [long_tag[:20], "短标签"])
+        self.assertEqual(preview["dropped_count"], 0)
+        self.assertEqual(preview["truncated_count"], 1)
+        self.assertEqual(
+            preview["truncated_tags"],
+            [
+                {
+                    "original": long_tag,
+                    "selected": long_tag[:20],
+                    "max_length": 20,
+                }
+            ],
+        )
+        self.assertEqual(preview["audit"]["truncated_count"], 1)
+        self.assertEqual(preview["policy"]["max_length"], 20)
+
+        preflight = evaluate_platform_offline_preflight(
+            platform="bilibili",
+            title="视频标题",
+            content="视频简介",
+            tags=[long_tag],
+        )
+        issue_codes = {item["code"] for item in preflight["issues"]}
+        self.assertIn("tags_truncated_for_adapter", issue_codes)
 
     def test_tag_reserve_uses_only_tags_the_adapter_can_submit(self):
         many_tags = [f"标签{index}" for index in range(10)]

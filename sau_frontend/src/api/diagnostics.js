@@ -34,5 +34,13 @@ export const diagnosticsApi = {
         'Idempotency-Key': idempotencyKey
       }
     })
+  },
+
+  getVisibilitySample(requestId, config = {}) {
+    return http.get(
+      `/api/geo/visibility/sample/${encodeURIComponent(requestId)}`,
+      undefined,
+      config
+    )
   }
 }

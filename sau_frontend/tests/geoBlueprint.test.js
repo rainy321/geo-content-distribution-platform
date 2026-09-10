@@ -107,6 +107,7 @@ test('score normalizer exposes the seven citeability dimensions in a stable orde
         grade: 'B',
         pass_score: 75,
         passed: true,
+        publish_gate_passed: true,
         dimensions: {
           risk_hygiene: 92,
           semantic_coverage: 78,
@@ -131,6 +132,7 @@ test('score normalizer exposes the seven citeability dimensions in a stable orde
   assert.equal(response.score, 82)
   assert.equal(response.citeability.score, 76)
   assert.equal(response.citeability.passed, true)
+  assert.equal(response.citeability.publishGatePassed, true)
   assert.deepEqual(
     response.citeability.dimensions.map(item => item.key),
     CITEABILITY_DIMENSIONS.map(item => item.key)
@@ -154,12 +156,101 @@ test('score normalizer remains compatible with typo aliases and legacy responses
   })
 
   assert.equal(aliasResult.citeability.passed, false)
+  assert.equal(aliasResult.citeability.publishGatePassed, true)
   assert.deepEqual(
     aliasResult.citeability.dimensions.map(item => [item.key, item.value]),
     [['direct_answer', 100], ['custom_signal', 0]]
   )
   assert.equal(aliasResult.citeability.blockingIssues[0].message, '需要补充直接答案')
   assert.equal(normalizeGeoScoreResult({ score: 60 }).citeability, null)
+})
+
+
+test('quality threshold and P0 publish gate remain independent', () => {
+  const advisory = normalizeGeoScoreResult({
+    citeability: {
+      score: 71,
+      pass_score: 75,
+      passed: false,
+      publish_gate_passed: true,
+      dimensions: {},
+      blocking_issues: []
+    }
+  })
+  const blocked = normalizeGeoScoreResult({
+    citeability: {
+      score: 92,
+      pass_score: 75,
+      passed: true,
+      publish_gate_passed: true,
+      dimensions: {},
+      blocking_issues: [{
+        code: 'unsupported-claim',
+        priority: 'P0',
+        message: '绝对化主张缺少证据。'
+      }]
+    }
+  })
+
+  assert.equal(advisory.citeability.passed, false)
+  assert.equal(advisory.citeability.publishGatePassed, true)
+  assert.equal(blocked.citeability.publishGatePassed, false)
+})
+
+
+test('score normalizer preserves length profiles and null not-applicable dimensions', () => {
+  const result = normalizeGeoScoreResult({
+    data: {
+      score: 84,
+      dimensions: { entity: 90, structure: 80, faq: null },
+      length_profile: {
+        version: 'target-length-score-profile-1.0.0',
+        key: 'compact',
+        label: '精简稿（200–400字）',
+        target_length: 200,
+        requested_target_length: 200,
+        effective_target_length: 1000,
+        over_target: true,
+        actual_length: 184,
+        minimum_length: 120,
+        source: 'explicit',
+        applicable_dimensions: ['entity', 'structure'],
+        not_applicable_dimensions: ['faq'],
+        criteria: { minimum_paragraphs: 2 },
+        guidance: '仅按适用检查归一评分。'
+      },
+      citeability: {
+        score: 78,
+        pass_score: 75,
+        passed: true,
+        dimensions: {
+          direct_answer: 88,
+          faq_decision_support: null
+        },
+        lengthProfile: {
+          key: 'compact',
+          targetLength: 200,
+          applicableDimensions: ['direct_answer'],
+          notApplicableDimensions: ['faq_decision_support']
+        }
+      }
+    }
+  })
+
+  assert.equal(result.dimensions.faq, null)
+  assert.equal(result.lengthProfile.key, 'compact')
+  assert.equal(result.lengthProfile.targetLength, 200)
+  assert.equal(result.lengthProfile.requestedTargetLength, 200)
+  assert.equal(result.lengthProfile.effectiveTargetLength, 1000)
+  assert.equal(result.lengthProfile.overTarget, true)
+  assert.equal(result.lengthProfile.minimumLength, 120)
+  assert.equal(result.lengthProfile.applicabilityProvided, true)
+  assert.deepEqual(result.lengthProfile.notApplicableDimensions, ['faq'])
+  assert.deepEqual(result.lengthProfile.guidance, ['仅按适用检查归一评分。'])
+  assert.equal(result.citeability.dimensions[1].key, 'faq_decision_support')
+  assert.equal(result.citeability.dimensions[1].value, 0)
+  assert.equal(result.citeability.dimensions[1].applicable, false)
+  assert.equal(result.citeability.lengthProfile.targetLength, 200)
 })
 
 
@@ -176,11 +267,24 @@ test('content creation wires blueprint preview and citeability to the existing s
   assert.match(component, /query_count:\s*12/)
   assert.match(component, /normalizeGeoBlueprint\(response\)/)
   assert.match(component, /normalizeGeoScoreResult\(response\)/)
-  assert.match(component, /scoreResult\.citeability\.dimensions/)
+  assert.match(component, /citeabilityDimensions/)
   assert.match(component, /发布前门禁预检/)
   assert.match(component, /不代表页面已被抓取、收录或被模型引用/)
   assert.match(component, /:value="200">200 字/)
   assert.match(component, /:min="200"/)
   assert.match(component, /:max="3000"/)
   assert.match(component, /可自定义 200–3000 字/)
+  assert.match(component, /targetLength: brief\.length/)
+  assert.match(component, /target_length: brief\.length/)
+  assert.match(component, /基础 GEO 长度归一分/)
+  assert.match(component, /本档不强制/)
+  assert.match(component, /visibleScoreSuggestions/)
+  assert.match(component, /实际内容已升级为/)
+  assert.match(component, /不能继续享受短稿结构豁免/)
+  assert.match(component, /requestedTargetLength/)
+  assert.match(component, /publishGatePassed/)
+  assert.match(component, /可发布，建议先优化/)
+  assert.match(component, /发布硬门禁未通过/)
+  assert.match(component, /content:\s*article\.content\s*\|\|\s*''/)
+  assert.doesNotMatch(component, /mergeFaqIntoContent/)
 })

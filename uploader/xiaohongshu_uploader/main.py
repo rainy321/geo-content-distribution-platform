@@ -495,23 +495,68 @@ class XiaoHongShuBaseUploader(BaseVideoUploader):
         await page.keyboard.type(self.desc)
         await page.keyboard.press("Enter")
 
-    async def fill_tags(self, page: Page) -> None:
+    async def fill_tags(self, page: Page) -> dict[str, list[str]]:
+        """Select suggested topics without turning an optional field into a blocker.
+
+        Xiaohongshu only accepts a topic when its suggestion list contains a
+        selectable item.  The old implementation waited on one brittle DOM id
+        and aborted the whole post when no suggestion was returned.  Type every
+        candidate at most once, inspect a small set of current/legacy selectors,
+        and undo the unmatched fragment before moving on.  Never retype a topic
+        in a loop.
+        """
         if not getattr(self, "tags", None):
-            return
+            return {"selected": [], "skipped": []}
 
         if not getattr(self, "desc", ""):
             desc = page.locator('p[data-placeholder*="输入正文描述"]')
             await desc.click()
 
-        for tag in self.tags:  # 循环处理所有 tags
+        selected: list[str] = []
+        skipped: list[str] = []
+        normalized_tags = []
+        for value in self.tags:
+            tag = str(value or "").strip().lstrip("#").strip()
+            if tag and tag not in normalized_tags:
+                normalized_tags.append(tag)
+
+        for tag in normalized_tags[:5]:
             await page.keyboard.type("#" + tag, delay=30)
-            await page.locator('#creator-editor-topic-container').wait_for(
-                state="visible",
-                timeout=3000
-            )
-            first_item = page.locator('#creator-editor-topic-container .item').first
-            await first_item.wait_for(state="visible", timeout=2000)
-            await first_item.click()
+            option = await self._first_visible_topic_option(page)
+            if option is None:
+                # One undo removes only the unmatched fragment just typed and
+                # preserves the already-filled description and selected topics.
+                await page.keyboard.press("Control+Z")
+                skipped.append(tag)
+                xiaohongshu_logger.warning(
+                    _msg("⚠️", f"平台没有返回可选话题「{tag}」，已跳过，不再重复输入")
+                )
+                continue
+            await option.click(timeout=2_000)
+            selected.append(tag)
+
+        return {"selected": selected, "skipped": skipped}
+
+    async def _first_visible_topic_option(self, page: Page):
+        selectors = (
+            '#creator-editor-topic-container .item',
+            '#creator-editor-topic-container [role="option"]',
+            '[class*="topic-container"] [class*="item"]',
+            '[class*="topic"] [role="option"]',
+            '[role="listbox"] [role="option"]',
+        )
+        # A suggestion request is normally sub-second.  Six bounded probes give
+        # slow networks 1.5 seconds without a 3-second exception per tag.
+        for _ in range(6):
+            for selector in selectors:
+                candidate = page.locator(selector).first
+                try:
+                    if await candidate.count() and await candidate.is_visible():
+                        return candidate
+                except Exception:
+                    continue
+            await page.wait_for_timeout(250)
+        return None
 
     async def fill_meta(self, page: Page) -> None:
         await self.fill_title(page)

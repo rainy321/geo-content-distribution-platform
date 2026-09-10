@@ -10,13 +10,13 @@ from services.platform_capability_service import (
 )
 
 
-PLATFORM_PUBLISH_POLICY_VERSION = "2026-09-10.4"
+PLATFORM_PUBLISH_POLICY_VERSION = "2026-09-11.1"
 
 
 # This matrix intentionally distinguishes a verified field constraint from a
-# product-side recommendation.  A missing limit means "not verified in this
-# repository", not "unlimited".  Do not turn unknown fields into invented
-# platform quotas.
+# product-side recommendation.  A missing hard limit means "not verified in
+# this repository", not "unlimited"; a product safe limit may still keep local
+# publication bounded.  Do not turn either into an invented platform quota.
 _PLATFORM_PUBLISH_POLICIES: dict[str, dict[str, Any]] = {
     "zhihu": {
         "format": "plain_article",
@@ -28,8 +28,9 @@ _PLATFORM_PUBLISH_POLICIES: dict[str, dict[str, Any]] = {
         },
         "content": {
             "hard_limit": None,
-            "safe_limit": None,
+            "safe_limit": 3000,
             "basis": "not_verified",
+            "safe_limit_basis": "product_conservative_guardrail",
         },
         "tags": {
             "submission_mode": "not_submitted_by_article_adapter",
@@ -47,8 +48,9 @@ _PLATFORM_PUBLISH_POLICIES: dict[str, dict[str, Any]] = {
         },
         "content": {
             "hard_limit": None,
-            "safe_limit": None,
+            "safe_limit": 3000,
             "basis": "not_verified",
+            "safe_limit_basis": "product_conservative_guardrail",
         },
         "tags": {
             "submission_mode": "first_matching_topic_once",
@@ -66,8 +68,9 @@ _PLATFORM_PUBLISH_POLICIES: dict[str, dict[str, Any]] = {
         },
         "content": {
             "hard_limit": None,
-            "safe_limit": None,
+            "safe_limit": 3000,
             "basis": "not_verified",
+            "safe_limit_basis": "product_conservative_guardrail",
         },
         "tags": {
             "submission_mode": "not_submitted_by_article_adapter",
@@ -85,8 +88,9 @@ _PLATFORM_PUBLISH_POLICIES: dict[str, dict[str, Any]] = {
         },
         "content": {
             "hard_limit": None,
-            "safe_limit": None,
+            "safe_limit": 3000,
             "basis": "not_verified",
+            "safe_limit_basis": "product_conservative_guardrail",
         },
         "tags": {
             "submission_mode": "topic_picker_and_body_hashtags",
@@ -143,8 +147,9 @@ _PLATFORM_PUBLISH_POLICIES: dict[str, dict[str, Any]] = {
         "title": {
             "min_length": 1,
             "hard_limit": None,
-            "safe_limit": None,
+            "safe_limit": 20,
             "basis": "not_verified",
+            "safe_limit_basis": "product_conservative_guardrail",
         },
         "content": {
             "hard_limit": 500,
@@ -164,8 +169,9 @@ _PLATFORM_PUBLISH_POLICIES: dict[str, dict[str, Any]] = {
         "title": {
             "min_length": 1,
             "hard_limit": None,
-            "safe_limit": None,
+            "safe_limit": 80,
             "basis": "not_verified",
+            "safe_limit_basis": "product_conservative_guardrail",
         },
         "content": {
             "hard_limit": 2000,
@@ -176,8 +182,11 @@ _PLATFORM_PUBLISH_POLICIES: dict[str, dict[str, Any]] = {
         },
         "tags": {
             "submission_mode": "comma_separated_cli_field",
-            "max_count": None,
-            "basis": "not_verified",
+            # These are internal safety bounds for the bundled CLI invocation,
+            # not claims about Bilibili's current official limits.
+            "max_count": 6,
+            "max_length": 20,
+            "basis": "product_conservative_guardrail",
         },
     },
     "channels": {
@@ -185,13 +194,15 @@ _PLATFORM_PUBLISH_POLICIES: dict[str, dict[str, Any]] = {
         "title": {
             "min_length": 1,
             "hard_limit": None,
-            "safe_limit": None,
+            "safe_limit": 30,
             "basis": "not_verified",
+            "safe_limit_basis": "product_conservative_guardrail",
         },
         "content": {
             "hard_limit": None,
-            "safe_limit": None,
+            "safe_limit": 800,
             "basis": "not_verified",
+            "safe_limit_basis": "product_conservative_guardrail",
         },
         "tags": {
             "submission_mode": "literal_hashtags",
@@ -204,13 +215,15 @@ _PLATFORM_PUBLISH_POLICIES: dict[str, dict[str, Any]] = {
         "title": {
             "min_length": 1,
             "hard_limit": None,
-            "safe_limit": None,
+            "safe_limit": 80,
             "basis": "not_verified",
+            "safe_limit_basis": "product_conservative_guardrail",
         },
         "content": {
             "hard_limit": None,
-            "safe_limit": None,
+            "safe_limit": 800,
             "basis": "not_verified",
+            "safe_limit_basis": "product_conservative_guardrail",
         },
         "tags": {
             "submission_mode": "literal_hashtags",
@@ -309,14 +322,27 @@ def list_platform_publish_policies() -> list[dict[str, Any]]:
     return [get_platform_publish_policy(key) for key in _PLATFORM_PUBLISH_POLICIES]
 
 
-def normalize_policy_tags(tags: Iterable[Any] | None) -> list[str]:
+def normalize_policy_tags(
+    tags: Iterable[Any] | None,
+    *,
+    max_length: int | None = None,
+) -> list[str]:
+    """Normalize tags and optionally enforce a per-tag product safety bound."""
+
     if tags is None or isinstance(tags, (str, bytes)):
         return []
+    if max_length is not None:
+        if isinstance(max_length, bool) or not isinstance(max_length, int):
+            raise ValueError("标签长度安全线必须是整数")
+        if max_length <= 0:
+            raise ValueError("标签长度安全线必须大于 0")
     result: list[str] = []
     seen: set[str] = set()
     for raw in tags:
         tag = re.sub(r"\s+", " ", str(raw or "").replace("\u200b", " "))
         tag = re.sub(r"^#+", "", tag).strip()
+        if max_length is not None:
+            tag = tag[:max_length].rstrip()
         identity = tag.casefold()
         if not tag or identity in seen:
             continue
@@ -336,15 +362,81 @@ def adapt_tags_for_platform(
     """
 
     policy = get_platform_publish_policy(platform)
+    tag_policy = policy["tags"]
     original = normalize_policy_tags(tags)
-    maximum = policy["tags"]["max_count"]
-    selected = original if maximum is None else original[: int(maximum)]
+    maximum = tag_policy.get("max_count")
+    maximum_length = tag_policy.get("max_length")
+
+    candidates: list[tuple[str, str]] = []
+    truncated: list[dict[str, Any]] = []
+    dropped: list[dict[str, Any]] = []
+    seen_candidates: set[str] = set()
+    for original_tag in original:
+        normalized = normalize_policy_tags(
+            [original_tag],
+            max_length=(int(maximum_length) if maximum_length is not None else None),
+        )
+        if not normalized:  # pragma: no cover - normalized originals are non-empty
+            dropped.append(
+                {
+                    "tag": original_tag,
+                    "reason": "empty_after_length_normalization",
+                }
+            )
+            continue
+        safe_tag = normalized[0]
+        if safe_tag != original_tag:
+            truncated.append(
+                {
+                    "original": original_tag,
+                    "selected": safe_tag,
+                    "max_length": int(maximum_length),
+                }
+            )
+        identity = safe_tag.casefold()
+        if identity in seen_candidates:
+            dropped.append(
+                {
+                    "tag": original_tag,
+                    "normalized": safe_tag,
+                    "reason": "duplicate_after_truncation",
+                }
+            )
+            continue
+        seen_candidates.add(identity)
+        candidates.append((original_tag, safe_tag))
+
+    selected_candidates = (
+        candidates if maximum is None else candidates[: int(maximum)]
+    )
+    if maximum is not None:
+        dropped.extend(
+            {
+                "tag": original_tag,
+                "normalized": safe_tag,
+                "reason": "max_count",
+            }
+            for original_tag, safe_tag in candidates[int(maximum) :]
+        )
+    selected = [safe_tag for _original_tag, safe_tag in selected_candidates]
+    audit = {
+        "dropped_count": len(dropped),
+        "dropped": list(dropped),
+        "truncated_count": len(truncated),
+        "truncated": list(truncated),
+    }
     return {
         "original": original,
         "selected": selected,
         "adapted": selected != original,
-        "dropped_count": len(original) - len(selected),
-        "policy": policy["tags"],
+        "dropped_count": audit["dropped_count"],
+        "dropped": list(dropped),
+        "dropped_tags": list(dropped),
+        "truncated_count": audit["truncated_count"],
+        "truncated": list(truncated),
+        "truncated_tags": list(truncated),
+        "audit": audit,
+        "policy": tag_policy,
     }
 
 
@@ -459,7 +551,7 @@ def evaluate_platform_offline_preflight(
                 "删除绝对化表述，或提供能直接支持该表述的公开证据和适用范围。",
             )
         )
-    if tag_preview["adapted"]:
+    if tag_preview["dropped_count"]:
         maximum = policy["tags"]["max_count"]
         if maximum == 0:
             tag_message = (
@@ -483,6 +575,21 @@ def evaluate_platform_offline_preflight(
                 "tags",
                 tag_message,
                 tag_suggestion,
+            )
+        )
+    if tag_preview["truncated_count"]:
+        maximum_length = policy["tags"].get("max_length")
+        issues.append(
+            _issue(
+                "tags_truncated_for_adapter",
+                "warning",
+                "tags",
+                (
+                    f"有 {tag_preview['truncated_count']} 个标签超过产品侧 "
+                    f"{maximum_length} 字安全线，适配副本已截短；"
+                    "该安全线不是平台官方配额。"
+                ),
+                "发布前查看标签适配审计，确认截短后的标签仍准确表达主题。",
             )
         )
 

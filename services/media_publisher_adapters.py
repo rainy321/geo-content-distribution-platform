@@ -276,7 +276,7 @@ async def _douyin_login_checker(account_file: str) -> bool:
     return await cookie_auth_douyin(account_file)
 
 
-async def _douyin_publish_runner(content: PublishContent, account_file: str) -> None:
+async def _douyin_publish_runner(content: PublishContent, account_file: str) -> Any:
     from uploader.douyin_uploader.main import DouYinNote
 
     publisher = DouYinNote(
@@ -289,7 +289,29 @@ async def _douyin_publish_runner(content: PublishContent, account_file: str) -> 
         headless=False,
         ai_generated=True,
     )
-    await publisher.douyin_upload_note()
+    try:
+        result = await publisher.douyin_upload_note()
+    except asyncio.CancelledError:
+        return _media_interrupted_result(
+            publisher,
+            platform_name="抖音",
+            submit_attribute="submit_click_attempted",
+            error=None,
+        )
+    except Exception as exc:
+        return _media_interrupted_result(
+            publisher,
+            platform_name="抖音",
+            submit_attribute="submit_click_attempted",
+            error=exc,
+        )
+    return result or {
+        "status": "processing",
+        "message": (
+            "抖音已完成一次提交链路，但未取得可核验的公开链接；"
+            "请先在作品管理中核对，系统不会自动重试"
+        ),
+    }
 
 
 async def _kuaishou_login_checker(account_file: str) -> bool:
@@ -298,7 +320,7 @@ async def _kuaishou_login_checker(account_file: str) -> bool:
     return await cookie_auth_ks(account_file)
 
 
-async def _kuaishou_publish_runner(content: PublishContent, account_file: str) -> None:
+async def _kuaishou_publish_runner(content: PublishContent, account_file: str) -> Any:
     from uploader.ks_uploader.main import KSNote
 
     publisher = KSNote(
@@ -311,7 +333,79 @@ async def _kuaishou_publish_runner(content: PublishContent, account_file: str) -
         headless=False,
         ai_generated=True,
     )
-    await publisher.main()
+    try:
+        result = await publisher.main()
+    except asyncio.CancelledError:
+        return _media_interrupted_result(
+            publisher,
+            platform_name="快手",
+            submit_attribute="submit_click_attempted",
+            error=None,
+        )
+    except Exception as exc:
+        return _media_interrupted_result(
+            publisher,
+            platform_name="快手",
+            submit_attribute="submit_click_attempted",
+            error=exc,
+        )
+    return result or {
+        "status": "processing",
+        "message": (
+            "快手已完成一次提交链路，但未取得可核验的公开链接；"
+            "请先在作品管理中核对，系统不会自动重试"
+        ),
+    }
+
+
+def _media_interrupted_result(
+    publisher: Any,
+    *,
+    platform_name: str,
+    submit_attribute: str,
+    error: Exception | None,
+) -> dict[str, str]:
+    """Preserve the one-click boundary and expose actionable account failures."""
+
+    from services.media_account_risk_service import (
+        classify_media_account_risk,
+        sanitize_risk_evidence,
+    )
+
+    detail = sanitize_risk_evidence(error or "", limit=180)
+    risk = classify_media_account_risk(detail)
+    if risk and risk["category"] != "network_error":
+        return {
+            "status": "need_action",
+            "message": (
+                f"{platform_name}{risk['label']}[{risk['category']}]："
+                f"{risk.get('evidence') or risk['reason']}；"
+                "任务已暂停，请按平台提示处理并先核对作品管理，系统不会自动重试"
+            ),
+        }
+
+    if bool(getattr(publisher, submit_attribute, False)):
+        return {
+            "status": "processing",
+            "message": (
+                f"{platform_name}已触发一次发布操作，但平台最终结果未知；"
+                "请先在作品管理中核对，系统不会自动重试"
+            ),
+        }
+
+    if risk and risk["category"] == "network_error":
+        problem = f"网络或浏览器连接异常：{risk.get('evidence') or risk['reason']}"
+    elif detail:
+        problem = detail
+    else:
+        problem = "发布流程在点击前被中止"
+    return {
+        "status": "failed",
+        "message": (
+            f"{platform_name}在点击发布前失败，尚未提交：{problem}；"
+            "确认平台后台没有新作品后可安全重试"
+        ),
+    }
 
 
 def _bilibili_login_checker(account_file: str) -> bool:
@@ -389,7 +483,7 @@ async def _channels_login_checker(account_file: str) -> bool:
     return await cookie_auth_tencent(account_file)
 
 
-async def _channels_publish_runner(content: PublishContent, account_file: str) -> None:
+async def _channels_publish_runner(content: PublishContent, account_file: str) -> Any:
     from uploader.tencent_uploader.main import TencentVideo
 
     publisher = TencentVideo(
@@ -402,7 +496,38 @@ async def _channels_publish_runner(content: PublishContent, account_file: str) -
         thumbnail_path=content.images[0] if content.images else None,
         headless=False,
     )
-    await publisher.main()
+    try:
+        await publisher.main()
+    except asyncio.CancelledError:
+        return _channels_interrupted_result(publisher, error=None)
+    except Exception as exc:
+        return _channels_interrupted_result(publisher, error=exc)
+    return {
+        "status": "processing",
+        "message": "视频号已完成一次提交链路，公开链接需在内容管理中核验",
+    }
+
+
+def _channels_interrupted_result(publisher: Any, *, error: Exception | None):
+    if bool(getattr(publisher, "submit_click_attempted", False)):
+        return {
+            "status": "processing",
+            "message": (
+                "视频号已触发一次发表操作，但最终结果未能确认；"
+                "请先在视频号助手核对，系统不会自动重试"
+            ),
+        }
+    status = classify_publisher_error(error) if error is not None else "failed"
+    detail = str(error or "").lower()
+    if any(marker in detail for marker in ("验证", "登录", "扫码", "captcha")):
+        status = "need_action"
+    return {
+        "status": status,
+        "message": (
+            "视频号在点击发表前中止，尚未提交；"
+            "可在修复登录、素材或页面问题后安全重试"
+        ),
+    }
 
 
 async def _tiktok_login_checker(account_file: str) -> bool:

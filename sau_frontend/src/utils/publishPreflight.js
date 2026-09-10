@@ -4,6 +4,16 @@ const normalizedSnapshotText = value => String(value || '')
   .replace(/\r\n?/g, '\n')
   .trim()
 
+const booleanValue = (value, fallback = false) => {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') return value !== 0
+  if (typeof value === 'string') {
+    if (['true', '1', 'yes', 'passed', 'ready'].includes(value.toLowerCase())) return true
+    if (['false', '0', 'no', 'blocked', 'failed'].includes(value.toLowerCase())) return false
+  }
+  return fallback
+}
+
 export const refreshEditableVariant = variant => {
   if (!variant) return null
   const editableTitle = String(variant.editable_title ?? variant.title ?? '')
@@ -24,6 +34,17 @@ export const refreshEditableVariant = variant => {
     : null
   const citeabilityScore = Number(citeability?.score)
   const citeabilityPassScore = Number(citeability?.pass_score)
+  const citeabilityBlockingIssues = Array.isArray(citeability?.blocking_issues)
+    ? citeability.blocking_issues
+    : []
+  const hasP0BlockingIssue = citeabilityBlockingIssues.some(issue => (
+    issue && typeof issue === 'object'
+    && String(issue.priority || '').toUpperCase() === 'P0'
+  ))
+  const publishGatePassed = booleanValue(
+    citeability?.publish_gate_passed ?? citeability?.publishGatePassed,
+    !hasP0BlockingIssue
+  ) && !hasP0BlockingIssue
   const citeabilityCurrent = Boolean(citeability)
     && normalizedSnapshotText(editableTitle) === normalizedSnapshotText(variant.title)
     && normalizedSnapshotText(editableContent) === normalizedSnapshotText(variant.publish_content)
@@ -42,11 +63,10 @@ export const refreshEditableVariant = variant => {
     within_safe_limit: !safeLimit || (publishLength > 0 && publishLength <= safeLimit),
     citeability_current: citeabilityCurrent,
     citeability_passed: citeabilityCurrent && citeability?.passed === true,
+    citeability_publish_gate_passed: citeabilityCurrent && publishGatePassed,
     citeability_score: Number.isFinite(citeabilityScore) ? citeabilityScore : null,
     citeability_pass_score: Number.isFinite(citeabilityPassScore) ? citeabilityPassScore : null,
-    citeability_blocking_issues: Array.isArray(citeability?.blocking_issues)
-      ? citeability.blocking_issues
-      : [],
+    citeability_blocking_issues: citeabilityBlockingIssues,
     citeability_suggestions: Array.isArray(citeability?.suggestions)
       ? citeability.suggestions
       : [],
@@ -59,6 +79,23 @@ export const refreshEditableVariant = variant => {
     offline_preflight_disclaimer: String(offlinePreflight?.disclaimer || '')
   }
 }
+
+export const isPublishVariantReady = (
+  draft,
+  { citeabilityRequired = true } = {}
+) => Boolean(
+  draft?.within_safe_limit === true
+  && draft?.title_within_safe_limit === true
+  && draft?.offline_preflight_current !== false
+  && draft?.offline_preflight_passed !== false
+  && (
+    !citeabilityRequired
+    || (
+      draft?.citeability_current === true
+      && draft?.citeability_publish_gate_passed === true
+    )
+  )
+)
 
 export const frequencyGuidanceLabel = guidance => {
   const dailyMax = Number(guidance?.daily_recommended_max || 0)

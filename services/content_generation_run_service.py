@@ -6,7 +6,7 @@ import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from services.ai_cost_ledger_service import (
     attach_article_to_usage,
@@ -18,6 +18,7 @@ from services.content_engine_contract import (
     ContentGenerationRequest,
     ContentGenerationResult,
 )
+from services.geo_article_compiler_service import resolve_generation_length_context
 
 
 class GenerationRunNotFoundError(LookupError):
@@ -114,6 +115,18 @@ def begin_or_replay(
                 )
                 return _outcome_from_row(row, replayed=True)
 
+            brief_snapshot = dict(request.provider_payload()["brief"])
+            length_context = resolve_generation_length_context(
+                request.length,
+                request.target_platform,
+            )
+            brief_snapshot.update(
+                {
+                    "requested_length": length_context["requested_length"],
+                    "effective_length": length_context["effective_length"],
+                    "length_context": length_context,
+                }
+            )
             cursor = conn.execute(
                 """
                 INSERT INTO content_generation_runs (
@@ -128,7 +141,7 @@ def begin_or_replay(
                     fingerprint,
                     _project_id(request.project_context),
                     _encode_json(dict(request.project_context)),
-                    _encode_json(request.provider_payload()["brief"]),
+                    _encode_json(brief_snapshot),
                     str(configured_engine or "").strip() or "unknown",
                     request.request_id,
                 ),
@@ -183,12 +196,15 @@ def mark_succeeded(
     *,
     local_score: int,
     local_analysis: Mapping[str, Any],
+    generation_metadata: Mapping[str, Any] | None = None,
+    additional_usage_records: Sequence[Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Persist the normalized result and return the stable public payload."""
 
     analysis = dict(local_analysis or {})
     payload = result.public_payload()
     payload["generation"]["replayed"] = False
+    payload["generation"].update(dict(generation_metadata or {}))
     payload["geo_score"] = int(local_score)
     payload["geo_analysis"] = analysis
     payload["generation"]["run_id"] = int(run_id)
@@ -256,6 +272,32 @@ def mark_succeeded(
                 },
                 connection=conn,
             )
+            for usage_record in additional_usage_records or ():
+                record_ai_usage(
+                    database_path,
+                    operation=str(usage_record.get("operation") or ""),
+                    provider=str(usage_record.get("provider") or "unknown"),
+                    model=str(usage_record.get("model") or "unknown"),
+                    usage=(
+                        usage_record.get("usage")
+                        if isinstance(usage_record.get("usage"), Mapping)
+                        else None
+                    ),
+                    usage_status=str(
+                        usage_record.get("usage_status") or "unknown"
+                    ),
+                    project_id=current["project_id"],
+                    reference_type=str(
+                        usage_record.get("reference_type") or "generation_run"
+                    ),
+                    reference_id=usage_record.get("reference_id") or run_id,
+                    metadata=(
+                        usage_record.get("metadata")
+                        if isinstance(usage_record.get("metadata"), Mapping)
+                        else None
+                    ),
+                    connection=conn,
+                )
     return payload
 
 
@@ -341,13 +383,49 @@ def get_run_score_context(database_path: str | Path, run_id: int) -> dict[str, A
     keywords = brief.get("keywords")
     if not isinstance(keywords, list):
         keywords = project.get("keywords") if isinstance(project.get("keywords"), list) else []
+    length_context = _length_context_from_brief(brief)
     return {
         "brand": str(project.get("name") or "").strip(),
         "keywords": [str(item).strip() for item in keywords if str(item).strip()],
         "project_snapshot": project,
         "topic": str(brief.get("topic") or "").strip(),
         "target_platform": str(brief.get("target_platform") or "").strip(),
+        "target_length": length_context["effective_length"],
+        "requested_target_length": length_context["requested_length"],
+        "effective_target_length": length_context["effective_length"],
+        "platform_limit": length_context["platform_limit"],
+        "length_source": length_context["source"],
     }
+
+
+def _length_context_from_brief(brief: Mapping[str, Any]) -> dict[str, Any]:
+    stored = brief.get("length_context")
+    if isinstance(stored, Mapping):
+        try:
+            requested = int(stored.get("requested_length"))
+            effective = int(stored.get("effective_length"))
+            raw_limit = stored.get("platform_limit")
+            platform_limit = int(raw_limit) if raw_limit is not None else None
+        except (TypeError, ValueError):
+            pass
+        else:
+            if (
+                200 <= requested <= 3_000
+                and 200 <= effective <= requested
+                and (platform_limit is None or platform_limit >= effective)
+            ):
+                return {
+                    "requested_length": requested,
+                    "effective_length": effective,
+                    "platform_limit": platform_limit,
+                    "source": str(stored.get("source") or "requested_length"),
+                    "platform_key": str(stored.get("platform_key") or "generic"),
+                }
+    raw_requested = brief.get("requested_length", brief.get("length"))
+    return resolve_generation_length_context(
+        int(raw_requested),
+        str(brief.get("target_platform") or ""),
+    )
 
 
 def _mark_error(
@@ -447,6 +525,14 @@ def _bind_article_on_connection(
     attach_article_to_usage(
         "",
         operation="generate",
+        reference_type="generation_run",
+        reference_id=run_id,
+        article_id=article_id,
+        connection=conn,
+    )
+    attach_article_to_usage(
+        "",
+        operation="optimize",
         reference_type="generation_run",
         reference_id=run_id,
         article_id=article_id,

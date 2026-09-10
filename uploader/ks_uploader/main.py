@@ -26,7 +26,9 @@ KUAISHOU_UPLOAD_URL = "https://cp.kuaishou.com/article/publish/video"
 KUAISHOU_MANAGE_URL = "https://cp.kuaishou.com/article/manage/video?status=2&from=publish"
 KUAISHOU_LOGIN_URL = "https://passport.kuaishou.com/pc/account/login/?sid=kuaishou.web.cp.api&callback=https%3A%2F%2Fcp.kuaishou.com%2Frest%2Finfra%2Fsts%3FfollowUrl%3Dhttps%253A%252F%252Fcp.kuaishou.com%252Farticle%252Fpublish%252Fvideo%26setRootDomain%3Dtrue"
 KUAISHOU_UPLOAD_URL_PATTERN = "**/article/publish/video**"
-KUAISHOU_MANAGE_URL_PATTERN = "**/article/manage/video?status=2&from=publish**"
+# The creator centre has used several query strings and content sub-routes for
+# the same management destination.  Do not couple submit evidence to one query.
+KUAISHOU_MANAGE_URL_PATTERN = "**/article/manage/**"
 KUAISHOU_COOKIE_INVALID_SELECTOR = "div.names div.container div.name:text('机构服务')"
 KUAISHOU_PUBLISH_STRATEGY_IMMEDIATE = "immediate"
 KUAISHOU_PUBLISH_STRATEGY_SCHEDULED = "scheduled"
@@ -287,6 +289,7 @@ class KSBaseUploader(BaseVideoUploader):
         self.headless = headless
         self.local_executable_path = LOCAL_CHROME_PATH
         self.date_format = "%Y-%m-%d %H:%M"
+        self.submit_click_attempted = False
 
     async def _raise_if_visible_account_risk(
         self,
@@ -473,6 +476,70 @@ class KSBaseUploader(BaseVideoUploader):
         except Exception:
             pass
 
+    async def _switch_to_note_publish(self, page: Page) -> None:
+        """Select the image-note route across known Kuaishou page variants."""
+
+        upload_buttons = page.locator(
+            'button:has-text("上传图片"), [role="button"]:has-text("上传图片")'
+        )
+        try:
+            if await upload_buttons.count():
+                return
+        except Exception:
+            pass
+
+        candidates = (
+            page.get_by_role("tab", name="图文", exact=True),
+            page.locator('[role="tab"]:has-text("图文")').first,
+            page.locator('button:has-text("图文")').first,
+            page.get_by_text("图文", exact=True).first,
+        )
+        for candidate in candidates:
+            try:
+                if not await candidate.count() or not await candidate.first.is_visible():
+                    continue
+                await candidate.first.click(timeout=4_000)
+                await page.wait_for_timeout(500)
+                if await upload_buttons.count():
+                    return
+            except Exception:
+                continue
+
+        await self._raise_if_visible_account_risk(page, include_verification=True)
+        raise RuntimeError("快手页面结构变化：未找到图文发布入口，尚未提交")
+
+    async def _upload_note_images(self, page: Page, image_paths: list[str]) -> None:
+        """Upload through either a direct input or the current chooser button."""
+
+        candidates = (
+            page.get_by_role("button", name="上传图片", exact=True),
+            page.locator('button:has-text("上传图片")').first,
+            page.locator('[role="button"]:has-text("上传图片")').first,
+            page.locator('label:has-text("上传图片")').first,
+        )
+        for candidate in candidates:
+            try:
+                if not await candidate.count() or not await candidate.first.is_visible():
+                    continue
+                async with page.expect_file_chooser(timeout=10_000) as chooser_info:
+                    await candidate.first.click(timeout=4_000)
+                chooser = await chooser_info.value
+                await chooser.set_files(image_paths)
+                return
+            except Exception:
+                continue
+
+        direct_inputs = page.locator('input[type="file"][accept*="image"]')
+        try:
+            if await direct_inputs.count():
+                await direct_inputs.first.set_input_files(image_paths)
+                return
+        except Exception:
+            pass
+
+        await self._raise_if_visible_account_risk(page, include_verification=True)
+        raise RuntimeError("快手页面结构变化：未找到图片上传控件，尚未提交")
+
     async def _click_publish_button(self, page: Page) -> bool:
         """多策略点击「发布」，兼容 antd 按钮非标准 role 的情况。"""
         await self._dismiss_blocking_overlays(page)
@@ -508,6 +575,7 @@ class KSBaseUploader(BaseVideoUploader):
 
                 await target.scroll_into_view_if_needed()
                 await page.wait_for_timeout(200)
+                self.submit_click_attempted = True
                 try:
                     await target.click(timeout=3000)
                 except Exception:
@@ -540,6 +608,7 @@ class KSBaseUploader(BaseVideoUploader):
                 }"""
             )
             if clicked:
+                self.submit_click_attempted = True
                 kuaishou_logger.info(_msg("🖱️", "已通过 JS 兜底点击「发布」"))
                 return True
         except Exception as e:
@@ -1017,24 +1086,11 @@ class KSNote(KSBaseUploader):
     async def upload_note_content(self, page: Page) -> None:
         kuaishou_logger.info(_msg("🏃", f"小人开始搬运图文，共 {len(self.image_paths)} 张图片"))
         kuaishou_logger.info(_msg("🔀", "小人正在切换到图文发布"))
-        await page.locator('div[role="tablist"] div[role="tab"]:has-text("图文")').click()
+        await self._switch_to_note_publish(page)
         await page.wait_for_timeout(1000)
 
         kuaishou_logger.info(_msg("📤", "小人正在上传图片"))
-        upload_button = page.locator("button[class^='_upload-btn']").filter(has_text="上传图片")
-        try:
-            await upload_button.wait_for(state="visible", timeout=10000)
-        except Exception:
-            await self._raise_if_visible_account_risk(
-                page,
-                include_verification=True,
-            )
-            raise
-
-        async with page.expect_file_chooser() as fc_info:
-            await upload_button.click()
-        file_chooser = await fc_info.value
-        await file_chooser.set_files(self.image_paths)
+        await self._upload_note_images(page, self.image_paths)
 
         know_button = page.locator('button[type="button"] span:text("我知道了")').first
         try:
@@ -1148,6 +1204,10 @@ class KSNote(KSBaseUploader):
 
                 if not publish_clicked:
                     publish_clicked = await self._click_publish_button(page)
+                    if not publish_clicked and publish_retry_count >= 3:
+                        raise RuntimeError(
+                            "快手页面结构变化：连续 3 次未找到可用发布按钮，尚未提交"
+                        )
                     if not publish_clicked and publish_retry_count % 20 == 0:
                         kuaishou_logger.warning(
                             _msg("⚠️", f"未找到可点击的「发布」按钮（第{publish_retry_count}次）")
@@ -1158,9 +1218,15 @@ class KSNote(KSBaseUploader):
 
                 await page.wait_for_url(KUAISHOU_MANAGE_URL_PATTERN, timeout=5000)
                 kuaishou_logger.success(_msg("🥳", "图文发布成功，小人开心收工"))
-                break
+                return {
+                    "status": "processing",
+                    "message": (
+                        "快手已接受提交并进入作品管理，当前可能处于平台处理或审核中；"
+                        "请在作品管理核对公开状态，系统不会自动重试"
+                    ),
+                }
             except Exception as exc:
-                if "180 秒内未完成" in str(exc):
+                if "180 秒内未完成" in str(exc) or "连续 3 次" in str(exc):
                     raise
                 await self._raise_if_visible_account_risk(
                     page,
@@ -1205,7 +1271,7 @@ class KSNote(KSBaseUploader):
             await page.wait_for_url(KUAISHOU_UPLOAD_URL_PATTERN)
 
             try:
-                await self.upload_note_content(page)
+                result = await self.upload_note_content(page)
             except Exception:
                 await self._raise_if_visible_account_risk(
                     page,
@@ -1220,7 +1286,8 @@ class KSNote(KSBaseUploader):
                 await asyncio.sleep(2)
             await context.close()
             await browser.close()
+        return result
 
     async def main(self):
         async with async_playwright() as playwright:
-            await self.upload(playwright)
+            return await self.upload(playwright)

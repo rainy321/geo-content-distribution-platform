@@ -11,12 +11,15 @@ from db.createTable import initialize_database
 from sau_backend import app
 from services.content_engine_adapters import MockContentEngineAdapter
 from services.content_engine_contract import (
+    ContentGenerationRequest,
     ContentEngineProtocolError,
     ContentEngineRateLimitError,
     ContentEngineTimeoutError,
     ContentEngineUnavailableError,
 )
+from services.content_generation_run_service import begin_or_replay
 from services.content_generation_service import ContentGenerationService
+from services.content_hygiene_service import authoring_visible_length
 
 
 VALID_RESULT = {
@@ -64,7 +67,15 @@ class ContentGenerationApiV1Tests(unittest.TestCase):
         app.testing = self.original_testing
         self.temp_dir.cleanup()
 
-    def _post(self, *, topic="AI Agent 落地", key="contract-test-key", request_id="req-1"):
+    def _post(
+        self,
+        *,
+        topic="AI Agent 落地",
+        key="contract-test-key",
+        request_id="req-1",
+        target_platform="知乎",
+        length=1000,
+    ):
         return self.client.post(
             "/api/articles/generate",
             headers={"Idempotency-Key": key, "X-Request-ID": request_id},
@@ -72,7 +83,8 @@ class ContentGenerationApiV1Tests(unittest.TestCase):
                 "project_id": self.project_id,
                 "topic": topic,
                 "keywords": ["AI Agent", "企业智能体"],
-                "target_platform": "知乎",
+                "target_platform": target_platform,
+                "length": length,
             },
         )
 
@@ -109,6 +121,179 @@ class ContentGenerationApiV1Tests(unittest.TestCase):
         ).get_json()["data"]
         self.assertEqual(run["sources"], VALID_RESULT["sources"])
         self.assertEqual(run["score_context"]["keywords"], ["AI Agent", "企业智能体"])
+        self.assertEqual(run["score_context"]["target_length"], 1000)
+        self.assertEqual(run["score_context"]["requested_target_length"], 1000)
+        self.assertEqual(run["score_context"]["effective_target_length"], 1000)
+        self.assertEqual(run["score_context"]["length_source"], "requested_length")
+
+    def test_request_identity_lookup_restores_result_without_provider_replay(self):
+        adapter = MockContentEngineAdapter([VALID_RESULT], version="1.0-test")
+        service = ContentGenerationService(self.db_path, adapter)
+        with patch("sau_backend._create_content_generation_service", return_value=service):
+            generated = self._post(
+                key="refresh-recovery-key",
+                request_id="refresh-recovery-request",
+                target_platform="知乎",
+                length=600,
+            )
+
+        self.assertEqual(generated.status_code, 200)
+        with patch(
+            "sau_backend._create_content_generation_service",
+            side_effect=AssertionError("read-only recovery must not create a provider"),
+        ):
+            recovered = self.client.get(
+                "/api/content-generation/runs/by-request/refresh-recovery-request"
+            )
+
+        self.assertEqual(recovered.status_code, 200)
+        data = recovered.get_json()["data"]
+        self.assertEqual(data["status"], "succeeded")
+        self.assertEqual(data["request_id"], "refresh-recovery-request")
+        self.assertEqual(data["result"]["title"], VALID_RESULT["title"])
+        self.assertEqual(data["result"]["content"], VALID_RESULT["content"])
+        self.assertEqual(data["brief"]["project_id"], self.project_id)
+        self.assertEqual(data["brief"]["topic"], "AI Agent 落地")
+        self.assertEqual(data["brief"]["requested_length"], 600)
+        self.assertEqual(data["brief"]["target_platform"], "zhihu")
+        self.assertNotIn("idempotency_key", data)
+        self.assertEqual(len(adapter.calls), 1)
+
+    def test_request_identity_lookup_rejects_invalid_or_missing_identity(self):
+        invalid = self.client.get("/api/content-generation/runs/by-request/bad%20request")
+        missing = self.client.get(
+            "/api/content-generation/runs/by-request/does-not-exist"
+        )
+
+        self.assertEqual(invalid.status_code, 400)
+        self.assertEqual(missing.status_code, 404)
+
+    def test_request_identity_lookup_observes_started_run_without_provider_call(self):
+        request = ContentGenerationRequest.create(
+            project_context={"id": self.project_id, "name": "XX科技"},
+            topic="刷新后等待原结果",
+            keywords=["AI Agent"],
+            length=200,
+            content_type="行业科普",
+            target_platform="zhihu",
+            request_id="started-refresh-request",
+            idempotency_key="started-refresh-key",
+        )
+        outcome = begin_or_replay(
+            self.db_path,
+            request,
+            configured_engine="mock",
+        )
+
+        with patch(
+            "sau_backend._create_content_generation_service",
+            side_effect=AssertionError("status polling must not create a provider"),
+        ):
+            response = self.client.get(
+                "/api/content-generation/runs/by-request/started-refresh-request"
+            )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()["data"]
+        self.assertEqual(data["id"], outcome.run_id)
+        self.assertEqual(data["status"], "started")
+        self.assertIsNone(data["result"])
+        self.assertEqual(data["brief"]["topic"], "刷新后等待原结果")
+
+    def test_platform_length_context_survives_run_and_explicit_rescore_respects_cap(self):
+        adapter = MockContentEngineAdapter([VALID_RESULT], version="1.0-test")
+        service = ContentGenerationService(self.db_path, adapter)
+        with patch("sau_backend._create_content_generation_service", return_value=service):
+            generated_response = self._post(
+                key="kuaishou-length-context",
+                request_id="req-kuaishou-length-context",
+                target_platform="快手",
+                length=1000,
+            )
+
+        self.assertEqual(generated_response.status_code, 200)
+        generated = generated_response.get_json()["data"]
+        generation_profile = generated["geo_analysis"]["length_profile"]
+        self.assertEqual(generation_profile["target_length"], 1000)
+        self.assertEqual(generation_profile["requested_target_length"], 1000)
+        self.assertEqual(generation_profile["effective_target_length"], 380)
+        self.assertEqual(generation_profile["source"], "platform_safe_limit")
+        self.assertEqual(generation_profile["key"], "compact")
+
+        run_id = generated["generation"]["run_id"]
+        run = self.client.get(
+            f"/api/content-generation/runs/{run_id}"
+        ).get_json()["data"]
+        self.assertEqual(run["score_context"]["target_length"], 380)
+        self.assertEqual(run["score_context"]["requested_target_length"], 1000)
+        self.assertEqual(run["score_context"]["effective_target_length"], 380)
+        self.assertEqual(run["score_context"]["platform_limit"], 380)
+        self.assertEqual(run["score_context"]["length_source"], "platform_safe_limit")
+
+        capped_rescore = self.client.post(
+            "/api/geo/score",
+            json={
+                "title": generated["title"],
+                "summary": generated["summary"],
+                "content": generated["content"],
+                "generation_run_id": run_id,
+                "target_length": 1000,
+            },
+        )
+        self.assertEqual(capped_rescore.status_code, 200)
+        capped_payload = capped_rescore.get_json()
+        self.assertEqual(capped_payload["length_profile"]["target_length"], 1000)
+        self.assertEqual(
+            capped_payload["length_profile"]["requested_target_length"],
+            1000,
+        )
+        self.assertEqual(
+            capped_payload["length_profile"]["effective_target_length"],
+            380,
+        )
+        self.assertEqual(
+            capped_payload["length_profile"]["source"],
+            "platform_safe_limit",
+        )
+        self.assertEqual(capped_payload["score_context"]["target_length"], 380)
+        self.assertEqual(
+            capped_payload["score_context"]["requested_target_length"],
+            1000,
+        )
+        self.assertEqual(
+            capped_payload["score_context"]["effective_target_length"],
+            380,
+        )
+        self.assertEqual(capped_payload["score_context"]["platform_limit"], 380)
+        self.assertEqual(
+            capped_payload["score_context"]["length_source"],
+            "platform_safe_limit",
+        )
+
+        rescored = self.client.post(
+            "/api/geo/score",
+            json={
+                "title": generated["title"],
+                "summary": generated["summary"],
+                "content": generated["content"],
+                "generation_run_id": run_id,
+                "target_length": 200,
+            },
+        )
+        self.assertEqual(rescored.status_code, 200)
+        rescored_payload = rescored.get_json()
+        self.assertEqual(rescored_payload["length_profile"]["target_length"], 200)
+        self.assertEqual(
+            rescored_payload["length_profile"]["effective_target_length"],
+            200,
+        )
+        self.assertEqual(rescored_payload["length_profile"]["source"], "explicit")
+        self.assertEqual(rescored_payload["score_context"]["target_length"], 200)
+        self.assertEqual(
+            rescored_payload["score_context"]["requested_target_length"],
+            200,
+        )
+        self.assertEqual(rescored_payload["score_context"]["length_source"], "explicit")
 
     def test_request_id_cannot_be_rebound_to_a_different_idempotency_key(self):
         second_result = {**VALID_RESULT, "title": "第二次独立生成"}
@@ -373,8 +558,25 @@ class ContentGenerationApiV1Tests(unittest.TestCase):
 
         score_calls = []
 
-        def fake_score(*, title, content, brand, keywords):
-            score_calls.append({"brand": brand, "keywords": list(keywords)})
+        def fake_score(
+            *,
+            title,
+            content,
+            brand,
+            keywords,
+            target_length=None,
+            requested_target_length=None,
+            source=None,
+        ):
+            score_calls.append(
+                {
+                    "brand": brand,
+                    "keywords": list(keywords),
+                    "target_length": target_length,
+                    "requested_target_length": requested_target_length,
+                    "source": source,
+                }
+            )
             return {"score": 77, "dimensions": {}, "suggestions": []}
 
         with patch("sau_backend.score_geo_content", side_effect=fake_score), patch(
@@ -395,10 +597,64 @@ class ContentGenerationApiV1Tests(unittest.TestCase):
         self.assertEqual(
             score_calls,
             [
-                {"brand": "XX科技", "keywords": ["AI Agent", "企业智能体"]},
-                {"brand": "XX科技", "keywords": ["AI Agent", "企业智能体"]},
+                {
+                    "brand": "XX科技",
+                    "keywords": ["AI Agent", "企业智能体"],
+                    "target_length": 1000,
+                    "requested_target_length": 1000,
+                    "source": "requested_length",
+                },
+                {
+                    "brand": "XX科技",
+                    "keywords": ["AI Agent", "企业智能体"],
+                    "target_length": 1000,
+                    "requested_target_length": 1000,
+                    "source": "requested_length",
+                },
             ],
         )
+
+    def test_optimize_sanitizes_placeholders_and_enforces_saved_target_length(self):
+        saved = self.client.post(
+            "/api/articles",
+            json={
+                "project_id": self.project_id,
+                "title": "AI Agent 是什么？",
+                "summary": "用于验证短稿优化边界。",
+                "content": "XX科技说明 AI Agent 的适用条件。\n\n结论以实际测试为准。",
+                "tags": ["AI Agent"],
+                "status": "ready",
+                "target_length": 200,
+            },
+        ).get_json()["data"]
+        overlong_content = (
+            "XX科技说明 AI Agent 的实际适用条件、接口边界和验证方法。"
+            * 30
+            + "\n\n作者：[待补充]\n更新时间：[待补充]"
+        )
+
+        with patch(
+            "sau_backend.optimize_geo_content",
+            return_value={
+                "title": "AI Agent 是什么？",
+                "summary": "用于验证短稿优化边界。",
+                "content": overlong_content,
+                "tags": ["AI Agent"],
+                "faq": [],
+                "sources": [],
+            },
+        ), patch("sau_backend._enforce_ai_rate_limit", return_value=None):
+            response = self.client.post(f"/api/articles/{saved['id']}/optimize", json={})
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()["data"]
+        optimized_content = data["optimized"]["content"]
+        warning_codes = {item["code"] for item in data["warnings"]}
+        self.assertLessEqual(authoring_visible_length(optimized_content), 200)
+        self.assertNotIn("待补充", optimized_content)
+        self.assertIn("optimization_placeholders_removed", warning_codes)
+        self.assertIn("optimization_length_constrained", warning_codes)
+        self.assertEqual(data["after"]["length_profile"]["target_length"], 200)
 
     def test_only_connection_failure_uses_fallback(self):
         primary = MockContentEngineAdapter(

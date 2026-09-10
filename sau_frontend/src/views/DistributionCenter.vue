@@ -40,6 +40,14 @@
         </button>
       </div>
       <div class="command-actions">
+        <el-button
+          plain
+          :loading="autoRepairing"
+          :disabled="!selectedArticleIds.length || !selectedPlatforms.length || preflightLoading || dispatching"
+          @click="autoRepairSelectedArticles"
+        >
+          一键修复并重检
+        </el-button>
         <el-button plain :disabled="articlesLoading || platformsLoadError" @click="autoConfigureDispatch">
           自动配置可用路径
         </el-button>
@@ -80,7 +88,7 @@
       <span>{{ publishingRuntimeReady ? 'LIVE / ARMED' : 'LIVE / BLOCKED' }}</span>
       <div>
         <strong>{{ publishingRuntimeReady ? '真实发布已开启' : '真实发布已授权，但运行时未就绪' }}</strong>
-        <p v-if="publishingRuntimeReady">每个平台必须手动选择一个具体账号；执行前还会核对任务版本、正文、素材和账号，并要求单任务或明确批次强确认。</p>
+        <p v-if="publishingRuntimeReady">每个平台绑定一个明确账号；点击主按钮并完成一次批次确认后，系统会自动创建并按渠道连续发送，单个异常不会阻断其他渠道。</p>
         <p v-else>{{ publishingBlockedReason }}</p>
       </div>
     </section>
@@ -128,7 +136,7 @@
             clearable
             placeholder="选择一篇或多篇已标记就绪的文章"
             :loading="articlesLoading"
-            :disabled="articlesLoading || articlesLoadError"
+            :disabled="articlesLoading || articlesLoadError || dispatching"
           >
             <el-option
               v-for="article in articles"
@@ -177,8 +185,8 @@
                 selected: selectedPlatforms.includes(platform.key),
                 unavailable: !isPlatformSelectable(platform)
               }]"
-              :disabled="!isPlatformSelectable(platform)"
-              :aria-disabled="!isPlatformSelectable(platform)"
+              :disabled="!isPlatformSelectable(platform) || dispatching"
+              :aria-disabled="!isPlatformSelectable(platform) || dispatching"
               :aria-pressed="selectedPlatforms.includes(platform.key)"
               @click="togglePlatform(platform.key)"
             >
@@ -188,6 +196,10 @@
               <em v-if="platform.frequency_guidance">
                 {{ frequencyGuidanceLabel(platform.frequency_guidance) }}
               </em>
+              <span class="platform-cost">
+                浏览器发布 Token 不适用 · 本地规则适配不产生 AI 费用
+              </span>
+              <span class="platform-cost-link">AI 改写费用见成本账单</span>
               <i v-if="platform.verification?.likely">可能需要本人验证</i>
               <span class="selection-mark" aria-hidden="true">
                 {{ selectedPlatforms.includes(platform.key) ? '✓' : '+' }}
@@ -236,6 +248,7 @@
                 </span>
                 <el-input
                   :model-value="platformDrafts[platform.key]?.editable_title || ''"
+                  :disabled="dispatching"
                   @input="value => updatePlatformTitle(platform.key, value)"
                 />
               </label>
@@ -244,6 +257,7 @@
                 type="textarea"
                 :rows="7"
                 resize="vertical"
+                :disabled="dispatching"
                 @input="value => updatePlatformDraft(platform.key, value)"
               />
               <div class="variant-meta">
@@ -251,10 +265,16 @@
                   软件安全线 {{ platformDrafts[platform.key]?.content_policy?.safe_limit || '—' }} 字；
                   已为话题/换行/计数差异预留 {{ platformDrafts[platform.key]?.content_policy?.reserved_characters || 0 }} 字
                 </span>
-                <strong v-if="platformDraftReadyForDispatch(platformDrafts[platform.key])">可创建任务</strong>
+                <strong
+                  v-if="platformDraftReadyForDispatch(platformDrafts[platform.key])"
+                  :class="{ 'quality-warning': citeabilityQualityAdvisory(platformDrafts[platform.key]) }"
+                >
+                  {{ citeabilityQualityAdvisory(platformDrafts[platform.key]) ? '可创建任务 · 建议先优化' : '可创建任务' }}
+                </strong>
                 <strong v-else-if="!platformDrafts[platform.key]?.within_safe_limit || !platformDrafts[platform.key]?.title_within_safe_limit" class="over-limit">请继续缩短后再创建</strong>
                 <strong v-else-if="!platformDrafts[platform.key]?.offline_preflight_current || !platformDrafts[platform.key]?.offline_preflight_passed" class="over-limit">先修复平台离线预检问题</strong>
-                <strong v-else class="over-limit">先修复 AI 可引用性问题</strong>
+                <strong v-else-if="!platformDrafts[platform.key]?.citeability_current" class="over-limit">AI 可引用性检查已失效</strong>
+                <strong v-else class="over-limit">发布硬门禁未通过</strong>
               </div>
               <div
                 :class="['citeability-receipt', {
@@ -283,7 +303,8 @@
               <div
                 :class="['citeability-receipt', {
                   stale: !platformDrafts[platform.key]?.citeability_current,
-                  failed: platformDrafts[platform.key]?.citeability_current && !platformDrafts[platform.key]?.citeability_passed
+                  failed: citeabilityHardBlocked(platformDrafts[platform.key]),
+                  attention: citeabilityQualityAdvisory(platformDrafts[platform.key])
                 }]"
               >
                 <div>
@@ -292,21 +313,27 @@
                   <strong v-else>
                     {{ platformDrafts[platform.key]?.citeability_score ?? '—' }}
                     / {{ platformDrafts[platform.key]?.citeability_pass_score ?? 75 }}
-                    · {{ platformDrafts[platform.key]?.citeability_passed ? '通过' : '未通过' }}
+                    · {{ citeabilityStatusLabel(platformDrafts[platform.key]) }}
                   </strong>
                 </div>
                 <p v-if="!citeabilityRequired">演示任务不会真实发送；评分仅作内容优化参考。</p>
-                <ul v-else-if="platformDrafts[platform.key]?.citeability_current && !platformDrafts[platform.key]?.citeability_passed">
+                <ul v-else-if="citeabilityHardBlocked(platformDrafts[platform.key])">
                   <li
-                    v-for="issue in citeabilityMessages(platformDrafts[platform.key]).slice(0, 3)"
+                    v-for="issue in citeabilityBlockingMessages(platformDrafts[platform.key]).slice(0, 3)"
                     :key="issue"
                   >{{ issue }}</li>
+                </ul>
+                <ul v-else-if="citeabilityQualityAdvisory(platformDrafts[platform.key])">
+                  <li
+                    v-for="suggestion in (platformDrafts[platform.key]?.citeability_suggestions || []).slice(0, 3)"
+                    :key="suggestion"
+                  >{{ suggestion }}</li>
                 </ul>
               </div>
               <p>{{ platformDrafts[platform.key]?.adaptation_reason }}</p>
               <footer>
-                <el-button text @click="restoreAutomaticVariant(platform.key)">恢复自动短版</el-button>
-                <el-button text @click="loadOriginalIntoVariant(platform.key)">载入原稿编辑</el-button>
+                <el-button text :disabled="dispatching" @click="restoreAutomaticVariant(platform.key)">恢复自动短版</el-button>
+                <el-button text :disabled="dispatching" @click="loadOriginalIntoVariant(platform.key)">载入原稿编辑</el-button>
               </footer>
             </article>
           </div>
@@ -334,6 +361,7 @@
                 v-if="connectedAccounts(platform.key).length"
                 v-model="selectedAccountIds[platform.key]"
                 clearable
+                :disabled="dispatching"
                 :placeholder="`选择${platform.name}账号`"
               >
                 <el-option
@@ -343,7 +371,7 @@
                   :value="account.id"
                 />
               </el-select>
-              <el-button v-else type="primary" plain @click="requestPlatformLogin(platform)">
+              <el-button v-else type="primary" plain :disabled="dispatching" @click="requestPlatformLogin(platform)">
                 登录 {{ platform.name }}
               </el-button>
             </div>
@@ -362,7 +390,7 @@
               <small>百家号取首图作为封面，小红书用作笔记图片；其他渠道可按各自规则使用。</small>
             </div>
             <div class="asset-heading-controls">
-              <el-switch v-if="imageRequired" v-model="autoImage" active-text="自动配图" />
+              <el-switch v-if="imageRequired" v-model="autoImage" :disabled="dispatching" active-text="自动配图" />
               <i>{{ imageRequired ? '所选渠道必需' : '可选' }}</i>
             </div>
           </div>
@@ -377,7 +405,7 @@
                 <b v-for="platform in imagePlatforms" :key="platform.key">→ {{ platform.name }}</b>
               </div>
             </div>
-            <el-button text @click="clearSelectedImage">移除</el-button>
+            <el-button text :disabled="dispatching" @click="clearSelectedImage">移除</el-button>
           </article>
 
           <div v-else-if="imageRequired && autoImage" class="asset-empty asset-auto">
@@ -385,10 +413,14 @@
             <div>
               <strong>发布时自动匹配图片</strong>
               <span>优先按品牌、标题和标签推荐素材；没有合适图片时生成一张中性 GEO 封面。</span>
+              <small class="image-model-disclosure">
+                外部 IMAGE 生图角色可独立配置；当前自动封面仍由本地确定性绘图生成。
+                <button type="button" @click="openImageModelSettings">配置生图模型</button>
+              </small>
             </div>
             <div class="asset-button-pair">
-              <el-button plain :loading="imageRecommending" @click="recommendImage">智能推荐</el-button>
-              <el-button plain :loading="coverGenerating" @click="generateCover">生成封面</el-button>
+              <el-button plain :loading="imageRecommending" :disabled="dispatching" @click="recommendImage">智能推荐</el-button>
+              <el-button plain :loading="coverGenerating" :disabled="dispatching" @click="generateCover">生成封面</el-button>
             </div>
           </div>
 
@@ -402,6 +434,7 @@
               plain
               :icon="Upload"
               :loading="imageUploading"
+              :disabled="dispatching"
               @click="openImagePicker"
             >
               {{ imageUploading ? `${imageUploadProgress}%` : '选择图片' }}
@@ -441,7 +474,7 @@
                 <b v-for="platform in videoPlatforms" :key="platform.key">→ {{ platform.name }}</b>
               </div>
             </div>
-            <el-button text @click="clearSelectedVideo">移除</el-button>
+            <el-button text :disabled="dispatching" @click="clearSelectedVideo">移除</el-button>
           </article>
           <div v-else class="asset-empty">
             <el-icon><VideoCamera /></el-icon>
@@ -449,7 +482,7 @@
               <strong>视频渠道还缺一段视频</strong>
               <span>MP4 / MOV / MKV / WEBM，最大 150MB；同一视频可复用到本次所有视频渠道。</span>
             </div>
-            <el-button plain :icon="Upload" :loading="videoUploading" @click="openVideoPicker">
+            <el-button plain :icon="Upload" :loading="videoUploading" :disabled="dispatching" @click="openVideoPicker">
               {{ videoUploading ? `${videoUploadProgress}%` : '选择视频' }}
             </el-button>
           </div>
@@ -482,6 +515,7 @@
           <el-switch
             v-model="scheduleEnabled"
             aria-label="启用定时发布"
+            :disabled="dispatching"
             @change="handleScheduleToggle"
           />
           <el-date-picker
@@ -490,10 +524,11 @@
             type="datetime"
             value-format="YYYY-MM-DDTHH:mm:ss"
             placeholder="选择发布时间"
+            :disabled="dispatching"
             :disabled-date="disablePastDate"
           />
           <div v-if="scheduleEnabled && demoAvailable" class="schedule-auto-execute">
-            <el-checkbox v-model="autoExecuteAtDue">到点自动执行</el-checkbox>
+            <el-checkbox v-model="autoExecuteAtDue" :disabled="dispatching">到点自动执行</el-checkbox>
             <p>
               仅适用于 Demo：到点后自动走演示状态链，不会访问任何媒体平台。
             </p>
@@ -737,7 +772,7 @@
             >
               确认真实发布
             </el-button>
-            <el-button v-if="job.url" text :icon="Link" @click="openResult(job.url)">查看结果</el-button>
+            <el-button v-if="hasSafeResultUrl(job)" text :icon="Link" @click="openResult(job)">查看结果</el-button>
             <span v-if="!job.url && !['failed', 'need_action', 'processing', 'queued'].includes(job.status)" class="no-action">无需操作</span>
           </div>
         </article>
@@ -768,7 +803,25 @@
       <div class="reconciliation-form">
         <div class="reconciliation-warning" role="alert">
           <strong>{{ reconciliationJobLabel }}</strong>
-          <p>先在平台创作者后台按标题、发布时间和账号核对。此操作只收口本地状态，不会再次点击发布。</p>
+          <p>核验账号：{{ reconciliationAccountLabel }}。有已验证作品链接时可直接打开目标作品；否则进入作品管理页按标题和发布时间检查。此操作只收口本地状态，不会再次点击发布。</p>
+        </div>
+        <div v-if="reconciliationRecordedPublicUrl || reconciliationDestination" class="reconciliation-links">
+          <el-button
+            v-if="reconciliationRecordedPublicUrl"
+            type="primary"
+            :icon="Link"
+            @click="openSafeResultUrl(reconciliationRecordedPublicUrl, reconciliationDialog.job?.platform)"
+          >
+            打开目标作品
+          </el-button>
+          <el-button
+            v-if="reconciliationDestination"
+            plain
+            :icon="Link"
+            @click="openReconciliationDestination"
+          >
+            打开{{ reconciliationDestination.label }}
+          </el-button>
         </div>
         <el-radio-group v-model="reconciliationDialog.decision" :disabled="reconciliationDialog.submitting">
           <el-radio-button value="published">后台确认已发布</el-radio-button>
@@ -786,14 +839,21 @@
           placeholder="例如：已检查全部作品、审核中、草稿箱，精确标题存在/不存在"
         />
         <template v-if="reconciliationDialog.decision === 'published'">
-          <label for="reconciliation-url">公开链接（可选）</label>
+          <label for="reconciliation-url">
+            公开链接（{{ reconciliationPublicUrlRequired ? '必填' : '该平台可留空' }}）
+          </label>
           <el-input
             id="reconciliation-url"
             v-model="reconciliationDialog.resultUrl"
             maxlength="2048"
             :disabled="reconciliationDialog.submitting"
-            placeholder="https://…；平台没有公链时可以留空"
+            :placeholder="reconciliationPublicUrlRequired
+              ? '填写当前平台的 HTTPS 公开作品链接'
+              : '该平台无稳定公链时可留空，以后台核验说明为证据'"
           />
+          <p v-if="reconciliationEnteredUrlInvalid" class="reconciliation-url-error" role="alert">
+            链接必须是当前平台的 HTTPS 公开作品页；创作者管理页不能作为已发布证据。
+          </p>
         </template>
         <el-checkbox
           v-model="reconciliationDialog.platformChecked"
@@ -840,6 +900,7 @@ import { publishApi } from '@/api/publish'
 import {
   countPublishCharacters,
   frequencyGuidanceLabel,
+  isPublishVariantReady,
   refreshEditableVariant
 } from '@/utils/publishPreflight'
 import {
@@ -847,6 +908,12 @@ import {
   normalizePublishOutcome,
   summarizePublishOutcomes
 } from '@/utils/publishOutcome'
+import {
+  isSafeExternalVerificationUrl,
+  isSafePublishedContentUrl,
+  isPublishedContentUrlRequired,
+  platformVerificationDestination
+} from '@/utils/platformVerification'
 
 const route = useRoute()
 const router = useRouter()
@@ -901,6 +968,7 @@ const scheduleEnabled = ref(false)
 const publishAt = ref('')
 const autoExecuteAtDue = ref(false)
 const dispatching = ref(false)
+const autoRepairing = ref(false)
 const imageInput = ref(null)
 const selectedImage = ref(null)
 const autoImage = ref(true)
@@ -986,16 +1054,9 @@ const demoAvailable = computed(() => (
 const citeabilityRequired = computed(() => (
   realPublishingAuthorized.value && !demoAvailable.value
 ))
-const platformDraftReadyForDispatch = draft => Boolean(
-  draft?.within_safe_limit === true
-  && draft?.title_within_safe_limit === true
-  && draft?.offline_preflight_current !== false
-  && draft?.offline_preflight_passed !== false
-  && (
-    !citeabilityRequired.value
-    || (draft?.citeability_current === true && draft?.citeability_passed === true)
-  )
-)
+const platformDraftReadyForDispatch = draft => isPublishVariantReady(draft, {
+  citeabilityRequired: citeabilityRequired.value
+})
 const platformCopiesReady = computed(() => (
   !preflightLoading.value
   && !preflightError.value
@@ -1003,14 +1064,34 @@ const platformCopiesReady = computed(() => (
     platformDraftReadyForDispatch(platformDrafts[platform.key])
   ))
 ))
-const citeabilityMessages = draft => {
-  const blocking = (draft?.citeability_blocking_issues || []).map(item => (
+const citeabilityHardBlocked = draft => Boolean(
+  citeabilityRequired.value
+  && draft?.citeability_current === true
+  && draft?.citeability_publish_gate_passed !== true
+)
+const citeabilityQualityAdvisory = draft => Boolean(
+  citeabilityRequired.value
+  && draft?.citeability_current === true
+  && draft?.citeability_publish_gate_passed === true
+  && draft?.citeability_passed !== true
+)
+const citeabilityStatusLabel = draft => {
+  if (!citeabilityRequired.value) {
+    return draft?.citeability_passed === true ? '质量线已达（仅供参考）' : '低于质量建议线（仅供参考）'
+  }
+  if (citeabilityHardBlocked(draft)) return '发布硬门禁未通过'
+  if (draft?.citeability_publish_gate_passed === true && draft?.citeability_passed !== true) {
+    return '可发布，建议先优化'
+  }
+  return draft?.citeability_passed === true ? '达到质量线' : '仅供参考'
+}
+const citeabilityBlockingMessages = draft => (
+  (draft?.citeability_blocking_issues || []).map(item => (
     typeof item === 'string' ? item : (item?.message || item?.code || '')
   ))
-  return [...blocking, ...(draft?.citeability_suggestions || [])]
     .map(item => String(item || '').trim())
     .filter(Boolean)
-}
+)
 const accountBindingRequired = computed(() => (
   realPublishingAuthorized.value && !demoAvailable.value
 ))
@@ -1071,7 +1152,7 @@ const dispatchBlockers = computed(() => {
   if (preflightLoading.value) add('preflight_running', '平台短版正在预检', 'platform')
   else if (preflightError.value) add('preflight_error', preflightError.value, 'platform')
   else if (selectedPlatforms.value.length && !platformCopiesReady.value) {
-    add('content_rules', '平台短版、离线规则或 AI 可引用性尚未通过', 'platform')
+    add('content_rules', '平台短版、离线规则或发布硬门禁尚未通过', 'platform')
   }
   if (!accountsReady.value) add('account', '请补齐或明确选择每个平台的可用账号', 'account')
   if (imageRequired.value && !selectedImage.value && !autoImage.value) {
@@ -1081,7 +1162,8 @@ const dispatchBlockers = computed(() => {
   if (scheduleEnabled.value && !publishAt.value) add('schedule', '请选择计划发布时间', 'schedule')
   if (imageUploading.value) add('image_upload', '图片仍在上传', 'image')
   if (videoUploading.value) add('video_upload', '视频仍在上传', 'video')
-  if (dispatching.value) add('dispatching', '任务正在创建，请等待本批次完成', 'top')
+  if (batchExecuting.value) add('batch_executing', '已有真实发布批次正在准备或执行，请等待本批次结束', 'top')
+  else if (dispatching.value) add('dispatching', '任务正在创建，请等待本批次完成', 'top')
   return blockers
 })
 
@@ -1098,6 +1180,7 @@ const dispatchTaskCount = computed(() => (
 const canDispatch = computed(() => dispatchBlockers.value.length === 0)
 
 const dispatchButtonLabel = computed(() => {
+  if (batchExecuting.value) return '真实发布批次执行中'
   if (platformsLoadError.value) return '发布能力未载入'
   if (capabilitiesLoaded.value && !platforms.value.some(item => item.task_creation_available === true)) {
     return realPublishingAuthorized.value ? '发布运行时未就绪' : '当前构建未开放发布'
@@ -1111,7 +1194,16 @@ const dispatchButtonLabel = computed(() => {
       platformDrafts[platform.key]?.within_safe_limit !== true
       || platformDrafts[platform.key]?.title_within_safe_limit !== true
     ))
-    return limitsInvalid ? '先将平台短版缩至安全线内' : '先通过 AI 可引用性检查'
+    if (limitsInvalid) return '先将平台短版缩至安全线内'
+    const offlineInvalid = boundedManifestPlatforms.value.some(platform => (
+      platformDrafts[platform.key]?.offline_preflight_current === false
+      || platformDrafts[platform.key]?.offline_preflight_passed === false
+    ))
+    if (offlineInvalid) return '先修复平台离线预检问题'
+    const citeabilityStale = boundedManifestPlatforms.value.some(platform => (
+      platformDrafts[platform.key]?.citeability_current !== true
+    ))
+    return citeabilityStale ? '等待 AI 可引用性检查' : '先修复发布硬门禁问题'
   }
   if (imageUploading.value) return '图片上传中'
   if (videoUploading.value) return '视频上传中'
@@ -1121,6 +1213,9 @@ const dispatchButtonLabel = computed(() => {
   if (scheduleEnabled.value && !publishAt.value) return '选择计划发布时间'
   if (scheduleEnabled.value && demoAvailable.value && autoExecuteAtDue.value) {
     return `创建 ${dispatchTaskCount.value} 个自动计划任务`
+  }
+  if (!scheduleEnabled.value && accountBindingRequired.value) {
+    return `确认并立即发布 ${dispatchTaskCount.value} 项`
   }
   return scheduleEnabled.value
     ? `创建 ${dispatchTaskCount.value} 个计划任务`
@@ -1152,6 +1247,34 @@ const reconciliationJobLabel = computed(() => {
   if (!job) return '发布任务'
   return `JOB-${String(job.job_id).padStart(5, '0')} · ${platformName(job.platform)} · ${job.article_title || `文章 #${job.article_id}`}`
 })
+const reconciliationAccountLabel = computed(() => (
+  reconciliationDialog.job?.account_name
+  || (reconciliationDialog.job?.account_id
+    ? `账号 ID ${reconciliationDialog.job.account_id}`
+    : '未记录账号')
+))
+const reconciliationDestination = computed(() => (
+  platformVerificationDestination(reconciliationDialog.job?.platform)
+))
+const reconciliationRecordedPublicUrl = computed(() => {
+  const job = reconciliationDialog.job
+  const url = String(job?.url || '').trim()
+  return isSafePublishedContentUrl(url, job?.platform) ? url : ''
+})
+const reconciliationEnteredUrlInvalid = computed(() => {
+  const job = reconciliationDialog.job
+  const url = reconciliationDialog.resultUrl.trim()
+  return Boolean(
+    reconciliationDialog.decision === 'published'
+    && (
+      (!url && reconciliationPublicUrlRequired.value)
+      || (url && !isSafePublishedContentUrl(url, job?.platform))
+    )
+  )
+})
+const reconciliationPublicUrlRequired = computed(() => (
+  isPublishedContentUrlRequired(reconciliationDialog.job?.platform)
+))
 const canSubmitReconciliation = computed(() => {
   const note = reconciliationDialog.note.trim()
   const url = reconciliationDialog.resultUrl.trim()
@@ -1166,8 +1289,8 @@ const canSubmitReconciliation = computed(() => {
     && note.length <= 500
     && (
       reconciliationDialog.decision === 'not_published'
-      || !url
-      || /^https?:\/\//i.test(url)
+      || (!url && !reconciliationPublicUrlRequired.value)
+      || isSafePublishedContentUrl(url, reconciliationDialog.job?.platform)
     )
   )
 })
@@ -1443,6 +1566,114 @@ const autoConfigureDispatch = async () => {
   }
 }
 
+const previewArticleVariants = async (articleId, overrides = null) => {
+  const platforms = [...selectedPlatforms.value]
+  const payload = { article_id: articleId, platforms }
+  if (overrides?.title != null) {
+    payload.title_overrides = Object.fromEntries(
+      platforms.map(platform => [platform, String(overrides.title)])
+    )
+  }
+  if (overrides?.content != null) {
+    payload.overrides = Object.fromEntries(
+      platforms.map(platform => [platform, String(overrides.content)])
+    )
+  }
+  const response = await publishApi.previewVariants(payload)
+  return (response.data?.variants || []).map(refreshEditableVariant)
+}
+
+const minimumCiteabilityScore = variants => {
+  const scores = variants
+    .map(variant => Number(variant?.citeability_score))
+    .filter(Number.isFinite)
+  return scores.length ? Math.min(...scores) : 0
+}
+
+const autoRepairSelectedArticles = async () => {
+  if (autoRepairing.value || !selectedArticleIds.value.length || !selectedPlatforms.value.length) return
+  autoRepairing.value = true
+  const repaired = []
+  const alreadyReady = []
+  const unresolved = []
+  try {
+    for (const articleId of selectedArticleIds.value) {
+      const article = articles.value.find(item => Number(item.id) === Number(articleId))
+      try {
+        const currentVariants = await previewArticleVariants(articleId)
+        const hardBlocked = currentVariants.some(variant => !platformDraftReadyForDispatch(variant))
+        const qualityAdvisory = currentVariants.some(variant => citeabilityQualityAdvisory(variant))
+        if (!hardBlocked && !qualityAdvisory) {
+          alreadyReady.push(article?.title || `文章 #${articleId}`)
+          continue
+        }
+
+        const optimization = await articleApi.optimizeArticle(articleId)
+        const optimized = optimization.data?.optimized || {}
+        if (!String(optimized.title || '').trim() || !String(optimized.content || '').trim()) {
+          throw new Error('调优模型没有返回完整标题和正文')
+        }
+        const candidateVariants = await previewArticleVariants(articleId, optimized)
+        const candidateBlocked = candidateVariants.some(variant => (
+          !platformDraftReadyForDispatch(variant)
+        ))
+        const currentMinimum = minimumCiteabilityScore(currentVariants)
+        const candidateMinimum = minimumCiteabilityScore(candidateVariants)
+        const clearedHardGate = hardBlocked && !candidateBlocked
+        if (candidateBlocked || (!clearedHardGate && candidateMinimum <= currentMinimum)) {
+          const blockingPlatforms = candidateVariants
+            .filter(variant => !platformDraftReadyForDispatch(variant))
+            .map(variant => platformName(variant.platform))
+          throw new Error(
+            blockingPlatforms.length
+              ? `${blockingPlatforms.join('、')}仍存在不可自动消除的证据或平台硬门禁`
+              : `调优后最低可引用性未提高（${currentMinimum} → ${candidateMinimum}）`
+          )
+        }
+
+        const saved = await articleApi.updateArticle(articleId, {
+          title: String(optimized.title).trim(),
+          summary: String(optimized.summary || '').trim(),
+          content: String(optimized.content).trim(),
+          tags: Array.isArray(optimized.tags) ? optimized.tags : (article?.tags || []),
+          status: article?.status === 'draft' ? 'draft' : 'ready'
+        })
+        const savedArticle = saved.data
+        if (savedArticle?.id) {
+          articles.value = articles.value.map(item => (
+            Number(item.id) === Number(savedArticle.id) ? savedArticle : item
+          ))
+        }
+        repaired.push(`${article?.title || `文章 #${articleId}`}（${currentMinimum} → ${candidateMinimum}）`)
+      } catch (error) {
+        unresolved.push(`${article?.title || `文章 #${articleId}`}：${batchFailureMessage(error)}`)
+      }
+    }
+
+    await refreshPublishPreflight({ preserveEdits: false })
+    if (repaired.length) {
+      ElMessage.success(`已自动优化并保存 ${repaired.length} 篇稿件，平台副本已重新生成`)
+    } else if (alreadyReady.length && !unresolved.length) {
+      ElMessage.success('平台副本已按最新长度规则重建；当前没有发布硬阻断')
+    }
+    if (unresolved.length) {
+      await ElMessageBox.alert(
+        h('div', { style: { lineHeight: '1.7' } }, [
+          h('p', { style: { margin: '0 0 8px' } }, '以下问题不能通过改写凭空解决，系统没有覆盖原稿：'),
+          h('ul', { style: { margin: 0, paddingLeft: '20px' } }, unresolved.map(message => (
+            h('li', { style: { margin: '4px 0' } }, message)
+          ))),
+          h('p', { style: { margin: '10px 0 0', color: '#985b16' } }, '若提示缺少真实来源，请先在品牌项目中补充可核验证据；软件不会伪造链接或数据。')
+        ]),
+        '一键修复已完成 · 仍有证据待补',
+        { confirmButtonText: '返回继续处理', type: 'warning' }
+      )
+    }
+  } finally {
+    autoRepairing.value = false
+  }
+}
+
 const requestPlatformLogin = async (platform, job = null) => {
   if (!platform?.key) return
   if (platform.login_available !== true) {
@@ -1701,18 +1932,28 @@ const clearSelectedVideo = () => {
   videoUploadProgress.value = 0
 }
 
-const resolveArticleDispatchDrafts = async articleId => {
+const resolveArticleDispatchDrafts = async (articleId, platformKeys = selectedPlatforms.value) => {
   if (Number(articleId) === Number(selectedArticleId.value)) {
-    return Object.fromEntries(selectedPlatforms.value.map(platform => [platform, platformDrafts[platform]]))
+    const drafts = Object.fromEntries(platformKeys.map(platform => [
+      platform,
+      platformDrafts[platform] ? { ...platformDrafts[platform] } : null
+    ]))
+    const invalid = platformKeys.filter(platform => (
+      !platformDraftReadyForDispatch(drafts[platform])
+    ))
+    if (invalid.length) {
+      throw new Error(`${invalid.map(platformName).join('、')}的平台短版预检未通过`)
+    }
+    return drafts
   }
   const response = await publishApi.previewVariants({
     article_id: articleId,
-    platforms: [...selectedPlatforms.value]
+    platforms: [...platformKeys]
   })
   const drafts = Object.fromEntries((response.data?.variants || []).map(variant => (
     [variant.platform, refreshEditableVariant(variant)]
   )))
-  const invalid = selectedPlatforms.value.filter(platform => (
+  const invalid = platformKeys.filter(platform => (
     !platformDraftReadyForDispatch(drafts[platform])
   ))
   if (invalid.length) {
@@ -1721,31 +1962,101 @@ const resolveArticleDispatchDrafts = async articleId => {
   return drafts
 }
 
+const openImageModelSettings = () => {
+  router.push({ path: '/settings', query: { role: 'image' } })
+}
+
+const preflightDispatchBatch = async (articleIds, platformKeys) => {
+  const results = await Promise.allSettled(articleIds.map(async articleId => ({
+    articleId,
+    drafts: await resolveArticleDispatchDrafts(articleId, platformKeys)
+  })))
+  const draftCache = new Map()
+  const failures = []
+  results.forEach((result, index) => {
+    const articleId = articleIds[index]
+    const article = articles.value.find(item => Number(item.id) === Number(articleId))
+    if (result.status === 'fulfilled') {
+      draftCache.set(Number(articleId), result.value.drafts)
+      return
+    }
+    failures.push(
+      `${article?.title || `文章 #${articleId}`}：${batchFailureMessage(result.reason)}`
+    )
+  })
+  return { draftCache, failures }
+}
+
 const dispatchArticle = async () => {
   if (!canDispatch.value) {
     ElMessage.warning(dispatchBlockerSummary.value)
     focusFirstBlocker()
     return
   }
+
+  const articleIds = [...selectedArticleIds.value]
+  const platformKeys = [...selectedPlatforms.value]
+  const taskCount = articleIds.length * platformKeys.length
+  const selectedNames = platformKeys.map(platformName).join('、')
+  const accountIds = Object.fromEntries(platformKeys.map(platform => (
+    [platform, selectedAccountIds[platform] || null]
+  )))
+  const imageSnapshot = selectedImage.value ? { ...selectedImage.value } : null
+  const videoSnapshot = selectedVideo.value ? { ...selectedVideo.value } : null
+  const autoImageSnapshot = autoImage.value
+  const publishAtSnapshot = scheduleEnabled.value ? publishAt.value : null
+  const executeImmediately = Boolean(
+    !demoAvailable.value && !scheduleEnabled.value && accountBindingRequired.value
+  )
+
+  dispatching.value = true
+  const { draftCache, failures: preflightFailures } = await preflightDispatchBatch(
+    articleIds,
+    platformKeys
+  )
+  if (preflightFailures.length) {
+    dispatching.value = false
+    await ElMessageBox.alert(
+      h('div', { style: { lineHeight: '1.7' } }, [
+        h('p', { style: { margin: '0 0 8px', fontWeight: '700' } },
+          `已预检 ${taskCount} 个“稿件 × 平台”组合，以下稿件存在发布硬阻断：`),
+        h('ul', { style: { margin: 0, paddingLeft: '20px' } }, preflightFailures.map(message => (
+          h('li', { style: { margin: '4px 0' } }, message)
+        ))),
+        h('p', { style: { margin: '10px 0 0', color: '#985b16' } },
+          '本批没有创建任何任务。修复后再点击一次发布，避免出现半批任务。')
+      ]),
+      '批次发布已阻止 · 未创建任务',
+      { confirmButtonText: '返回修复', type: 'error' }
+    )
+    return
+  }
+
   if (!demoAvailable.value) {
-    const selectedNames = manifestPlatforms.value.map(platform => platform.name).join('、')
     try {
       await ElMessageBox.confirm(
         h('div', { style: { lineHeight: '1.65' } }, [
-          h('p', { style: { margin: '0 0 8px' } }, `将用 ${selectedArticles.value.length} 篇稿件为 ${selectedNames} 创建 ${dispatchTaskCount.value} 个独立真实发布任务。创建任务本身不会绕过平台验证。`),
+          h('p', { style: { margin: '0 0 8px' } }, executeImmediately
+            ? `将用 ${articleIds.length} 篇稿件向 ${selectedNames} 创建并立即连续执行 ${taskCount} 个真实发布任务。`
+            : `将用 ${articleIds.length} 篇稿件为 ${selectedNames} 创建 ${taskCount} 个独立真实发布任务。`),
+          h('p', { style: { margin: '0 0 8px', color: '#267d78', fontWeight: '700' } },
+            `全批 ${taskCount} 个组合已完成预检并锁定平台副本；确认后不会再调用预检。`),
           h('p', { style: { margin: '0 0 8px', color: '#985b16', fontWeight: '700' } },
             '执行时可能弹出短信验证码、扫码、滑块或安全确认，请保持绑定手机和对应 App 可用。'),
           h('p', { style: { margin: 0, fontSize: '11px', color: '#6d6a61' } },
-            '每篇稿件都会独立执行平台字数、标题、来源与可引用性预检。同一账号严格串行；遇到验证、限流或审核异常时停止该账号后续执行。')
+            '这一次确认覆盖本批任务的创建和立即执行。同一账号严格串行，单个渠道执行失败不会拖住其他渠道，结果未知时不会自动重发。')
         ]),
-        '发布前检查 · 可能需要本人验证',
+        executeImmediately ? '最终确认 · 创建并连续真实发布' : '发布前检查 · 可能需要本人验证',
         {
-          confirmButtonText: `已核对，创建 ${dispatchTaskCount.value} 项`,
+          confirmButtonText: executeImmediately
+            ? `确认并发布 ${taskCount} 项`
+            : `已核对，创建 ${taskCount} 项`,
           cancelButtonText: '稍后再发',
           type: 'warning'
         }
       )
     } catch {
+      dispatching.value = false
       return
     }
   }
@@ -1753,7 +2064,7 @@ const dispatchArticle = async () => {
   if (scheduleEnabled.value && demoAvailable.value && autoExecuteAtDue.value) {
     try {
       await ElMessageBox.confirm(
-        `这将授权系统在 ${publishAt.value} 到达后自动执行 ${dispatchTaskCount.value} 个演示任务；不会访问真实平台。是否确认？`,
+        `这将授权系统在 ${publishAtSnapshot} 到达后自动执行 ${taskCount} 个演示任务；不会访问真实平台。是否确认？`,
         '确认定时演示任务',
         {
           confirmButtonText: '确认到点执行演示',
@@ -1764,45 +2075,41 @@ const dispatchArticle = async () => {
       )
       confirmedAutoExecute = true
     } catch (action) {
-      if (action !== 'cancel') return
+      if (action !== 'cancel') {
+        dispatching.value = false
+        return
+      }
     }
   }
-  dispatching.value = true
   let createdCount = 0
   let failedCount = 0
   let demoCount = 0
   const creationFailures = []
+  const createdRealJobs = []
 
-  for (const articleId of selectedArticleIds.value) {
+  for (const articleId of articleIds) {
     const article = articles.value.find(item => item.id === articleId)
-    let drafts
-    try {
-      drafts = await resolveArticleDispatchDrafts(articleId)
-    } catch (error) {
-      failedCount += selectedPlatforms.value.length
-      creationFailures.push(`${article?.title || `文章 #${articleId}`}：${batchFailureMessage(error)}`)
-      console.error(`文章 ${articleId} 平台预检失败:`, error)
-      continue
-    }
+    const drafts = draftCache.get(Number(articleId))
 
-    for (const platform of selectedPlatforms.value) {
+    for (const platform of platformKeys) {
       try {
         const capability = platforms.value.find(item => item.key === platform)
         const response = await publishApi.createJob({
           article_id: articleId,
           platform,
-          images: selectedImage.value ? [selectedImage.value.filename] : [],
-          video: capability?.requires_video ? (selectedVideo.value?.filename || '') : '',
-          auto_image: autoImage.value,
-          publish_at: scheduleEnabled.value ? publishAt.value : null,
+          images: imageSnapshot ? [imageSnapshot.filename] : [],
+          video: capability?.requires_video ? (videoSnapshot?.filename || '') : '',
+          auto_image: autoImageSnapshot,
+          publish_at: publishAtSnapshot,
           auto_execute: demoAvailable.value && confirmedAutoExecute,
-          account_id: selectedAccountIds[platform] || null,
+          account_id: accountIds[platform],
           publish_title: drafts[platform]?.editable_title ?? null,
           publish_content: drafts[platform]?.editable_content ?? null
         })
         let job = response.data
         createdCount += 1
         if (job.demo) demoCount += 1
+        else createdRealJobs.push(job)
         if (job.demo && job.status === 'queued') {
           const executed = await publishApi.executeDemoJob(job.job_id)
           job = executed.data
@@ -1817,7 +2124,12 @@ const dispatchArticle = async () => {
 
   await fetchJobs(true)
   dispatching.value = false
-  if (createdCount && !failedCount) {
+  if (executeImmediately && createdRealJobs.length) {
+    await executeRealBatch({
+      jobsOverride: createdRealJobs,
+      skipConfirmation: true
+    })
+  } else if (createdCount && !failedCount) {
     ElMessage.success(
       demoCount
         ? `${createdCount} 个演示任务已完成，未访问真实平台`
@@ -1860,17 +2172,22 @@ const batchFailureMessage = error => (
   || '请求未完成，请核对本地任务状态和平台后台'
 )
 
-const executeRealBatch = async () => {
+const executeRealBatch = async ({ jobsOverride = null, skipConfirmation = false } = {}) => {
   if (batchExecuting.value) return
-  const listedJobs = [...batchJobsToRun.value]
+  const listedJobs = Array.isArray(jobsOverride)
+    ? [...jobsOverride]
+    : [...batchJobsToRun.value]
   if (!listedJobs.length) {
     ElMessage.warning('当前页面没有可连续发布的排队任务')
     return
   }
 
+  batchExecuting.value = true
+
   const accountsLoaded = await fetchAccounts()
   if (!accountsLoaded) {
     ElMessage.error('账号清单未载入，批次没有开始')
+    batchExecuting.value = false
     return
   }
 
@@ -1911,45 +2228,48 @@ const executeRealBatch = async () => {
   if (!preparedJobs.length) {
     await fetchJobs(true)
     ElMessage.error(`批次没有开始：${preparationIssues.map(item => item.reason).join('；')}`)
+    batchExecuting.value = false
     return
   }
 
-  const confirmationPhrase = `批量发布 ${preparedJobs.length} 项`
-  const taskLines = preparedJobs.map(job => h(
-    'li',
-    { style: { margin: '3px 0' } },
-    `JOB-${String(job.job_id).padStart(5, '0')} · ${platformName(job.platform)} / ${job.boundAccount.account_name} · ${job.publication_snapshot.title}`
-  ))
-  try {
-    await ElMessageBox.prompt(
-      h('div', { style: { color: '#423b31', lineHeight: '1.6' } }, [
-        h('p', { style: { margin: '0 0 8px', fontWeight: '700' } },
-          `将按列表顺序真实执行 ${preparedJobs.length} 个任务。`),
-        h('ul', { style: { maxHeight: '180px', overflow: 'auto', margin: '0 0 8px', paddingLeft: '20px', fontSize: '11px' } }, taskLines),
-        preparationIssues.length
-          ? h('p', { style: { margin: '7px 0', color: '#985b16' } },
-              `${preparationIssues.length} 个已变化任务将跳过，不会访问平台。`)
-          : null,
-        h('p', { style: { margin: '8px 0 0', color: '#985b16', fontWeight: '700' } },
-          '每项独立执行：普通单项失败不拖住其他账号，也不会自动重试；若识别到封禁、限制、登录失效或本人验证，则冻结该账号余下任务。平台可能弹出本人验证窗口。'),
-        h('p', { style: { margin: '8px 0 0' } }, `请输入“${confirmationPhrase}”继续。`)
-      ]),
-      '强确认 · 连续真实发布',
-      {
-        confirmButtonText: `连续执行 ${preparedJobs.length} 项`,
-        cancelButtonText: '取消',
-        type: 'warning',
-        distinguishCancelAndClose: true,
-        inputPlaceholder: confirmationPhrase,
-        inputValidator: value => String(value || '').trim() === confirmationPhrase
-          || `请输入“${confirmationPhrase}”`
-      }
-    )
-  } catch {
-    return
+  if (!skipConfirmation) {
+    const confirmationPhrase = `批量发布 ${preparedJobs.length} 项`
+    const taskLines = preparedJobs.map(job => h(
+      'li',
+      { style: { margin: '3px 0' } },
+      `JOB-${String(job.job_id).padStart(5, '0')} · ${platformName(job.platform)} / ${job.boundAccount.account_name} · ${job.publication_snapshot.title}`
+    ))
+    try {
+      await ElMessageBox.prompt(
+        h('div', { style: { color: '#423b31', lineHeight: '1.6' } }, [
+          h('p', { style: { margin: '0 0 8px', fontWeight: '700' } },
+            `将按列表顺序真实执行 ${preparedJobs.length} 个任务。`),
+          h('ul', { style: { maxHeight: '180px', overflow: 'auto', margin: '0 0 8px', paddingLeft: '20px', fontSize: '11px' } }, taskLines),
+          preparationIssues.length
+            ? h('p', { style: { margin: '7px 0', color: '#985b16' } },
+                `${preparationIssues.length} 个已变化任务将跳过，不会访问平台。`)
+            : null,
+          h('p', { style: { margin: '8px 0 0', color: '#985b16', fontWeight: '700' } },
+            '每项独立执行：普通单项失败不拖住其他账号，也不会自动重试；若识别到封禁、限制、登录失效或本人验证，则冻结该账号余下任务。平台可能弹出本人验证窗口。'),
+          h('p', { style: { margin: '8px 0 0' } }, `请输入“${confirmationPhrase}”继续。`)
+        ]),
+        '强确认 · 连续真实发布',
+        {
+          confirmButtonText: `连续执行 ${preparedJobs.length} 项`,
+          cancelButtonText: '取消',
+          type: 'warning',
+          distinguishCancelAndClose: true,
+          inputPlaceholder: confirmationPhrase,
+          inputValidator: value => String(value || '').trim() === confirmationPhrase
+            || `请输入“${confirmationPhrase}”`
+        }
+      )
+    } catch {
+      batchExecuting.value = false
+      return
+    }
   }
 
-  batchExecuting.value = true
   const outcomes = []
   try {
     for (const job of preparedJobs) {
@@ -2292,7 +2612,9 @@ const openReconciliation = async job => {
     reconciliationDialog.job = current
     reconciliationDialog.decision = 'published'
     reconciliationDialog.note = ''
-    reconciliationDialog.resultUrl = ''
+    reconciliationDialog.resultUrl = isSafePublishedContentUrl(current?.url, current?.platform)
+      ? String(current.url).trim()
+      : ''
     reconciliationDialog.platformChecked = false
     reconciliationDialog.executionStoppedChecked = false
     reconciliationDialog.visible = true
@@ -2302,6 +2624,25 @@ const openReconciliation = async job => {
   } finally {
     markJobBusy(job.job_id, false)
   }
+}
+
+const openReconciliationDestination = () => {
+  const destination = reconciliationDestination.value
+  const platform = reconciliationDialog.job?.platform
+  if (!destination || !isSafeExternalVerificationUrl(destination.url, platform)) {
+    ElMessage.error('该平台暂未提供可信的作品管理入口')
+    return
+  }
+  window.open(destination.url, '_blank', 'noopener,noreferrer')
+}
+
+const openSafeResultUrl = (value, platform) => {
+  const url = String(value || '').trim()
+  if (!isSafePublishedContentUrl(url, platform)) {
+    ElMessage.error('该链接不是当前平台的可验证公开作品页')
+    return
+  }
+  window.open(url, '_blank', 'noopener,noreferrer')
 }
 
 const submitReconciliation = async () => {
@@ -2445,9 +2786,9 @@ const formatDate = (value, assumeUtc = true) => {
   }).format(date)
 }
 
-const openResult = (url) => {
-  if (/^https?:\/\//i.test(url)) window.open(url, '_blank', 'noopener,noreferrer')
-}
+const hasSafeResultUrl = job => isSafePublishedContentUrl(job?.url, job?.platform)
+
+const openResult = job => openSafeResultUrl(job?.url, job?.platform)
 
 const clearJobPollTimer = () => {
   if (pollTimer) window.clearTimeout(pollTimer)
@@ -2938,7 +3279,7 @@ onBeforeUnmount(() => {
 
 .platform-option {
   position: relative;
-  min-height: 142px;
+  min-height: 184px;
   padding: 13px 11px;
   border: 1px solid var(--rule);
   border-radius: 3px;
@@ -2979,6 +3320,19 @@ onBeforeUnmount(() => {
     font-size: 9px;
     font-style: normal;
     line-height: 1.45;
+  }
+  .platform-cost,
+  .platform-cost-link {
+    display: block;
+    margin-top: 7px;
+    color: #61777a;
+    font-size: 8px;
+    line-height: 1.45;
+  }
+  .platform-cost-link {
+    margin-top: 2px;
+    color: #397976;
+    font-weight: 700;
   }
   > i {
     display: inline-block;
@@ -3074,6 +3428,7 @@ onBeforeUnmount(() => {
 
   span { color: var(--muted); }
   strong { color: #267d78; white-space: nowrap; }
+  .quality-warning { color: #9a6817; }
   .over-limit { color: var(--danger); }
 }
 
@@ -3122,6 +3477,14 @@ onBeforeUnmount(() => {
 
     strong,
     li { color: #a44d48; }
+  }
+
+  &.attention {
+    border-color: #d8bf86;
+    background: #fff9ec;
+
+    strong,
+    li { color: #8b641f; }
   }
 }
 
@@ -3275,6 +3638,29 @@ onBeforeUnmount(() => {
 }
 
 .asset-auto { background: #f3faf8; }
+
+.image-model-disclosure {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: center;
+  color: #657a7c;
+  font-size: 9px;
+  line-height: 1.5;
+
+  button {
+    padding: 0;
+    border: 0;
+    border-bottom: 1px solid currentColor;
+    background: transparent;
+    color: #287d79;
+    cursor: pointer;
+    font: inherit;
+    font-weight: 700;
+  }
+
+  button:focus-visible { outline: 2px solid rgba(57, 184, 178, 0.35); outline-offset: 2px; }
+}
 
 .asset-button-pair {
   display: flex !important;
@@ -3689,6 +4075,21 @@ onBeforeUnmount(() => {
 
   strong { color: #50483e; font-size: 12px; }
   p { margin: 6px 0 0; color: #756d62; font-size: 11px; line-height: 1.6; }
+}
+
+.reconciliation-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+
+  :deep(.el-button) { margin-left: 0; }
+}
+
+.reconciliation-url-error {
+  margin: -7px 0 0;
+  color: var(--danger);
+  font-size: 10px;
+  line-height: 1.5;
 }
 
 .reconciliation-next-step {

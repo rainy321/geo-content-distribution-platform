@@ -46,7 +46,7 @@ class PublishReconcileApiTests(unittest.TestCase):
         app.config["DATABASE_PATH"] = self.original_database
         self.temp_dir.cleanup()
 
-    def _job(self, status="awaiting_reconcile"):
+    def _job(self, status="awaiting_reconcile", *, platform="zhihu"):
         # Each synthetic case represents an independently prepared dispatch.
         with closing(sqlite3.connect(self.db_path)) as conn:
             with conn:
@@ -54,12 +54,13 @@ class PublishReconcileApiTests(unittest.TestCase):
                     "UPDATE articles SET status = 'ready' WHERE id = ?",
                     (self.article_id,),
                 )
-        job = create_publish_job(
-            self.db_path,
-            article_id=self.article_id,
-            platform="zhihu",
-            account_id=self.account_id,
-        )
+        create_kwargs = {
+            "article_id": self.article_id,
+            "platform": platform,
+        }
+        if platform == "zhihu":
+            create_kwargs["account_id"] = self.account_id
+        job = create_publish_job(self.db_path, **create_kwargs)
         if status != "queued":
             job = transition_publish_job(
                 self.db_path,
@@ -214,9 +215,28 @@ class PublishReconcileApiTests(unittest.TestCase):
 
     def test_validates_url_and_disallows_url_for_not_published(self):
         invalid_url_job = self._job()
-        invalid_url = self.client.post(
+        invalid_urls = (
+            "javascript:alert(1)",
+            "http://zhuanlan.zhihu.com/p/123",
+            "https://user@zhuanlan.zhihu.com/p/123",
+            "https://zhuanlan.zhihu.com:444/p/123",
+            "https://www.zhihu.com/signin",
+            "https://www.toutiao.com/article/123/",
+        )
+        for result_url in invalid_urls:
+            with self.subTest(result_url=result_url):
+                invalid_url = self.client.post(
+                    f"/api/publish/jobs/{invalid_url_job['id']}/reconcile",
+                    json=self._payload(
+                        invalid_url_job,
+                        result_url=result_url,
+                    ),
+                )
+                self.assertEqual(invalid_url.status_code, 400)
+
+        missing_url = self.client.post(
             f"/api/publish/jobs/{invalid_url_job['id']}/reconcile",
-            json=self._payload(invalid_url_job, result_url="javascript:alert(1)"),
+            json=self._payload(invalid_url_job),
         )
         not_published_job = self._job()
         impossible = self.client.post(
@@ -228,8 +248,24 @@ class PublishReconcileApiTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(invalid_url.status_code, 400)
+        self.assertEqual(missing_url.status_code, 400)
         self.assertEqual(impossible.status_code, 400)
+
+    def test_channels_can_reconcile_with_note_and_no_public_url(self):
+        job = self._job(platform="channels")
+
+        response = self.client.post(
+            f"/api/publish/jobs/{job['id']}/reconcile",
+            json=self._payload(
+                job,
+                verification_note="视频号后台精确标题与发布时间已核验",
+            ),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()["data"]
+        self.assertEqual(payload["status"], "success")
+        self.assertEqual(payload["url"], "")
 
 
 if __name__ == "__main__":

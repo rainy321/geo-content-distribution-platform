@@ -19,8 +19,10 @@ from services.geo_article_compiler_service import (
     AI_CITEABILITY_SCORE_VERSION,
     score_ai_citeability,
 )
-from services.geo_score_service import score_geo_content
+from services.geo_score_service import GEO_SCORE_VERSION, score_geo_content
+from services.target_length_score_profile import TARGET_LENGTH_SCORE_PROFILE_VERSION
 from services.platform_capability_service import list_platform_capabilities
+from services.publish_preflight_service import filter_sources_for_outbound_copy
 
 
 GEO_DIAGNOSTIC_VERSION = "geo-commercial-diagnostic-1.3.0"
@@ -160,13 +162,17 @@ def diagnose_geo_readiness(
 
         article_rows = conn.execute(
             """
-            SELECT id, geo_score, geo_analysis
+            SELECT id, title, summary, content, geo_analysis
             FROM articles
             WHERE project_id = ?
             ORDER BY id
             """,
             (normalized_project_id,),
         ).fetchall()
+        articles = _recompute_project_article_scores(
+            project=dict(project),
+            articles=[dict(row) for row in article_rows],
+        )
         visibility_row = conn.execute(
             """
             SELECT id, result_json, algorithm_version, created_at
@@ -181,7 +187,7 @@ def diagnose_geo_readiness(
 
         project_result = _diagnose_project(
             project=dict(project),
-            articles=[dict(row) for row in article_rows],
+            articles=articles,
             visibility=visibility,
             visibility_row=dict(visibility_row) if visibility_row else None,
         )
@@ -195,6 +201,7 @@ def diagnose_geo_readiness(
                 # safe audit fingerprint by itself.
                 "project_inputs_sha256": _digest_json(
                     {
+                        "name": str(project["name"] or "").strip(),
                         "product": str(project["product"] or "").strip(),
                         "industry": str(project["industry"] or "").strip(),
                         "description": str(project["description"] or "").strip(),
@@ -206,13 +213,17 @@ def diagnose_geo_readiness(
                 "articles": [
                     {
                         "id": int(row["id"]),
-                        "geo_score": int(row["geo_score"] or 0),
-                        "geo_analysis_sha256": _sha256_text(
-                            str(row["geo_analysis"] or "")
-                        ),
+                        "title_sha256": _sha256_text(str(row["title"] or "")),
+                        "summary_sha256": _sha256_text(str(row["summary"] or "")),
+                        "content_sha256": _sha256_text(str(row["content"] or "")),
+                        "score_context": dict(row["score_context"]),
+                        "recomputed_geo_score": int(row["recomputed_geo_score"]),
+                        "score_version": str(row["score_version"]),
                     }
-                    for row in article_rows
+                    for row in articles
                 ],
+                "score_basis": "current_rules_recomputed",
+                "score_version": GEO_SCORE_VERSION,
                 "visibility_run_id": visibility_row["id"] if visibility_row else None,
                 "visibility_algorithm_version": (
                     visibility_row["algorithm_version"] if visibility_row else None
@@ -228,6 +239,26 @@ def diagnose_geo_readiness(
             content_title = article["title"] if article is not None else title
             content_body = article["content"] if article is not None else content
             content_summary = article["summary"] if article is not None else ""
+            if article is not None:
+                citeability_sources, evidence_source_summary = (
+                    _bound_generation_sources_for_diagnostic(
+                        conn,
+                        article_id=int(article["id"]),
+                        project_id=normalized_project_id,
+                        content=str(content_body),
+                    )
+                )
+            else:
+                citeability_sources = []
+                evidence_source_summary = _empty_evidence_source_summary(
+                    receipt_status="ad_hoc_no_receipt"
+                )
+            stored_length_context = (
+                _stored_score_length_context(article["geo_analysis"])
+                if article is not None
+                else {}
+            )
+            target_length = stored_length_context.get("effective_target_length")
             result = _diagnose_content(
                 project=dict(project),
                 title=str(content_title),
@@ -236,6 +267,13 @@ def diagnose_geo_readiness(
                 project_result=project_result,
                 source_type=source_type,
                 article_id=normalized_article_id,
+                target_length=target_length,
+                requested_target_length=stored_length_context.get(
+                    "requested_target_length"
+                ),
+                length_source=stored_length_context.get("source"),
+                sources=citeability_sources,
+                evidence_source_summary=evidence_source_summary,
             )
             digest_payload = {
                 "project_id": normalized_project_id,
@@ -254,6 +292,8 @@ def diagnose_geo_readiness(
                         "website": str(project["website"] or "").strip(),
                         "keywords": _decode_string_list(project["keywords"]),
                         "project_readiness_score": project_result.get("score"),
+                        "target_length": target_length,
+                        "evidence_source_summary": evidence_source_summary,
                     }
                 ),
             }
@@ -377,7 +417,8 @@ def _diagnose_project(
     )
     competition_score = min(100, round(len(competitors) / 3 * 100))
     article_scores = [
-        max(0, min(100, int(row.get("geo_score") or 0))) for row in articles
+        max(0, min(100, int(row.get("recomputed_geo_score") or 0)))
+        for row in articles
     ]
     average_geo_score = round(sum(article_scores) / len(article_scores), 1) if article_scores else 0.0
     content_readiness_score = round(
@@ -449,6 +490,8 @@ def _diagnose_project(
         baseline={
             "article_count": len(articles),
             "average_geo_score": average_geo_score,
+            "score_basis": "current_rules_recomputed",
+            "score_version": GEO_SCORE_VERSION,
             "latest_visibility_run_id": int(visibility_row["id"]) if visibility_row else None,
             "latest_visibility_created_at": visibility_row["created_at"] if visibility_row else None,
         },
@@ -460,6 +503,7 @@ def _diagnose_project(
         visibility_summary=visibility_summary,
         visibility_row=visibility_row,
     )
+    result["length_profile_distribution"] = _length_profile_distribution(articles)
     return result
 
 
@@ -472,12 +516,20 @@ def _diagnose_content(
     project_result: Mapping[str, Any],
     source_type: str,
     article_id: int | None,
+    target_length: int | None,
+    requested_target_length: int | None,
+    length_source: str | None,
+    sources: list[Any],
+    evidence_source_summary: Mapping[str, Any],
 ) -> dict[str, Any]:
     score_result = score_geo_content(
         title=title,
         content=content,
         brand=str(project.get("name") or "").strip(),
         keywords=_decode_string_list(project.get("keywords")),
+        target_length=target_length,
+        requested_target_length=requested_target_length,
+        source=length_source,
     )
     citeability = score_ai_citeability(
         title=title,
@@ -487,15 +539,21 @@ def _diagnose_content(
         product=str(project.get("product") or "").strip(),
         website=str(project.get("website") or "").strip(),
         keywords=_decode_string_list(project.get("keywords")),
-        sources=(),
+        sources=sources,
+        target_length=target_length,
+        requested_target_length=requested_target_length,
+        source=length_source,
     )
     dimensions = [
-        _dimension(key, _content_dimension_label(key), int(score_result["dimensions"].get(key, 0)), {
+        _dimension(key, _content_dimension_label(key), score_result["dimensions"].get(key), {
             "weight": CONTENT_DIMENSION_WEIGHTS[key],
         })
         for key in CONTENT_DIMENSION_WEIGHTS
     ]
     citeability_passed = bool(citeability.get("passed"))
+    publish_gate_passed = bool(
+        citeability.get("publish_gate_passed", citeability_passed)
+    )
     gaps = _sort_dedupe_gaps(
         [*_content_gaps(score_result), *_citeability_gaps(citeability)]
     )
@@ -512,7 +570,7 @@ def _diagnose_content(
         gaps=gaps,
         algorithm_versions={
             "diagnostic": GEO_DIAGNOSTIC_VERSION,
-            "content_score": "geo-score-mvp-rules-1.0.0",
+            "content_score": GEO_SCORE_VERSION,
             "ai_citeability": AI_CITEABILITY_SCORE_VERSION,
             "channel_fit": CHANNEL_RECOMMENDATION_VERSION,
         },
@@ -523,10 +581,12 @@ def _diagnose_content(
             "project_readiness_score": project_result.get("score"),
             "ai_citeability_score": citeability["score"],
             "ai_citeability_passed": citeability_passed,
+            "publish_gate_passed": publish_gate_passed,
+            "evidence_source_summary": dict(evidence_source_summary),
         },
     )
-    result["publish_ready"] = citeability_passed
-    result["readiness_status"] = "ready" if citeability_passed else "blocked"
+    result["publish_ready"] = publish_gate_passed
+    result["readiness_status"] = "ready" if publish_gate_passed else "blocked"
     success_definition = result["measurement_plan"]["success_definition"]
     success_definition.update(
         {
@@ -540,7 +600,7 @@ def _diagnose_content(
         <= int(success_definition["p0_gap_count"]),
         "ai_citeability_score": int(citeability["score"]),
         "ai_citeability_passed": citeability_passed,
-        "publish_ready": citeability_passed,
+        "publish_ready": publish_gate_passed,
         "success_definition_met": bool(
             legacy_score >= int(success_definition["score_at_least"])
             and result["gap_counts"]["P0"]
@@ -549,10 +609,12 @@ def _diagnose_content(
         ),
     }
     result["score_suggestions"] = list(score_result.get("suggestions") or [])
+    result["length_profile"] = dict(score_result.get("length_profile") or {})
     result["citeability"] = citeability
+    result["evidence_source_summary"] = dict(evidence_source_summary)
     result["channel_strategy"] = _content_channel_strategy(
         project_result.get("channel_strategy"),
-        publish_ready=citeability_passed,
+        publish_ready=publish_gate_passed,
         citeability_score=int(citeability["score"]),
     )
     return result
@@ -953,6 +1015,8 @@ def _content_gaps(score_result: Mapping[str, Any]) -> list[dict[str, Any]]:
     }
     gaps = []
     for key, score in score_result.get("dimensions", {}).items():
+        if score is None:
+            continue
         numeric_score = int(score or 0)
         if numeric_score >= 80:
             continue
@@ -1020,15 +1084,31 @@ def _visibility_score(summary: Mapping[str, Any]) -> int:
     return round((sample * 25 + mention * 30 + owned * 20 + sov * 15 + confidence_score * 10))
 
 
-def _dimension(key: str, label: str, score: int, evidence: Mapping[str, Any]) -> dict[str, Any]:
-    score = max(0, min(100, int(score)))
+def _dimension(
+    key: str,
+    label: str,
+    score: int | None,
+    evidence: Mapping[str, Any],
+) -> dict[str, Any]:
     weight = PROJECT_DIMENSION_WEIGHTS.get(key, CONTENT_DIMENSION_WEIGHTS.get(key, 0))
+    if score is None:
+        return {
+            "key": key,
+            "label": label,
+            "score": None,
+            "weight": weight,
+            "status": "not_applicable",
+            "applicable": False,
+            "evidence": {**dict(evidence), "applicable": False},
+        }
+    score = max(0, min(100, int(score)))
     return {
         "key": key,
         "label": label,
         "score": score,
         "weight": weight,
         "status": "ready" if score >= 80 else "attention" if score >= 50 else "critical",
+        "applicable": True,
         "evidence": dict(evidence),
     }
 
@@ -1056,7 +1136,7 @@ def _algorithm_versions(visibility: Mapping[str, Any]) -> dict[str, Any]:
     versions = visibility.get("algorithm_versions")
     return {
         "diagnostic": GEO_DIAGNOSTIC_VERSION,
-        "content_score": "geo-score-mvp-rules-1.0.0",
+        "content_score": GEO_SCORE_VERSION,
         "channel_fit": CHANNEL_RECOMMENDATION_VERSION,
         "visibility_integration": (
             versions.get("integration")
@@ -1108,6 +1188,178 @@ def _decode_object(value: Any) -> dict[str, Any]:
     except (TypeError, json.JSONDecodeError):
         return {}
     return dict(parsed) if isinstance(parsed, Mapping) else {}
+
+
+def _empty_evidence_source_summary(*, receipt_status: str) -> dict[str, Any]:
+    return {
+        "generation_run_id": None,
+        "receipt_status": receipt_status,
+        "provided_count": 0,
+        "matched_count": 0,
+        "visible_url_count": 0,
+        "policy": "structured_claim_requires_url_in_exact_outbound_copy",
+        "matched_sources_sha256": _sha256_text(_encode_json([])),
+    }
+
+
+def _bound_generation_sources_for_diagnostic(
+    connection: sqlite3.Connection,
+    *,
+    article_id: int,
+    project_id: int,
+    content: str,
+) -> tuple[list[Any], dict[str, Any]]:
+    """Read only the succeeded immutable receipt bound to this article.
+
+    The run result remains the source of structured claims, while the shared
+    outbound-copy filter requires the corresponding public URL to remain in
+    the article body.  No model or network request is made here.
+    """
+
+    row = connection.execute(
+        """
+        SELECT id, status, result_payload
+        FROM content_generation_runs
+        WHERE article_id = ? AND project_id = ?
+        ORDER BY id DESC
+        LIMIT 1
+        """,
+        (article_id, project_id),
+    ).fetchone()
+    if row is None:
+        return [], _empty_evidence_source_summary(receipt_status="not_bound")
+
+    run_id = int(row["id"])
+    status = str(row["status"] or "unknown")
+    if status != "succeeded":
+        summary = _empty_evidence_source_summary(receipt_status=status)
+        summary["generation_run_id"] = run_id
+        return [], summary
+
+    result_payload = _decode_object(row["result_payload"])
+    raw_sources = result_payload.get("sources")
+    receipt_sources = raw_sources if isinstance(raw_sources, list) else []
+    matched_sources, filter_summary = filter_sources_for_outbound_copy(
+        receipt_sources,
+        content,
+    )
+    summary = {
+        "generation_run_id": run_id,
+        "receipt_status": status,
+        **filter_summary,
+        "matched_sources_sha256": _sha256_text(_encode_json(matched_sources)),
+    }
+    return matched_sources, summary
+
+
+def _stored_score_length_context(value: Any) -> dict[str, Any]:
+    analysis = _decode_object(value)
+    profile = analysis.get("length_profile")
+    if not isinstance(profile, Mapping):
+        return {}
+
+    def normalize(raw: Any) -> int | None:
+        if isinstance(raw, bool):
+            return None
+        try:
+            target = int(raw)
+        except (TypeError, ValueError):
+            return None
+        return target if 200 <= target <= 3000 else None
+
+    requested = normalize(
+        profile.get("requested_target_length", profile.get("target_length"))
+    )
+    effective = normalize(
+        profile.get("effective_target_length", profile.get("target_length"))
+    )
+    return {
+        "requested_target_length": requested,
+        "effective_target_length": effective,
+        "source": str(profile.get("source") or "explicit"),
+    }
+
+
+def _recompute_project_article_scores(
+    *,
+    project: Mapping[str, Any],
+    articles: list[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    brand = str(project.get("name") or "").strip()
+    keywords = _decode_string_list(project.get("keywords"))
+    recomputed: list[dict[str, Any]] = []
+    for article in articles:
+        score_context = _stored_score_length_context(article.get("geo_analysis"))
+        score_result = score_geo_content(
+            title=str(article.get("title") or ""),
+            content=str(article.get("content") or ""),
+            brand=brand,
+            keywords=keywords,
+            target_length=score_context.get("effective_target_length"),
+            requested_target_length=score_context.get("requested_target_length"),
+            source=score_context.get("source"),
+        )
+        recomputed.append(
+            {
+                **dict(article),
+                "score_context": score_context,
+                "recomputed_geo_score": int(score_result["score"]),
+                "score_version": str(score_result.get("version") or GEO_SCORE_VERSION),
+            }
+        )
+    return recomputed
+
+
+def _length_profile_distribution(
+    articles: list[Mapping[str, Any]],
+) -> dict[str, Any]:
+    labels = {
+        "legacy": "兼容长文规则",
+        "compact": "精简稿（200–400字）",
+        "short": "短稿（401–799字）",
+        "standard": "标准稿（800–1199字）",
+        "long": "长稿（1200–3000字）",
+        "unknown": "未记录长度档位",
+    }
+    buckets: dict[str, dict[str, Any]] = {}
+    for article in articles:
+        analysis = _decode_object(article.get("geo_analysis"))
+        profile = analysis.get("length_profile")
+        key = (
+            str(profile.get("key") or "").strip().lower()
+            if isinstance(profile, Mapping)
+            else ""
+        )
+        if key not in labels:
+            key = "unknown"
+        bucket = buckets.setdefault(
+            key,
+            {"key": key, "label": labels[key], "count": 0, "target_lengths": set()},
+        )
+        bucket["count"] += 1
+        target = _stored_score_length_context(analysis).get(
+            "requested_target_length"
+        )
+        if target is not None:
+            bucket["target_lengths"].add(target)
+
+    ordered_keys = ["compact", "short", "standard", "long", "legacy", "unknown"]
+    profiles = [
+        {
+            **{name: value for name, value in buckets[key].items() if name != "target_lengths"},
+            "target_lengths": sorted(buckets[key]["target_lengths"]),
+        }
+        for key in ordered_keys
+        if key in buckets
+    ]
+    known_keys = {item["key"] for item in profiles if item["key"] != "unknown"}
+    return {
+        "version": TARGET_LENGTH_SCORE_PROFILE_VERSION,
+        "total_articles": len(articles),
+        "profiles": profiles,
+        "mixed_profiles": len(known_keys) > 1,
+        "comparison_policy": "长度档位会改变适用结构项；只建议比较同一长度档位的分数与变化。",
+    }
 
 
 def _required_text(value: Any, field: str, maximum: int) -> str:

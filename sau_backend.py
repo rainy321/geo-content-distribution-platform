@@ -1,18 +1,21 @@
 import asyncio
 import hmac
 import json
+import math
 import os
 import re
 import sqlite3
 import threading
 import time
 import uuid
+import warnings
 import weakref
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from queue import Empty, Full, Queue
 from flask_cors import CORS
+from PIL import Image, UnidentifiedImageError
 from flask import (
     Flask,
     Response,
@@ -35,6 +38,7 @@ from services.ai_service import (
     generate_geo_content,
     optimize_geo_content,
     provider_label_for_settings,
+    resolve_ai_chat_completions_url,
     sample_ai_prompt_detailed,
 )
 from services.ai_cost_ledger_service import (
@@ -60,7 +64,9 @@ from services.ai_visibility_run_service import (
 from services.ai_visibility_sampling_service import (
     VisibilitySamplingConflictError,
     VisibilitySamplingInProgressError,
+    VisibilitySamplingRequestNotFoundError,
     VisibilitySamplingValidationError,
+    get_ai_visibility_sample_request,
     run_ai_visibility_sample,
 )
 from services.article_service import (
@@ -100,6 +106,8 @@ from services.geo_score_service import score_geo_content
 from services.geo_article_compiler_service import (
     GEOArticleCompilerError,
     build_geo_article_blueprint,
+    resolve_explicit_scoring_length_context,
+    resolve_generation_length_context,
     score_ai_citeability,
 )
 from services.geo_diagnostic_service import (
@@ -183,6 +191,10 @@ from services.content_engine_contract import (
 from services.content_generation_service import (
     ContentGenerationInProgressError,
     ContentGenerationService,
+)
+from services.content_hygiene_service import (
+    constrain_generated_content_length,
+    sanitize_generated_content,
 )
 from services.project_service import (
     ProjectHasArticlesError,
@@ -358,6 +370,12 @@ LOGIN_COMPAT_QUEUE_MAX_COUNT = 4
 # The desktop host has eight Waitress threads. Reserve at least half for API
 # requests and cancellation/status calls while headed logins are waiting.
 LOGIN_MAX_ACTIVE_STREAMS = 4
+# These are product-owned intake guardrails, not audited limits published by
+# any media platform.  Keeping them platform-neutral is especially important
+# for TikTok, where an unaudited product assumption must not be presented as an
+# official platform rule.
+PRODUCT_PUBLISH_IMAGE_MAX_BYTES = 5 * 1024 * 1024
+PRODUCT_PUBLISH_VIDEO_MAX_BYTES = 150 * 1024 * 1024
 # Only Zhihu's login helper atomically replaces the credential bound to an
 # exact user_info row.  Every other helper creates a new row, so accepting an
 # existing_account_id for those platforms would silently leave the old account
@@ -1269,9 +1287,24 @@ def generate_article():
 def _create_content_generation_service(settings=None):
     if settings is None:
         settings = _request_ai_settings({})
+    try:
+        config_status = _unified_ai_config_status_data()
+    except UnifiedAIConfigError:
+        config_status = {}
+    reviewer_role = dict(
+        ((config_status.get("roles") or {}).get("reviewer") or {})
+    )
+    reviewer_settings = None
+    # Optional roles resolve to writer settings when absent. Do not pass that
+    # fallback through as a reviewer: it would create a second billable call
+    # while falsely presenting it as an independently configured review.
+    if reviewer_role.get("configured") and not reviewer_role.get("fallback"):
+        reviewer_settings = _request_ai_settings({}, role="reviewer")
     return ContentGenerationService.from_environment(
         app.config["DATABASE_PATH"],
         qwen_settings=settings,
+        reviewer_settings=reviewer_settings,
+        reviewer_role=reviewer_role,
     )
 
 
@@ -2150,6 +2183,7 @@ def test_ai_config_connection():
                 "message": "固定合成测试已收到模型响应",
                 "provider": provider_label_for_settings(settings),
                 "model": result.model,
+                "endpoint": resolve_ai_chat_completions_url(settings.base_url),
                 "role": role,
                 "ai_role": _public_ai_role_resolution(
                     role,
@@ -2216,6 +2250,36 @@ def get_content_generation_run(run_id):
     run = get_run(app.config["DATABASE_PATH"], run_id)
     if run is None:
         return jsonify({"code": 404, "msg": "生成记录不存在", "data": None}), 404
+    return _content_generation_run_response(run)
+
+
+@app.route('/api/content-generation/runs/by-request/<request_id>', methods=['GET'])
+def get_content_generation_run_by_request_id(request_id):
+    """Recover one durable run without replaying the generation request.
+
+    The content-creation screen only knows the client request identity until
+    the original POST returns.  A browser refresh can therefore use this
+    read-only endpoint to observe the already-reserved run.  This route never
+    constructs a content engine and cannot submit or retry a provider call.
+    """
+
+    normalized_request_id = str(request_id or "").strip()
+    if (
+        not normalized_request_id
+        or len(normalized_request_id) > 128
+        or not re.fullmatch(r"[A-Za-z0-9._:-]+", normalized_request_id)
+    ):
+        return jsonify({"code": 400, "msg": "request_id 格式无效", "data": None}), 400
+    run = get_run_by_request_id(
+        app.config["DATABASE_PATH"],
+        normalized_request_id,
+    )
+    if run is None:
+        return jsonify({"code": 404, "msg": "生成记录不存在", "data": None}), 404
+    return _content_generation_run_response(run)
+
+
+def _content_generation_run_response(run):
     public_fields = {
         key: run.get(key)
         for key in (
@@ -2251,10 +2315,48 @@ def get_content_generation_run(run_id):
     keywords = brief_snapshot.get("keywords")
     if not isinstance(keywords, list):
         keywords = project_snapshot.get("keywords")
+    length_context = _generation_length_context_from_brief(brief_snapshot)
+    public_fields["brief"] = {
+        "project_id": run.get("project_id"),
+        "topic": str(brief_snapshot.get("topic") or "").strip(),
+        "keywords": _normalize_string_list(
+            keywords if isinstance(keywords, list) else []
+        ),
+        "content_type": str(brief_snapshot.get("content_type") or "").strip(),
+        "target_platform": str(
+            brief_snapshot.get("target_platform") or ""
+        ).strip(),
+        "requested_length": length_context["requested_length"],
+        "effective_length": length_context["effective_length"],
+    }
     public_fields["score_context"] = {
         "brand": str(project_snapshot.get("name") or "").strip(),
         "keywords": _normalize_string_list(keywords if isinstance(keywords, list) else []),
+        "target_length": length_context["effective_length"],
+        "requested_target_length": length_context["requested_length"],
+        "effective_target_length": length_context["effective_length"],
+        "platform_limit": length_context["platform_limit"],
+        "length_source": length_context["source"],
     }
+    if run.get("status") == "succeeded" and isinstance(result_payload, dict):
+        # Return only the normalized public article contract.  Provider
+        # credentials are never part of this projection or the stored result.
+        public_fields["result"] = {
+            key: result_payload.get(key)
+            for key in (
+                "title",
+                "summary",
+                "content",
+                "tags",
+                "faq",
+                "sources",
+                "geo_score",
+                "geo_analysis",
+                "generation",
+            )
+        }
+    else:
+        public_fields["result"] = None
     return jsonify({"code": 200, "msg": "success", "data": public_fields}), 200
 
 
@@ -2810,6 +2912,66 @@ def evaluate_imported_geo_blackbox_panel():
     return jsonify({"code": 200, "msg": "评估完成", "data": result}), 200
 
 
+@app.route('/api/geo/visibility/sample/<string:request_id>', methods=['GET'])
+def get_geo_visibility_sample(request_id):
+    """Resume a durable sampling receipt without another provider call."""
+
+    try:
+        record = get_ai_visibility_sample_request(
+            app.config["DATABASE_PATH"],
+            request_id,
+        )
+    except VisibilitySamplingValidationError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    except VisibilitySamplingRequestNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except (VisibilitySamplingConflictError, sqlite3.Error):
+        return jsonify(
+            {
+                "code": 409,
+                "msg": "已保存的采样状态无法可靠读取，请核对本机数据后再处理",
+                "data": None,
+            }
+        ), 409
+
+    if record["status"] == "started" or not isinstance(record.get("result"), dict):
+        response = jsonify(
+            {
+                "code": 202,
+                "msg": "真实采样仍在原进程中执行；切换页面不会重新调用模型",
+                "data": {
+                    "status": "processing",
+                    "need_action": False,
+                    "request_id": record["request_id"],
+                    "project_id": record["project_id"],
+                    "created_at": record["created_at"],
+                    "updated_at": record["updated_at"],
+                    "retry_policy": {
+                        "automatic_retry": False,
+                        "action": "等待原请求完成；不要新建重复采样",
+                    },
+                },
+            }
+        )
+        response.headers["X-Request-ID"] = record["request_id"]
+        response.headers["Idempotency-Key"] = record["idempotency_key"]
+        response.headers["Idempotency-Replayed"] = "true"
+        return response, 202
+
+    stored_payload = dict(record["result"])
+    stored_data = dict(stored_payload.get("data") or {})
+    stored_data["ai_role"] = _public_ai_role_resolution(
+        "evaluator",
+        explicit_request=False,
+    )
+    stored_payload["data"] = stored_data
+    response = jsonify(stored_payload)
+    response.headers["X-Request-ID"] = record["request_id"]
+    response.headers["Idempotency-Key"] = record["idempotency_key"]
+    response.headers["Idempotency-Replayed"] = "true"
+    return response, int(record.get("http_status") or 200)
+
+
 @app.route('/api/geo/visibility/sample', methods=['POST'])
 def sample_geo_visibility():
     """Run explicitly confirmed live samples against the configured AI model."""
@@ -3126,8 +3288,15 @@ def calculate_geo_score():
     brand = str(data.get("brand") or "").strip()
     keywords = data.get("keywords", [])
     generation_run_id = data.get("generation_run_id")
+    target_length, target_length_error = _parse_optional_target_length(data)
+    if target_length_error:
+        return jsonify({"code": 400, "msg": target_length_error, "data": None}), 400
+    explicit_target_supplied = target_length is not None
 
     score_context = None
+    requested_target_length = target_length
+    length_source = "explicit" if target_length is not None else None
+    effective_platform_limit = None
     citeability_sources = data.get("sources", [])
     if generation_run_id not in (None, ""):
         try:
@@ -3146,6 +3315,25 @@ def calculate_geo_score():
             return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
         brand = score_context["brand"]
         keywords = score_context["keywords"]
+        effective_platform_limit = _optional_target_length_value(
+            score_context.get("platform_limit")
+        )
+        if explicit_target_supplied:
+            explicit_context = resolve_explicit_scoring_length_context(
+                target_length,
+                str(score_context.get("target_platform") or ""),
+                platform_limit=effective_platform_limit,
+            )
+            target_length = explicit_context["effective_length"]
+            requested_target_length = explicit_context["requested_length"]
+            length_source = explicit_context["source"]
+            effective_platform_limit = explicit_context["platform_limit"]
+        else:
+            target_length = score_context.get("target_length")
+            requested_target_length = (
+                score_context.get("requested_target_length") or target_length
+            )
+            length_source = score_context.get("length_source")
         generation_run = get_run(
             app.config["DATABASE_PATH"],
             generation_run_id,
@@ -3180,6 +3368,9 @@ def calculate_geo_score():
         content=content,
         brand=brand,
         keywords=_normalize_string_list(keywords),
+        target_length=target_length,
+        requested_target_length=requested_target_length,
+        source=length_source,
     )
     project_snapshot = (
         score_context.get("project_snapshot", {})
@@ -3200,6 +3391,9 @@ def calculate_geo_score():
             ).strip(),
             keywords=_normalize_string_list(keywords),
             sources=citeability_sources,
+            target_length=target_length,
+            requested_target_length=requested_target_length,
+            source=length_source,
         )
     except GEOArticleCompilerError as exc:
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
@@ -3208,6 +3402,11 @@ def calculate_geo_score():
             "generation_run_id": generation_run_id,
             "brand": brand,
             "keywords": keywords,
+            "target_length": target_length,
+            "requested_target_length": requested_target_length,
+            "effective_target_length": target_length,
+            "platform_limit": effective_platform_limit,
+            "length_source": length_source,
         }
     return jsonify(result), 200
 
@@ -3522,6 +3721,10 @@ def optimize_article(article_id):
     score_keywords = project["keywords"]
     scoring_project = project
     generation_sources = []
+    article_length_context = _article_length_context(article)
+    target_length = article_length_context["effective_target_length"]
+    requested_target_length = article_length_context["requested_target_length"]
+    length_source = article_length_context["source"]
     if article.get("generation_run_id") is not None:
         try:
             score_context = get_run_score_context(
@@ -3532,6 +3735,13 @@ def optimize_article(article_id):
             return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
         score_brand = score_context["brand"]
         score_keywords = score_context["keywords"]
+        target_length = score_context.get("target_length") or target_length
+        requested_target_length = (
+            score_context.get("requested_target_length")
+            or requested_target_length
+            or target_length
+        )
+        length_source = score_context.get("length_source") or length_source
         scoring_project = score_context.get("project_snapshot") or project
         generation = article.get("generation")
         if isinstance(generation, dict) and isinstance(
@@ -3544,6 +3754,9 @@ def optimize_article(article_id):
         content=article["content"],
         brand=score_brand,
         keywords=score_keywords,
+        target_length=target_length,
+        requested_target_length=requested_target_length,
+        source=length_source,
     )
     before_score["citeability"] = score_ai_citeability(
         title=article["title"],
@@ -3554,6 +3767,9 @@ def optimize_article(article_id):
         website=str(scoring_project.get("website") or "").strip(),
         keywords=score_keywords,
         sources=generation_sources,
+        target_length=target_length,
+        requested_target_length=requested_target_length,
+        source=length_source,
     )
     try:
         ai_settings = _request_ai_settings(data, role="reviewer")
@@ -3571,6 +3787,7 @@ def optimize_article(article_id):
             score=before_score,
             settings=ai_settings,
             include_metadata=True,
+            target_length=target_length,
         )
     except AIConfigurationError as exc:
         return jsonify({"code": 503, "msg": str(exc), "data": None}), 503
@@ -3626,11 +3843,40 @@ def optimize_article(article_id):
                 type(exc).__name__,
             )
 
+    hygiene = sanitize_generated_content(str(optimized.get("content") or ""))
+    optimized["content"] = hygiene.content
+    if hygiene.changed:
+        ai_usage_warnings.append(
+            {
+                "code": "optimization_placeholders_removed",
+                "message": "优化稿中的未完成作者、日期或证据占位标记已在本地移除。",
+            }
+        )
+    if target_length is not None:
+        length_guard = constrain_generated_content_length(
+            optimized["content"],
+            target_length,
+        )
+        optimized["content"] = length_guard.content
+        if length_guard.changed:
+            ai_usage_warnings.append(
+                {
+                    "code": "optimization_length_constrained",
+                    "message": (
+                        "优化稿已按完整语句压缩到目标字数："
+                        f"{length_guard.original_length} → {length_guard.final_length} 字"
+                    ),
+                }
+            )
+
     after_score = score_geo_content(
         title=optimized["title"],
         content=optimized["content"],
         brand=score_brand,
         keywords=score_keywords,
+        target_length=target_length,
+        requested_target_length=requested_target_length,
+        source=length_source,
     )
     after_score["citeability"] = score_ai_citeability(
         title=optimized["title"],
@@ -3644,6 +3890,9 @@ def optimize_article(article_id):
         # the preview with the same immutable sources that article update will
         # reuse, so the preview cannot jump when the operator saves it.
         sources=generation_sources,
+        target_length=target_length,
+        requested_target_length=requested_target_length,
+        source=length_source,
     )
     return jsonify(
         {
@@ -3715,7 +3964,104 @@ def _parse_article_fields(data, *, partial):
             return None, "文章只允许保存为草稿或待发布状态"
         result["status"] = status
 
+    if "target_length" in data:
+        target_length, target_length_error = _parse_optional_target_length(data)
+        if target_length_error:
+            return None, target_length_error
+        if target_length is not None:
+            result["target_length"] = target_length
+
     return result, None
+
+
+def _parse_optional_target_length(data):
+    if "target_length" not in data or data.get("target_length") in (None, ""):
+        return None, None
+    raw_value = data.get("target_length")
+    if isinstance(raw_value, bool):
+        return None, "target_length 必须是整数"
+    try:
+        value = int(raw_value)
+    except (TypeError, ValueError):
+        return None, "target_length 必须是整数"
+    if isinstance(raw_value, float) and raw_value != value:
+        return None, "target_length 必须是整数"
+    if not ARTICLE_LENGTH_MIN <= value <= ARTICLE_LENGTH_MAX:
+        return None, (
+            f"target_length 必须在 {ARTICLE_LENGTH_MIN} 到 "
+            f"{ARTICLE_LENGTH_MAX} 之间"
+        )
+    return value, None
+
+
+def _optional_target_length_value(value):
+    target_length, _ = _parse_optional_target_length({"target_length": value})
+    return target_length
+
+
+def _generation_length_context_from_brief(brief):
+    stored = brief.get("length_context") if isinstance(brief, dict) else None
+    if isinstance(stored, dict):
+        requested = _optional_target_length_value(stored.get("requested_length"))
+        effective = _optional_target_length_value(stored.get("effective_length"))
+        raw_limit = stored.get("platform_limit")
+        platform_limit = (
+            _optional_target_length_value(raw_limit) if raw_limit is not None else None
+        )
+        if (
+            requested is not None
+            and effective is not None
+            and effective <= requested
+            and (platform_limit is None or effective <= platform_limit)
+        ):
+            return {
+                "requested_length": requested,
+                "effective_length": effective,
+                "platform_limit": platform_limit,
+                "source": str(stored.get("source") or "requested_length"),
+            }
+    requested = _optional_target_length_value(
+        brief.get("requested_length", brief.get("length"))
+        if isinstance(brief, dict)
+        else None
+    )
+    if requested is None:
+        return {
+            "requested_length": None,
+            "effective_length": None,
+            "platform_limit": None,
+            "source": "legacy",
+        }
+    return resolve_generation_length_context(
+        requested,
+        str(brief.get("target_platform") or ""),
+    )
+
+
+def _article_length_context(article):
+    analysis = article.get("geo_analysis") if isinstance(article, dict) else None
+    profile = analysis.get("length_profile") if isinstance(analysis, dict) else None
+    if not isinstance(profile, dict):
+        return {
+            "requested_target_length": None,
+            "effective_target_length": None,
+            "source": None,
+        }
+    requested = _optional_target_length_value(
+        profile.get("requested_target_length", profile.get("target_length"))
+    )
+    effective = _optional_target_length_value(
+        profile.get("effective_target_length", profile.get("target_length"))
+    )
+    return {
+        "requested_target_length": requested,
+        "effective_target_length": effective,
+        "source": str(profile.get("source") or "explicit"),
+    }
+
+
+def _article_target_length(article):
+    return _article_length_context(article)["effective_target_length"]
 
 
 def _parse_positive_query_integer(name, *, default=None):
@@ -3799,6 +4145,13 @@ def preview_publish_variants():
                 keywords=(
                     project.get("keywords")
                     if isinstance(project.get("keywords"), list)
+                    else []
+                ),
+                target_length=_article_target_length(article),
+                sources=(
+                    article["generation"]["sources"]
+                    if isinstance(article.get("generation"), dict)
+                    and isinstance(article["generation"].get("sources"), list)
                     else []
                 ),
             )
@@ -3957,7 +4310,10 @@ def create_publish_task():
             article=article,
             project=project,
         )
-        images = [record["file_path"]]
+        try:
+            images = _validate_publish_images([record["file_path"]])
+        except ValueError as exc:
+            return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
 
     if (
         capability["requires_images"]
@@ -4028,6 +4384,15 @@ def create_publish_task():
                     if isinstance(project_for_gate.get("keywords"), list)
                     else []
                 ),
+                target_length=_article_target_length(article_for_gate),
+                sources=(
+                    article_for_gate["generation"]["sources"]
+                    if isinstance(article_for_gate.get("generation"), dict)
+                    and isinstance(
+                        article_for_gate["generation"].get("sources"), list
+                    )
+                    else []
+                ),
             )
         except ArticleNotFoundError as exc:
             return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
@@ -4035,7 +4400,7 @@ def create_publish_task():
             return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
         except (PublishContentLimitError, GEOArticleCompilerError, KeyError, TypeError, ValueError) as exc:
             return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
-        if citeability.get("passed") is not True:
+        if citeability.get("publish_gate_passed") is not True:
             return jsonify(
                 {
                     "code": 409,
@@ -4572,9 +4937,10 @@ def _publish_job_payload(
 def _validate_publish_images(value):
     images = normalize_publish_images(value)
     media_root = Path(app.config["MEDIA_ROOT"]).expanduser().resolve()
-    allowed_extensions = {".jpg", ".jpeg", ".png"}
+    expected_formats = {".jpg": "JPEG", ".jpeg": "JPEG", ".png": "PNG"}
     for filename in images:
-        if Path(filename).suffix.lower() not in allowed_extensions:
+        extension = Path(filename).suffix.lower()
+        if extension not in expected_formats:
             raise ValueError("发布图片仅支持 JPG、JPEG、PNG 格式")
         image_path = (media_root / filename).resolve()
         try:
@@ -4583,7 +4949,112 @@ def _validate_publish_images(value):
             raise ValueError("发布图片必须来自素材库") from exc
         if not image_path.is_file():
             raise ValueError(f"素材图片不存在：{filename}")
+        try:
+            file_size = image_path.stat().st_size
+        except OSError as exc:
+            raise ValueError(f"无法读取素材图片：{filename}") from exc
+        if file_size <= 0:
+            raise ValueError(
+                f"素材图片不能为空：{filename}；这是产品级媒体安全预检，"
+                "不是平台官方规则"
+            )
+        if file_size > PRODUCT_PUBLISH_IMAGE_MAX_BYTES:
+            raise ValueError(
+                f"素材图片超过产品侧保守上限 "
+                f"{PRODUCT_PUBLISH_IMAGE_MAX_BYTES} 字节：{filename}；"
+                "该上限不是平台官方上限"
+            )
+
+        try:
+            # Pillow opens lazily. verify() checks container integrity, while a
+            # second open + load() forces actual pixel decoding before a task
+            # can be persisted or any publishing browser can start.
+            with warnings.catch_warnings():
+                warnings.simplefilter("error", Image.DecompressionBombWarning)
+                with Image.open(image_path) as image:
+                    image_format = image.format
+                    width, height = image.size
+                    image.verify()
+                with Image.open(image_path) as image:
+                    image.load()
+        except (
+            Image.DecompressionBombError,
+            Image.DecompressionBombWarning,
+            UnidentifiedImageError,
+            OSError,
+            SyntaxError,
+            ValueError,
+        ) as exc:
+            raise ValueError(
+                f"素材图片无法解码或已损坏：{filename}；"
+                "这是产品级媒体安全预检，不是平台官方规则"
+            ) from exc
+        if image_format != expected_formats[extension]:
+            raise ValueError(
+                f"素材图片扩展名与实际格式不一致：{filename}；"
+                "这是产品级媒体安全预检，不是平台官方规则"
+            )
+        if width <= 0 or height <= 0:
+            raise ValueError(
+                f"素材图片宽高必须大于 0：{filename}；"
+                "这是产品级媒体安全预检，不是平台官方规则"
+            )
     return images
+
+
+def _read_publish_video_metadata(video_path):
+    """Return basic OpenCV metadata, or None when it cannot be read safely.
+
+    OpenCV belongs to the optional publishing runtime rather than the light
+    control-plane install.  Importing it lazily keeps the backend bootable when
+    that runtime is absent; returning None makes validation fail closed instead
+    of silently accepting an unprobed video.
+
+    Only a resolved local material-library path reaches this helper, and the
+    product byte cap bounds the input. OpenCV does not provide a portable hard
+    deadline for opening local containers across its native backends; an
+    enforceable wall-clock timeout would require an isolated worker process.
+    Do not describe this synchronous probe as timeout-controlled.
+    """
+
+    try:
+        import cv2
+    except Exception:
+        return None
+
+    capture = None
+    try:
+        capture = cv2.VideoCapture(str(video_path))
+        if capture is None or not capture.isOpened():
+            return None
+        width = float(capture.get(cv2.CAP_PROP_FRAME_WIDTH))
+        height = float(capture.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        frame_count = float(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+        frames_per_second = float(capture.get(cv2.CAP_PROP_FPS))
+    except Exception:
+        return None
+    finally:
+        if capture is not None:
+            try:
+                capture.release()
+            except Exception:
+                pass
+
+    if not all(
+        math.isfinite(value)
+        for value in (width, height, frame_count, frames_per_second)
+    ):
+        return None
+    if width <= 0 or height <= 0 or frame_count <= 0 or frames_per_second <= 0:
+        return None
+    duration_seconds = frame_count / frames_per_second
+    if not math.isfinite(duration_seconds) or duration_seconds <= 0:
+        return None
+    return {
+        "width": width,
+        "height": height,
+        "duration_seconds": duration_seconds,
+    }
 
 
 def _validate_publish_video(value):
@@ -4600,6 +5071,42 @@ def _validate_publish_video(value):
         raise ValueError("发布视频必须来自素材库") from exc
     if not video_path.is_file():
         raise ValueError(f"素材视频不存在：{video}")
+    try:
+        file_size = video_path.stat().st_size
+    except OSError as exc:
+        raise ValueError(f"无法读取素材视频：{video}") from exc
+    if file_size <= 0:
+        raise ValueError(
+            f"素材视频不能为空：{video}；这是产品级媒体安全预检，"
+            "不是平台官方规则"
+        )
+    if file_size > PRODUCT_PUBLISH_VIDEO_MAX_BYTES:
+        raise ValueError(
+            f"素材视频超过产品侧保守上限 "
+            f"{PRODUCT_PUBLISH_VIDEO_MAX_BYTES} 字节：{video}；"
+            "该上限不是平台官方上限"
+        )
+
+    metadata = _read_publish_video_metadata(video_path)
+    if not isinstance(metadata, dict):
+        raise ValueError(
+            f"素材视频无法读取有效的宽高和时长元数据：{video}；"
+            "这是产品级媒体安全预检，不是平台官方规则"
+        )
+    try:
+        width = float(metadata.get("width"))
+        height = float(metadata.get("height"))
+        duration_seconds = float(metadata.get("duration_seconds"))
+    except (TypeError, ValueError):
+        width = height = duration_seconds = 0.0
+    if not all(
+        math.isfinite(value) and value > 0
+        for value in (width, height, duration_seconds)
+    ):
+        raise ValueError(
+            f"素材视频宽高和时长必须大于 0：{video}；"
+            "这是产品级媒体安全预检，不是平台官方规则"
+        )
     return video
 
 

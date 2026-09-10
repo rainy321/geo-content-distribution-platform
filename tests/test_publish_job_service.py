@@ -622,6 +622,114 @@ class PublishJobServiceTests(unittest.TestCase):
         )
         self.assertTrue(reconciled["finished_at"])
 
+    def test_platform_reconciliation_accepts_canonical_public_work_urls(self):
+        cases = (
+            ("zhihu", "https://www.zhihu.com/p/123456"),
+            ("toutiao", "https://www.toutiao.com/item/7680497457658135090/"),
+            (
+                "baijiahao",
+                "https://baijiahao.baidu.com/s?id=1875188881859292891",
+            ),
+            ("sohu", "https://www.sohu.com/a/1070776112_122997873"),
+            (
+                "xiaohongshu",
+                "https://www.xiaohongshu.com/explore/6a977888000000001103bb96",
+            ),
+            ("douyin", "https://www.douyin.com/note/7680497457658135090"),
+            ("kuaishou", "https://www.kuaishou.com/short-video/3xabcdef123456"),
+            ("bilibili", "https://www.bilibili.com/video/BV1xJt66fEyq/"),
+            (
+                "tiktok",
+                "https://www.tiktok.com/@redemption3731/video/7681719912934477072",
+            ),
+        )
+        jobs = {
+            platform: create_publish_job(
+                self.db_path,
+                article_id=self.article_id,
+                platform=platform,
+            )
+            for platform, _url in cases
+        }
+
+        for platform, result_url in cases:
+            with self.subTest(platform=platform):
+                active = transition_publish_job(
+                    self.db_path,
+                    jobs[platform]["id"],
+                    "processing",
+                )
+                awaiting = mark_publish_job_awaiting_reconciliation(
+                    self.db_path,
+                    active["id"],
+                    message="平台提交结果待确认",
+                    expected_state_version=active["state_version"],
+                )
+
+                reconciled = reconcile_publish_job_platform_success(
+                    self.db_path,
+                    awaiting["id"],
+                    message="已在平台后台按精确标题核验",
+                    result_url=result_url,
+                    expected_state_version=awaiting["state_version"],
+                )
+
+                self.assertEqual(reconciled["status"], "success")
+                self.assertEqual(reconciled["result_url"], result_url)
+
+    def test_reconciliation_rejects_unsafe_or_cross_platform_urls(self):
+        job = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="zhihu",
+        )
+        transition_publish_job(self.db_path, job["id"], "processing")
+        transition_publish_job(self.db_path, job["id"], "failed")
+        unsafe_urls = (
+            "http://zhuanlan.zhihu.com/p/123",
+            "https://reader:secret@zhuanlan.zhihu.com/p/123",
+            "https://zhuanlan.zhihu.com:8443/p/123",
+            "https://www.zhihu.com/signin",
+            "https://www.zhihu.com/creator/content-management",
+            "https://www.toutiao.com/article/123456/",
+            "https://zhuanlan.zhihu.com.attacker.example/p/123",
+        )
+
+        for result_url in unsafe_urls:
+            with self.subTest(result_url=result_url):
+                with self.assertRaises(ValueError):
+                    reconcile_publish_job_success(
+                        self.db_path,
+                        job["id"],
+                        result_url=result_url,
+                    )
+
+        unchanged = get_publish_job(self.db_path, job["id"])
+        self.assertEqual(unchanged["status"], "failed")
+        self.assertEqual(unchanged["result_url"], "")
+
+    def test_platform_success_requires_public_url_for_stable_link_platform(self):
+        job = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="zhihu",
+        )
+        active = transition_publish_job(self.db_path, job["id"], "processing")
+        awaiting = mark_publish_job_awaiting_reconciliation(
+            self.db_path,
+            job["id"],
+            message="平台提交结果待确认",
+            expected_state_version=active["state_version"],
+        )
+
+        with self.assertRaisesRegex(ValueError, "官方公开"):
+            reconcile_publish_job_platform_success(
+                self.db_path,
+                awaiting["id"],
+                message="后台显示已发布",
+                result_url="",
+            )
+
     def test_reconciles_platform_success_without_public_url(self):
         job = create_publish_job(
             self.db_path,
@@ -635,6 +743,20 @@ class PublishJobServiceTests(unittest.TestCase):
             message="已提交，平台不返回 Web 公链",
             expected_state_version=active["state_version"],
         )
+
+        with self.assertRaisesRegex(ValueError, "核验说明"):
+            reconcile_publish_job_platform_success(
+                self.db_path,
+                job["id"],
+                message="",
+            )
+        with self.assertRaisesRegex(ValueError, "官方公开作品链接"):
+            reconcile_publish_job_platform_success(
+                self.db_path,
+                job["id"],
+                message="视频号后台记录已核验",
+                result_url="https://channels.weixin.qq.com/platform/post/list",
+            )
 
         reconciled = reconcile_publish_job_platform_success(
             self.db_path,

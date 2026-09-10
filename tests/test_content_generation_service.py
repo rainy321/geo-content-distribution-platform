@@ -5,12 +5,12 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import closing
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import requests
 
 from db.createTable import initialize_database
-from services.ai_service import AISettings
+from services.ai_service import AIOptimizationResult, AIServiceError, AISettings
 from services.content_engine_adapters import (
     ColleagueContentEngineAdapter,
     MockContentEngineAdapter,
@@ -31,6 +31,7 @@ from services.content_generation_run_service import (
     begin_or_replay,
 )
 from services.content_generation_service import ContentGenerationService
+from services.content_hygiene_service import authoring_visible_length
 
 
 def engine_payload(*, title="企业 AI Agent 指南", engine="mock", usage=None):
@@ -86,6 +87,7 @@ class ContentGenerationServiceTests(unittest.TestCase):
         idempotency_key="idem-1",
         topic="测试主题",
         length=1000,
+        target_platform="zhihu",
     ):
         return ContentGenerationRequest.create(
             project_context={
@@ -101,7 +103,7 @@ class ContentGenerationServiceTests(unittest.TestCase):
             keywords=["AI Agent"],
             length=length,
             content_type="行业科普",
-            target_platform="zhihu",
+            target_platform=target_platform,
             ai_role={
                 "role": "writer",
                 "configured": True,
@@ -120,7 +122,7 @@ class ContentGenerationServiceTests(unittest.TestCase):
         self.assertIn("geo_analysis", result)
         self.assertEqual(
             result["geo_analysis"]["citeability"]["version"],
-            "ai-citeability-rules-2.1.1",
+            "ai-citeability-rules-2.2.0",
         )
         self.assertEqual(
             len(result["geo_analysis"]["citeability"]["dimensions"]),
@@ -138,6 +140,254 @@ class ContentGenerationServiceTests(unittest.TestCase):
             run["result_payload"]["generation"]["ai_role"]["source_role"],
             "writer",
         )
+
+    def test_unconfigured_reviewer_is_explicit_writer_only_without_fake_receipt(self):
+        result = ContentGenerationService(
+            self.db_path,
+            MockContentEngineAdapter([engine_payload(usage={"total_tokens": 12})]),
+        ).generate(self.request())
+
+        review = result["generation"]["review"]
+        self.assertFalse(review["configured"])
+        self.assertTrue(review["fallback"])
+        self.assertEqual(review["source_role"], "writer")
+        self.assertEqual(review["mode"], "writer_only")
+        self.assertFalse(review["invoked"])
+        self.assertEqual(review["selected"], "writer")
+        self.assertEqual(review["usage_status"], "not_invoked")
+        self.assertIsNone(review["comparison"])
+        self.assertIsNone(review["provider"])
+        self.assertIsNone(review["model"])
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            operations = conn.execute(
+                "SELECT operation FROM ai_usage_ledger ORDER BY id"
+            ).fetchall()
+        self.assertEqual(operations, [("generate",)])
+
+    def test_configured_reviewer_optimizes_compares_and_records_both_costs_once(self):
+        writer_payload = engine_payload(
+            title="Writer title",
+            usage={"input_tokens": 100, "output_tokens": 50, "total_tokens": 150},
+        )
+        reviewer = Mock(
+            return_value=AIOptimizationResult(
+                article={
+                    "title": "Reviewer title",
+                    "summary": "Reviewer summary",
+                    "content": (
+                        "## 直接答案\nXX科技的企业 AI Agent 适用于受控流程。\n\n"
+                        "## 验证边界\n结论需要用输入资料和人工复核验证。"
+                    ),
+                    "tags": ["AI Agent", "受控流程"],
+                    "faq": [
+                        {"question": "如何验证？", "answer": "先在小范围流程中测试。"}
+                    ],
+                },
+                provider="deepseek",
+                model="review-model",
+                provider_request_id="review-provider-request-1",
+                elapsed_ms=23,
+                usage={"input_tokens": 40, "output_tokens": 20, "total_tokens": 60},
+            )
+        )
+        settings = AISettings(
+            provider="deepseek",
+            base_url="https://review.example.test/v1",
+            api_key="review-secret",
+            model="review-model",
+        )
+        service = ContentGenerationService(
+            self.db_path,
+            MockContentEngineAdapter([writer_payload]),
+            reviewer_settings=settings,
+            reviewer_role={
+                "role": "reviewer",
+                "configured": True,
+                "effective_configured": True,
+                "fallback": False,
+                "source_role": "reviewer",
+                "same_as_writer": False,
+            },
+            reviewer_optimizer=reviewer,
+        )
+        writer_geo = {
+            "score": 60,
+            "dimensions": {"entity": 60},
+            "suggestions": ["writer suggestion"],
+            "length_profile": {"key": "standard"},
+        }
+        reviewer_geo = {
+            "score": 82,
+            "dimensions": {"entity": 100},
+            "suggestions": [],
+            "length_profile": {"key": "standard"},
+        }
+        writer_citeability = {
+            "score": 64,
+            "publish_gate_passed": True,
+            "dimensions": {},
+        }
+        reviewer_citeability = {
+            "score": 88,
+            "publish_gate_passed": True,
+            "dimensions": {},
+        }
+        price_catalog = json.dumps(
+            {
+                "mock/test-1": {
+                    "input_per_million": "2",
+                    "output_per_million": "6",
+                    "currency": "CNY",
+                },
+                "deepseek/review-model": {
+                    "input_per_million": "3",
+                    "output_per_million": "9",
+                    "currency": "CNY",
+                },
+            }
+        )
+
+        with patch.dict(
+            "os.environ",
+            {"AI_PRICE_CATALOG_JSON": price_catalog},
+            clear=False,
+        ), patch(
+            "services.content_generation_service.score_geo_content",
+            side_effect=[writer_geo, reviewer_geo],
+        ), patch(
+            "services.content_generation_service.score_ai_citeability",
+            side_effect=[writer_citeability, reviewer_citeability],
+        ):
+            first = service.generate(self.request(request_id="review-request-1"))
+            replay = service.generate(self.request(request_id="review-request-2"))
+
+        self.assertEqual(first["title"], "Reviewer title")
+        self.assertEqual(first["geo_score"], 82)
+        review = first["generation"]["review"]
+        self.assertTrue(review["configured"])
+        self.assertTrue(review["invoked"])
+        self.assertTrue(review["completed"])
+        self.assertEqual(review["selected"], "reviewer")
+        self.assertEqual(review["provider"], "deepseek")
+        self.assertEqual(review["model"], "review-model")
+        self.assertEqual(review["usage"]["total_tokens"], 60)
+        self.assertEqual(
+            review["comparison"]["method"],
+            "deterministic_local_quality_v1",
+        )
+        self.assertEqual(review["comparison"]["writer"]["geo_score"], 60)
+        self.assertEqual(review["comparison"]["reviewer"]["geo_score"], 82)
+        self.assertTrue(replay["generation"]["replayed"])
+        self.assertEqual(replay["title"], "Reviewer title")
+        reviewer.assert_called_once()
+        self.assertEqual(reviewer.call_args.kwargs["settings"].model, "review-model")
+        self.assertTrue(reviewer.call_args.kwargs["include_metadata"])
+        self.assertEqual(reviewer.call_args.kwargs["target_length"], 1000)
+
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            receipts = [
+                dict(row)
+                for row in conn.execute(
+                    """
+                    SELECT operation, provider, model, usage_status,
+                           total_tokens, estimated_cost, cost_status,
+                           reference_type, reference_id
+                    FROM ai_usage_ledger
+                    ORDER BY id
+                    """
+                ).fetchall()
+            ]
+        self.assertEqual([item["operation"] for item in receipts], ["generate", "optimize"])
+        self.assertEqual([item["total_tokens"] for item in receipts], [150, 60])
+        self.assertEqual([item["cost_status"] for item in receipts], ["calculated", "calculated"])
+        self.assertEqual(receipts[0]["estimated_cost"], "0.0005")
+        self.assertEqual(receipts[1]["estimated_cost"], "0.0003")
+        self.assertEqual(receipts[1]["provider"], "deepseek")
+        self.assertEqual(receipts[1]["model"], "review-model")
+        self.assertEqual(receipts[0]["reference_type"], "generation_run")
+        self.assertEqual(receipts[0]["reference_id"], receipts[1]["reference_id"])
+
+    def test_reviewer_failure_keeps_writer_and_records_unknown_attempt(self):
+        writer_payload = engine_payload(title="Writer survives")
+        reviewer = Mock(side_effect=AIServiceError("synthetic reviewer failure"))
+        service = ContentGenerationService(
+            self.db_path,
+            MockContentEngineAdapter([writer_payload]),
+            reviewer_settings=AISettings(
+                provider="deepseek",
+                base_url="https://review.example.test/v1",
+                api_key="review-secret",
+                model="review-model",
+            ),
+            reviewer_role={
+                "configured": True,
+                "effective_configured": True,
+                "fallback": False,
+                "source_role": "reviewer",
+            },
+            reviewer_optimizer=reviewer,
+        )
+
+        result = service.generate(self.request())
+
+        self.assertEqual(result["title"], "Writer survives")
+        review = result["generation"]["review"]
+        self.assertTrue(review["invoked"])
+        self.assertFalse(review["completed"])
+        self.assertTrue(review["writer_fallback_used"])
+        self.assertEqual(review["reason"], "reviewer_call_failed")
+        self.assertIsNone(review["comparison"])
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            receipt = conn.execute(
+                """
+                SELECT usage_status, total_tokens, estimated_cost, cost_status
+                FROM ai_usage_ledger WHERE operation = 'optimize'
+                """
+            ).fetchone()
+        self.assertEqual(receipt, ("unknown", None, None, "unknown_usage"))
+
+    def test_platform_safe_length_drives_cleanup_scoring_and_run_context(self):
+        payload = engine_payload()
+        payload["content"] = (
+            "XX科技围绕 AI Agent 说明适用条件、实现机制和可验证边界。"
+            * 80
+        )
+        result = ContentGenerationService(
+            self.db_path,
+            MockContentEngineAdapter([payload]),
+        ).generate(
+            self.request(
+                request_id="request-kuaishou-length",
+                idempotency_key="idem-kuaishou-length",
+                length=1000,
+                target_platform="快手",
+            )
+        )
+
+        self.assertLessEqual(authoring_visible_length(result["content"]), 380)
+        self.assertTrue(
+            any(
+                "原始请求 1000 字" in warning and "380 字平台安全线" in warning
+                for warning in result["generation"]["warnings"]
+            )
+        )
+        profile = result["geo_analysis"]["length_profile"]
+        self.assertEqual(profile["target_length"], 1000)
+        self.assertEqual(profile["requested_target_length"], 1000)
+        self.assertEqual(profile["effective_target_length"], 380)
+        self.assertEqual(profile["source"], "platform_safe_limit")
+        self.assertEqual(profile["key"], "compact")
+
+        context = get_run_score_context(
+            self.db_path,
+            result["generation"]["run_id"],
+        )
+        self.assertEqual(context["target_length"], 380)
+        self.assertEqual(context["requested_target_length"], 1000)
+        self.assertEqual(context["effective_target_length"], 380)
+        self.assertEqual(context["platform_limit"], 380)
+        self.assertEqual(context["length_source"], "platform_safe_limit")
 
     def test_success_removes_unfinished_placeholders_before_persistence(self):
         payload = engine_payload()
@@ -167,7 +417,7 @@ class ContentGenerationServiceTests(unittest.TestCase):
             "XX科技的企业 AI Agent 用于验证业务流程。" * 25
             + "\n\n限制与风险：结果取决于输入资料并需要人工复核。"
         )
-        original_length = len(payload["content"])
+        original_length = authoring_visible_length(payload["content"])
         primary = MockContentEngineAdapter([payload])
 
         result = ContentGenerationService(self.db_path, primary).generate(
@@ -175,7 +425,7 @@ class ContentGenerationServiceTests(unittest.TestCase):
         )
 
         self.assertGreater(original_length, 200)
-        self.assertLessEqual(len(result["content"]), 200)
+        self.assertLessEqual(authoring_visible_length(result["content"]), 200)
         self.assertIn("限制与风险", result["content"])
         warning = next(
             item
@@ -185,6 +435,30 @@ class ContentGenerationServiceTests(unittest.TestCase):
         self.assertIn(f"{original_length} →", warning)
         persisted = get_run(self.db_path, result["generation"]["run_id"])
         self.assertEqual(persisted["result_payload"]["content"], result["content"])
+
+    def test_under_target_output_warns_without_inventing_padding(self):
+        payload = engine_payload()
+        payload["content"] = "## 标题\n\n" + ("字 " * 140)
+        self.assertGreater(len(payload["content"]), 200)
+        self.assertEqual(authoring_visible_length(payload["content"]), 144)
+        primary = MockContentEngineAdapter([payload])
+
+        result = ContentGenerationService(self.db_path, primary).generate(
+            self.request(length=200)
+        )
+
+        self.assertEqual(result["content"], payload["content"].strip())
+        self.assertFalse(
+            any("自动压缩" in item for item in result["generation"]["warnings"])
+        )
+        warning = next(
+            item
+            for item in result["generation"]["warnings"]
+            if "可见字数低于目标合理下界" in item
+        )
+        self.assertIn("144 / 200", warning)
+        self.assertIn("建议至少 160 字", warning)
+        self.assertIn("未自动补字", warning)
 
     def test_content_inside_requested_length_is_not_reported_as_compressed(self):
         primary = MockContentEngineAdapter([engine_payload()])

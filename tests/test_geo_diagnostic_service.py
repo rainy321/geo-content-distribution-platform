@@ -14,6 +14,7 @@ from services.geo_diagnostic_service import (
     get_geo_diagnostic_run,
     list_geo_diagnostic_runs,
 )
+from services.geo_score_service import GEO_SCORE_VERSION
 
 
 class GEODiagnosticServiceTests(unittest.TestCase):
@@ -47,6 +48,11 @@ class GEODiagnosticServiceTests(unittest.TestCase):
         self.assertIn("visibility.baseline", keys)
         self.assertFalse(result["methodology"]["external_model_used"])
         self.assertFalse(result["methodology"]["customer_content_sent_externally"])
+        self.assertEqual(
+            result["baseline"]["score_basis"],
+            "current_rules_recomputed",
+        )
+        self.assertEqual(result["baseline"]["score_version"], GEO_SCORE_VERSION)
         self.assertNotIn("Acme Cloud", result["input_digest"])
         channel_strategy = result["channel_strategy"]
         self.assertEqual(channel_strategy["version"], CHANNEL_RECOMMENDATION_VERSION)
@@ -87,18 +93,18 @@ class GEODiagnosticServiceTests(unittest.TestCase):
         self.assertEqual(result["source_type"], "ad_hoc")
         self.assertEqual(
             result["algorithm_versions"]["ai_citeability"],
-            "ai-citeability-rules-2.1.1",
+            "ai-citeability-rules-2.2.0",
         )
         self.assertIn("citeability", result)
         self.assertEqual(len(result["citeability"]["dimensions"]), 7)
         self.assertTrue(any(gap["dimension"] == "structure" for gap in result["gaps"]))
-        self.assertFalse(result["publish_ready"])
-        self.assertEqual(result["readiness_status"], "blocked")
-        self.assertEqual(
+        self.assertTrue(result["publish_ready"])
+        self.assertEqual(result["readiness_status"], "ready")
+        self.assertNotIn(
+            "content_preflight_blocked",
             {item["stage"] for item in result["channel_strategy"]["recommendations"]},
-            {"content_preflight_blocked"},
         )
-        self.assertFalse(result["channel_strategy"]["content_gate"]["publish_ready"])
+        self.assertTrue(result["channel_strategy"]["content_gate"]["publish_ready"])
         self.assertTrue(
             any(
                 gap["dimension"] == "citeability"
@@ -115,7 +121,7 @@ class GEODiagnosticServiceTests(unittest.TestCase):
         self.assertNotIn(private_body, json.dumps(stored, ensure_ascii=False))
         self.assertEqual(
             stored["algorithm_versions"]["content_score"],
-            "geo-score-mvp-rules-1.0.0",
+            GEO_SCORE_VERSION,
         )
 
     @patch("services.geo_diagnostic_service.score_ai_citeability")
@@ -141,8 +147,10 @@ class GEODiagnosticServiceTests(unittest.TestCase):
             "score": 74,
             "pass_score": 75,
             "passed": False,
+            "publish_gate_passed": True,
             "dimensions": {},
             "blocking_issues": [],
+            "warnings": [],
             "suggestions": ["补充可追溯来源。"],
         }
 
@@ -158,8 +166,8 @@ class GEODiagnosticServiceTests(unittest.TestCase):
         # fields express the stricter publication decision.
         self.assertEqual(result["score"], 95)
         self.assertEqual(result["grade"], "A")
-        self.assertFalse(result["publish_ready"])
-        self.assertEqual(result["readiness_status"], "blocked")
+        self.assertTrue(result["publish_ready"])
+        self.assertEqual(result["readiness_status"], "ready")
         gate_gap = next(
             gap
             for gap in result["gaps"]
@@ -199,8 +207,10 @@ class GEODiagnosticServiceTests(unittest.TestCase):
             "score": 90,
             "pass_score": 75,
             "passed": True,
+            "publish_gate_passed": True,
             "dimensions": {},
             "blocking_issues": [],
+            "warnings": [],
             "suggestions": [],
         }
 
@@ -220,6 +230,241 @@ class GEODiagnosticServiceTests(unittest.TestCase):
                 "success_definition_met"
             ]
         )
+
+    def test_compact_saved_article_diagnostic_keeps_long_form_checks_not_applicable(self):
+        content = (
+            "Acme Cloud 用于说明企业服务的真实适用条件和人工复核边界，"
+            "本文仅基于已经确认的产品资料，不把未经验证的效果写成事实。\n\n"
+            "使用前应核对业务目标、数据权限和服务条款，并记录实际测试结果，"
+            "再判断方案是否适合当前场景。"
+        )
+        with closing(sqlite3.connect(self.database_path)) as conn:
+            article_id = conn.execute(
+                """
+                INSERT INTO articles (
+                    project_id, title, summary, content, geo_score, geo_analysis
+                ) VALUES (?, ?, '', ?, 0, ?)
+                """,
+                (
+                    self.project_id,
+                    "Acme Cloud 适合哪些场景？",
+                    content,
+                    json.dumps(
+                        {"length_profile": {"key": "compact", "target_length": 200}},
+                        ensure_ascii=False,
+                    ),
+                ),
+            ).lastrowid
+            conn.commit()
+
+        result = diagnose_geo_readiness(
+            self.database_path,
+            project_id=self.project_id,
+            article_id=article_id,
+            persist=False,
+        )
+
+        faq_dimension = next(item for item in result["dimensions"] if item["key"] == "faq")
+        self.assertEqual(result["length_profile"]["key"], "compact")
+        self.assertEqual(result["length_profile"]["target_length"], 200)
+        self.assertIsNone(faq_dimension["score"])
+        self.assertEqual(faq_dimension["status"], "not_applicable")
+        self.assertFalse(faq_dimension["applicable"])
+        self.assertFalse(any(gap["key"] == "content.faq" for gap in result["gaps"]))
+        self.assertFalse(
+            any(
+                token in suggestion
+                for suggestion in result["score_suggestions"]
+                for token in ("H2", "H3", "FAQ", "总结", "结语")
+            )
+        )
+
+    def test_article_diagnostic_uses_only_visible_bound_generation_sources(self):
+        source = {
+            "title": "公开测试报告",
+            "url": "https://docs.acmecloud.cn/report",
+            "claim": "Acme Cloud 在公开测试中将处理效率提升 40%",
+        }
+        content = (
+            "Acme Cloud 在公开测试中将处理效率提升 40%，"
+            "该结论仅适用于报告所述样本与测试环境。\n\n"
+            "来源：https://docs.acmecloud.cn/report"
+        )
+        with closing(sqlite3.connect(self.database_path)) as conn:
+            article_id = conn.execute(
+                """
+                INSERT INTO articles (project_id, title, summary, content)
+                VALUES (?, ?, '', ?)
+                """,
+                (self.project_id, "Acme Cloud 如何提高处理效率？", content),
+            ).lastrowid
+            run_id = conn.execute(
+                """
+                INSERT INTO content_generation_runs (
+                    request_id, request_fingerprint, project_id,
+                    project_snapshot, brief_snapshot, configured_engine,
+                    status, result_payload, article_id
+                ) VALUES (?, ?, ?, '{}', '{}', 'test-engine', 'succeeded', ?, ?)
+                """,
+                (
+                    "diagnostic-visible-source",
+                    "fingerprint-visible-source",
+                    self.project_id,
+                    json.dumps({"sources": [source]}, ensure_ascii=False),
+                    article_id,
+                ),
+            ).lastrowid
+            conn.commit()
+
+        supported = diagnose_geo_readiness(
+            self.database_path,
+            project_id=self.project_id,
+            article_id=article_id,
+            persist=False,
+        )
+
+        self.assertTrue(supported["publish_ready"])
+        self.assertEqual(
+            supported["evidence_source_summary"]["generation_run_id"], run_id
+        )
+        self.assertEqual(supported["evidence_source_summary"]["provided_count"], 1)
+        self.assertEqual(supported["evidence_source_summary"]["matched_count"], 1)
+        self.assertEqual(
+            supported["citeability"]["signals"]["unsupported_quantified_claims"],
+            [],
+        )
+
+        with closing(sqlite3.connect(self.database_path)) as conn:
+            conn.execute(
+                "UPDATE articles SET content = ? WHERE id = ?",
+                (
+                    "Acme Cloud 在公开测试中将处理效率提升 40%，"
+                    "该结论仅适用于报告所述样本与测试环境。",
+                    article_id,
+                ),
+            )
+            conn.commit()
+
+        unsupported = diagnose_geo_readiness(
+            self.database_path,
+            project_id=self.project_id,
+            article_id=article_id,
+            persist=False,
+        )
+
+        self.assertFalse(unsupported["publish_ready"])
+        self.assertEqual(unsupported["evidence_source_summary"]["provided_count"], 1)
+        self.assertEqual(unsupported["evidence_source_summary"]["matched_count"], 0)
+        self.assertIn(
+            "risk.unsupported_quantified_claim",
+            {
+                item["code"]
+                for item in unsupported["citeability"]["blocking_issues"]
+            },
+        )
+
+    def test_article_diagnostic_digest_fingerprints_bound_source_summary(self):
+        source = {
+            "title": "公开测试报告",
+            "url": "https://docs.acmecloud.cn/report",
+            "claim": "Acme Cloud 在公开测试中将处理效率提升 40%",
+        }
+        content = (
+            "Acme Cloud 在公开测试中将处理效率提升 40%，"
+            "适用范围仅限报告所述环境。\n\n"
+            "来源：https://docs.acmecloud.cn/report"
+        )
+        with closing(sqlite3.connect(self.database_path)) as conn:
+            article_id = conn.execute(
+                "INSERT INTO articles (project_id, title, content) VALUES (?, ?, ?)",
+                (self.project_id, "Acme Cloud 测试说明", content),
+            ).lastrowid
+            run_id = conn.execute(
+                """
+                INSERT INTO content_generation_runs (
+                    request_id, request_fingerprint, project_id,
+                    project_snapshot, brief_snapshot, configured_engine,
+                    status, result_payload, article_id
+                ) VALUES (?, ?, ?, '{}', '{}', 'test-engine', 'succeeded', ?, ?)
+                """,
+                (
+                    "diagnostic-source-digest",
+                    "fingerprint-source-digest",
+                    self.project_id,
+                    json.dumps({"sources": [source]}, ensure_ascii=False),
+                    article_id,
+                ),
+            ).lastrowid
+            conn.commit()
+
+        first = diagnose_geo_readiness(
+            self.database_path,
+            project_id=self.project_id,
+            article_id=article_id,
+            persist=False,
+        )
+        changed_source = {
+            **source,
+            "claim": source["claim"] + "，样本与版本边界以报告正文为准",
+        }
+        with closing(sqlite3.connect(self.database_path)) as conn:
+            conn.execute(
+                "UPDATE content_generation_runs SET result_payload = ? WHERE id = ?",
+                (
+                    json.dumps({"sources": [changed_source]}, ensure_ascii=False),
+                    run_id,
+                ),
+            )
+            conn.commit()
+
+        second = diagnose_geo_readiness(
+            self.database_path,
+            project_id=self.project_id,
+            article_id=article_id,
+            persist=False,
+        )
+
+        self.assertNotEqual(first["input_digest"], second["input_digest"])
+        self.assertNotEqual(
+            first["evidence_source_summary"]["matched_sources_sha256"],
+            second["evidence_source_summary"]["matched_sources_sha256"],
+        )
+
+    def test_project_reports_length_profiles_and_limits_comparison_to_same_band(self):
+        analyses = (
+            {"length_profile": {"key": "compact", "target_length": 200}},
+            {"length_profile": {"key": "standard", "target_length": 1000}},
+            {},
+        )
+        with closing(sqlite3.connect(self.database_path)) as conn:
+            for index, analysis in enumerate(analyses, start=1):
+                conn.execute(
+                    """
+                    INSERT INTO articles (
+                        project_id, title, content, geo_score, geo_analysis
+                    ) VALUES (?, ?, '正文', ?, ?)
+                    """,
+                    (
+                        self.project_id,
+                        f"文章 {index}",
+                        60 + index,
+                        json.dumps(analysis, ensure_ascii=False),
+                    ),
+                )
+            conn.commit()
+
+        result = diagnose_geo_readiness(
+            self.database_path,
+            project_id=self.project_id,
+            persist=False,
+        )
+
+        distribution = result["length_profile_distribution"]
+        counts = {item["key"]: item["count"] for item in distribution["profiles"]}
+        self.assertEqual(distribution["total_articles"], 3)
+        self.assertEqual(counts, {"compact": 1, "standard": 1, "unknown": 1})
+        self.assertTrue(distribution["mixed_profiles"])
+        self.assertIn("只建议比较同一长度档位", distribution["comparison_policy"])
 
     def test_project_diagnostic_uses_latest_visibility_metrics_and_versions(self):
         visibility_result = {
@@ -295,7 +540,7 @@ class GEODiagnosticServiceTests(unittest.TestCase):
             )
             self.assertIn("不可由本软件保证", item["risks"][0])
 
-    def test_project_digest_changes_when_scored_article_evidence_changes(self):
+    def test_project_digest_ignores_stale_score_but_changes_with_current_content(self):
         with closing(sqlite3.connect(self.database_path)) as conn:
             article_id = conn.execute(
                 """
@@ -328,8 +573,89 @@ class GEODiagnosticServiceTests(unittest.TestCase):
             persist=False,
         )
 
-        self.assertNotEqual(first["input_digest"], second["input_digest"])
-        self.assertNotEqual(first["score"], second["score"])
+        self.assertEqual(first["input_digest"], second["input_digest"])
+        self.assertEqual(first["score"], second["score"])
+
+        with closing(sqlite3.connect(self.database_path)) as conn:
+            conn.execute(
+                "UPDATE articles SET content = ? WHERE id = ?",
+                (
+                    (
+                        "Acme Cloud 提供可核验的企业服务说明，包含适用条件、"
+                        "实施机制、数据边界和人工复核要求。\n\n"
+                    )
+                    * 40,
+                    article_id,
+                ),
+            )
+            conn.commit()
+        third = diagnose_geo_readiness(
+            self.database_path,
+            project_id=self.project_id,
+            persist=False,
+        )
+
+        self.assertNotEqual(second["input_digest"], third["input_digest"])
+        self.assertNotEqual(second["score"], third["score"])
+
+    @patch("services.geo_diagnostic_service.score_geo_content")
+    def test_project_recompute_uses_saved_length_context(self, mock_score):
+        mock_score.return_value = {
+            "version": GEO_SCORE_VERSION,
+            "score": 37,
+        }
+        with closing(sqlite3.connect(self.database_path)) as conn:
+            conn.execute(
+                "UPDATE projects SET keywords = ? WHERE id = ?",
+                ('["evidence","automation"]', self.project_id),
+            )
+            conn.execute(
+                """
+                INSERT INTO articles (
+                    project_id, title, summary, content, geo_score, geo_analysis
+                ) VALUES (?, ?, ?, ?, 99, ?)
+                """,
+                (
+                    self.project_id,
+                    "Acme Cloud 证据说明",
+                    "当前摘要",
+                    "当前正文",
+                    json.dumps(
+                        {
+                            "length_profile": {
+                                "key": "standard",
+                                "requested_target_length": 200,
+                                "effective_target_length": 1000,
+                                "source": "actual_length_upgrade",
+                            }
+                        },
+                        ensure_ascii=False,
+                    ),
+                ),
+            )
+            conn.commit()
+
+        result = diagnose_geo_readiness(
+            self.database_path,
+            project_id=self.project_id,
+            persist=False,
+        )
+
+        mock_score.assert_called_once_with(
+            title="Acme Cloud 证据说明",
+            content="当前正文",
+            brand="Acme Cloud",
+            keywords=["evidence", "automation"],
+            target_length=1000,
+            requested_target_length=200,
+            source="actual_length_upgrade",
+        )
+        self.assertEqual(result["baseline"]["average_geo_score"], 37)
+        self.assertEqual(
+            result["baseline"]["score_basis"],
+            "current_rules_recomputed",
+        )
+        self.assertEqual(result["baseline"]["score_version"], GEO_SCORE_VERSION)
 
     def test_project_digest_hashes_inputs_instead_of_timestamp_precision(self):
         first = diagnose_geo_readiness(

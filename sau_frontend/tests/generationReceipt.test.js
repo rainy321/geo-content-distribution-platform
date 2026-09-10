@@ -89,12 +89,31 @@ test('component and API keep run restoration non-blocking', () => {
 
   assert.match(api, /getContentGenerationRun\(runId, config = \{\}\)/)
   assert.match(api, /\/api\/content-generation\/runs\/\$\{runId\}/)
+  assert.match(api, /getContentGenerationRunByRequestId\(requestId, config = \{\}\)/)
   assert.match(component, /generationReceipt\.sources/)
   assert.match(
     component,
     /getContentGenerationRun\(\s*runId,\s*\{ suppressGlobalError: true \}\s*\)/
   )
   assert.match(component, /error\.response\?\.status === 404/)
+})
+
+
+test('generated FAQ metadata is not appended after the server has constrained a 200-character body', () => {
+  const component = readFileSync(
+    new URL('../src/views/ContentCreation.vue', import.meta.url),
+    'utf8'
+  )
+  const response = {
+    article: {
+      content: '字'.repeat(200),
+      faq: [{ question: '额外问题？', answer: '额外答案。' }]
+    }
+  }
+
+  assert.equal(response.article.content.length, 200)
+  assert.match(component, /content:\s*article\.content\s*\|\|\s*''/)
+  assert.doesNotMatch(component, /mergeFaqIntoContent/)
 })
 
 
@@ -110,6 +129,25 @@ test('GEO scoring uses the immutable run snapshot when a run id exists', () => {
     {
       title: '生成后编辑的标题',
       content: '生成后编辑的正文',
+      generation_run_id: 73
+    }
+  )
+})
+
+
+test('GEO scoring keeps an explicit target length beside an immutable run id', () => {
+  assert.deepEqual(
+    buildGeoScorePayload({
+      title: '精简稿标题',
+      content: '精简稿正文',
+      generationRunId: 73,
+      targetLength: 200,
+      brand: '不应覆盖快照的品牌'
+    }),
+    {
+      title: '精简稿标题',
+      content: '精简稿正文',
+      target_length: 200,
       generation_run_id: 73
     }
   )

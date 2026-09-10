@@ -62,6 +62,14 @@ export const articleApi = {
     return http.get(`/api/content-generation/runs/${runId}`, undefined, config)
   },
 
+  getContentGenerationRunByRequestId(requestId, config = {}) {
+    return http.get(
+      `/api/content-generation/runs/by-request/${encodeURIComponent(requestId)}`,
+      undefined,
+      config
+    )
+  },
+
   scoreArticle(data) {
     return http.post('/api/geo/score', data)
   },

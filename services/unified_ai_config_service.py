@@ -34,9 +34,11 @@ from services.ai_service import (
     AIConfigurationError,
     AISettings,
     provider_label_for_settings,
+    resolve_ai_chat_completions_url,
 )
 
 
+UNIFIED_AI_ROLE_ROUTER_VERSION = "unified-ai-role-router-1.0.0"
 SCHEMA_VERSION = 2
 LEGACY_SCHEMA_VERSION = 1
 MAX_PROVIDER_LENGTH = 64
@@ -266,7 +268,8 @@ class UnifiedAIConfigStatus:
                 reviewer["effective_configured"]
                 and writer["effective_configured"]
                 and reviewer["provider"] == writer["provider"]
-                and reviewer["base_url"] == writer["base_url"]
+                and resolve_ai_chat_completions_url(reviewer["base_url"])
+                == resolve_ai_chat_completions_url(writer["base_url"])
                 and reviewer["model"] == writer["model"]
             )
         return payload
@@ -439,8 +442,8 @@ class UnifiedAIConfigService:
             if not normalized_api_key and existing_payload is not None:
                 same_connection = bool(
                     normalized_provider == existing_payload["provider"]
-                    and candidate_settings.base_url.rstrip("/")
-                    == existing_payload["base_url"].rstrip("/")
+                    and resolve_ai_chat_completions_url(candidate_settings.base_url)
+                    == resolve_ai_chat_completions_url(existing_payload["base_url"])
                 )
                 if same_connection:
                     normalized_api_key = self._decrypt_record(existing_payload)
@@ -507,12 +510,25 @@ class UnifiedAIConfigService:
             existing = payload.get("roles", {}).get(normalized_role)
             normalized_api_key = str(api_key or "").strip()
             credential_source = normalized_role
+            candidate_settings = AISettings.from_mapping(
+                {
+                    "base_url": base_url,
+                    "api_key": normalized_api_key or "credential-reuse-check",
+                    "model": model,
+                    "provider": provider,
+                }
+            )
             candidate_provider = _normalize_provider(provider)
-            candidate_base_url = str(base_url or "").strip().rstrip("/")
+            if not candidate_provider:
+                candidate_provider = provider_label_for_settings(candidate_settings)
+            candidate_endpoint = resolve_ai_chat_completions_url(
+                candidate_settings.base_url
+            )
             existing_connection_matches = bool(
                 existing is not None
                 and candidate_provider == existing["provider"]
-                and candidate_base_url == existing["base_url"].rstrip("/")
+                and candidate_endpoint
+                == resolve_ai_chat_completions_url(existing["base_url"])
             )
             if not normalized_api_key and existing_connection_matches:
                 normalized_api_key = self._decrypt_record(existing)
@@ -530,16 +546,17 @@ class UnifiedAIConfigService:
                 )
                 if (
                     candidate_provider == payload["provider"]
-                    and candidate_base_url == writer_settings.base_url.rstrip("/")
+                    and candidate_endpoint
+                    == resolve_ai_chat_completions_url(writer_settings.base_url)
                 ):
                     normalized_api_key = writer_settings.api_key
                     credential_source = "writer"
             settings = AISettings.from_mapping(
                 {
-                    "base_url": base_url,
+                    "base_url": candidate_settings.base_url,
                     "api_key": normalized_api_key,
-                    "model": model,
-                    "provider": provider,
+                    "model": candidate_settings.model,
+                    "provider": candidate_settings.provider,
                 }
             )
             normalized_provider = _normalize_provider(provider)
@@ -801,6 +818,7 @@ def _utc_now() -> str:
 __all__ = [
     "AI_ROLE_IDS",
     "OPTIONAL_AI_ROLE_IDS",
+    "UNIFIED_AI_ROLE_ROUTER_VERSION",
     "SecretProtector",
     "UnifiedAIConfigDataError",
     "UnifiedAIConfigError",

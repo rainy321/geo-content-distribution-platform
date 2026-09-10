@@ -108,6 +108,21 @@ class ContentEngineContractTests(unittest.TestCase):
         self.assertEqual(public["usage_status"], "unknown")
         self.assertTrue(any("Token" in warning for warning in public["warnings"]))
 
+    def test_empty_faq_is_valid_optional_protocol_data(self):
+        payload = load_fixture("success.json")
+        payload["data"]["faq"] = []
+
+        result = ContentGenerationResult.from_payload(
+            payload,
+            default_engine="colleague",
+            default_engine_version="unknown",
+            request_id="request-a",
+            elapsed_ms=10,
+        )
+
+        self.assertEqual(result.faq, ())
+        self.assertFalse(any("FAQ" in warning for warning in result.warnings))
+
     def test_rejects_incompatible_contract_version(self):
         payload = load_fixture("success.json")
         payload["contract_version"] = "2.0"

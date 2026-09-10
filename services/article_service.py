@@ -6,8 +6,12 @@ from contextlib import closing
 from pathlib import Path
 from typing import Any
 
-from services.geo_score_service import score_geo_content
-from services.geo_article_compiler_service import score_ai_citeability
+from services.geo_score_service import GEO_SCORE_VERSION, score_geo_content
+from services.geo_article_compiler_service import (
+    resolve_explicit_scoring_length_context,
+    resolve_generation_length_context,
+    score_ai_citeability,
+)
 from services.content_generation_run_service import (
     GenerationRunNotFoundError,
     GenerationRunStateError,
@@ -33,6 +37,7 @@ def create_article(
     tags: list[str],
     status: str,
     generation_run_id: int | None = None,
+    target_length: int | None = None,
 ) -> dict[str, Any]:
     with closing(_connect(database_path)) as conn:
         with conn:
@@ -50,6 +55,7 @@ def create_article(
                 content,
                 summary=summary,
                 score_context=score_context,
+                target_length=target_length,
             )
             cursor = conn.execute(
                 """
@@ -101,6 +107,7 @@ def create_articles_bulk(
                     article["title"],
                     article["content"],
                     summary=article.get("summary", ""),
+                    target_length=article.get("target_length"),
                 )
                 cursor = conn.execute(
                     """
@@ -209,12 +216,21 @@ def update_article(
                 project_id=current["project_id"],
                 article_id=article_id,
             )
+            if "target_length" not in changes:
+                # The saved profile is the latest operator-approved length
+                # contract. Keep run provenance, but do not restore the run's
+                # original length after a later explicit edit.
+                score_context = {
+                    **(score_context or {}),
+                    **_stored_length_context(current.get("geo_analysis")),
+                }
             score_result = _score_article(
                 project,
                 title,
                 content,
                 summary=summary,
                 score_context=score_context,
+                target_length=changes.get("target_length"),
             )
 
             conn.execute(
@@ -286,6 +302,7 @@ def _score_article(
     *,
     summary: str = "",
     score_context: dict[str, Any] | None = None,
+    target_length: int | None = None,
 ) -> dict[str, Any]:
     context = score_context or {}
     brand = str(context.get("brand") or project["name"]).strip()
@@ -294,11 +311,36 @@ def _score_article(
         if isinstance(context.get("keywords"), list)
         else _decode_string_list(project["keywords"])
     )
+    explicit_target_length = _optional_target_length(target_length)
+    if explicit_target_length is not None:
+        # The editor/API choice becomes the new request, while an immutable
+        # generation-run platform cap still defines what can safely publish.
+        explicit_context = resolve_explicit_scoring_length_context(
+            explicit_target_length,
+            str(context.get("target_platform") or ""),
+            platform_limit=_optional_target_length(context.get("platform_limit")),
+        )
+        effective_target_length = explicit_context["effective_length"]
+        requested_target_length = explicit_context["requested_length"]
+        length_source = explicit_context["source"]
+    else:
+        effective_target_length = (
+            context.get("effective_target_length")
+            or context.get("target_length")
+        )
+        requested_target_length = (
+            context.get("requested_target_length")
+            or effective_target_length
+        )
+        length_source = context.get("length_source")
     result = score_geo_content(
         title=title,
         content=content,
         brand=brand,
         keywords=keywords,
+        target_length=effective_target_length,
+        requested_target_length=requested_target_length,
+        source=length_source,
     )
     result["citeability"] = score_ai_citeability(
         title=title,
@@ -313,6 +355,9 @@ def _score_article(
             if isinstance(context.get("sources"), list)
             else ()
         ),
+        target_length=effective_target_length,
+        requested_target_length=requested_target_length,
+        source=length_source,
     )
     return result
 
@@ -352,11 +397,18 @@ def _score_context_for_run(
     keywords = brief_snapshot.get("keywords")
     if not isinstance(keywords, list):
         keywords = project_snapshot.get("keywords")
+    length_context = _generation_length_context(brief_snapshot)
     return {
         "brand": str(project_snapshot.get("name") or "").strip(),
         "keywords": _decode_string_list(keywords),
         "product": str(project_snapshot.get("product") or "").strip(),
         "website": str(project_snapshot.get("website") or "").strip(),
+        "target_platform": str(brief_snapshot.get("target_platform") or "").strip(),
+        "target_length": length_context["effective_length"],
+        "requested_target_length": length_context["requested_length"],
+        "effective_target_length": length_context["effective_length"],
+        "platform_limit": length_context["platform_limit"],
+        "length_source": length_context["source"],
         # Generation sources are immutable provenance stored in the existing
         # result receipt. Reusing them keeps pre-save, saved and later edited
         # citeability scores stable without adding another article column.
@@ -415,12 +467,90 @@ def _serialize_article_list_item(row: sqlite3.Row) -> dict[str, Any]:
 
 def _encode_geo_analysis(score_result: dict[str, Any]) -> str:
     analysis = {
+        "base_score": {
+            "version": str(score_result.get("version") or GEO_SCORE_VERSION),
+            "score": int(score_result["score"]),
+        },
         "dimensions": score_result["dimensions"],
         "suggestions": score_result["suggestions"],
     }
+    if isinstance(score_result.get("length_profile"), dict):
+        analysis["length_profile"] = score_result["length_profile"]
     if isinstance(score_result.get("citeability"), dict):
         analysis["citeability"] = score_result["citeability"]
     return _encode_json(analysis)
+
+
+def _optional_target_length(value: Any) -> int | None:
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        return None
+    return normalized if 200 <= normalized <= 3_000 else None
+
+
+def _stored_length_context(analysis: Any) -> dict[str, Any]:
+    if not isinstance(analysis, dict):
+        return {}
+    profile = analysis.get("length_profile")
+    if not isinstance(profile, dict):
+        return {}
+    requested = _optional_target_length(
+        profile.get(
+            "requested_target_length",
+            profile.get("target_length", profile.get("targetLength")),
+        )
+    )
+    effective = _optional_target_length(
+        profile.get(
+            "effective_target_length",
+            profile.get("target_length", profile.get("targetLength")),
+        )
+    )
+    if requested is None and effective is None:
+        return {}
+    requested = requested or effective
+    effective = effective or requested
+    return {
+        "requested_target_length": requested,
+        "effective_target_length": effective,
+        "length_source": str(profile.get("source") or "explicit"),
+    }
+
+
+def _generation_length_context(brief: dict[str, Any]) -> dict[str, Any]:
+    stored = brief.get("length_context")
+    if isinstance(stored, dict):
+        requested = _optional_target_length(stored.get("requested_length"))
+        effective = _optional_target_length(stored.get("effective_length"))
+        raw_limit = stored.get("platform_limit")
+        platform_limit = _optional_target_length(raw_limit) if raw_limit is not None else None
+        if (
+            requested is not None
+            and effective is not None
+            and effective <= requested
+            and (platform_limit is None or effective <= platform_limit)
+        ):
+            return {
+                "requested_length": requested,
+                "effective_length": effective,
+                "platform_limit": platform_limit,
+                "source": str(stored.get("source") or "requested_length"),
+            }
+    requested = _optional_target_length(
+        brief.get("requested_length", brief.get("length"))
+    )
+    if requested is None:
+        return {
+            "requested_length": None,
+            "effective_length": None,
+            "platform_limit": None,
+            "source": "legacy",
+        }
+    return resolve_generation_length_context(
+        requested,
+        str(brief.get("target_platform") or ""),
+    )
 
 
 def _encode_json(value: Any) -> str:

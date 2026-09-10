@@ -7,7 +7,10 @@ import {
   applyUnifiedAIProviderPreset,
   buildUnifiedAIRoleConfigPayload,
   buildUnifiedAIConfigPayload,
+  normalizeUnifiedAIBaseUrl,
   normalizeUnifiedAIStatus,
+  resolveUnifiedAIChatEndpoint,
+  unifiedAIProviderConfigurationHint,
   unifiedAICredentialLabel
 } from '../src/utils/aiConfig.js'
 
@@ -150,7 +153,71 @@ test('changing providers clears the in-memory draft key', () => {
   const next = applyUnifiedAIProviderPreset({ provider: 'qwen', apiKey: 'secret' }, 'deepseek')
   assert.equal(next.provider, 'deepseek')
   assert.equal(next.baseUrl, 'https://api.deepseek.com')
+  assert.equal(next.model, 'deepseek-chat')
   assert.equal(next.apiKey, '')
+})
+
+test('provider endpoints are normalized without duplicate or injected v1 paths', () => {
+  assert.equal(
+    resolveUnifiedAIChatEndpoint('https://dashscope.aliyuncs.com/compatible-mode/v1/'),
+    'https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions'
+  )
+  assert.equal(
+    resolveUnifiedAIChatEndpoint('https://api.deepseek.com'),
+    'https://api.deepseek.com/chat/completions'
+  )
+  assert.equal(
+    resolveUnifiedAIChatEndpoint('https://ark.cn-beijing.volces.com/api/v3'),
+    'https://ark.cn-beijing.volces.com/api/v3/chat/completions'
+  )
+  assert.equal(
+    resolveUnifiedAIChatEndpoint('https://gateway.example.com/v2/chat/completions/chat/completions'),
+    'https://gateway.example.com/v2/chat/completions'
+  )
+  assert.equal(
+    normalizeUnifiedAIBaseUrl('https://API.EXAMPLE.COM:443/v1/'),
+    'https://api.example.com/v1'
+  )
+})
+
+test('ark preset binds the api v3 base and requires its own model id', () => {
+  const next = applyUnifiedAIProviderPreset({ provider: 'qwen', apiKey: 'secret' }, 'doubao')
+  assert.equal(next.provider, 'doubao')
+  assert.equal(next.baseUrl, 'https://ark.cn-beijing.volces.com/api/v3')
+  assert.equal(next.model, '')
+  assert.equal(next.apiKey, '')
+  assert.match(unifiedAIProviderConfigurationHint('doubao'), /模型或接入点 ID/)
+
+  assert.throws(() => buildUnifiedAIConfigPayload({
+    provider: 'doubao',
+    baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+    model: 'ep-test',
+    apiKey: 'secret'
+  }), /服务商与 Base URL 不匹配/)
+
+  assert.throws(() => buildUnifiedAIConfigPayload({
+    provider: 'qwen',
+    baseUrl: 'https://dashscope.aliyuncs.com/v1',
+    model: 'qwen-test',
+    apiKey: 'secret'
+  }), /compatible-mode\/v1/)
+})
+
+test('credential reuse compares the resolved chat endpoint identity', () => {
+  const payload = buildUnifiedAIConfigPayload({
+    provider: 'custom',
+    baseUrl: 'https://gateway.example.com/openai/v2',
+    model: 'model-v2',
+    apiKey: ''
+  }, {
+    savedConfigured: true,
+    apiKeyConfigured: true,
+    provider: 'custom',
+    baseUrl: 'https://gateway.example.com/openai/v2/chat/completions'
+  })
+
+  assert.equal(payload.base_url, 'https://gateway.example.com/openai/v2')
+  assert.equal(Object.hasOwn(payload, 'api_key'), false)
 })
 
 test('unified AI API includes read, save, clear and fixed synthetic test actions', () => {

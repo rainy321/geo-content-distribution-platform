@@ -115,6 +115,8 @@ test('AI settings exposes protected role routing with explicit writer fallback',
   assert.match(settingsSource, /写稿、调优、回测与生图可以独立配置/)
   assert.match(settingsSource, /未配置的角色会明确回退到写稿模型/)
   assert.match(settingsSource, /本版本封面仍由本地确定性绘图生成/)
+  assert.match(settingsSource, /const roleId = String\(route\.query\.role \|\| ''\)/)
+  assert.match(settingsSource, /watch\(\(\) => route\.query\.role, selectRoleFromRoute\)/)
   assert.match(settingsSource, /测试连接只会向当前模型发送固定合成文本/)
   assert.doesNotMatch(settingsSource, /Vercel Production/)
   assert.doesNotMatch(settingsSource, /仅当前标签页/)

@@ -498,6 +498,7 @@ class TencentBaseUploader(BaseVideoUploader):
         self.local_executable_path = LOCAL_CHROME_PATH
         self._upload_diagnostics: list[str] = []
         self._upload_network_diagnostics_installed = False
+        self._upload_transport_completed = False
 
     def _record_upload_diagnostic(self, message: str) -> None:
         normalized = " ".join(str(message or "").split())[:500]
@@ -554,6 +555,22 @@ class TencentBaseUploader(BaseVideoUploader):
                     return
                 endpoint = self._safe_request_endpoint(response.url)
                 endpoint_lower = endpoint.lower()
+                if (
+                    200 <= int(response.status) < 300
+                    and any(
+                        marker in endpoint_lower
+                        for marker in (
+                            "completepartupload",
+                            "complete_multipart",
+                            "completeupload",
+                            "uploadcomplete",
+                        )
+                    )
+                ):
+                    self._upload_transport_completed = True
+                    self._record_upload_diagnostic(
+                        f"upload_transport_complete {method} {response.status} {endpoint}"
+                    )
                 upload_markers = (
                     "upload",
                     "multipart",
@@ -875,10 +892,14 @@ class TencentBaseUploader(BaseVideoUploader):
     ) -> None:
         retry_count = 0
         upload_retry_count = 0
+        transport_stable_checks = 0
         while retry_count < max_retries:
             retry_count += 1
             try:
-                publish_buttons = page.get_by_role("button", name="发表", exact=True)
+                publish_buttons = page.get_by_role(
+                    "button",
+                    name=re.compile(r"^(发表|发表视频|发布|发布视频)$"),
+                )
                 button_count = await publish_buttons.count()
                 for index in range(button_count - 1, -1, -1):
                     publish_button = publish_buttons.nth(index)
@@ -893,6 +914,14 @@ class TencentBaseUploader(BaseVideoUploader):
                     ):
                         tencent_logger.info(_msg("🥳", "视频上传完毕"))
                         return
+
+                completed_marker = page.locator(
+                    'text=/^(?:上传成功|处理完成|重新上传|替换视频|100%)$/'
+                ).first
+                if await completed_marker.count() and await completed_marker.is_visible():
+                    self._record_upload_diagnostic("visible_upload_complete_marker")
+                    tencent_logger.info(_msg("🥳", "视频上传与处理状态已完成"))
+                    return
 
                 upload_error = page.locator("div.status-msg.error:visible")
                 if await upload_error.count():
@@ -916,6 +945,16 @@ class TencentBaseUploader(BaseVideoUploader):
                         raise RuntimeError(
                             f"视频号页面明确报告上传失败: {error_text}"
                         )
+
+                if self._upload_transport_completed:
+                    transport_stable_checks += 1
+                    if transport_stable_checks >= 2:
+                        tencent_logger.info(
+                            _msg("🥳", "视频上传接口已完成且页面连续两次未报告错误")
+                        )
+                        return
+                else:
+                    transport_stable_checks = 0
             except RuntimeError:
                 raise
             except Exception as exc:
@@ -946,7 +985,7 @@ class TencentBaseUploader(BaseVideoUploader):
             )
 
     async def submit_publish(self, page: Page) -> None:
-        max_publish_retries = 600
+        max_publish_retries = 60
         publish_retry_count = 0
         verification_waited = False
         submit_clicked = False
@@ -985,18 +1024,27 @@ class TencentBaseUploader(BaseVideoUploader):
                             if wait_i % 20 == 0 and wait_i > 0:
                                 tencent_logger.info(_msg("⏳", f"仍在等待验证完成...已等待{wait_i // 2}秒"))
                         else:
-                            verification_waited = True
+                            raise RuntimeError(
+                                "视频号需要人工验证，180 秒内未完成；尚未点击发表"
+                            )
 
                 if getattr(self, "is_draft", False):
                     draft_button = page.get_by_role("button", name="保存草稿")
                     if not submit_clicked and await draft_button.count():
+                        self.submit_click_attempted = True
                         await draft_button.click()
                         submit_clicked = True
                     await page.wait_for_url("**/post/list**", timeout=5000)
                     tencent_logger.success(_msg("🥳", "视频草稿保存成功"))
                 else:
-                    publish_button = page.get_by_role("button", name="发表")
+                    publish_button = page.get_by_role(
+                        "button",
+                        name=re.compile(r"^(发表|发表视频|发布|发布视频)$"),
+                    )
                     if not submit_clicked and await publish_button.count():
+                        # Arm before dispatch: a click exception may still mean
+                        # the browser sent the event, so no automatic second click.
+                        self.submit_click_attempted = True
                         await publish_button.click()
                         submit_clicked = True
                     await page.wait_for_url(TENCENT_MANAGE_URL, timeout=5000)
@@ -1063,6 +1111,7 @@ class TencentVideo(TencentBaseUploader):
         self.dry_run = bool(dry_run)
         self.preview_seconds = max(0, int(preview_seconds))
         self.require_original_statement = bool(require_original_statement)
+        self.submit_click_attempted = False
 
     async def validate_upload_args(self):
         await self.validate_base_args()
@@ -1158,14 +1207,16 @@ class TencentVideo(TencentBaseUploader):
 
             await self.upload_video_file(page, self.file_path)
             await self.prepare_video_for_publish(page)
+            # Some video-channel layouts keep the publish button disabled until
+            # short title is populated.  Fill it before using button state as one
+            # of the upload-complete signals.
+            await self.set_short_title(page, self.title, self.short_title)
             await self.wait_for_upload_complete(page)
             await self.apply_original_statement(page)
             await self.set_thumbnail(page)
 
             if self.publish_strategy == TENCENT_PUBLISH_STRATEGY_SCHEDULED and self.publish_date != 0:
                 await self.set_schedule_time_tencent(page, self.publish_date)
-
-            await self.set_short_title(page, self.title, self.short_title)
 
             if getattr(self, "dry_run", False):
                 tencent_logger.warning(_msg("🛑", "【仅预览不发布】已跳过点击发表按钮"))

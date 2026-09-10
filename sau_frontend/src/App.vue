@@ -119,7 +119,7 @@
         </el-header>
         <el-main>
           <router-view v-slot="{ Component }">
-            <KeepAlive include="AiVisibility">
+            <KeepAlive include="AiVisibility,ContentCreation">
               <component :is="Component" />
             </KeepAlive>
           </router-view>

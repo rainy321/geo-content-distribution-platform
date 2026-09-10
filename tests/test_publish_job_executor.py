@@ -10,6 +10,8 @@ from db.createTable import initialize_database
 from services.article_service import get_article
 from services.publish_job_executor import (
     PublishConfirmationMismatchError,
+    _build_publish_content,
+    _enforce_citeability_gate,
     execute_publish_job,
 )
 from services.publish_job_service import (
@@ -212,8 +214,39 @@ class PublishJobExecutorTests(unittest.TestCase):
         content = publisher.calls[0]
         self.assertIsInstance(content, PublishContent)
         self.assertEqual(content.title, "企业 AI Agent 指南")
-        self.assertEqual(content.tags, ("AI", "Agent"))
+        # The Zhihu article adapter does not submit a tag field, so execution
+        # must use the same empty platform-selected set validated in preflight.
+        self.assertEqual(content.tags, ())
         self.assertEqual(self._article_status(), "published")
+
+    def test_executor_validates_and_sends_the_same_platform_selected_tags(self):
+        article = get_article(self.db_path, self.article_id)
+        tags = [f"标签{index}" for index in range(1, 9)]
+        article["tags"] = tags
+
+        for platform, expected_count in (
+            ("douyin", 5),
+            ("tiktok", 5),
+            ("bilibili", 6),
+        ):
+            with self.subTest(platform=platform), patch(
+                "services.publish_job_executor.validate_platform_publish_variant"
+            ) as validate:
+                content = _build_publish_content(
+                    {
+                        "platform": platform,
+                        "publish_title": "测试标题",
+                        "publish_content": "正文",
+                        "publish_at": None,
+                        "images": [],
+                        "video": "",
+                    },
+                    article,
+                    media_root=self.temp_dir.name,
+                )
+
+                self.assertEqual(content.tags, tuple(tags[:expected_count]))
+                self.assertEqual(validate.call_args.kwargs["tags"], content.tags)
 
     def test_executor_sends_saved_platform_copy_instead_of_mutating_original(self):
         # A manually saved outbound copy must already satisfy the platform's
@@ -264,9 +297,106 @@ class PublishJobExecutorTests(unittest.TestCase):
         publisher_factory.assert_not_called()
         self.assertEqual(result["status"], "need_action")
         self.assertIn("AI 可引用性发布门禁未通过", result["message"])
+        self.assertIn("P0 硬阻断", result["message"])
+        self.assertIn("entity.canonical_name_absent", result["message"])
         self.assertIn("标准品牌名称“XX科技”", result["message"])
+        self.assertIn("质量分", result["message"])
+        self.assertIn("不是本次拦截原因", result["message"])
+        self.assertNotIn("要求至少", result["message"])
         self.assertIn("处理建议", result["message"])
         self.assertIn("未加载发布器、未访问平台", result["message"])
+
+    def test_p0_gate_message_names_blocker_even_when_quality_score_is_high(self):
+        job = self._create_job()
+        publisher_factory = Mock(name="publisher_factory_must_not_be_called")
+        p0_issue = {
+            "code": "risk.unsupported_quantified_claim",
+            "priority": "P0",
+            "message": "量化主张缺少关联证据。",
+            "action": "补充可核验来源并在正文保留来源 URL。",
+        }
+        with patch(
+            "services.publish_job_executor.evaluate_publish_citeability",
+            return_value={
+                "score": 92,
+                "pass_score": 75,
+                "passed": False,
+                "publish_gate_passed": False,
+                "blocking_issues": [p0_issue],
+                "warnings": [],
+                "suggestions": [],
+            },
+        ):
+            result = execute_publish_job(
+                self.db_path,
+                job["id"],
+                publisher_factory=publisher_factory,
+            )
+
+        publisher_factory.assert_not_called()
+        self.assertEqual(result["status"], "need_action")
+        self.assertIn("1 个 P0 硬阻断", result["message"])
+        self.assertIn("risk.unsupported_quantified_claim", result["message"])
+        self.assertIn("量化主张缺少关联证据", result["message"])
+        self.assertIn("质量分 92/100 仅供优化参考", result["message"])
+        self.assertIn("不是本次拦截原因", result["message"])
+        self.assertNotIn("要求至少", result["message"])
+
+    def test_real_executor_allows_score_71_without_p0_after_existing_confirmation(self):
+        job = self._create_job()
+        publisher = StubPublisher(
+            "zhihu",
+            PublishResult(True, "zhihu", "success", "https://zhuanlan.zhihu.com/p/71"),
+        )
+        quality_warning = {
+            "code": "quality.score_below_target",
+            "priority": "P1",
+            "message": "AI 可引用性质量分为 71/100，低于建议目标 75/100。",
+            "action": "建议继续优化，但不硬阻断发布。",
+        }
+        with patch(
+            "services.publish_job_executor.evaluate_publish_citeability",
+            return_value={
+                "score": 71,
+                "pass_score": 75,
+                "passed": False,
+                "publish_gate_passed": True,
+                "blocking_issues": [],
+                "warnings": [quality_warning],
+                "suggestions": [],
+            },
+        ):
+            result = execute_publish_job(
+                self.db_path,
+                job["id"],
+                publisher_factory=lambda _job: publisher,
+            )
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(len(publisher.calls), 1)
+
+    def test_executor_reuses_only_visible_immutable_generation_source_claims(self):
+        source = {
+            "title": "公开测试报告",
+            "url": "https://example.com/report",
+            "claim": "XX科技在公开测试中将处理效率提升 40%",
+        }
+        article = get_article(self.db_path, self.article_id)
+        article["generation"] = {"sources": [source]}
+        content = (
+            "XX科技在公开测试中将处理效率提升 40%，适用范围仅限报告所述环境。"
+            "来源：https://example.com/report"
+        )
+
+        result = _enforce_citeability_gate(
+            self.db_path,
+            article=article,
+            title="XX科技如何提高处理效率？",
+            content=content,
+        )
+
+        self.assertTrue(result["publish_gate_passed"])
+        self.assertEqual(result["outbound_source_filter"]["matched_count"], 1)
 
     def test_real_executor_scores_exact_platform_override_before_publishing(self):
         job = self._create_job(

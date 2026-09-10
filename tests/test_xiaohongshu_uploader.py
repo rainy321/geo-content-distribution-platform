@@ -44,8 +44,11 @@ class FakeLocator:
     async def fill(self, value):
         return None
 
-    async def click(self):
+    async def click(self, **kwargs):
         return None
+
+    async def is_visible(self):
+        return bool(self._count)
 
 
 class RecordingKeyboard:
@@ -67,8 +70,8 @@ class RecordingLocator(FakeLocator):
     async def fill(self, value):
         self.actions.append(("fill", value))
 
-    async def click(self):
-        self.actions.append(("click",))
+    async def click(self, **kwargs):
+        self.actions.append(("click", kwargs))
 
     async def wait_for(self, **kwargs):
         self.actions.append(("wait_for", kwargs))
@@ -85,7 +88,10 @@ class RecordingPage:
         }
 
     def locator(self, selector):
-        return self.locators[selector]
+        return self.locators.get(selector, FakeLocator(selector))
+
+    async def wait_for_timeout(self, milliseconds):
+        return None
 
 
 class XiaohongshuUploaderTests(unittest.TestCase):
@@ -213,13 +219,13 @@ class XiaohongshuUploaderTests(unittest.TestCase):
         )
         self.assertEqual(
             page.locators['p[data-placeholder*="输入正文描述"]'].actions,
-            [("click",)],
+            [("click", {})],
         )
         self.assertIn(("type", "描述内容", None), page.keyboard.actions)
         self.assertIn(("type", "#话题1", 30), page.keyboard.actions)
         self.assertEqual(
             page.locators['#creator-editor-topic-container .item'].actions,
-            [("wait_for", {"state": "visible", "timeout": 2000}), ("click",)],
+            [("click", {"timeout": 2000})],
         )
 
     def test_video_fill_meta_can_fill_first_tag_without_desc(self):
@@ -236,10 +242,36 @@ class XiaohongshuUploaderTests(unittest.TestCase):
 
         self.assertEqual(
             page.locators['p[data-placeholder*="输入正文描述"]'].actions,
-            [("click",)],
+            [("click", {})],
         )
         self.assertNotIn(("type", "", None), page.keyboard.actions)
         self.assertIn(("type", "#话题1", 30), page.keyboard.actions)
+
+    def test_missing_topic_suggestion_is_skipped_once_without_blocking_meta(self):
+        app = xhs_main.XiaoHongShuNote(
+            image_paths=["cover.png"],
+            note="正文",
+            tags=["没有匹配的话题"],
+            publish_date=0,
+            account_file="account.json",
+            title="标题",
+            desc="正文",
+        )
+        page = RecordingPage()
+        page.locators['#creator-editor-topic-container .item'] = FakeLocator(
+            "missing-topic",
+            count=0,
+        )
+
+        result = asyncio.run(app.fill_tags(page))
+
+        self.assertEqual(result["selected"], [])
+        self.assertEqual(result["skipped"], ["没有匹配的话题"])
+        self.assertEqual(
+            page.keyboard.actions.count(("type", "#没有匹配的话题", 30)),
+            1,
+        )
+        self.assertEqual(page.keyboard.actions.count(("press", "Control+Z")), 1)
 
     def test_note_title_defaults_do_not_override_explicit_title(self):
         app = xhs_main.XiaoHongShuNote(

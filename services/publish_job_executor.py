@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hmac
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -13,6 +13,7 @@ from services.geo_article_compiler_service import (
 )
 from services.project_service import ProjectNotFoundError, get_project
 from services.media_account_risk_service import record_publish_job_account_risk
+from services.platform_publish_policy_service import adapt_tags_for_platform
 from services.publish_job_service import (
     ConcurrentPublishJobUpdateError,
     PUBLISH_AUTHORIZATION_MISMATCH_MESSAGE,
@@ -230,6 +231,13 @@ def _enforce_citeability_gate(
 
     try:
         project = get_project(database_path, int(article["project_id"]))
+        generation = article.get("generation")
+        immutable_sources = (
+            generation.get("sources", [])
+            if isinstance(generation, Mapping)
+            and isinstance(generation.get("sources"), list)
+            else []
+        )
         result = evaluate_publish_citeability(
             title=title,
             content=content,
@@ -241,19 +249,26 @@ def _enforce_citeability_gate(
                 if isinstance(project.get("keywords"), list)
                 else []
             ),
+            target_length=_article_target_length(article),
+            sources=immutable_sources,
         )
     except (GEOArticleCompilerError, ProjectNotFoundError, KeyError, TypeError, ValueError) as exc:
         raise PublishCiteabilityGateError(
             f"无法校验当前发布副本（{str(exc).strip() or exc.__class__.__name__}）"
         ) from exc
 
-    if result.get("passed") is True:
+    if result.get("publish_gate_passed") is True:
         return result
 
+    p0_blockers: list[str] = []
     actions: list[str] = []
     for issue in result.get("blocking_issues") or ():
         if not isinstance(issue, dict):
             continue
+        if str(issue.get("priority") or "").strip().upper() == "P0":
+            code = str(issue.get("code") or "unknown_p0").strip()
+            message = str(issue.get("message") or "未提供原因").strip()
+            p0_blockers.append(f"{code}：{message}")
         text = str(issue.get("action") or issue.get("message") or "").strip()
         if text and text not in actions:
             actions.append(text)
@@ -263,10 +278,30 @@ def _enforce_citeability_gate(
             actions.append(text)
     action_text = "；".join(actions[:3]) or "补齐标准实体、直接答案、结构与可核验来源"
     score = result.get("score", 0)
-    pass_score = result.get("pass_score", 70)
+    blocker_summary = "；".join(p0_blockers[:3]) or "门禁返回阻断状态但未提供 P0 明细"
     raise PublishCiteabilityGateError(
-        f"当前 {score}/100，要求至少 {pass_score}/100。处理建议：{action_text}"
+        f"检测到 {len(p0_blockers)} 个 P0 硬阻断：{blocker_summary}。"
+        f"当前 AI 可引用性质量分 {score}/100 仅供优化参考，不是本次拦截原因。"
+        f"处理建议：{action_text}"
     )
+
+
+def _article_target_length(article: Mapping[str, Any]) -> int | None:
+    analysis = article.get("geo_analysis")
+    profile = analysis.get("length_profile") if isinstance(analysis, Mapping) else None
+    if not isinstance(profile, Mapping):
+        return None
+    value = profile.get(
+        "effective_target_length",
+        profile.get("target_length", profile.get("targetLength")),
+    )
+    if isinstance(value, bool):
+        return None
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError):
+        return None
+    return normalized if 200 <= normalized <= 3000 else None
 
 
 def _build_publish_content(
@@ -282,11 +317,17 @@ def _build_publish_content(
     effective_content = str(
         job.get("publish_content") or article["content"]
     ).strip()
+    selected_tags = tuple(
+        adapt_tags_for_platform(
+            job["platform"],
+            article.get("tags") or (),
+        )["selected"]
+    )
     validate_platform_publish_variant(
         platform=job["platform"],
         title=effective_title,
         content=effective_content,
-        tags=article.get("tags") or (),
+        tags=selected_tags,
     )
 
     resolved_media_root = Path(media_root).expanduser().resolve()
@@ -319,7 +360,7 @@ def _build_publish_content(
         content=effective_content,
         images=tuple(image_paths),
         video=video_path,
-        tags=tuple(article.get("tags") or ()),
+        tags=selected_tags,
         publish_at=publish_at,
     )
 

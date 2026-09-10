@@ -448,14 +448,22 @@ class P2ContentWorkflowApiTests(unittest.TestCase):
         self.assertIn("视频素材", missing.get_json()["msg"])
 
         (self.media_root / "demo.mp4").write_bytes(b"video")
-        created = self.client.post(
-            "/api/publish",
-            json={
-                "article_id": self.article_id,
-                "platform": "bilibili",
-                "video": "demo.mp4",
+        with patch(
+            "sau_backend._read_publish_video_metadata",
+            return_value={
+                "width": 1920,
+                "height": 1080,
+                "duration_seconds": 12,
             },
-        )
+        ):
+            created = self.client.post(
+                "/api/publish",
+                json={
+                    "article_id": self.article_id,
+                    "platform": "bilibili",
+                    "video": "demo.mp4",
+                },
+            )
         self.assertEqual(created.status_code, 201)
         self.assertEqual(created.get_json()["data"]["video"], "demo.mp4")
 

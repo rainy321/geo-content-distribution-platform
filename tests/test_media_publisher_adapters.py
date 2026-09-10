@@ -11,6 +11,9 @@ from services.media_publisher_adapters import (
     DouyinPublisherAdapter,
     TiktokPublisherAdapter,
     _bilibili_publish_runner,
+    _channels_publish_runner,
+    _douyin_publish_runner,
+    _kuaishou_publish_runner,
     _tiktok_publish_runner,
 )
 from services.publisher_adapter import PublishContent
@@ -338,6 +341,171 @@ class TiktokPublishRunnerTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["status"], "processing")
         self.assertIn("Post", result["message"])
+        self.assertIn("不会自动重试", result["message"])
+
+
+class ChineseShortVideoPublishRunnerTests(unittest.IsolatedAsyncioTestCase):
+    @patch("uploader.douyin_uploader.main.DouYinNote")
+    async def test_douyin_management_receipt_is_returned_for_reconciliation(
+        self,
+        publisher_class,
+    ):
+        publisher = publisher_class.return_value
+        publisher.submit_click_attempted = True
+        publisher.douyin_upload_note = AsyncMock(
+            return_value={
+                "status": "processing",
+                "message": "抖音已接受提交并进入作品管理，当前可能处于平台处理或审核中",
+            }
+        )
+
+        result = await _douyin_publish_runner(
+            PublishContent(
+                "douyin",
+                "标题",
+                "正文",
+                images=("cover.png",),
+            ),
+            "account.json",
+        )
+
+        self.assertEqual(result["status"], "processing")
+        self.assertIn("已接受提交", result["message"])
+
+    @patch("uploader.douyin_uploader.main.DouYinNote")
+    async def test_douyin_post_click_exception_never_auto_retries(self, publisher_class):
+        publisher = publisher_class.return_value
+        publisher.submit_click_attempted = True
+        publisher.douyin_upload_note = AsyncMock(
+            side_effect=RuntimeError("target closed")
+        )
+
+        result = await _douyin_publish_runner(
+            PublishContent(
+                "douyin",
+                "标题",
+                "正文",
+                images=("cover.png",),
+            ),
+            "account.json",
+        )
+
+        self.assertEqual(result["status"], "processing")
+        self.assertIn("最终结果未知", result["message"])
+        self.assertIn("不会自动重试", result["message"])
+
+    @patch("uploader.douyin_uploader.main.DouYinNote")
+    async def test_douyin_verification_is_an_explicit_action_required_result(
+        self,
+        publisher_class,
+    ):
+        publisher = publisher_class.return_value
+        publisher.submit_click_attempted = False
+        publisher.douyin_upload_note = AsyncMock(
+            side_effect=RuntimeError("抖音账号风险[verification_required]：请完成短信验证码")
+        )
+
+        result = await _douyin_publish_runner(
+            PublishContent(
+                "douyin",
+                "标题",
+                "正文",
+                images=("cover.png",),
+            ),
+            "account.json",
+        )
+
+        self.assertEqual(result["status"], "need_action")
+        self.assertIn("verification_required", result["message"])
+        self.assertIn("不会自动重试", result["message"])
+
+    @patch("uploader.ks_uploader.main.KSNote")
+    async def test_kuaishou_permanent_ban_is_an_explicit_action_required_result(
+        self,
+        publisher_class,
+    ):
+        publisher = publisher_class.return_value
+        publisher.submit_click_attempted = False
+        publisher.main = AsyncMock(
+            side_effect=RuntimeError("快手账号风险[permanent_ban]：账号已被封禁")
+        )
+
+        result = await _kuaishou_publish_runner(
+            PublishContent(
+                "kuaishou",
+                "标题",
+                "正文",
+                images=("cover.png",),
+            ),
+            "account.json",
+        )
+
+        self.assertEqual(result["status"], "need_action")
+        self.assertIn("permanent_ban", result["message"])
+        self.assertIn("不会自动重试", result["message"])
+
+    @patch("uploader.ks_uploader.main.KSNote")
+    async def test_kuaishou_pre_click_locator_failure_is_safe_to_retry(
+        self,
+        publisher_class,
+    ):
+        publisher = publisher_class.return_value
+        publisher.submit_click_attempted = False
+        publisher.main = AsyncMock(
+            side_effect=RuntimeError("快手页面结构变化：未找到图文发布入口，尚未提交")
+        )
+
+        result = await _kuaishou_publish_runner(
+            PublishContent(
+                "kuaishou",
+                "标题",
+                "正文",
+                images=("cover.png",),
+            ),
+            "account.json",
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("尚未提交", result["message"])
+
+
+class ChannelsPublishRunnerTests(unittest.IsolatedAsyncioTestCase):
+    @patch("uploader.tencent_uploader.main.TencentVideo")
+    async def test_pre_submit_failure_is_safe_to_retry(self, publisher_class):
+        publisher = publisher_class.return_value
+        publisher.submit_click_attempted = False
+        publisher.main = AsyncMock(side_effect=RuntimeError("upload monitor failed"))
+
+        result = await _channels_publish_runner(
+            PublishContent(
+                "channels",
+                "标题",
+                "正文",
+                video="demo.mp4",
+            ),
+            "account.json",
+        )
+
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("尚未提交", result["message"])
+
+    @patch("uploader.tencent_uploader.main.TencentVideo")
+    async def test_post_click_failure_never_requests_automatic_retry(self, publisher_class):
+        publisher = publisher_class.return_value
+        publisher.submit_click_attempted = True
+        publisher.main = AsyncMock(side_effect=RuntimeError("target closed"))
+
+        result = await _channels_publish_runner(
+            PublishContent(
+                "channels",
+                "标题",
+                "正文",
+                video="demo.mp4",
+            ),
+            "account.json",
+        )
+
+        self.assertEqual(result["status"], "processing")
         self.assertIn("不会自动重试", result["message"])
 
 

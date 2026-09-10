@@ -8,6 +8,15 @@ const compactStrings = value => (
   [...new Set(asArray(value).map(item => String(item || '').trim()).filter(Boolean))]
 )
 
+const compactDimensionKeys = value => (
+  [...new Set(asArray(value).map((item) => {
+    if (item && typeof item === 'object' && !Array.isArray(item)) {
+      return String(item.key || item.name || item.dimension || '').trim()
+    }
+    return String(item || '').trim()
+  }).filter(Boolean))]
+)
+
 const numberOrNull = value => {
   if (value == null || value === '') return null
   const parsed = Number(value)
@@ -169,10 +178,20 @@ const normalizeCiteability = root => {
     key,
     label: DIMENSION_LABELS[key] || key.replaceAll('_', ' '),
     value: clampPercent(rawDimensions[key]),
+    applicable: rawDimensions[key] !== null,
     weight: Math.max(0, numberOrNull(weights[key]) ?? 0)
   }))
   const score = clampPercent(source.score)
   const passScore = clampPercent(source.pass_score ?? source.passScore ?? 75)
+  const blockingIssues = asArray(
+    source.blocking_issues || source.blockingIssues
+  ).map(normalizeIssue)
+  const hasP0BlockingIssue = blockingIssues.some(issue => issue.priority === 'P0')
+  const rawPublishGatePassed = source.publish_gate_passed ?? source.publishGatePassed
+  const publishGatePassed = booleanValue(
+    rawPublishGatePassed,
+    !hasP0BlockingIssue
+  ) && !hasP0BlockingIssue
 
   return {
     version: String(source.version || ''),
@@ -180,12 +199,55 @@ const normalizeCiteability = root => {
     grade: String(source.grade || '—'),
     passScore,
     passed: booleanValue(source.passed, score >= passScore),
+    publishGatePassed,
     dimensions,
-    blockingIssues: asArray(source.blocking_issues || source.blockingIssues).map(normalizeIssue),
+    blockingIssues,
     suggestions: compactStrings(source.suggestions),
     signals: asObject(source.signals),
     citations: asArray(source.citations),
+    lengthProfile: normalizeLengthProfile(source),
     methodology: asObject(source.methodology)
+  }
+}
+
+const normalizeLengthProfile = root => {
+  const raw = root.length_profile || root.lengthProfile
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const source = asObject(raw)
+  const hasApplicableDimensions = (
+    Object.prototype.hasOwnProperty.call(source, 'applicable_dimensions')
+    || Object.prototype.hasOwnProperty.call(source, 'applicableDimensions')
+  )
+  const hasNotApplicableDimensions = (
+    Object.prototype.hasOwnProperty.call(source, 'not_applicable_dimensions')
+    || Object.prototype.hasOwnProperty.call(source, 'notApplicableDimensions')
+  )
+  return {
+    version: String(source.version || ''),
+    key: String(source.key || source.tier || ''),
+    label: String(source.label || ''),
+    targetLength: numberOrNull(source.target_length ?? source.targetLength),
+    requestedTargetLength: numberOrNull(
+      source.requested_target_length ?? source.requestedTargetLength
+    ),
+    effectiveTargetLength: numberOrNull(
+      source.effective_target_length ?? source.effectiveTargetLength
+    ),
+    overTarget: (source.over_target ?? source.overTarget) === true,
+    actualLength: numberOrNull(source.actual_length ?? source.actualLength),
+    minimumLength: numberOrNull(source.minimum_length ?? source.minimumLength),
+    source: String(source.source || ''),
+    applicableDimensions: compactDimensionKeys(
+      source.applicable_dimensions || source.applicableDimensions
+    ),
+    notApplicableDimensions: compactDimensionKeys(
+      source.not_applicable_dimensions || source.notApplicableDimensions
+    ),
+    applicabilityProvided: hasApplicableDimensions || hasNotApplicableDimensions,
+    criteria: asObject(source.criteria),
+    guidance: compactStrings(
+      Array.isArray(source.guidance) ? source.guidance : [source.guidance]
+    )
   }
 }
 
@@ -196,7 +258,7 @@ export const normalizeGeoScoreResult = response => {
     dimensions: asObject(root.dimensions),
     suggestions: compactStrings(root.suggestions),
     scoreContext: asObject(root.score_context || root.scoreContext),
+    lengthProfile: normalizeLengthProfile(root),
     citeability: normalizeCiteability(root)
   }
 }
-

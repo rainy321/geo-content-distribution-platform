@@ -175,7 +175,7 @@
 
           <el-form-item label="文章长度" prop="length">
             <div class="length-control">
-              <el-radio-group v-model="brief.length" class="length-options" :disabled="generating" @change="markBlueprintStale">
+              <el-radio-group v-model="brief.length" class="length-options" :disabled="generating" @change="markLengthContextStale">
               <el-radio-button :value="200">200 字</el-radio-button>
               <el-radio-button :value="600">600 字</el-radio-button>
               <el-radio-button :value="1000">1000 字</el-radio-button>
@@ -189,7 +189,7 @@
                 :disabled="generating"
                 controls-position="right"
                 aria-label="自定义目标字数"
-                @change="markBlueprintStale"
+                @change="markLengthContextStale"
               />
               <small>可自定义 200–3000 字；发布时仍会按各平台安全线自动生成短版。</small>
             </div>
@@ -544,7 +544,7 @@
                     <span>/ 100</span>
                   </div>
                 </div>
-                <small>基础 GEO 规则分</small>
+                <small>{{ scoreProvenanceLabel }} · {{ currentScoreBand.code }} 档</small>
                 <p>{{ scoreSummary }}</p>
               </div>
 
@@ -560,28 +560,78 @@
                 <el-button text :loading="scoring" @click="scoreDraft">重新评分</el-button>
               </div>
 
+              <section v-if="scoreResult" :class="['length-score-profile', `is-${lengthScoreProfile.key}`]" aria-labelledby="length-profile-title">
+                <header>
+                  <div>
+                    <span>LENGTH PROFILE / {{ lengthScoreProfile.targetLabel }}</span>
+                    <h3 id="length-profile-title">{{ lengthScoreProfile.label }}</h3>
+                  </div>
+                  <b>{{ currentScoreBand.code }} · {{ currentScoreBand.label }}</b>
+                </header>
+                <p>
+                  {{ lengthProfileExplanation }}
+                </p>
+                <div v-if="lengthProfileUpgradeNotice" class="length-profile-upgrade" role="alert">
+                  <b>实际内容已升级为{{ lengthScoreProfile.label }}</b>
+                  <span>{{ lengthProfileUpgradeNotice }}</span>
+                </div>
+                <div v-if="lengthScoreProfile.serverBacked" class="length-profile-facts">
+                  <span>实际字数 <b>{{ lengthScoreProfile.actualLength ?? contentLength }}</b></span>
+                  <span>最低字数 <b>{{ lengthScoreProfile.minimumLength ?? '—' }}</b></span>
+                  <span>最少段落 <b>{{ lengthScoreProfile.criteria.minimum_paragraphs ?? '—' }}</b></span>
+                </div>
+                <dl class="length-metric-ledger">
+                  <div>
+                    <dt>本档适用</dt>
+                    <dd><span v-for="label in lengthScoreProfile.applicableLabels" :key="label">{{ label }}</span></dd>
+                  </div>
+                  <div v-if="lengthScoreProfile.optionalLabels.length" class="optional">
+                    <dt>本档不强制</dt>
+                    <dd><span v-for="label in lengthScoreProfile.optionalLabels" :key="label">{{ label }}</span></dd>
+                  </div>
+                </dl>
+                <div class="length-guidance">
+                  <b>本档优化建议</b>
+                  <ul>
+                    <li v-for="item in lengthScoreProfile.guidance" :key="item">{{ item }}</li>
+                  </ul>
+                </div>
+                <small v-if="hiddenLengthSuggestionCount">
+                  已隔离 {{ hiddenLengthSuggestionCount }} 条与当前目标长度不匹配的长文建议。
+                </small>
+                <small v-for="item in lengthScoreProfile.scoringGuidance" :key="item" class="scoring-policy">
+                  {{ item }}
+                </small>
+              </section>
+
               <div v-if="scoreResult" class="dimension-list">
-                <div v-for="dimension in scoreDimensions" :key="dimension.key" class="dimension-row">
+                <div
+                  v-for="dimension in scoreDimensions"
+                  :key="dimension.key"
+                  :class="['dimension-row', { 'is-not-applicable': !dimension.applicable }]"
+                >
                   <div>
                     <span>{{ dimension.label }}</span>
-                    <strong>{{ dimension.value }}</strong>
+                    <strong v-if="dimension.applicable">{{ dimension.value }}</strong>
+                    <em v-else>本档不强制</em>
                   </div>
-                  <div class="dimension-track">
+                  <div v-if="dimension.applicable" class="dimension-track">
                     <span :style="{ width: `${dimension.value}%` }" />
                   </div>
+                  <p v-else>{{ dimension.value == null ? '后端已标记该项不适用。' : `原始得分 ${dimension.value}，仅作为长文结构参考。` }}</p>
                 </div>
               </div>
 
               <div v-if="scoreResult" class="suggestion-list">
                 <span class="editor-label">改进建议</span>
-                <ul v-if="scoreResult.suggestions.length">
-                  <li v-for="suggestion in scoreResult.suggestions" :key="suggestion">
+                <ul v-if="visibleScoreSuggestions.length">
+                  <li v-for="suggestion in visibleScoreSuggestions" :key="suggestion">
                     {{ suggestion }}
                   </li>
                 </ul>
                 <div v-else class="all-clear">
                   <el-icon><CircleCheckFilled /></el-icon>
-                  当前规则项已全部覆盖
+                  {{ lengthScoreProfile.shortForm ? '本档适用规则项暂无额外建议' : '当前规则项已全部覆盖' }}
                 </div>
               </div>
 
@@ -591,19 +641,28 @@
                     <span>AI CITEABILITY / 7D</span>
                     <h3 id="citeability-title">AI 可引用度</h3>
                   </div>
-                  <strong :class="scoreResult.citeability.passed ? 'passed' : 'attention'">
+                  <strong :class="citeabilityScoreTone">
                     {{ scoreResult.citeability.score }} / 100
                   </strong>
                 </header>
-                <div class="citeability-status">
-                  <b>{{ scoreResult.citeability.passed ? '通过发布前门禁' : `未达到 ${scoreResult.citeability.passScore} 分门禁` }}</b>
+                <div :class="['citeability-status', {
+                  blocked: citeabilityHardBlocked,
+                  advisory: citeabilityQualityAdvisory
+                }]">
+                  <b>{{ citeabilityGateLabel }}</b>
                   <span>{{ scoreResult.citeability.grade }} · {{ scoreResult.citeability.version || '规则版本未声明' }}</span>
                 </div>
                 <div class="citeability-dimensions">
-                  <div v-for="dimension in scoreResult.citeability.dimensions" :key="dimension.key">
+                  <div
+                    v-for="dimension in citeabilityDimensions"
+                    :key="dimension.key"
+                    :class="{ 'is-not-applicable': !dimension.applicable }"
+                  >
                     <span>{{ dimension.label }}</span>
-                    <i><b :style="{ width: `${dimension.value}%` }" /></i>
-                    <strong>{{ dimension.value }}</strong>
+                    <i v-if="dimension.applicable"><b :style="{ width: `${dimension.value}%` }" /></i>
+                    <i v-else class="optional-track" />
+                    <strong v-if="dimension.applicable">{{ dimension.value }}</strong>
+                    <em v-else>不强制</em>
                   </div>
                 </div>
                 <div v-if="scoreResult.citeability.blockingIssues.length" class="citeability-blockers">
@@ -612,8 +671,8 @@
                     <span>{{ issue.message }} {{ issue.action }}</span>
                   </article>
                 </div>
-                <ul v-else-if="scoreResult.citeability.suggestions.length" class="citeability-suggestions">
-                  <li v-for="suggestion in scoreResult.citeability.suggestions.slice(0, 4)" :key="suggestion">{{ suggestion }}</li>
+                <ul v-else-if="visibleCiteabilitySuggestions.length" class="citeability-suggestions">
+                  <li v-for="suggestion in visibleCiteabilitySuggestions.slice(0, 4)" :key="suggestion">{{ suggestion }}</li>
                 </ul>
                 <p>{{ scoreResult.citeability.methodology.claim_boundary || '该分数只衡量结构和证据可提取性，不代表真实收录或引用率。' }}</p>
               </section>
@@ -725,7 +784,7 @@
 </template>
 
 <script setup>
-import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, onActivated, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
@@ -747,6 +806,12 @@ import { normalizeGenerationReceipt } from '@/utils/generationReceipt'
 import { buildGeoScorePayload } from '@/utils/generationScore'
 import { normalizeGeoBlueprint, normalizeGeoScoreResult } from '@/utils/geoBlueprint'
 import {
+  filterLengthAwareSuggestions,
+  isLengthMetricApplicable,
+  resolveScoreBand,
+  resolveScoreLengthProfile
+} from '@/utils/scoreLengthProfile'
+import {
   BATCH_GENERATION_LIMIT,
   formatBatchCost,
   formatBatchItemCost,
@@ -754,6 +819,13 @@ import {
   normalizeBatchGenerationResult,
   parseBatchTopics
 } from '@/utils/batchGeneration'
+import {
+  clearPendingContentGeneration,
+  readPendingContentGeneration,
+  savePendingContentGeneration
+} from '@/utils/contentGenerationSession'
+
+defineOptions({ name: 'ContentCreation' })
 
 const router = useRouter()
 const route = useRoute()
@@ -773,7 +845,11 @@ const rateLimitUntil = ref(0)
 const rateLimitNow = ref(Date.now())
 let generationController = null
 let generationTimer = null
+let generationRecoveryTimer = null
+let generationRecoveryStopped = false
+let generationRecoveryMissingCount = 0
 let rateLimitTimer = null
+let initialRouteHydrated = false
 const scoring = ref(false)
 const saving = ref(false)
 const generationError = ref(null)
@@ -918,15 +994,157 @@ const documentState = computed(() => {
   return dirty.value ? '有未保存修改' : '已保存到内容库'
 })
 
+const lengthScoreProfile = computed(() => {
+  const serverProfile = scoreResult.value?.lengthProfile || null
+  const serverRequestTarget = (
+    serverProfile?.requestedTargetLength
+    ?? serverProfile?.targetLength
+  )
+  const serverTarget = Number(serverRequestTarget)
+  const selectedTarget = Number(brief.length)
+  const serverMatchesSelection = (
+    serverRequestTarget == null
+    || !Number.isFinite(serverTarget)
+    || serverTarget === selectedTarget
+  )
+  return resolveScoreLengthProfile(
+    brief.length,
+    serverProfile && serverMatchesSelection ? serverProfile : null
+  )
+})
+
+const citeabilityLengthScoreProfile = computed(() => {
+  const serverProfile = scoreResult.value?.citeability?.lengthProfile || null
+  const serverRequestTarget = (
+    serverProfile?.requestedTargetLength
+    ?? serverProfile?.targetLength
+  )
+  const serverTarget = Number(serverRequestTarget)
+  const selectedTarget = Number(brief.length)
+  const serverMatchesSelection = (
+    serverRequestTarget == null
+    || !Number.isFinite(serverTarget)
+    || serverTarget === selectedTarget
+  )
+  return resolveScoreLengthProfile(
+    brief.length,
+    serverProfile && serverMatchesSelection ? serverProfile : null
+  )
+})
+
+const normalizedDimensionValue = (dimensions, key) => {
+  const raw = dimensions?.[key]
+  if (raw == null || raw === '') return null
+  const parsed = Number(raw)
+  return Number.isFinite(parsed) ? Math.max(0, Math.min(100, parsed)) : null
+}
+
 const scoreDimensions = computed(() => {
   const dimensions = scoreResult.value?.dimensions || {}
   return [
-    { key: 'entity', label: '品牌实体明确度', value: dimensions.entity || 0 },
-    { key: 'keywords', label: '关键词覆盖', value: dimensions.keywords || 0 },
-    { key: 'structure', label: '内容结构', value: dimensions.structure || 0 },
-    { key: 'faq', label: 'FAQ 完整性', value: dimensions.faq || 0 },
-    { key: 'citation', label: '引用友好度', value: dimensions.citation || 0 }
-  ]
+    { key: 'entity', label: '品牌实体明确度' },
+    { key: 'keywords', label: '关键词覆盖' },
+    { key: 'structure', label: '内容结构' },
+    { key: 'faq', label: 'FAQ 完整性' },
+    { key: 'citation', label: '引用友好度' }
+  ].map((dimension) => {
+    const value = normalizedDimensionValue(dimensions, dimension.key)
+    return {
+      ...dimension,
+      value,
+      applicable: value != null && isLengthMetricApplicable(
+        lengthScoreProfile.value,
+        'base',
+        dimension.key
+      )
+    }
+  })
+})
+
+const citeabilityDimensions = computed(() => (
+  (scoreResult.value?.citeability?.dimensions || []).map(dimension => ({
+    ...dimension,
+    applicable: dimension.applicable !== false && isLengthMetricApplicable(
+      citeabilityLengthScoreProfile.value,
+      'citeability',
+      dimension.key
+    )
+  }))
+))
+
+const visibleScoreSuggestions = computed(() => filterLengthAwareSuggestions(
+  scoreResult.value?.suggestions,
+  lengthScoreProfile.value
+))
+
+const visibleCiteabilitySuggestions = computed(() => filterLengthAwareSuggestions(
+  scoreResult.value?.citeability?.suggestions,
+  citeabilityLengthScoreProfile.value
+))
+
+const hiddenLengthSuggestionCount = computed(() => (
+  Math.max(0, (scoreResult.value?.suggestions?.length || 0) - visibleScoreSuggestions.value.length)
+  + Math.max(
+    0,
+    (scoreResult.value?.citeability?.suggestions?.length || 0)
+      - visibleCiteabilitySuggestions.value.length
+  )
+))
+
+const currentScoreBand = computed(() => resolveScoreBand(scoreResult.value?.score))
+
+const scoreProvenanceLabel = computed(() => (
+  lengthScoreProfile.value.key === 'legacy'
+    ? '基础 GEO 兼容长文分'
+    : lengthScoreProfile.value.serverBacked
+    ? '基础 GEO 长度归一分'
+    : '基础 GEO 旧版回执'
+))
+
+const lengthProfileExplanation = computed(() => {
+  if (lengthScoreProfile.value.serverBacked) {
+    return `后端按“${lengthScoreProfile.value.label}”的适用检查归一为 100 分；不适用项有效权重为 0。界面只解释结果，不自行改分。`
+  }
+  if (lengthScoreProfile.value.shortForm) {
+    return '当前回执未包含服务端长度档位；下方按所选目标长度标注指标适用性。重新评分后可获得长度归一结果。'
+  }
+  return `当前回执未包含服务端长度档位；下方按 ${lengthScoreProfile.value.rangeLabel} 标注指标适用性。重新评分后可获得长度归一结果。`
+})
+
+const lengthProfileUpgradeNotice = computed(() => {
+  const profile = lengthScoreProfile.value
+  if (
+    !profile.serverBacked
+    || profile.source !== 'actual_length_upgrade'
+    || profile.effectiveTargetLength === profile.requestedTargetLength
+  ) return ''
+  return (
+    `原目标 ${profile.requestedTargetLength} 字，实际 ${profile.actualLength ?? contentLength.value} 字；`
+    + `当前按 ${profile.effectiveTargetLength} 字档评分，不能继续享受短稿结构豁免。`
+  )
+})
+
+const citeabilityGateLabel = computed(() => {
+  const citeability = scoreResult.value?.citeability
+  if (!citeability) return '尚未检测'
+  if (citeabilityHardBlocked.value) return '发布硬门禁未通过'
+  return citeability.passed
+    ? '质量线已达，可进入发布复核'
+    : `可发布，建议先优化（未达到 ${citeability.passScore} 分质量线）`
+})
+
+const citeabilityHardBlocked = computed(() => (
+  scoreResult.value?.citeability?.publishGatePassed !== true
+))
+
+const citeabilityQualityAdvisory = computed(() => (
+  !citeabilityHardBlocked.value
+  && scoreResult.value?.citeability?.passed !== true
+))
+
+const citeabilityScoreTone = computed(() => {
+  if (citeabilityHardBlocked.value) return 'failed'
+  return scoreResult.value?.citeability?.passed === true ? 'passed' : 'attention'
 })
 
 const scoreRingStyle = computed(() => ({
@@ -935,6 +1153,7 @@ const scoreRingStyle = computed(() => ({
 
 const scoreSummary = computed(() => {
   const score = scoreResult.value?.score || 0
+  if (lengthScoreProfile.value.shortForm) return '短稿按实体、直接回答、证据和风险边界优先复核。'
   if (score >= 85) return '内容结构完整，可以进入人工复核。'
   if (score >= 70) return '基础质量良好，仍有几项可以加强。'
   return '建议先根据右侧提示补充内容证据。'
@@ -942,6 +1161,11 @@ const scoreSummary = computed(() => {
 
 const markBlueprintStale = () => {
   if (geoBlueprint.value) blueprintStale.value = true
+}
+
+const markLengthContextStale = () => {
+  markBlueprintStale()
+  if (scoreResult.value) scoreStale.value = true
 }
 
 const displayMetric = (value) => (
@@ -963,17 +1187,25 @@ const makeRequestId = () => {
   return `geo-${Date.now()}-${Math.random().toString(16).slice(2)}`
 }
 
+const stopGenerationRecovery = () => {
+  generationRecoveryStopped = true
+  if (generationRecoveryTimer) window.clearTimeout(generationRecoveryTimer)
+  generationRecoveryTimer = null
+}
+
 const stopGenerationTimer = () => {
   if (generationTimer) window.clearInterval(generationTimer)
   generationTimer = null
 }
 
-const startGenerationTimer = () => {
+const startGenerationTimer = (startedAt = Date.now()) => {
   stopGenerationTimer()
-  const startedAt = performance.now()
-  liveElapsedMs.value = 0
+  const normalizedStartedAt = Number.isFinite(Number(startedAt))
+    ? Number(startedAt)
+    : Date.now()
+  liveElapsedMs.value = Math.max(0, Date.now() - normalizedStartedAt)
   generationTimer = window.setInterval(() => {
-    liveElapsedMs.value = performance.now() - startedAt
+    liveElapsedMs.value = Math.max(0, Date.now() - normalizedStartedAt)
   }, 200)
 }
 
@@ -1238,6 +1470,8 @@ const handleProjectChange = () => {
 }
 
 const resetDraft = () => {
+  stopGenerationRecovery()
+  clearPendingContentGeneration()
   Object.assign(draft, { title: '', summary: '', content: '', tags: [] })
   hasDraft.value = false
   scoreResult.value = null
@@ -1253,7 +1487,214 @@ const resetDraft = () => {
 }
 
 const cancelGeneration = () => {
-  generationController?.abort()
+  if (generationController) {
+    generationController.abort()
+    return
+  }
+  // A refreshed screen can only stop observing a durable server run.  It
+  // cannot safely cancel a provider call whose outcome may already exist.
+  stopGenerationRecovery()
+  stopGenerationTimer()
+  generationPhase.value = 'cancelled'
+  generationError.value = {
+    kind: 'cancelled',
+    title: '已取消等待',
+    message: '已停止查询这次运行；系统没有重新提交模型。刷新页面仍可按原请求 ID 恢复结果。',
+    traceId: activeRequestId.value
+  }
+}
+
+const applyGeneratedArticle = async (
+  article,
+  { requestId = '', elapsedMs = null, metadata = null } = {}
+) => {
+  if (!String(article?.title || '').trim() || !String(article?.content || '').trim()) {
+    generationPhase.value = 'failed'
+    generationError.value = {
+      kind: 'protocol',
+      title: '引擎返回内容不完整',
+      message: '标题或正文缺失，系统没有覆盖当前草稿，也不会自动切换引擎。请复制请求 ID 后排查。',
+      traceId: article?.generation?.trace_id || requestId
+    }
+    stopGenerationRecovery()
+    clearPendingContentGeneration()
+    return false
+  }
+
+  const receipt = normalizeGenerationReceipt(
+    metadata || article.generation || article.runtime || article.generation_metadata,
+    article,
+    requestId,
+    elapsedMs
+  )
+  Object.assign(draft, {
+    title: article.title,
+    summary: article.summary || '',
+    content: article.content || '',
+    tags: article.tags || brief.keywords
+  })
+  generationReceipt.value = receipt
+  diversitySeed.value = makeRequestId()
+  generationNotice.value = receipt.fallbackUsed
+    ? {
+        kind: 'fallback',
+        title: '已由备用引擎完成',
+        message: `${receipt.fallbackFrom ? `主引擎 ${receipt.fallbackFrom}` : '主引擎'}未完成本次请求${receipt.fallbackReason ? `：${receipt.fallbackReason}` : '。'}运行回执已保留真实执行路径。`
+      }
+    : receipt.warnings.length
+      ? {
+          kind: 'partial',
+          title: '内容已生成，部分字段需要补充',
+          message: '正文可以继续编辑和保存；缺失项已列在运行回执中。'
+        }
+      : null
+  hasDraft.value = true
+  savedArticleId.value = null
+  articleStatus.value = 'draft'
+  dirty.value = true
+  scoreResult.value = null
+  scoreStale.value = false
+  generationPhase.value = 'succeeded'
+  generationError.value = null
+  stopGenerationRecovery()
+  clearPendingContentGeneration()
+  if (article.geo_score != null) {
+    hydrateStoredScore(article)
+  } else {
+    await scoreDraft({ silent: true })
+  }
+  return true
+}
+
+const recoveredPlatformValue = (value) => {
+  const aliases = {
+    zhihu: '知乎',
+    toutiao: '今日头条',
+    baijiahao: '百家号',
+    sohu: '搜狐',
+    xiaohongshu: '小红书',
+    douyin: '抖音',
+    kuaishou: '快手',
+    bilibili: 'Bilibili',
+    tencent: '视频号',
+    tiktok: 'TikTok'
+  }
+  const normalized = String(value || '').trim()
+  return aliases[normalized.toLocaleLowerCase()] || normalized
+}
+
+const applyRecoveredBrief = (run) => {
+  const recovered = run?.brief && typeof run.brief === 'object' ? run.brief : {}
+  const projectId = Number(recovered.project_id)
+  if (Number.isInteger(projectId) && projects.value.some(item => item.id === projectId)) {
+    brief.project_id = projectId
+  }
+  if (String(recovered.topic || '').trim()) brief.topic = String(recovered.topic).trim()
+  if (Array.isArray(recovered.keywords) && recovered.keywords.length) {
+    brief.keywords = recovered.keywords.map(item => String(item).trim()).filter(Boolean)
+  }
+  const requestedLength = Number(recovered.requested_length)
+  if (Number.isInteger(requestedLength) && requestedLength >= 200 && requestedLength <= 3000) {
+    brief.length = requestedLength
+  }
+  if (contentTypes.includes(recovered.content_type)) brief.content_type = recovered.content_type
+  const platform = recoveredPlatformValue(recovered.target_platform)
+  if (platforms.some(item => item.value === platform)) brief.target_platform = platform
+}
+
+const pollGenerationRecovery = async (requestId) => {
+  if (generationRecoveryStopped || requestId !== activeRequestId.value) return
+  try {
+    const response = await articleApi.getContentGenerationRunByRequestId(
+      requestId,
+      { suppressGlobalError: true }
+    )
+    if (generationRecoveryStopped || requestId !== activeRequestId.value) return
+    generationRecoveryMissingCount = 0
+    const run = response.data || {}
+    applyRecoveredBrief(run)
+    if (run.status === 'succeeded' && run.result) {
+      const result = run.result
+      await applyGeneratedArticle(result, {
+        requestId,
+        elapsedMs: run.elapsed_ms ?? liveElapsedMs.value,
+        metadata: {
+          ...run,
+          ...(result.generation || {}),
+          run_id: run.id,
+          sources: run.sources || result.sources
+        }
+      })
+      return
+    }
+    if (run.status === 'started') {
+      generationPhase.value = 'requesting'
+      generationError.value = null
+      scheduleGenerationRecovery(requestId)
+      return
+    }
+
+    stopGenerationRecovery()
+    stopGenerationTimer()
+    clearPendingContentGeneration()
+    generationPhase.value = run.status === 'unknown' ? 'unknown' : 'failed'
+    generationError.value = {
+      kind: run.status === 'unknown' ? 'unknown' : 'failed',
+      title: run.status === 'unknown' ? '原请求结果仍无法确认' : '原请求未生成内容',
+      message: run.error_message || (
+        run.status === 'unknown'
+          ? '系统只查询了原请求，没有再次调用模型。请保留请求 ID 进行人工核验。'
+          : '系统只读取了原运行记录，没有再次调用模型。'
+      ),
+      traceId: run.trace_id || run.request_id || requestId
+    }
+  } catch (error) {
+    if (generationRecoveryStopped || requestId !== activeRequestId.value) return
+    if (error.response?.status === 404) {
+      generationRecoveryMissingCount += 1
+      if (generationRecoveryMissingCount >= 10) {
+        stopGenerationRecovery()
+        stopGenerationTimer()
+        clearPendingContentGeneration()
+        generationPhase.value = 'failed'
+        generationError.value = {
+          kind: 'failed',
+          title: '没有找到原生成运行',
+          message: '请求可能未到达后端；恢复过程没有重新调用模型。请重新检查 Brief 后手动发起。',
+          traceId: requestId
+        }
+        return
+      }
+    }
+    scheduleGenerationRecovery(requestId, 1500)
+  }
+}
+
+const scheduleGenerationRecovery = (requestId, delay = 1000) => {
+  if (generationRecoveryStopped || requestId !== activeRequestId.value) return
+  if (generationRecoveryTimer) window.clearTimeout(generationRecoveryTimer)
+  generationRecoveryTimer = window.setTimeout(() => {
+    generationRecoveryTimer = null
+    void pollGenerationRecovery(requestId)
+  }, delay)
+}
+
+const restorePendingGeneration = () => {
+  const pending = readPendingContentGeneration()
+  if (!pending) return false
+  activeRequestId.value = pending.requestId
+  generationPhase.value = 'requesting'
+  generationError.value = null
+  generationNotice.value = {
+    kind: 'partial',
+    title: '正在恢复原生成运行',
+    message: '页面只会按原请求 ID 读取持久化结果，不会换新幂等键或再次调用模型。'
+  }
+  generationRecoveryStopped = false
+  generationRecoveryMissingCount = 0
+  startGenerationTimer(pending.startedAt)
+  void pollGenerationRecovery(pending.requestId)
+  return true
 }
 
 const generateDraft = async () => {
@@ -1283,8 +1724,14 @@ const generateDraft = async () => {
   scoreError.value = ''
   activeRequestId.value = makeRequestId()
   const activeDiversitySeed = diversitySeed.value || activeRequestId.value
+  const generationStartedAt = Date.now()
+  generationRecoveryStopped = false
+  savePendingContentGeneration({
+    requestId: activeRequestId.value,
+    startedAt: generationStartedAt
+  })
   generationController = new AbortController()
-  startGenerationTimer()
+  startGenerationTimer(generationStartedAt)
   try {
     const response = await articleApi.generateArticle({
       project_id: brief.project_id,
@@ -1305,55 +1752,10 @@ const generateDraft = async () => {
     })
     const article = response.data
     const generationElapsed = liveElapsedMs.value
-    if (!String(article?.title || '').trim() || !String(article?.content || '').trim()) {
-      generationPhase.value = 'failed'
-      generationError.value = {
-        kind: 'protocol',
-        title: '引擎返回内容不完整',
-        message: '标题或正文缺失，系统没有覆盖当前草稿，也不会自动切换引擎。请复制请求 ID 后排查。',
-        traceId: article?.generation?.trace_id || activeRequestId.value
-      }
-      return
-    }
-    const receipt = normalizeGenerationReceipt(
-      article.generation || article.runtime || article.generation_metadata,
-      article,
-      activeRequestId.value,
-      generationElapsed
-    )
-    Object.assign(draft, {
-      title: article.title,
-      summary: article.summary || '',
-      content: mergeFaqIntoContent(article.content || '', article.faq),
-      tags: article.tags || brief.keywords
+    await applyGeneratedArticle(article, {
+      requestId: activeRequestId.value,
+      elapsedMs: generationElapsed
     })
-    generationReceipt.value = receipt
-    diversitySeed.value = makeRequestId()
-    generationNotice.value = receipt.fallbackUsed
-      ? {
-          kind: 'fallback',
-          title: '已由备用引擎完成',
-          message: `${receipt.fallbackFrom ? `主引擎 ${receipt.fallbackFrom}` : '主引擎'}未完成本次请求${receipt.fallbackReason ? `：${receipt.fallbackReason}` : '。'}运行回执已保留真实执行路径。`
-        }
-      : receipt.warnings.length
-        ? {
-            kind: 'partial',
-            title: '内容已生成，部分字段需要补充',
-            message: '正文可以继续编辑和保存；缺失项已列在运行回执中。'
-          }
-        : null
-    hasDraft.value = true
-    savedArticleId.value = null
-    articleStatus.value = 'draft'
-    dirty.value = true
-    scoreResult.value = null
-    scoreStale.value = false
-    generationPhase.value = 'succeeded'
-    if (article.geo_score != null) {
-      hydrateStoredScore(article)
-    } else {
-      await scoreDraft({ silent: true })
-    }
   } catch (error) {
     if (error.code === 'ERR_CANCELED' || error.name === 'CanceledError') {
       generationPhase.value = 'cancelled'
@@ -1367,9 +1769,15 @@ const generateDraft = async () => {
       generationError.value = formatGenerationError(error, activeRequestId.value)
       generationPhase.value = generationError.value.kind === 'unknown' ? 'unknown' : 'failed'
       if (generationError.value.retryAfter) setRateLimitCooldown(generationError.value.retryAfter)
+      if (generationError.value.kind === 'unknown') {
+        generationRecoveryStopped = false
+        scheduleGenerationRecovery(activeRequestId.value)
+      } else {
+        clearPendingContentGeneration()
+      }
     }
   } finally {
-    stopGenerationTimer()
+    if (generationPhase.value !== 'unknown') stopGenerationTimer()
     generationController = null
   }
 }
@@ -1393,7 +1801,8 @@ const scoreDraft = async ({ silent = false } = {}) => {
       product: selectedProject.value?.product || '',
       website: selectedProject.value?.website || '',
       keywords: brief.keywords,
-      sources: generationReceipt.value?.sources || []
+      sources: generationReceipt.value?.sources || [],
+      targetLength: brief.length
     }))
     scoreResult.value = normalizeGeoScoreResult(response)
     scoreStale.value = false
@@ -1420,7 +1829,8 @@ const saveDraft = async () => {
     summary: draft.summary,
     content: draft.content,
     tags: draft.tags,
-    status: articleStatus.value
+    status: articleStatus.value,
+    target_length: brief.length
   }
   const createFields = {
     project_id: brief.project_id,
@@ -1458,6 +1868,7 @@ const hydrateStoredScore = (article, fallbackCiteability = null) => {
     score: article.geo_score,
     dimensions: article.geo_analysis?.dimensions || {},
     suggestions: article.geo_analysis?.suggestions || [],
+    length_profile: article.geo_analysis?.length_profile || article.geo_analysis?.lengthProfile,
     citeability: article.geo_analysis?.citeability || fallbackCiteability
   })
   scoreStale.value = false
@@ -1526,6 +1937,17 @@ const loadExistingArticle = async (articleId) => {
     articleStatus.value = article.status || 'draft'
     dirty.value = false
     hydrateStoredScore(article)
+    const storedTargetLength = Number(
+      article.target_length
+      ?? scoreResult.value?.lengthProfile?.targetLength
+    )
+    if (
+      Number.isInteger(storedTargetLength)
+      && storedTargetLength >= 200
+      && storedTargetLength <= 3000
+    ) {
+      brief.length = storedTargetLength
+    }
     void restoreGenerationReceipt(article)
   } catch (error) {
     generationError.value = {
@@ -1540,17 +1962,6 @@ const loadExistingArticle = async (articleId) => {
 const markEdited = (affectsScore) => {
   dirty.value = true
   if (affectsScore) scoreStale.value = true
-}
-
-const mergeFaqIntoContent = (content, faq) => {
-  if (!Array.isArray(faq) || faq.length === 0 || /(?:FAQ|常见问题|常见问答)/i.test(content)) {
-    return content
-  }
-  const faqText = faq
-    .filter(item => item?.question)
-    .map(item => `### ${item.question}\n\n${item.answer || ''}`)
-    .join('\n\n')
-  return faqText ? `${content.trim()}\n\n## FAQ\n\n${faqText}` : content
 }
 
 const formatGenerationError = (error, requestId = '') => {
@@ -1591,6 +2002,7 @@ const formatGenerationError = (error, requestId = '') => {
     || status === 504
     || error.code === 'ECONNABORTED'
     || error.code === 'ETIMEDOUT'
+    || (!error.response && error.code === 'ERR_NETWORK')
     || errorCode.includes('TIMEOUT')
     || /超时|timeout|状态未知|unknown/i.test(backendMessage)
   ) {
@@ -1639,12 +2051,30 @@ onMounted(async () => {
   const articleId = Number.parseInt(route.query.articleId, 10)
   if (Number.isInteger(articleId) && articleId > 0) {
     await loadExistingArticle(articleId)
+  } else {
+    restorePendingGeneration()
   }
+  initialRouteHydrated = true
+})
+
+onActivated(() => {
+  if (!initialRouteHydrated || generating.value) return
+  const articleId = Number.parseInt(route.query.articleId, 10)
+  if (
+    Number.isInteger(articleId)
+    && articleId > 0
+    && articleId !== savedArticleId.value
+  ) {
+    void loadExistingArticle(articleId)
+    return
+  }
+  if (!hasDraft.value && !articleId) restorePendingGeneration()
 })
 
 onBeforeUnmount(() => {
   window.removeEventListener('geo-unified-ai-config-changed', handleUnifiedAIConfigChanged)
   generationController?.abort()
+  stopGenerationRecovery()
   stopGenerationTimer()
   clearRateLimitTimer()
 })
@@ -2959,6 +3389,172 @@ onBeforeUnmount(() => {
   :deep(.el-button) { margin-top: 4px; padding-left: 0; color: #73302b; }
 }
 
+.length-score-profile {
+  margin: 0 0 18px;
+  border: 1px solid var(--geo-ink);
+  border-left-width: 4px;
+  background: var(--paper);
+
+  > header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 13px 14px 11px;
+    border-bottom: 1px solid var(--geo-line);
+
+    span {
+      color: var(--geo-muted);
+      font: 700 8px/1 "Cascadia Mono", monospace;
+      letter-spacing: 0.08em;
+    }
+
+    h3 { margin: 5px 0 0; color: var(--geo-ink); font-size: 14px; }
+
+    > b {
+      color: var(--geo-ink);
+      font: 750 9px/1.4 "Cascadia Mono", monospace;
+      white-space: nowrap;
+    }
+  }
+
+  > p {
+    margin: 0;
+    padding: 11px 14px 0;
+    color: var(--geo-ink-secondary);
+    font-size: 9px;
+    line-height: 1.65;
+  }
+
+  > small {
+    display: block;
+    margin: 0 14px 10px;
+    color: var(--geo-muted);
+    font-size: 8px;
+    line-height: 1.55;
+  }
+
+  > small.scoring-policy {
+    padding-top: 8px;
+    border-top: 1px dashed var(--geo-line);
+  }
+
+  &.is-compact,
+  &.is-short { border-left-color: var(--geo-warning); }
+}
+
+.length-profile-facts {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  margin: 10px 14px 0;
+  border-top: 1px solid var(--geo-line);
+  border-bottom: 1px solid var(--geo-line);
+
+  span {
+    padding: 8px 4px;
+    color: var(--geo-muted);
+    font: 700 8px/1.2 "Cascadia Mono", monospace;
+    text-align: center;
+
+    + span { border-left: 1px solid var(--geo-line); }
+  }
+
+  b { color: var(--geo-ink); }
+}
+
+.length-profile-upgrade {
+  display: grid;
+  gap: 4px;
+  margin: 10px 14px 0;
+  padding: 9px 10px;
+  border: 1px solid var(--geo-warning);
+  background: #fff8ed;
+
+  b {
+    color: var(--geo-ink);
+    font-size: 9px;
+  }
+
+  span {
+    color: #7b4b10;
+    font-size: 8px;
+    line-height: 1.55;
+  }
+}
+
+.length-metric-ledger {
+  display: grid;
+  gap: 9px;
+  margin: 12px 14px 0;
+
+  > div {
+    display: grid;
+    grid-template-columns: 68px minmax(0, 1fr);
+    gap: 8px;
+    align-items: start;
+  }
+
+  dt {
+    padding-top: 4px;
+    color: var(--geo-success);
+    font: 750 8px/1.2 "Cascadia Mono", monospace;
+  }
+
+  dd {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin: 0;
+
+    span {
+      padding: 3px 5px;
+      border: 1px solid var(--geo-line);
+      color: var(--geo-ink-secondary);
+      background: var(--geo-soft);
+      font-size: 8px;
+    }
+  }
+
+  .optional {
+    dt { color: var(--geo-warning); }
+    dd span { border-style: dashed; background: #fff; color: var(--geo-muted); }
+  }
+}
+
+.length-guidance {
+  margin: 13px 14px 10px;
+  padding-top: 11px;
+  border-top: 1px solid var(--geo-line);
+
+  > b { color: var(--geo-ink); font-size: 9px; }
+
+  ul {
+    display: grid;
+    gap: 5px;
+    margin: 7px 0 0;
+    padding: 0;
+    list-style: none;
+  }
+
+  li {
+    position: relative;
+    padding-left: 10px;
+    color: var(--geo-ink-secondary);
+    font-size: 8px;
+    line-height: 1.55;
+
+    &::before {
+      position: absolute;
+      top: 6px;
+      left: 0;
+      width: 4px;
+      height: 1px;
+      background: var(--geo-ink);
+      content: "";
+    }
+  }
+}
+
 .dimension-list {
   padding: 18px 0;
   border-top: 1px solid #d9e4e4;
@@ -2981,7 +3577,22 @@ onBeforeUnmount(() => {
       color: var(--ink);
       font: 700 10px/1 "Cascadia Mono", monospace;
     }
+
+    em {
+      color: var(--geo-warning);
+      font: 700 8px/1 "Cascadia Mono", monospace;
+      font-style: normal;
+    }
   }
+
+  > p {
+    margin: 0;
+    color: var(--geo-muted);
+    font-size: 8px;
+    line-height: 1.5;
+  }
+
+  &.is-not-applicable > div:first-child span { color: var(--geo-muted); }
 }
 
 .dimension-track {
@@ -3059,6 +3670,7 @@ onBeforeUnmount(() => {
       font: 800 13px/1 "Cascadia Mono", monospace;
 
       &.passed { color: var(--geo-success); }
+      &.failed { color: var(--geo-danger); }
     }
   }
 
@@ -3081,6 +3693,20 @@ onBeforeUnmount(() => {
 
   b { font-size: 10px; }
   span { color: var(--geo-muted); font: 700 8px/1.4 "Cascadia Mono", monospace; }
+
+  &.advisory {
+    border-color: #d8bf86;
+    background: #fff9ec;
+
+    b { color: var(--geo-warning); }
+  }
+
+  &.blocked {
+    border-color: rgba(150, 62, 55, 0.32);
+    background: #fff6f4;
+
+    b { color: var(--geo-danger); }
+  }
 }
 
 .citeability-dimensions {
@@ -3113,6 +3739,21 @@ onBeforeUnmount(() => {
   strong {
     font: 700 8px/1 "Cascadia Mono", monospace;
     text-align: right;
+  }
+
+  em {
+    color: var(--geo-warning);
+    font: 700 7px/1 "Cascadia Mono", monospace;
+    font-style: normal;
+    text-align: right;
+  }
+
+  > div.is-not-applicable span { color: var(--geo-muted); }
+
+  i.optional-track {
+    height: 1px;
+    border-top: 1px dashed var(--geo-line-strong);
+    background: transparent;
   }
 }
 

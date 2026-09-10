@@ -6,7 +6,7 @@ import re
 from dataclasses import dataclass
 
 
-CONTENT_HYGIENE_VERSION = "content-hygiene-1.1.0"
+CONTENT_HYGIENE_VERSION = "content-hygiene-1.2.0"
 
 _METADATA_PLACEHOLDER_LINE = re.compile(
     r"^\s*[*_]*\s*(?:作者|更新时间|更新日期|发布日期)\s*[:：]\s*"
@@ -53,6 +53,17 @@ class ContentLengthResult:
         return self.final_length < self.original_length
 
 
+def authoring_visible_length(value: str) -> int:
+    """Count non-whitespace authoring characters.
+
+    This is a generation/scoring length, not a publishing platform limit.
+    Markdown markers and every other non-whitespace Unicode code point remain
+    countable; platform policies deliberately keep separate raw counters.
+    """
+
+    return sum(1 for character in str(value or "") if not character.isspace())
+
+
 def sanitize_generated_content(value: str) -> ContentHygieneResult:
     """Remove unfinished placeholders without inventing missing facts.
 
@@ -91,18 +102,19 @@ def sanitize_generated_content(value: str) -> ContentHygieneResult:
 
 
 def constrain_generated_content_length(value: str, limit: int) -> ContentLengthResult:
-    """Keep model output inside the requested character budget.
+    """Keep model output inside the requested visible-character budget.
 
     A generation target is treated as a hard product-side ceiling.  The helper
-    selects complete leading sentences and, when space permits, retains one
-    short evidence/boundary sentence from the tail.  It never calls another
-    model, invents copy, or leaves a half sentence merely to fill the budget.
+    prefers complete leading sentences or natural clauses and, when space
+    permits, retains one short evidence/boundary sentence from the tail.  An
+    explicit ellipsis is used only when complete units cannot reach a
+    reasonable 80% budget floor.  It never calls another model or invents copy.
     """
 
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
         raise ValueError("内容长度上限必须是正整数")
     normalized = str(value or "").replace("\r\n", "\n").replace("\r", "\n").strip()
-    original_length = len(normalized)
+    original_length = authoring_visible_length(normalized)
     if original_length <= limit:
         return ContentLengthResult(normalized, original_length, original_length, limit)
 
@@ -115,50 +127,91 @@ def constrain_generated_content_length(value: str, limit: int) -> ContentLengthR
         shortened = normalized[:limit].rstrip()
         return ContentLengthResult(shortened, original_length, len(shortened), limit)
 
-    tail = ""
+    tail_index: int | None = None
     tail_budget = min(120, max(0, limit // 4))
-    for piece in reversed(pieces):
+    for index in range(len(pieces) - 1, 1, -1):
+        piece = pieces[index]
         if (
             _EVIDENCE_OR_BOUNDARY.search(piece)
-            and len(piece) <= tail_budget
-            and piece not in pieces[:2]
+            and authoring_visible_length(piece) <= tail_budget
         ):
-            tail = piece
+            tail_index = index
             break
 
+    tail = pieces[tail_index] if tail_index is not None else ""
+    tail_length = authoring_visible_length(tail)
     separator = "\n" if tail else ""
-    head_budget = limit - len(separator) - len(tail)
+    head_budget = limit - tail_length
+    minimum_output_length = (limit * 4 + 4) // 5
     selected: list[str] = []
     used = 0
-    for piece in pieces:
-        if piece == tail:
+    for index, piece in enumerate(pieces):
+        if index == tail_index:
             continue
-        joiner = "\n" if selected else ""
-        addition = f"{joiner}{piece}"
-        if used + len(addition) <= head_budget:
+        piece_length = authoring_visible_length(piece)
+        if used + piece_length <= head_budget:
             selected.append(piece)
-            used += len(addition)
+            used += piece_length
             continue
+        if used + tail_length < minimum_output_length:
+            fragment = _natural_prefix(piece, head_budget - used)
+            if fragment:
+                selected.append(fragment)
+                used += authoring_visible_length(fragment)
         break
 
     head = "\n".join(selected).rstrip()
     if not head:
-        # A single model sentence can exceed the entire budget. Prefer the
-        # last natural clause boundary inside the limit; only then fall back
-        # to an explicit ellipsis rather than a misleading complete sentence.
-        candidate = pieces[0][: max(1, head_budget)].rstrip()
-        boundary = max(
-            candidate.rfind(mark)
-            for mark in ("。", "！", "？", "；", ".", "!", "?", ";")
-        )
-        head = candidate[: boundary + 1].rstrip() if boundary >= 20 else candidate.rstrip(" ，,；;：:")
-        if head and not re.search(r"[。！？!?；;]$", head):
-            head = f"{head[: max(1, head_budget - 1)].rstrip()}…"
+        head = _natural_prefix(pieces[0], head_budget)
 
     shortened = f"{head}{separator}{tail}".strip()
-    if len(shortened) > limit:  # defensive invariant
-        shortened = shortened[:limit].rstrip()
-    return ContentLengthResult(shortened, original_length, len(shortened), limit)
+    if authoring_visible_length(shortened) > limit:  # defensive invariant
+        shortened = _natural_prefix(shortened, limit)
+    return ContentLengthResult(
+        shortened,
+        original_length,
+        authoring_visible_length(shortened),
+        limit,
+    )
+
+
+def _natural_prefix(value: str, visible_budget: int) -> str:
+    """Return a readable prefix that fits one visible-character budget."""
+
+    if visible_budget <= 0:
+        return ""
+    normalized = str(value or "").strip()
+    if authoring_visible_length(normalized) <= visible_budget:
+        return normalized
+
+    candidate = _prefix_with_visible_budget(normalized, visible_budget)
+    minimum_natural_fill = max(1, (visible_budget * 4 + 4) // 5)
+    for index in range(len(candidate) - 1, -1, -1):
+        if candidate[index] not in "。！？!?；;，,：:":
+            continue
+        natural = candidate[: index + 1].rstrip()
+        if authoring_visible_length(natural) >= minimum_natural_fill:
+            return natural
+
+    if visible_budget == 1:
+        return "…"
+    prefix = _prefix_with_visible_budget(normalized, visible_budget - 1)
+    prefix = prefix.rstrip(" ，,；;：:")
+    if re.search(r"[。！？!?；;]$", prefix):
+        return prefix
+    return f"{prefix}…" if prefix else "…"
+
+
+def _prefix_with_visible_budget(value: str, visible_budget: int) -> str:
+    visible_count = 0
+    end = 0
+    for index, character in enumerate(value):
+        if not character.isspace():
+            if visible_count >= visible_budget:
+                break
+            visible_count += 1
+        end = index + 1
+    return value[:end].rstrip()
 
 
 def has_unresolved_placeholders(value: str) -> bool:

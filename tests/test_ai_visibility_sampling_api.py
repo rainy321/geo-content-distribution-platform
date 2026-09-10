@@ -171,6 +171,54 @@ class AIVisibilitySamplingApiTests(unittest.TestCase):
         self.assertEqual(second.headers["X-Request-ID"], "api-sampling-request-1")
         self.assertEqual(second.get_json(), first.get_json())
 
+        resumed = self.client.get(
+            "/api/geo/visibility/sample/api-sampling-request-1"
+        )
+        self.assertEqual(resumed.status_code, 200)
+        self.assertEqual(resumed.headers["Idempotency-Replayed"], "true")
+        self.assertEqual(resumed.get_json()["data"]["status"], "completed")
+        self.assertEqual(sampler.call_count, 1)
+
+    def test_resume_endpoint_reports_started_request_without_provider_call(self):
+        with closing(sqlite3.connect(self.database_path)) as conn:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO ai_visibility_sample_requests (
+                        project_id, request_id, idempotency_key,
+                        request_fingerprint, status
+                    ) VALUES (?, ?, ?, ?, 'started')
+                    """,
+                    (
+                        self.project_id,
+                        "resume-started-request",
+                        "resume-started-key",
+                        "a" * 64,
+                    ),
+                )
+
+        response = self.client.get(
+            "/api/geo/visibility/sample/resume-started-request"
+        )
+
+        self.assertEqual(response.status_code, 202)
+        self.assertEqual(response.headers["Idempotency-Replayed"], "true")
+        data = response.get_json()["data"]
+        self.assertEqual(data["status"], "processing")
+        self.assertFalse(data["retry_policy"]["automatic_retry"])
+        self.assertIn("不会重新调用模型", response.get_json()["msg"])
+
+    def test_resume_endpoint_rejects_unknown_or_invalid_identity(self):
+        missing = self.client.get(
+            "/api/geo/visibility/sample/missing-request"
+        )
+        invalid = self.client.get(
+            "/api/geo/visibility/sample/not%20valid"
+        )
+
+        self.assertEqual(missing.status_code, 404)
+        self.assertEqual(invalid.status_code, 400)
+
     @patch("services.ai_visibility_sampling_service.sample_ai_prompt_detailed")
     def test_partial_timeout_returns_need_action_and_stops(self, sampler):
         sampler.side_effect = [
