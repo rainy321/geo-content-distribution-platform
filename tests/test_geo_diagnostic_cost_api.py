@@ -86,6 +86,67 @@ class GEODiagnosticAndCostApiTests(unittest.TestCase):
         self.assertEqual(data["summary"]["unpriced_count"], 1)
         self.assertFalse(data["publishing"]["token_usage_applicable"])
 
+    def test_billing_endpoint_filters_receipts_without_exposing_metadata(self):
+        catalog = {
+            "qwen/synthetic-model": {
+                "input_per_million": "1",
+                "output_per_million": "2",
+                "currency": "CNY",
+            }
+        }
+        record_ai_usage(
+            self.database_path,
+            operation="generate",
+            provider="qwen",
+            model="synthetic-model",
+            usage={"input_tokens": 100, "output_tokens": 50},
+            project_id=self.project_id,
+            pricing_catalog=catalog,
+            metadata={"usage_origin": "provider_response"},
+        )
+        record_ai_usage(
+            self.database_path,
+            operation="optimize",
+            provider="qwen",
+            model="synthetic-model",
+            usage={"input_tokens": 10, "output_tokens": 5},
+            project_id=self.project_id,
+            pricing_catalog={},
+        )
+
+        response = self.client.get(
+            "/api/ai-usage/billing",
+            query_string={
+                "project_id": self.project_id,
+                "days": 30,
+                "operation": "generate",
+                "cost_status": "calculated",
+                "limit": 200,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        data = response.get_json()["data"]
+        self.assertEqual(data["summary"]["operation_count"], 1)
+        self.assertEqual(data["summary"]["known_total_tokens"], 150)
+        self.assertEqual(data["record_window"]["matched"], 1)
+        self.assertEqual(data["records"][0]["project_name"], "Synthetic Acme")
+        self.assertNotIn("metadata", data["records"][0])
+        self.assertFalse(data["publishing"]["token_usage_applicable"])
+
+    def test_billing_endpoint_rejects_invalid_filters(self):
+        responses = (
+            self.client.get("/api/ai-usage/billing", query_string={"days": -1}),
+            self.client.get(
+                "/api/ai-usage/billing", query_string={"operation": "publish"}
+            ),
+            self.client.get(
+                "/api/ai-usage/billing", query_string={"project_id": "invalid"}
+            ),
+        )
+        self.assertEqual([response.status_code for response in responses], [400, 400, 400])
+
     @patch("sau_backend.optimize_geo_content")
     def test_optimization_provider_usage_is_recorded(self, mock_optimize):
         mock_optimize.return_value = AIOptimizationResult(
@@ -114,6 +175,38 @@ class GEODiagnosticAndCostApiTests(unittest.TestCase):
             f"/api/ai-usage/projects/{self.project_id}/summary"
         ).get_json()["data"]
         self.assertEqual(summary["summary"]["known_total_tokens"], 120)
+
+    @patch("sau_backend.record_ai_usage")
+    @patch("sau_backend.optimize_geo_content")
+    def test_optimization_returns_preview_when_cost_receipt_write_fails(
+        self,
+        mock_optimize,
+        mock_record_usage,
+    ):
+        mock_optimize.return_value = AIOptimizationResult(
+            article={
+                "title": "Optimized title",
+                "summary": "summary",
+                "content": "Synthetic Acme optimized content",
+                "tags": [],
+                "faq": [],
+            },
+            provider="qwen",
+            model="qwen-plus",
+            provider_request_id="charged-provider-request",
+            elapsed_ms=50,
+            usage={"input_tokens": 80, "output_tokens": 40, "total_tokens": 120},
+        )
+        mock_record_usage.side_effect = sqlite3.OperationalError("database busy")
+
+        response = self.client.post(f"/api/articles/{self.article_id}/optimize")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()["data"]
+        self.assertEqual(data["optimized"]["title"], "Optimized title")
+        self.assertIsNone(data["ai_usage"])
+        self.assertEqual(data["warnings"][0]["code"], "cost_receipt_not_recorded")
+        self.assertIn("不要直接重试", data["warnings"][0]["message"])
 
 
 if __name__ == "__main__":

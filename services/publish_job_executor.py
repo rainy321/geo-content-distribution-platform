@@ -9,7 +9,6 @@ from typing import Any
 from services.article_service import get_article
 from services.geo_article_compiler_service import (
     GEOArticleCompilerError,
-    score_ai_citeability,
 )
 from services.project_service import ProjectNotFoundError, get_project
 from services.publish_job_service import (
@@ -30,6 +29,7 @@ from services.publisher_adapter import (
 )
 from services.publish_preflight_service import (
     PublishContentLimitError,
+    evaluate_publish_citeability,
     validate_platform_publish_variant,
 )
 
@@ -223,12 +223,8 @@ def _enforce_citeability_gate(
 
     try:
         project = get_project(database_path, int(article["project_id"]))
-        result = score_ai_citeability(
+        result = evaluate_publish_citeability(
             title=title,
-            # The current publisher contract sends title/body/tags only.  A
-            # summary stored on the article cannot improve the score of an
-            # outbound platform copy that does not actually contain it.
-            summary="",
             content=content,
             brand=str(project.get("name") or "").strip(),
             product=str(project.get("product") or "").strip(),
@@ -238,10 +234,6 @@ def _enforce_citeability_gate(
                 if isinstance(project.get("keywords"), list)
                 else []
             ),
-            # Provider receipt sources are not part of PublishContent and
-            # therefore cannot improve the exact outbound-copy gate.  Public
-            # URLs that are actually present in the body are still audited.
-            sources=[],
         )
     except (GEOArticleCompilerError, ProjectNotFoundError, KeyError, TypeError, ValueError) as exc:
         raise PublishCiteabilityGateError(

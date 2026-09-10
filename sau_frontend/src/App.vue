@@ -62,6 +62,10 @@
               <el-icon><View /></el-icon>
               <span>AI 可见度</span>
             </el-menu-item>
+            <el-menu-item index="/cost-ledger">
+              <el-icon><Tickets /></el-icon>
+              <span>成本账单</span>
+            </el-menu-item>
             <el-menu-item index="/material-management">
               <el-icon><Picture /></el-icon>
               <span>素材管理</span>
@@ -176,7 +180,7 @@ import { authApi } from '@/api/auth'
 import {
   HomeFilled, User, DataAnalysis,
   Fold, Picture, Upload, CollectionTag, MagicStick, DocumentCopy, Aim, Setting,
-  View, UserFilled, ArrowDown
+  View, Tickets, UserFilled, ArrowDown
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
@@ -223,6 +227,7 @@ const pageTitles = {
   '/content-library': '内容库',
   '/geo-optimize': 'GEO 优化',
   '/ai-visibility': 'AI 可见度',
+  '/cost-ledger': '成本账单',
   '/material-management': '素材管理',
   '/publish-center': '发布中心',
   '/settings': '系统设置',

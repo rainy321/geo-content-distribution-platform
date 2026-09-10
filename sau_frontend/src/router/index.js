@@ -10,6 +10,7 @@ import ContentLibrary from '../views/ContentLibrary.vue'
 import GeoOptimization from '../views/GeoOptimization.vue'
 import SystemSettings from '../views/SystemSettings.vue'
 import AiVisibility from '../views/AiVisibility.vue'
+import CostLedger from '../views/CostLedger.vue'
 
 const routes = [
   {
@@ -46,6 +47,11 @@ const routes = [
     path: '/ai-visibility',
     name: 'AiVisibility',
     component: AiVisibility
+  },
+  {
+    path: '/cost-ledger',
+    name: 'CostLedger',
+    component: CostLedger
   },
   {
     path: '/material-management',

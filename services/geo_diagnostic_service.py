@@ -22,7 +22,7 @@ from services.geo_article_compiler_service import (
 from services.geo_score_service import score_geo_content
 
 
-GEO_DIAGNOSTIC_VERSION = "geo-commercial-diagnostic-1.1.0"
+GEO_DIAGNOSTIC_VERSION = "geo-commercial-diagnostic-1.2.0"
 PROJECT_DIMENSION_WEIGHTS = {
     "positioning": 20,
     "discoverability": 20,
@@ -418,24 +418,19 @@ def _diagnose_content(
         })
         for key in CONTENT_DIMENSION_WEIGHTS
     ]
-    gaps = _content_gaps(score_result)
-    gaps.extend(
-        _gap(
-            f"citeability.{issue.get('code') or 'blocking'}",
-            str(issue.get("priority") or "P0"),
-            "citeability",
-            str(issue.get("message") or "AI 可引用性门禁未通过"),
-            str(issue.get("action") or "按门禁提示修复后重新诊断。"),
-            f"ai_citeability >= {citeability['pass_score']} 且无 P0 阻断",
-        )
-        for issue in citeability.get("blocking_issues", [])
-        if isinstance(issue, Mapping)
+    citeability_passed = bool(citeability.get("passed"))
+    gaps = _sort_dedupe_gaps(
+        [*_content_gaps(score_result), *_citeability_gaps(citeability)]
     )
+    legacy_score = int(score_result["score"])
     result = _base_result(
         project_id=int(project["id"]),
         scope="content",
         source_type=source_type,
-        score=int(score_result["score"]),
+        # Keep the original five-dimension content score stable for existing
+        # consumers. Publication readiness is a separate gate below: a high
+        # legacy score must never imply that citeability checks passed.
+        score=legacy_score,
         dimensions=dimensions,
         gaps=gaps,
         algorithm_versions={
@@ -449,9 +444,32 @@ def _diagnose_content(
             "content_characters": len(content),
             "project_readiness_score": project_result.get("score"),
             "ai_citeability_score": citeability["score"],
-            "ai_citeability_passed": citeability["passed"],
+            "ai_citeability_passed": citeability_passed,
         },
     )
+    result["publish_ready"] = citeability_passed
+    result["readiness_status"] = "ready" if citeability_passed else "blocked"
+    success_definition = result["measurement_plan"]["success_definition"]
+    success_definition.update(
+        {
+            "publish_ready": True,
+            "ai_citeability_score_at_least": int(citeability["pass_score"]),
+        }
+    )
+    result["measurement_plan"]["current_status"] = {
+        "score_target_met": legacy_score >= int(success_definition["score_at_least"]),
+        "p0_target_met": result["gap_counts"]["P0"]
+        <= int(success_definition["p0_gap_count"]),
+        "ai_citeability_score": int(citeability["score"]),
+        "ai_citeability_passed": citeability_passed,
+        "publish_ready": citeability_passed,
+        "success_definition_met": bool(
+            legacy_score >= int(success_definition["score_at_least"])
+            and result["gap_counts"]["P0"]
+            <= int(success_definition["p0_gap_count"])
+            and citeability_passed
+        ),
+    }
     result["score_suggestions"] = list(score_result.get("suggestions") or [])
     result["citeability"] = citeability
     return result
@@ -575,6 +593,51 @@ def _content_gaps(score_result: Mapping[str, Any]) -> list[dict[str, Any]]:
         priority = "P0" if numeric_score < 50 else "P1"
         title, action, target = actions.get(key, ("该维度需要优化", "按评分建议优化后复测。", f"{key} >= 80"))
         gaps.append(_gap(f"content.{key}", priority, key, title, action, target))
+    return _sort_dedupe_gaps(gaps)
+
+
+def _citeability_gaps(citeability: Mapping[str, Any]) -> list[dict[str, str]]:
+    """Turn every failed publication gate into an actionable P0/P1 gap."""
+
+    pass_score = int(citeability.get("pass_score") or 0)
+    gaps: list[dict[str, str]] = []
+    for issue in citeability.get("blocking_issues", []):
+        if not isinstance(issue, Mapping):
+            continue
+        priority = str(issue.get("priority") or "P0").strip().upper()
+        # Citeability is a publication gate, so a failed issue cannot be
+        # downgraded to an informational P2 item by a future rule version.
+        if priority not in {"P0", "P1"}:
+            priority = "P0"
+        gaps.append(
+            _gap(
+                f"citeability.{issue.get('code') or 'blocking'}",
+                priority,
+                "citeability",
+                str(issue.get("message") or "AI 可引用性门禁未通过"),
+                str(issue.get("action") or "按门禁提示修复后重新诊断。"),
+                f"ai_citeability >= {pass_score} 且无 P0 阻断",
+            )
+        )
+
+    if not bool(citeability.get("passed")) and not any(
+        gap["priority"] in {"P0", "P1"} for gap in gaps
+    ):
+        suggestions = [
+            str(item).strip()
+            for item in citeability.get("suggestions", [])
+            if str(item).strip()
+        ]
+        gaps.append(
+            _gap(
+                "citeability.score_below_threshold",
+                "P1",
+                "citeability",
+                "AI 可引用性总分未达到发布门禁",
+                suggestions[0] if suggestions else "按可引用性分维度建议优化后重新诊断。",
+                f"ai_citeability >= {pass_score} 且无 P0 阻断",
+            )
+        )
     return _sort_dedupe_gaps(gaps)
 
 

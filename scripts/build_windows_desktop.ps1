@@ -437,15 +437,15 @@ try {
         }
         algorithm = [ordered]@{
             integration_version = "ai-visibility-python-port-1.1.0"
-            article_compiler_version = "geo-article-compiler-2.0.0"
-            ai_citeability_version = "ai-citeability-rules-2.0.0"
+            article_compiler_version = "geo-article-compiler-2.1.0"
+            ai_citeability_version = "ai-citeability-rules-2.1.0"
             handoff_archive_sha256 = "2ff20604dad3b68807c47d0f3aef3d59ce613bf927dcde0b90ad80bc4b96e96c"
             source_rights_status = "pending_written_authorization"
             directly_comparable_to_provider_grounding = $false
         }
         product_features = [ordered]@{
-            geo_diagnostic_version = "geo-commercial-diagnostic-1.1.0"
-            ai_cost_ledger_version = "ai-cost-ledger-1.1.0"
+            geo_diagnostic_version = "geo-commercial-diagnostic-1.2.0"
+            ai_cost_ledger_version = "ai-cost-ledger-1.2.0"
             platform_content_policy_version = "2026-09-10.1"
             per_call_token_and_cost_receipts = $true
             non_model_publish_token_semantics = "not_applicable"

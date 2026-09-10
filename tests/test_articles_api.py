@@ -64,7 +64,7 @@ class ArticlesApiTests(unittest.TestCase):
         self.assertIn("dimensions", article["geo_analysis"])
         self.assertEqual(
             article["geo_analysis"]["citeability"]["version"],
-            "ai-citeability-rules-2.0.0",
+            "ai-citeability-rules-2.1.0",
         )
         self.assertEqual(article["status"], "draft")
 

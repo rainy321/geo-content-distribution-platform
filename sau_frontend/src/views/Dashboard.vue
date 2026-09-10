@@ -134,10 +134,16 @@
           <span>ACTION / 02</span><strong>{{ actionGapCount }}</strong>
           <div><h3>优先行动</h3><p>P0 {{ latestDiagnostic?.gapCounts?.P0 || 0 }} · P1 {{ latestDiagnostic?.gapCounts?.P1 || 0 }}</p></div>
         </article>
-        <article>
+        <button
+          type="button"
+          class="cost-proof-card"
+          :disabled="!activeProject"
+          :aria-label="activeProject ? `打开${activeProject.name}的成本账单` : '成本账单暂不可用'"
+          @click="openCostLedger"
+        >
           <span>AI COST / 03</span><strong>{{ costDisplay }}</strong>
-          <div><h3>模型成本凭证</h3><p>{{ costSummary?.knownTotalTokens || 0 }} 已知 Token · {{ costSummary?.unknownUsageCount || 0 }} 条用量未知</p></div>
-        </article>
+          <div><h3>模型成本凭证</h3><p>{{ costSummaryLabel }}<template v-if="activeProject"> · 打开账单 →</template></p></div>
+        </button>
         <article>
           <span>DISTRIBUTION / 04</span><strong>{{ overview.summary.today_success || 0 }}</strong>
           <div><h3>今日发布成功</h3><p>{{ overview.summary.today_published || 0 }} 条任务 · {{ overview.summary.today_failed || 0 }} 条失败</p></div>
@@ -208,10 +214,37 @@ const diagnosticChange = computed(() => diagnosticRetestDelta(diagnosticHistory.
 const citationEvidence = computed(() => latestCitationEvidence(latestVisibility.value))
 const actionGapCount = computed(() => Number(latestDiagnostic.value?.gapCounts?.P0 || 0) + Number(latestDiagnostic.value?.gapCounts?.P1 || 0))
 const costDisplay = computed(() => {
+  if (!costSummary.value) return '—'
   const costs = costSummary.value?.calculatedCosts || []
-  if (!costs.length) return '—'
-  return costs.map(item => `${item.currency} ${Number(item.amount).toFixed(4)}`).join(' + ')
+  if (!costs.length) return costSummary.value.operationCount > 0 ? '待核算' : '—'
+  return costs.map(item => `${item.currency} ${String(item.amount)}`).join(' + ')
 })
+const costSummaryLabel = computed(() => {
+  if (insightsLoading.value) return '正在载入成本凭证'
+  const summary = costSummary.value
+  if (!summary) return '成本凭证未载入'
+
+  const operationCount = Number(summary.operationCount || 0)
+  const knownRecordCount = Number(summary.knownTokenRecordCount || 0)
+  const unknownUsageCount = Number(summary.unknownUsageCount || 0)
+  if (operationCount === 0) return '暂无模型调用'
+  if (knownRecordCount === 0) {
+    return `${unknownUsageCount || operationCount} 条调用的 Token 用量未知`
+  }
+
+  const knownTokens = new Intl.NumberFormat('zh-CN').format(Number(summary.knownTotalTokens || 0))
+  return unknownUsageCount > 0
+    ? `${knownTokens} 已知 Token · ${unknownUsageCount} 条用量未知`
+    : `${knownTokens} 已知 Token · 回执完整`
+})
+
+const openCostLedger = () => {
+  if (!activeProject.value?.id) return
+  router.push({
+    path: '/cost-ledger',
+    query: { project_id: String(activeProject.value.id) }
+  })
+}
 
 const discoverySteps = [
   { index: '01', title: 'AI 可见度监测', description: '了解品牌在 AI 回答中的呈现', route: '/ai-visibility', icon: markRaw(Search) },
@@ -332,12 +365,16 @@ fetchOverview()
 .discovery-path button small { color:#7b7d82; font-size:12px; line-height:1.5; }
 .discovery-path .step-arrow { justify-self:end; color:#9c9da0; }
 .proof-ledger { display:grid; grid-template-columns:repeat(4,1fr); margin:30px 40px 0; border:1px solid var(--line); border-radius:9px; background:#fff; overflow:hidden; }
-.proof-ledger article { display:grid; grid-template-columns:1fr; min-height:150px; padding:20px; border-right:1px solid var(--line); }
-.proof-ledger article:last-child { border-right:0; }
-.proof-ledger article>span { color:#8a8c91; font:600 9px/1 "Cascadia Mono",monospace; letter-spacing:.1em; }
-.proof-ledger article>strong { align-self:center; overflow-wrap:anywhere; font-size:clamp(28px,2.4vw,38px); letter-spacing:-.05em; }
-.proof-ledger article>div h3 { margin:0; font-size:13px; }
-.proof-ledger article>div p { margin:5px 0 0; line-height:1.45; }
+.proof-ledger>article,.proof-ledger>button { display:grid; grid-template-columns:1fr; min-height:150px; padding:20px; border-right:1px solid var(--line); color:var(--ink); text-align:left; }
+.proof-ledger>article:last-child { border-right:0; }
+.proof-ledger>article>span,.proof-ledger>button>span { color:#8a8c91; font:600 9px/1 "Cascadia Mono",monospace; letter-spacing:.1em; }
+.proof-ledger>article>strong,.proof-ledger>button>strong { align-self:center; overflow-wrap:anywhere; font-size:clamp(28px,2.4vw,38px); letter-spacing:-.05em; }
+.proof-ledger>article>div h3,.proof-ledger>button>div h3 { margin:0; font-size:13px; }
+.proof-ledger>article>div p,.proof-ledger>button>div p { margin:5px 0 0; line-height:1.45; }
+.cost-proof-card { transition:background 160ms ease,box-shadow 160ms ease; }
+.cost-proof-card:not(:disabled):hover { background:#f4f4f1; box-shadow:inset 0 -3px 0 var(--ink); }
+.cost-proof-card:focus-visible { position:relative; z-index:1; outline-offset:-3px; }
+.cost-proof-card:disabled { cursor:not-allowed; }
 .recent-section { margin:30px 40px 54px; padding-top:30px; border-top:1px solid var(--line); }
 .section-heading button { display:inline-flex; align-items:center; gap:6px; padding:9px 0; color:var(--ink); font-size:12px; font-weight:700; }
 .recent-list { margin-top:22px; border-top:1px solid var(--line); }
@@ -357,9 +394,9 @@ fetchOverview()
 .first-run-steps{display:grid;grid-template-columns:repeat(3,1fr);margin-top:60px;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
 .first-run-steps article{display:grid;min-height:210px;grid-template-columns:1fr auto;padding:24px;border-right:1px solid var(--line)}.first-run-steps article:last-child{border-right:0}
 .first-run-steps span{color:#85878c;font:600 9px/1 "Cascadia Mono",monospace}.first-run-steps .el-icon{font-size:28px}.first-run-steps h2{grid-column:1/-1;align-self:end;margin:0;font-size:18px}.first-run-steps p{grid-column:1/-1;margin:10px 0 0;color:#77797e;font-size:12px;line-height:1.65}
-@media (prefers-reduced-motion:reduce){.discovery-path button{transition:none}}
+@media (prefers-reduced-motion:reduce){.discovery-path button,.cost-proof-card{transition:none}}
 @media (max-width:1600px){.hero-grid{grid-template-columns:1fr}.hero-copy{max-width:760px}.visibility-card{width:100%}}
-@media (max-width:1180px){.proof-ledger{grid-template-columns:repeat(2,1fr)}.proof-ledger article:nth-child(2){border-right:0}.proof-ledger article:nth-child(-n+2){border-bottom:1px solid var(--line)}.recent-list article{grid-template-columns:100px minmax(180px,.8fr) minmax(200px,1fr) 90px}.recent-list article>time{display:none}}
+@media (max-width:1180px){.proof-ledger{grid-template-columns:repeat(2,1fr)}.proof-ledger>article:nth-child(2){border-right:0}.proof-ledger>article:nth-child(-n+2),.proof-ledger>button:nth-child(-n+2){border-bottom:1px solid var(--line)}.recent-list article{grid-template-columns:100px minmax(180px,.8fr) minmax(200px,1fr) 90px}.recent-list article>time{display:none}}
 @media (max-width:820px){.hero-grid,.discovery-section,.first-run{padding-right:20px;padding-left:20px}.proof-ledger,.recent-section{margin-right:20px;margin-left:20px}.hero-grid{grid-template-columns:minmax(0,1fr);padding-top:30px}.hero-copy h1,.first-run-copy h1{font-size:clamp(48px,12vw,68px)}.discovery-path,.first-run-steps{grid-template-columns:1fr}.discovery-path button,.first-run-steps article{border-right:0;border-bottom:1px solid var(--line)}.discovery-path button:last-child,.first-run-steps article:last-child{border-bottom:0}.recent-list article{grid-template-columns:90px 1fr auto;gap:12px;padding:12px 0}.recent-list article>p{grid-column:2/-1;grid-row:2}}
-@media (max-width:560px){.hero-grid{padding-right:14px;padding-left:14px}.discovery-section,.first-run{padding-right:14px;padding-left:14px}.proof-ledger,.recent-section{margin-right:14px;margin-left:14px}.hero-actions{flex-direction:column}.hero-actions :deep(.el-button){width:100%}.hero-meta{align-items:flex-start;flex-direction:column}.hero-meta i{display:none}.visibility-card{padding:13px}.visibility-index,.citation-snapshot{padding:13px}.visibility-index>header{align-items:flex-start;flex-direction:column}.citation-content footer{align-items:flex-start;flex-direction:column}.citation-content footer small{margin-left:0}.proof-ledger{grid-template-columns:1fr}.proof-ledger article,.proof-ledger article:nth-child(2){border-right:0;border-bottom:1px solid var(--line)}.proof-ledger article:last-child{border-bottom:0}.recent-list article{grid-template-columns:1fr auto}.job-code{grid-column:1/-1}.recent-list article>p{grid-column:1/-1}.load-state{grid-template-columns:1fr;margin:20px 14px}}
+@media (max-width:560px){.hero-grid{padding-right:14px;padding-left:14px}.discovery-section,.first-run{padding-right:14px;padding-left:14px}.proof-ledger,.recent-section{margin-right:14px;margin-left:14px}.hero-actions{flex-direction:column}.hero-actions :deep(.el-button){width:100%}.hero-meta{align-items:flex-start;flex-direction:column}.hero-meta i{display:none}.visibility-card{padding:13px}.visibility-index,.citation-snapshot{padding:13px}.visibility-index>header{align-items:flex-start;flex-direction:column}.citation-content footer{align-items:flex-start;flex-direction:column}.citation-content footer small{margin-left:0}.proof-ledger{grid-template-columns:1fr}.proof-ledger>article,.proof-ledger>article:nth-child(2),.proof-ledger>button{border-right:0;border-bottom:1px solid var(--line)}.proof-ledger>article:last-child{border-bottom:0}.recent-list article{grid-template-columns:1fr auto}.job-code{grid-column:1/-1}.recent-list article>p{grid-column:1/-1}.load-state{grid-template-columns:1fr;margin:20px 14px}}
 </style>

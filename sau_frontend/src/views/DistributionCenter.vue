@@ -154,7 +154,7 @@
             <article
               v-for="platform in boundedManifestPlatforms"
               :key="platform.key"
-              :class="['variant-card', { invalid: !platformDrafts[platform.key]?.within_safe_limit || !platformDrafts[platform.key]?.title_within_safe_limit }]"
+              :class="['variant-card', { invalid: !platformDraftReadyForDispatch(platformDrafts[platform.key]) }]"
             >
               <header>
                 <div>
@@ -191,8 +191,32 @@
                   软件安全线 {{ platformDrafts[platform.key]?.content_policy?.safe_limit || '—' }} 字；
                   已为话题/换行/计数差异预留 {{ platformDrafts[platform.key]?.content_policy?.reserved_characters || 0 }} 字
                 </span>
-                <strong v-if="platformDrafts[platform.key]?.within_safe_limit && platformDrafts[platform.key]?.title_within_safe_limit">可创建任务</strong>
-                <strong v-else class="over-limit">请继续缩短后再创建</strong>
+                <strong v-if="platformDraftReadyForDispatch(platformDrafts[platform.key])">可创建任务</strong>
+                <strong v-else-if="!platformDrafts[platform.key]?.within_safe_limit || !platformDrafts[platform.key]?.title_within_safe_limit" class="over-limit">请继续缩短后再创建</strong>
+                <strong v-else class="over-limit">先修复 AI 可引用性问题</strong>
+              </div>
+              <div
+                :class="['citeability-receipt', {
+                  stale: !platformDrafts[platform.key]?.citeability_current,
+                  failed: platformDrafts[platform.key]?.citeability_current && !platformDrafts[platform.key]?.citeability_passed
+                }]"
+              >
+                <div>
+                  <span>AI 可引用性</span>
+                  <strong v-if="!platformDrafts[platform.key]?.citeability_current">内容编辑后正在重新检查…</strong>
+                  <strong v-else>
+                    {{ platformDrafts[platform.key]?.citeability_score ?? '—' }}
+                    / {{ platformDrafts[platform.key]?.citeability_pass_score ?? 75 }}
+                    · {{ platformDrafts[platform.key]?.citeability_passed ? '通过' : '未通过' }}
+                  </strong>
+                </div>
+                <p v-if="!citeabilityRequired">演示任务不会真实发送；评分仅作内容优化参考。</p>
+                <ul v-else-if="platformDrafts[platform.key]?.citeability_current && !platformDrafts[platform.key]?.citeability_passed">
+                  <li
+                    v-for="issue in citeabilityMessages(platformDrafts[platform.key]).slice(0, 3)"
+                    :key="issue"
+                  >{{ issue }}</li>
+                </ul>
               </div>
               <p>{{ platformDrafts[platform.key]?.adaptation_reason }}</p>
               <footer>
@@ -779,6 +803,7 @@ const automaticPlatformVariants = reactive({})
 const preflightLoading = ref(false)
 const preflightError = ref('')
 let preflightRequestSerial = 0
+let preflightDebounceTimer = null
 const scheduleEnabled = ref(false)
 const publishAt = ref('')
 const autoExecuteAtDue = ref(false)
@@ -828,15 +853,6 @@ const manifestPlatforms = computed(() => (
 
 const boundedManifestPlatforms = computed(() => manifestPlatforms.value)
 
-const platformCopiesReady = computed(() => (
-  !preflightLoading.value
-  && !preflightError.value
-  && boundedManifestPlatforms.value.every(platform => (
-    platformDrafts[platform.key]?.within_safe_limit === true
-    && platformDrafts[platform.key]?.title_within_safe_limit === true
-  ))
-))
-
 const imagePlatforms = computed(() => (
   manifestPlatforms.value.filter(platform => platform.requires_images)
 ))
@@ -856,6 +872,32 @@ const publishingRuntimeReady = computed(() => (
 const demoAvailable = computed(() => (
   platforms.value.some(item => item.demo_available === true)
 ))
+const citeabilityRequired = computed(() => (
+  realPublishingAuthorized.value && !demoAvailable.value
+))
+const platformDraftReadyForDispatch = draft => Boolean(
+  draft?.within_safe_limit === true
+  && draft?.title_within_safe_limit === true
+  && (
+    !citeabilityRequired.value
+    || (draft?.citeability_current === true && draft?.citeability_passed === true)
+  )
+)
+const platformCopiesReady = computed(() => (
+  !preflightLoading.value
+  && !preflightError.value
+  && boundedManifestPlatforms.value.every(platform => (
+    platformDraftReadyForDispatch(platformDrafts[platform.key])
+  ))
+))
+const citeabilityMessages = draft => {
+  const blocking = (draft?.citeability_blocking_issues || []).map(item => (
+    typeof item === 'string' ? item : (item?.message || item?.code || '')
+  ))
+  return [...blocking, ...(draft?.citeability_suggestions || [])]
+    .map(item => String(item || '').trim())
+    .filter(Boolean)
+}
 const accountBindingRequired = computed(() => (
   realPublishingAuthorized.value && !demoAvailable.value
 ))
@@ -915,7 +957,13 @@ const dispatchButtonLabel = computed(() => {
   if (!selectedPlatforms.value.length) return '至少选择一个渠道'
   if (preflightLoading.value) return '正在生成平台短版'
   if (preflightError.value) return '平台短版预检失败'
-  if (!platformCopiesReady.value) return '先将平台短版缩至安全线内'
+  if (!platformCopiesReady.value) {
+    const limitsInvalid = boundedManifestPlatforms.value.some(platform => (
+      platformDrafts[platform.key]?.within_safe_limit !== true
+      || platformDrafts[platform.key]?.title_within_safe_limit !== true
+    ))
+    return limitsInvalid ? '先将平台短版缩至安全线内' : '先通过 AI 可引用性检查'
+  }
   if (imageUploading.value) return '图片上传中'
   if (videoUploading.value) return '视频上传中'
   if (!accountsReady.value) return '先登录并选择每个平台账号'
@@ -1054,6 +1102,9 @@ const fetchAccounts = async () => {
 }
 
 const clearPublishPreflight = () => {
+  if (preflightDebounceTimer) window.clearTimeout(preflightDebounceTimer)
+  preflightDebounceTimer = null
+  preflightRequestSerial += 1
   for (const key of Object.keys(platformDrafts)) delete platformDrafts[key]
   for (const key of Object.keys(automaticPlatformVariants)) delete automaticPlatformVariants[key]
   preflightError.value = ''
@@ -1070,10 +1121,22 @@ const refreshPublishPreflight = async ({ preserveEdits = true } = {}) => {
   preflightLoading.value = true
   preflightError.value = ''
   try {
-    const response = await publishApi.previewVariants({
+    const payload = {
       article_id: selectedArticleId.value,
       platforms: platformKeys
-    })
+    }
+    if (preserveEdits) {
+      const overrides = {}
+      const titleOverrides = {}
+      for (const platformKey of platformKeys) {
+        const draft = platformDrafts[platformKey]
+        if (draft?.manually_edited) overrides[platformKey] = draft.editable_content
+        if (draft?.title_manually_edited) titleOverrides[platformKey] = draft.editable_title
+      }
+      if (Object.keys(overrides).length) payload.overrides = overrides
+      if (Object.keys(titleOverrides).length) payload.title_overrides = titleOverrides
+    }
+    const response = await publishApi.previewVariants(payload)
     if (requestSerial !== preflightRequestSerial) return
     const variants = response.data?.variants || []
     const activeKeys = new Set(platformKeys)
@@ -1084,17 +1147,12 @@ const refreshPublishPreflight = async ({ preserveEdits = true } = {}) => {
       if (!activeKeys.has(key)) delete automaticPlatformVariants[key]
     }
     for (const variant of variants) {
-      const automatic = refreshEditableVariant(variant)
-      automaticPlatformVariants[variant.platform] = automatic
+      const serverDraft = refreshEditableVariant(variant)
       const existing = platformDrafts[variant.platform]
-      platformDrafts[variant.platform] = preserveEdits && existing
-        ? refreshEditableVariant({
-            ...automatic,
-            editable_title: existing.editable_title,
-            editable_content: existing.editable_content,
-            adaptation_reason: existing.adaptation_reason || '用户编辑的平台副本'
-          })
-        : automatic
+      if (!preserveEdits || !existing || !automaticPlatformVariants[variant.platform]) {
+        automaticPlatformVariants[variant.platform] = serverDraft
+      }
+      platformDrafts[variant.platform] = serverDraft
     }
   } catch (error) {
     if (requestSerial !== preflightRequestSerial) return
@@ -1103,6 +1161,15 @@ const refreshPublishPreflight = async ({ preserveEdits = true } = {}) => {
   } finally {
     if (requestSerial === preflightRequestSerial) preflightLoading.value = false
   }
+}
+
+const schedulePublishPreflight = () => {
+  preflightRequestSerial += 1
+  if (preflightDebounceTimer) window.clearTimeout(preflightDebounceTimer)
+  preflightDebounceTimer = window.setTimeout(() => {
+    preflightDebounceTimer = null
+    refreshPublishPreflight({ preserveEdits: true })
+  }, 450)
 }
 
 const updatePlatformDraft = (platformKey, value) => {
@@ -1115,6 +1182,7 @@ const updatePlatformDraft = (platformKey, value) => {
     adapted: String(value || '') !== String(current.original_content || ''),
     adaptation_reason: '用户编辑的平台副本；原稿未修改'
   })
+  schedulePublishPreflight()
 }
 
 const updatePlatformTitle = (platformKey, value) => {
@@ -1126,11 +1194,16 @@ const updatePlatformTitle = (platformKey, value) => {
     title_manually_edited: true,
     title_adapted: String(value || '').trim() !== String(current.original_title || '').trim()
   })
+  schedulePublishPreflight()
 }
 
 const restoreAutomaticVariant = platformKey => {
   const automatic = automaticPlatformVariants[platformKey]
   if (!automatic) return
+  if (preflightDebounceTimer) window.clearTimeout(preflightDebounceTimer)
+  preflightDebounceTimer = null
+  preflightRequestSerial += 1
+  preflightLoading.value = false
   platformDrafts[platformKey] = refreshEditableVariant({ ...automatic })
   ElMessage.success(`${platformName(platformKey)}已恢复自动短版`)
 }
@@ -1145,6 +1218,7 @@ const loadOriginalIntoVariant = platformKey => {
     adapted: false,
     adaptation_reason: '已载入完整原稿；若超过安全线，请在本框内缩短后再创建任务'
   })
+  schedulePublishPreflight()
 }
 
 const platformByKey = key => platforms.value.find(platform => platform.key === key) || {
@@ -1439,6 +1513,7 @@ const dispatchArticle = async () => {
   let createdCount = 0
   let failedCount = 0
   let demoCount = 0
+  const creationFailures = []
 
   for (const platform of selectedPlatforms.value) {
     try {
@@ -1464,6 +1539,7 @@ const dispatchArticle = async () => {
       }
     } catch (error) {
       failedCount += 1
+      creationFailures.push(`${platformName(platform)}：${batchFailureMessage(error)}`)
       console.error(`创建 ${platform} 发布任务失败:`, error)
     }
   }
@@ -1478,6 +1554,17 @@ const dispatchArticle = async () => {
     )
   } else if (createdCount) {
     ElMessage.warning(`已创建 ${createdCount} 个任务，${failedCount} 个渠道创建失败`)
+  } else if (failedCount) {
+    ElMessage.error(`${failedCount} 个渠道均未创建任务`)
+  }
+  if (creationFailures.length) {
+    await ElMessageBox.alert(
+      h('div', { style: { lineHeight: '1.7' } }, creationFailures.map(message => (
+        h('p', { style: { margin: '0 0 6px' } }, message)
+      ))),
+      '部分渠道未创建 · 已继续处理其余渠道',
+      { confirmButtonText: '我知道了', type: 'warning' }
+    )
   }
 }
 
@@ -2075,7 +2162,9 @@ watch(
 onBeforeUnmount(() => {
   pollingStopped = true
   if (pollTimer) window.clearTimeout(pollTimer)
+  if (preflightDebounceTimer) window.clearTimeout(preflightDebounceTimer)
   pollTimer = null
+  preflightDebounceTimer = null
 })
 </script>
 
@@ -2486,6 +2575,54 @@ onBeforeUnmount(() => {
   span { color: var(--muted); }
   strong { color: #267d78; white-space: nowrap; }
   .over-limit { color: var(--danger); }
+}
+
+.citeability-receipt {
+  margin-top: 10px;
+  padding: 10px 12px;
+  border: 1px solid #b9d8d3;
+  background: #f2faf8;
+
+  > div {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+  }
+
+  span {
+    color: #367d79;
+    font: 700 9px/1.4 "Cascadia Mono", monospace;
+    letter-spacing: .08em;
+    text-transform: uppercase;
+  }
+
+  strong { color: #226e69; font-size: 10px; }
+
+  p,
+  ul {
+    margin: 7px 0 0;
+    color: #63777a;
+    font-size: 10px;
+    line-height: 1.55;
+  }
+
+  ul { padding-left: 16px; }
+
+  &.stale {
+    border-color: #d6c08f;
+    background: #fffaf0;
+
+    strong { color: #8b641f; }
+  }
+
+  &.failed {
+    border-color: #dfaaa3;
+    background: #fff5f3;
+
+    strong,
+    li { color: #a44d48; }
+  }
 }
 
 .verification-panel {

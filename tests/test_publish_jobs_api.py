@@ -86,7 +86,11 @@ class PublishJobsApiTests(unittest.TestCase):
 
         preview_response = self.client.post(
             "/api/publish/preflight",
-            json={"article_id": self.article_id, "platforms": ["kuaishou"]},
+            json={
+                "article_id": self.article_id,
+                "platforms": ["kuaishou"],
+                "title_overrides": {"kuaishou": "快手可见标题"},
+            },
         )
 
         self.assertEqual(preview_response.status_code, 200)
@@ -97,6 +101,9 @@ class PublishJobsApiTests(unittest.TestCase):
             variant["publish_length"], variant["content_policy"]["safe_limit"]
         )
         self.assertTrue(variant["adapted"])
+        self.assertEqual(variant["title"], "快手可见标题")
+        self.assertIn("citeability", variant)
+        self.assertIn("passed", variant["citeability"])
 
         created = self.client.post(
             "/api/publish",
@@ -290,6 +297,31 @@ class PublishJobsApiTests(unittest.TestCase):
         detail = self.client.get(f"/api/publish/jobs/{job['job_id']}").get_json()["data"]
         self.assertEqual(detail["status"], "queued")
         self.assertFalse(detail["demo"])
+
+    def test_authorized_real_job_creation_blocks_low_citeability_copy(self):
+        original_authorized = app.config.get("REAL_PUBLISHING_AUTHORIZED")
+        original_allow = app.config.get("ALLOW_REAL_PUBLISHING")
+        original_runtime = app.config.get("PUBLISHING_RUNTIME_READY")
+        app.config["DEMO_MODE"] = False
+        app.config["REAL_PUBLISHING_AUTHORIZED"] = True
+        app.config["ALLOW_REAL_PUBLISHING"] = False
+        app.config["PUBLISHING_RUNTIME_READY"] = True
+        try:
+            response = self.client.post(
+                "/api/publish",
+                json={"article_id": self.article_id, "platform": "zhihu"},
+            )
+        finally:
+            app.config["REAL_PUBLISHING_AUTHORIZED"] = original_authorized
+            app.config["ALLOW_REAL_PUBLISHING"] = original_allow
+            app.config["PUBLISHING_RUNTIME_READY"] = original_runtime
+
+        self.assertEqual(response.status_code, 409)
+        payload = response.get_json()
+        self.assertEqual(
+            payload["data"]["action"], "content_optimization_required"
+        )
+        self.assertFalse(payload["data"]["citeability"]["passed"])
 
     def test_scheduled_job_waits_instead_of_executing_early(self):
         response = self.client.post(

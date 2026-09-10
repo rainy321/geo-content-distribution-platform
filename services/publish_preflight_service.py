@@ -57,6 +57,12 @@ _TITLE_POLICIES: dict[str, dict[str, Any]] = {
 
 _PLAIN_TEXT_CONTENT_PLATFORMS = frozenset({"baijiahao", "xiaohongshu"})
 
+_GEO_PRESERVATION_PATTERN = re.compile(
+    r"(?:https?://|参考(?:资料|来源)?|来源|证据|适用(?:条件|范围)|"
+    r"限制|边界|风险|注意事项|常见问题|FAQ|问[:：]|答[:：])",
+    flags=re.IGNORECASE,
+)
+
 
 _VERIFICATION_POLICIES: dict[str, dict[str, Any]] = {
     "zhihu": {
@@ -342,6 +348,38 @@ def validate_platform_publish_variant(
     )
 
 
+def evaluate_publish_citeability(
+    *,
+    title: str,
+    content: str,
+    brand: str,
+    product: str = "",
+    website: str = "",
+    keywords: Iterable[Any] | None = None,
+) -> dict[str, Any]:
+    """Score only fields that the current publisher actually sends.
+
+    Article summaries and generation-receipt sources are intentionally absent:
+    they cannot improve a platform copy when they are not part of its outbound
+    title/body contract. Inline public URLs remain visible to the scorer.
+    """
+
+    # Imported lazily because the article compiler reuses this module's pure
+    # platform-limit policies while constructing generation instructions.
+    from services.geo_article_compiler_service import score_ai_citeability
+
+    return score_ai_citeability(
+        title=str(title or "").strip(),
+        summary="",
+        content=str(content or "").strip(),
+        brand=str(brand or "").strip(),
+        product=str(product or "").strip(),
+        website=str(website or "").strip(),
+        keywords=_normalize_tags(keywords),
+        sources=[],
+    )
+
+
 def character_count(value: Any) -> int:
     return len(str(value or ""))
 
@@ -374,6 +412,15 @@ def _markdown_to_note_text(value: str) -> str:
     text = re.sub(r"^\s{0,3}#{1,6}\s*", "", text, flags=re.MULTILINE)
     text = re.sub(r"^\s*>\s?", "", text, flags=re.MULTILINE)
     text = re.sub(r"^\s*[-*+]\s+", "• ", text, flags=re.MULTILINE)
+    # A public evidence link is part of the outbound GEO signal. Plain-text
+    # editors do not need Markdown syntax, but dropping the URL would remove
+    # the visible evidence that readers and models can verify.
+    text = re.sub(
+        r"\[([^\]]+)\]\((https?://[^\s\)]+)\)",
+        r"\1：\2",
+        text,
+        flags=re.IGNORECASE,
+    )
     text = re.sub(r"\[([^\]]+)\]\([^\)]+\)", r"\1", text)
     text = text.replace("**", "").replace("__", "").replace("`", "")
     text = re.sub(r"[ \t]+", " ", text)
@@ -388,28 +435,57 @@ def _shorten_to_limit(value: str, limit: int) -> str:
     if limit < 2:
         raise PublishContentLimitError("平台安全字数不足，无法生成发布副本")
 
-    target = limit - 1
-    pieces = re.split(r"(?<=[。！？!?；;])|\n+", value)
+    pieces = [
+        piece
+        for raw_piece in re.split(r"(?<=[。！？!?；;])|\n+", value)
+        if (piece := raw_piece.strip())
+    ]
+    preserved_indexes = [
+        index
+        for index, piece in enumerate(pieces)
+        if _GEO_PRESERVATION_PATTERN.search(piece)
+    ]
+    preserved: list[str] = []
+    preserve_budget = max(80, min(220, limit // 3))
+    preserved_used = 0
+    for index in reversed(preserved_indexes):
+        piece = pieces[index]
+        separator_cost = 1 if preserved else 0
+        piece_length = character_count(piece)
+        if piece_length + separator_cost > preserve_budget - preserved_used:
+            continue
+        preserved.insert(0, piece)
+        preserved_used += piece_length + separator_cost
+        if len(preserved) >= 3:
+            break
+
+    bridge = "\n…\n" if preserved else ""
+    tail = "\n".join(preserved)
+    head_limit = limit - character_count(bridge) - character_count(tail)
+    if not preserved:
+        head_limit = limit - 1
     selected: list[str] = []
     used = 0
-    for raw_piece in pieces:
-        piece = raw_piece.strip()
-        if not piece:
+    preserved_values = set(preserved)
+    for piece in pieces:
+        if piece in preserved_values:
             continue
         separator = "\n" if selected else ""
         addition = f"{separator}{piece}"
-        if used + character_count(addition) <= target:
+        if used + character_count(addition) <= head_limit:
             selected.append(piece)
             used += character_count(addition)
             continue
-        remaining = target - used - character_count(separator)
+        remaining = head_limit - used - character_count(separator)
         if remaining > 0 and not selected:
             selected.append(piece[:remaining].rstrip())
         break
 
     shortened = "\n".join(selected).rstrip(" ，,。；;：:")
     if not shortened:
-        shortened = value[:target].rstrip()
+        shortened = value[: max(1, head_limit)].rstrip()
+    if preserved:
+        return f"{shortened}{bridge}{tail}"[:limit].rstrip()
     return f"{shortened}…"
 
 

@@ -107,7 +107,7 @@ class ContentGenerationServiceTests(unittest.TestCase):
         self.assertIn("geo_analysis", result)
         self.assertEqual(
             result["geo_analysis"]["citeability"]["version"],
-            "ai-citeability-rules-2.0.0",
+            "ai-citeability-rules-2.1.0",
         )
         self.assertEqual(
             len(result["geo_analysis"]["citeability"]["dimensions"]),

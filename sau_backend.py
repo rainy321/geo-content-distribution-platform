@@ -34,6 +34,7 @@ from services.ai_service import (
 )
 from services.ai_cost_ledger_service import (
     AIUsageLedgerError,
+    get_ai_usage_bill,
     get_ai_usage_records_by_references,
     get_project_ai_cost_summary,
     record_ai_usage,
@@ -184,6 +185,7 @@ from services.publish_job_service import (
 from services.publish_preflight_service import (
     PublishContentLimitError,
     build_platform_publish_variant,
+    evaluate_publish_citeability,
     get_platform_frequency_guidance,
     get_publish_content_policy,
     get_publish_title_policy,
@@ -1772,6 +1774,28 @@ def get_project_ai_usage_summary(project_id):
     return jsonify({"code": 200, "msg": "success", "data": summary}), 200
 
 
+@app.route('/api/ai-usage/billing', methods=['GET'])
+def get_ai_usage_billing():
+    """Return a filterable local bill without exposing prompts or secrets."""
+
+    try:
+        raw_project_id = str(request.args.get("project_id", "")).strip()
+        bill = get_ai_usage_bill(
+            app.config["DATABASE_PATH"],
+            project_id=int(raw_project_id) if raw_project_id else None,
+            days=request.args.get("days", "30"),
+            operation=request.args.get("operation", ""),
+            cost_status=request.args.get("cost_status", ""),
+            limit=request.args.get("limit", "200"),
+        )
+    except (AIUsageLedgerError, ValueError) as exc:
+        status = 404 if "不存在" in str(exc) else 400
+        return jsonify({"code": status, "msg": str(exc), "data": None}), status
+    response = jsonify({"code": 200, "msg": "success", "data": bill})
+    response.headers["Cache-Control"] = "no-store"
+    return response, 200
+
+
 @app.route('/api/dashboard', methods=['GET'])
 def get_dashboard_data():
     overview = get_dashboard_overview(app.config["DATABASE_PATH"])
@@ -2868,30 +2892,49 @@ def optimize_article(article_id):
         # article-only shape. No usage is invented for that shape.
         optimized = dict(optimized_result)
         ai_usage_record = None
+        ai_usage_warnings = []
     else:
         optimized = dict(optimized_result.article)
-        ai_usage_record = record_ai_usage(
-            app.config["DATABASE_PATH"],
-            operation="optimize",
-            provider=optimized_result.provider,
-            model=optimized_result.model,
-            usage=optimized_result.usage,
-            usage_status=(
-                "reported" if optimized_result.usage is not None else "unknown"
-            ),
-            project_id=article["project_id"],
-            article_id=article_id,
-            reference_type="optimization_request",
-            reference_id=(optimized_result.provider_request_id or str(uuid.uuid4())),
-            metadata={
-                "outcome": "succeeded",
-                "usage_origin": (
-                    "provider_response"
-                    if optimized_result.usage is not None
-                    else "not_reported"
+        ai_usage_warnings = []
+        try:
+            ai_usage_record = record_ai_usage(
+                app.config["DATABASE_PATH"],
+                operation="optimize",
+                provider=optimized_result.provider,
+                model=optimized_result.model,
+                usage=optimized_result.usage,
+                usage_status=(
+                    "reported" if optimized_result.usage is not None else "unknown"
                 ),
-            },
-        )
+                project_id=article["project_id"],
+                article_id=article_id,
+                reference_type="optimization_request",
+                reference_id=(optimized_result.provider_request_id or str(uuid.uuid4())),
+                metadata={
+                    "outcome": "succeeded",
+                    "usage_origin": (
+                        "provider_response"
+                        if optimized_result.usage is not None
+                        else "not_reported"
+                    ),
+                },
+            )
+        except (AIUsageLedgerError, sqlite3.Error) as exc:
+            # The model call has already succeeded. Returning HTTP 500 here
+            # invites an unsafe retry and a second charge, so preserve the
+            # generated preview and make the missing receipt explicit.
+            ai_usage_record = None
+            ai_usage_warnings.append(
+                {
+                    "code": "cost_receipt_not_recorded",
+                    "message": "优化稿已生成，但本次成本凭证未能写入；请先核对供应商账单，不要直接重试。",
+                }
+            )
+            app.logger.error(
+                "optimization cost receipt failed article_id=%s error_type=%s",
+                article_id,
+                type(exc).__name__,
+            )
 
     after_score = score_geo_content(
         title=optimized["title"],
@@ -2921,6 +2964,7 @@ def optimize_article(article_id):
                 "before": before_score,
                 "after": after_score,
                 "ai_usage": ai_usage_record,
+                "warnings": ai_usage_warnings,
             },
         }
     ), 200
@@ -3005,10 +3049,17 @@ def preview_publish_variants():
     overrides = data.get("overrides", {})
     if not isinstance(overrides, dict):
         return jsonify({"code": 400, "msg": "overrides 必须是对象", "data": None}), 400
+    title_overrides = data.get("title_overrides", {})
+    if not isinstance(title_overrides, dict):
+        return jsonify({"code": 400, "msg": "title_overrides 必须是对象", "data": None}), 400
     try:
         article = get_article(app.config["DATABASE_PATH"], article_id)
     except ArticleNotFoundError as exc:
         return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    try:
+        project = get_project(app.config["DATABASE_PATH"], int(article["project_id"]))
+    except (ProjectNotFoundError, KeyError, TypeError, ValueError) as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
 
     variants = []
     seen = set()
@@ -3024,17 +3075,32 @@ def preview_publish_variants():
             override = overrides.get(platform)
             if override is not None and not isinstance(override, str):
                 raise PublishContentLimitError(f"{platform} 平台副本必须是字符串")
-            variants.append(
-                build_platform_publish_variant(
-                    platform=platform,
-                    title=article["title"],
-                    content=article["content"],
-                    tags=article.get("tags") or (),
-                    publish_content=override,
-                )
+            title_override = title_overrides.get(platform)
+            if title_override is not None and not isinstance(title_override, str):
+                raise PublishContentLimitError(f"{platform} 发布标题必须是字符串")
+            variant = build_platform_publish_variant(
+                platform=platform,
+                title=article["title"],
+                content=article["content"],
+                tags=article.get("tags") or (),
+                publish_title=title_override,
+                publish_content=override,
             )
+            variant["citeability"] = evaluate_publish_citeability(
+                title=variant["title"],
+                content=variant["publish_content"],
+                brand=str(project.get("name") or "").strip(),
+                product=str(project.get("product") or "").strip(),
+                website=str(project.get("website") or "").strip(),
+                keywords=(
+                    project.get("keywords")
+                    if isinstance(project.get("keywords"), list)
+                    else []
+                ),
+            )
+            variants.append(variant)
             seen.add(platform)
-    except PublishContentLimitError as exc:
+    except (PublishContentLimitError, GEOArticleCompilerError) as exc:
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
 
     return jsonify(
@@ -3228,6 +3294,55 @@ def create_publish_task():
                 "data": None,
             }
         ), 403
+
+    if (
+        not app.config.get("DEMO_MODE", False)
+        and _real_publishing_authorized()
+    ):
+        try:
+            article_for_gate = get_article(app.config["DATABASE_PATH"], article_id)
+            project_for_gate = get_project(
+                app.config["DATABASE_PATH"],
+                int(article_for_gate["project_id"]),
+            )
+            exact_variant = build_platform_publish_variant(
+                platform=platform,
+                title=article_for_gate["title"],
+                content=article_for_gate["content"],
+                tags=article_for_gate.get("tags") or (),
+                publish_title=publish_title,
+                publish_content=publish_content,
+            )
+            citeability = evaluate_publish_citeability(
+                title=exact_variant["title"],
+                content=exact_variant["publish_content"],
+                brand=str(project_for_gate.get("name") or "").strip(),
+                product=str(project_for_gate.get("product") or "").strip(),
+                website=str(project_for_gate.get("website") or "").strip(),
+                keywords=(
+                    project_for_gate.get("keywords")
+                    if isinstance(project_for_gate.get("keywords"), list)
+                    else []
+                ),
+            )
+        except ArticleNotFoundError as exc:
+            return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+        except ProjectNotFoundError as exc:
+            return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+        except (PublishContentLimitError, GEOArticleCompilerError, KeyError, TypeError, ValueError) as exc:
+            return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+        if citeability.get("passed") is not True:
+            return jsonify(
+                {
+                    "code": 409,
+                    "msg": "当前平台实发副本未通过 AI 可引用性门禁，未创建真实发布任务",
+                    "data": {
+                        "action": "content_optimization_required",
+                        "platform": platform,
+                        "citeability": citeability,
+                    },
+                }
+            ), 409
 
     try:
         job = create_publish_job(

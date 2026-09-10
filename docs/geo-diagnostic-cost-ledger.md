@@ -51,9 +51,17 @@
 
 历史列表是轻量摘要；详情用于展示当时的维度、缺口和复测口径。
 
-## AI Token 与成本 API
+## AI Token 与成本账单
+
+项目摘要接口仍可供项目页使用：
 
 `GET /api/ai-usage/projects/{project_id}/summary?limit=50`
+
+桌面端独立“成本账单”界面使用跨项目账单接口：
+
+`GET /api/ai-usage/billing?project_id=&days=30&operation=&cost_status=&limit=200`
+
+账单接口按筛选条件计算全部匹配记录的总览，并返回按操作、模型、项目、日期的拆分和一个有上限的最新明细窗口。界面会明确显示明细窗口与全部匹配数；CSV 只导出当前明细窗口，不把截断结果冒充完整账单。
 
 台账支持真实模型操作 `generate`、`optimize` 和 `platform_adapt`：
 
@@ -64,6 +72,8 @@
 - 有 Token 明细和价格快照时为 `calculated`，金额字段仍命名 `estimated_cost`，因为账单应以供应商最终账单为准。
 
 浏览器上传、登录、平台发布如果没有调用模型，`token_usage_applicable=false`，不能伪造“发布 Token”。若未来平台适配确实调用模型，应单独记录 `platform_adapt`，不能把浏览器操作混入。
+
+金额按币种分别汇总，不能把 CNY、USD 等直接相加。未知 Token、未定价调用和已核算金额分别展示：未知不是 0，未定价也不是免费。当前 P1 遗留是账单明细游标翻页、管理员价格目录、预算/超额预警和供应商账单对账。
 
 ### 单价配置
 

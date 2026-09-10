@@ -98,6 +98,28 @@ class PublishPreflightServiceTests(unittest.TestCase):
         self.assertEqual(result["publish_content"], "小节\n\n正文 强调")
         self.assertTrue(result["adapted"])
 
+    def test_plain_text_and_shortening_preserve_public_evidence_and_boundaries(self):
+        original = (
+            "## 直接答案\n\n"
+            + "DongClaw 提供本地 AI 部署检查步骤。" * 40
+            + "\n\n## 适用边界\n仅适用于完成权限核对的企业环境。"
+            + "\n\n## FAQ\n问：能保证被模型收录吗？答：不能保证，应持续回测。"
+            + "\n\n## 参考资料\n[产品页](https://example.com/dongclaw)"
+        )
+
+        result = build_platform_publish_variant(
+            platform="kuaishou",
+            title="DongClaw 如何部署",
+            content=original,
+            tags=["DongClaw"],
+        )
+
+        self.assertLessEqual(
+            result["publish_length"], result["content_policy"]["safe_limit"]
+        )
+        self.assertIn("https://example.com/dongclaw", result["publish_content"])
+        self.assertRegex(result["publish_content"], "适用边界|FAQ|不能保证")
+
     def test_baijiahao_rejects_one_character_title_before_platform(self):
         with self.assertRaisesRegex(PublishContentLimitError, "至少需要 2 字"):
             build_platform_publish_variant(

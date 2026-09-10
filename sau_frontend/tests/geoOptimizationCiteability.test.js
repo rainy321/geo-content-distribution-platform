@@ -45,5 +45,7 @@ test('optimization view renders the gate only when citeability exists', () => {
   assert.match(source, /remainingP0Issues/)
   assert.match(source, /normalizeGeoScoreResult\(response\.data\.before\)/)
   assert.match(source, /normalizeGeoScoreResult\(response\.data\.after\)/)
+  assert.match(source, /response\.data\.warnings/)
+  assert.match(source, /费用凭证需要人工核对/)
   assert.doesNotMatch(source, /:disabled="[^\"]*citeability/)
 })

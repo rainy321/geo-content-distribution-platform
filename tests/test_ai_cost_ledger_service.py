@@ -8,6 +8,7 @@ from db.createTable import initialize_database
 from services.ai_cost_ledger_service import (
     AIUsageLedgerError,
     canonicalize_provider,
+    get_ai_usage_bill,
     get_ai_usage_records_by_references,
     get_project_ai_cost_summary,
     record_ai_usage,
@@ -287,6 +288,84 @@ class AIUsageLedgerServiceTests(unittest.TestCase):
         self.assertEqual(summary["unknown_token_item_count"], 2)
         self.assertEqual(summary["unknown_cost_item_count"], 2)
         self.assertEqual(summary["calculated_costs"], [])
+
+    def test_cross_project_bill_keeps_full_totals_and_bounded_receipt_window(self):
+        with closing(sqlite3.connect(self.database_path)) as conn:
+            second_project_id = conn.execute(
+                "INSERT INTO projects (name) VALUES ('Second project')"
+            ).lastrowid
+            conn.commit()
+        record_ai_usage(
+            self.database_path,
+            operation="generate",
+            provider="qwen",
+            model="qwen-plus",
+            usage={"input_tokens": 1000, "output_tokens": 500},
+            project_id=self.project_id,
+            pricing_catalog=self.catalog,
+            metadata={"usage_origin": "provider_response"},
+        )
+        record_ai_usage(
+            self.database_path,
+            operation="optimize",
+            provider="qwen",
+            model="qwen-plus",
+            usage={"input_tokens": 200, "output_tokens": 100},
+            project_id=self.project_id,
+            pricing_catalog={},
+        )
+        record_ai_usage(
+            self.database_path,
+            operation="visibility_sample",
+            provider="custom.example.com",
+            model="sample-v1",
+            usage=None,
+            usage_status="unknown",
+            project_id=second_project_id,
+            pricing_catalog={},
+        )
+
+        bill = get_ai_usage_bill(self.database_path, days=0, limit=1)
+
+        self.assertEqual(bill["summary"]["operation_count"], 3)
+        self.assertEqual(bill["summary"]["known_total_tokens"], 1800)
+        self.assertEqual(bill["summary"]["calculated_cost_count"], 1)
+        self.assertEqual(bill["summary"]["unknown_cost_count"], 2)
+        self.assertEqual(
+            bill["summary"]["calculated_costs"],
+            [{"currency": "CNY", "estimated_cost": "0.005"}],
+        )
+        self.assertEqual(bill["record_window"]["matched"], 3)
+        self.assertEqual(bill["record_window"]["returned"], 1)
+        self.assertTrue(bill["record_window"]["has_more"])
+        self.assertEqual(len(bill["records"]), 1)
+        self.assertNotIn("metadata", bill["records"][0])
+        self.assertEqual(len(bill["by_project"]), 2)
+        self.assertEqual(len(bill["by_operation"]), 3)
+        self.assertFalse(bill["publishing"]["token_usage_applicable"])
+
+        project_bill = get_ai_usage_bill(
+            self.database_path,
+            project_id=self.project_id,
+            days=30,
+            cost_status="calculated",
+        )
+        self.assertEqual(project_bill["summary"]["operation_count"], 1)
+        self.assertEqual(project_bill["records"][0]["project_name"], "Acme")
+        self.assertEqual(project_bill["filters"]["cost_status"], "calculated")
+
+    def test_cross_project_bill_rejects_invalid_filters(self):
+        invalid_calls = (
+            {"days": -1},
+            {"days": 3651},
+            {"limit": 501},
+            {"operation": "publish"},
+            {"cost_status": "free"},
+            {"project_id": 999999},
+        )
+        for values in invalid_calls:
+            with self.subTest(values=values), self.assertRaises(AIUsageLedgerError):
+                get_ai_usage_bill(self.database_path, **values)
 
 
 if __name__ == "__main__":

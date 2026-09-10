@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
 from db.createTable import initialize_database
 from services.geo_diagnostic_service import (
@@ -67,16 +68,133 @@ class GEODiagnosticServiceTests(unittest.TestCase):
         self.assertEqual(result["source_type"], "ad_hoc")
         self.assertEqual(
             result["algorithm_versions"]["ai_citeability"],
-            "ai-citeability-rules-2.0.0",
+            "ai-citeability-rules-2.1.0",
         )
         self.assertIn("citeability", result)
         self.assertEqual(len(result["citeability"]["dimensions"]), 7)
         self.assertTrue(any(gap["dimension"] == "structure" for gap in result["gaps"]))
+        self.assertFalse(result["publish_ready"])
+        self.assertEqual(result["readiness_status"], "blocked")
+        self.assertTrue(
+            any(
+                gap["dimension"] == "citeability"
+                and gap["priority"] in {"P0", "P1"}
+                for gap in result["gaps"]
+            )
+        )
+        self.assertFalse(
+            result["measurement_plan"]["current_status"][
+                "success_definition_met"
+            ]
+        )
         stored = get_geo_diagnostic_run(self.database_path, result["run_id"])
         self.assertNotIn(private_body, json.dumps(stored, ensure_ascii=False))
         self.assertEqual(
             stored["algorithm_versions"]["content_score"],
             "geo-score-mvp-rules-1.0.0",
+        )
+
+    @patch("services.geo_diagnostic_service.score_ai_citeability")
+    @patch("services.geo_diagnostic_service.score_geo_content")
+    def test_high_legacy_score_does_not_override_failed_citeability_gate(
+        self,
+        mock_content_score,
+        mock_citeability,
+    ):
+        mock_content_score.return_value = {
+            "score": 95,
+            "dimensions": {
+                "entity": 100,
+                "keywords": 100,
+                "structure": 100,
+                "faq": 100,
+                "citation": 100,
+            },
+            "suggestions": [],
+        }
+        mock_citeability.return_value = {
+            "version": "ai-citeability-rules-test",
+            "score": 74,
+            "pass_score": 75,
+            "passed": False,
+            "dimensions": {},
+            "blocking_issues": [],
+            "suggestions": ["补充可追溯来源。"],
+        }
+
+        result = diagnose_geo_readiness(
+            self.database_path,
+            project_id=self.project_id,
+            title="Acme Cloud 完整指南",
+            content="Acme Cloud 的完整说明。" * 80,
+            persist=False,
+        )
+
+        # ``score`` and ``grade`` retain the legacy contract, while the new
+        # fields express the stricter publication decision.
+        self.assertEqual(result["score"], 95)
+        self.assertEqual(result["grade"], "A")
+        self.assertFalse(result["publish_ready"])
+        self.assertEqual(result["readiness_status"], "blocked")
+        gate_gap = next(
+            gap
+            for gap in result["gaps"]
+            if gap["key"] == "citeability.score_below_threshold"
+        )
+        self.assertEqual(gate_gap["priority"], "P1")
+        self.assertEqual(gate_gap["dimension"], "citeability")
+        self.assertGreaterEqual(result["gap_counts"]["P1"], 1)
+        plan = result["measurement_plan"]
+        self.assertTrue(plan["current_status"]["score_target_met"])
+        self.assertTrue(plan["current_status"]["p0_target_met"])
+        self.assertFalse(plan["current_status"]["ai_citeability_passed"])
+        self.assertFalse(plan["current_status"]["success_definition_met"])
+        self.assertTrue(plan["success_definition"]["publish_ready"])
+        self.assertEqual(plan["success_definition"]["ai_citeability_score_at_least"], 75)
+
+    @patch("services.geo_diagnostic_service.score_ai_citeability")
+    @patch("services.geo_diagnostic_service.score_geo_content")
+    def test_passing_citeability_gate_sets_publish_readiness(
+        self,
+        mock_content_score,
+        mock_citeability,
+    ):
+        mock_content_score.return_value = {
+            "score": 90,
+            "dimensions": {
+                "entity": 100,
+                "keywords": 100,
+                "structure": 100,
+                "faq": 100,
+                "citation": 100,
+            },
+            "suggestions": [],
+        }
+        mock_citeability.return_value = {
+            "version": "ai-citeability-rules-test",
+            "score": 90,
+            "pass_score": 75,
+            "passed": True,
+            "dimensions": {},
+            "blocking_issues": [],
+            "suggestions": [],
+        }
+
+        result = diagnose_geo_readiness(
+            self.database_path,
+            project_id=self.project_id,
+            title="Acme Cloud 完整指南",
+            content="Acme Cloud 的完整说明。" * 80,
+            persist=False,
+        )
+
+        self.assertEqual(result["score"], 90)
+        self.assertTrue(result["publish_ready"])
+        self.assertEqual(result["readiness_status"], "ready")
+        self.assertTrue(
+            result["measurement_plan"]["current_status"][
+                "success_definition_met"
+            ]
         )
 
     def test_project_diagnostic_uses_latest_visibility_metrics_and_versions(self):

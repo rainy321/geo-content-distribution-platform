@@ -45,6 +45,32 @@ test('platform draft validates the visible title snapshot independently', () => 
 })
 
 
+test('citeability receipt is valid only for the exact visible outbound snapshot', () => {
+  const scored = refreshEditableVariant({
+    title: 'DongClaw 如何部署',
+    publish_content: '北京同于野科技有限公司提供部署步骤与限制。',
+    citeability: {
+      score: 82,
+      pass_score: 75,
+      passed: true,
+      blocking_issues: [],
+      suggestions: ['补充来源']
+    }
+  })
+  const edited = refreshEditableVariant({
+    ...scored,
+    editable_content: `${scored.editable_content}新增一句`
+  })
+
+  assert.equal(scored.citeability_current, true)
+  assert.equal(scored.citeability_passed, true)
+  assert.equal(scored.citeability_score, 82)
+  assert.equal(edited.citeability_current, false)
+  assert.equal(edited.citeability_passed, false)
+  assert.deepEqual(edited.citeability_suggestions, ['补充来源'])
+})
+
+
 test('frequency label is explicitly a software recommendation', () => {
   assert.equal(
     frequencyGuidanceLabel({ daily_recommended_max: 3, cooldown_minutes: 120 }),
@@ -70,5 +96,9 @@ test('distribution center previews per-platform copies and warns about human ver
   assert.match(source, /发布前检查 · 可能需要本人验证/)
   assert.match(source, /任务已暂停 · 需要本人验证/)
   assert.match(source, /不是平台官方配额/)
+  assert.match(source, /AI 可引用性/)
+  assert.match(source, /title_overrides/)
+  assert.match(source, /citeability_current/)
+  assert.match(source, /内容编辑后正在重新检查/)
   assert.match(apiSource, /\/api\/publish\/preflight/)
 })

@@ -621,15 +621,15 @@ class DesktopPackagingContractTests(unittest.TestCase):
         self.assertIn("internal_authorized_real_publish", build_script)
         self.assertIn("THIRD-PARTY-NOTICES.txt", build_script)
         self.assertIn(
-            'ai_cost_ledger_version = "ai-cost-ledger-1.1.0"',
+            'ai_cost_ledger_version = "ai-cost-ledger-1.2.0"',
             build_script,
         )
         self.assertIn(
-            'article_compiler_version = "geo-article-compiler-2.0.0"',
+            'article_compiler_version = "geo-article-compiler-2.1.0"',
             build_script,
         )
         self.assertIn(
-            'ai_citeability_version = "ai-citeability-rules-2.0.0"',
+            'ai_citeability_version = "ai-citeability-rules-2.1.0"',
             build_script,
         )
         self.assertIn('docs\\GEO算法融合说明.md', build_script)

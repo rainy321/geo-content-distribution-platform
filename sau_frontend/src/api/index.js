@@ -8,6 +8,7 @@ export * from './publish'
 export * from './dashboard'
 export * from './visibility'
 export * from './diagnostics'
+export * from './billing'
 
 // 可以在这里添加其他API模块的导出
 // export * from './product'

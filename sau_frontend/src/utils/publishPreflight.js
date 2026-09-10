@@ -1,5 +1,9 @@
 export const countPublishCharacters = value => Array.from(String(value || '')).length
 
+const normalizedSnapshotText = value => String(value || '')
+  .replace(/\r\n?/g, '\n')
+  .trim()
+
 export const refreshEditableVariant = variant => {
   if (!variant) return null
   const editableTitle = String(variant.editable_title ?? variant.title ?? '')
@@ -11,6 +15,14 @@ export const refreshEditableVariant = variant => {
   const safeLimit = Number(variant.content_policy?.safe_limit || 0)
   const titleLength = countPublishCharacters(editableTitle.trim())
   const publishLength = countPublishCharacters(editableContent)
+  const citeability = variant.citeability && typeof variant.citeability === 'object'
+    ? variant.citeability
+    : null
+  const citeabilityScore = Number(citeability?.score)
+  const citeabilityPassScore = Number(citeability?.pass_score)
+  const citeabilityCurrent = Boolean(citeability)
+    && normalizedSnapshotText(editableTitle) === normalizedSnapshotText(variant.title)
+    && normalizedSnapshotText(editableContent) === normalizedSnapshotText(variant.publish_content)
   return {
     ...variant,
     editable_title: editableTitle,
@@ -19,7 +31,17 @@ export const refreshEditableVariant = variant => {
     publish_length: publishLength,
     title_within_safe_limit: titleLength >= titleMinLength
       && (!titleSafeLimit || titleLength <= titleSafeLimit),
-    within_safe_limit: !safeLimit || (publishLength > 0 && publishLength <= safeLimit)
+    within_safe_limit: !safeLimit || (publishLength > 0 && publishLength <= safeLimit),
+    citeability_current: citeabilityCurrent,
+    citeability_passed: citeabilityCurrent && citeability?.passed === true,
+    citeability_score: Number.isFinite(citeabilityScore) ? citeabilityScore : null,
+    citeability_pass_score: Number.isFinite(citeabilityPassScore) ? citeabilityPassScore : null,
+    citeability_blocking_issues: Array.isArray(citeability?.blocking_issues)
+      ? citeability.blocking_issues
+      : [],
+    citeability_suggestions: Array.isArray(citeability?.suggestions)
+      ? citeability.suggestions
+      : []
   }
 }
 

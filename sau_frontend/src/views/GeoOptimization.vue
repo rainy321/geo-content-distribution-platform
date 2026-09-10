@@ -222,6 +222,13 @@
         <p>{{ optimizationError.message }}</p>
       </div>
 
+      <div v-if="optimizationWarnings.length" class="optimization-warning" role="status">
+        <strong>优化稿已生成，但费用凭证需要人工核对</strong>
+        <p v-for="warning in optimizationWarnings" :key="warning.code || warning.message">
+          {{ warning.message }}
+        </p>
+      </div>
+
       <section class="action-dock">
         <div>
           <span>人工确认门</span>
@@ -281,6 +288,7 @@ const optimizing = ref(false)
 const saving = ref(false)
 const listError = ref(false)
 const optimizationError = ref(null)
+const optimizationWarnings = ref([])
 const optimizationSaved = ref(false)
 let articleRequestSequence = 0
 
@@ -358,6 +366,7 @@ const loadArticle = async (articleId) => {
   selectedArticleId.value = normalizedId
   articleLoading.value = true
   optimizationError.value = null
+  optimizationWarnings.value = []
   optimizedArticle.value = null
   afterScore.value = null
   optimizationSaved.value = false
@@ -384,12 +393,16 @@ const runOptimization = async () => {
   if (!currentArticle.value || optimizing.value) return
   optimizing.value = true
   optimizationError.value = null
+  optimizationWarnings.value = []
   optimizationSaved.value = false
   try {
     const response = await articleApi.optimizeArticle(currentArticle.value.id)
     optimizedArticle.value = response.data.optimized
     beforeScore.value = normalizeGeoScoreResult(response.data.before)
     afterScore.value = normalizeGeoScoreResult(response.data.after)
+    optimizationWarnings.value = Array.isArray(response.data.warnings)
+      ? response.data.warnings.filter(item => item && typeof item.message === 'string')
+      : []
   } catch (error) {
     optimizationError.value = formatOptimizationError(error)
   } finally {
@@ -878,6 +891,17 @@ onMounted(async () => {
 }
 
 .optimization-error p { margin: 4px 0 0; font-size: 12px; }
+
+.optimization-warning {
+  margin-top: 14px;
+  padding: 13px 16px;
+  border-left: 3px solid #a85a25;
+  background: #fbf4eb;
+  color: #754710;
+}
+
+.optimization-warning strong { font-size: 13px; }
+.optimization-warning p { margin: 5px 0 0; font-size: 12px; line-height: 1.55; }
 
 .citeability-gate {
   margin-top: 16px;

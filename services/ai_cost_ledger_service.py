@@ -11,12 +11,13 @@ import json
 import os
 import sqlite3
 from contextlib import closing, nullcontext
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
-AI_COST_LEDGER_VERSION = "ai-cost-ledger-1.1.0"
+AI_COST_LEDGER_VERSION = "ai-cost-ledger-1.2.0"
 AI_PRICE_CATALOG_ENV = "AI_PRICE_CATALOG_JSON"
 AI_USAGE_OPERATIONS = frozenset(
     {"generate", "optimize", "platform_adapt", "visibility_sample"}
@@ -264,6 +265,130 @@ def get_project_ai_cost_summary(
         "pricing": {
             "configuration": AI_PRICE_CATALOG_ENV,
             "semantics": "每条记录保存调用当时的单价快照；未配置价格时成本保持未知，不按 0 处理。",
+        },
+    }
+
+
+def get_ai_usage_bill(
+    database_path: str | Path,
+    *,
+    project_id: int | None = None,
+    days: int = 30,
+    operation: str = "",
+    cost_status: str = "",
+    limit: int = 200,
+) -> dict[str, Any]:
+    """Return a filterable, cross-project bill made from immutable receipts.
+
+    Totals are calculated across every matching row while ``records`` is a
+    bounded newest-first window for the desktop detail table. Unknown usage or
+    missing prices stay explicit; they are never folded into a zero amount.
+    """
+
+    normalized_project_id = _optional_positive_int(project_id, "project_id")
+    normalized_days = _bounded_integer(days, "days", minimum=0, maximum=3650)
+    normalized_limit = _bounded_integer(limit, "limit", minimum=1, maximum=500)
+    normalized_operation = str(operation or "").strip().lower()
+    if normalized_operation and normalized_operation not in AI_USAGE_OPERATIONS:
+        raise AIUsageLedgerError("operation 格式无效")
+    normalized_cost_status = str(cost_status or "").strip().lower()
+    valid_cost_statuses = {
+        "calculated",
+        "unpriced",
+        "unknown_usage",
+        "insufficient_usage",
+    }
+    if normalized_cost_status and normalized_cost_status not in valid_cost_statuses:
+        raise AIUsageLedgerError("cost_status 格式无效")
+
+    where = ["1 = 1"]
+    params: list[Any] = []
+    generated_at = datetime.now(timezone.utc).replace(microsecond=0)
+    period_start = None
+    if normalized_project_id is not None:
+        where.append("ledger.project_id = ?")
+        params.append(normalized_project_id)
+    if normalized_days:
+        period_start = generated_at - timedelta(days=normalized_days)
+        where.append("ledger.created_at >= ?")
+        params.append(period_start.strftime("%Y-%m-%dT%H:%M:%SZ"))
+    if normalized_operation:
+        where.append("ledger.operation = ?")
+        params.append(normalized_operation)
+    if normalized_cost_status:
+        where.append("ledger.cost_status = ?")
+        params.append(normalized_cost_status)
+
+    with closing(_connect(database_path)) as conn:
+        if normalized_project_id is not None and conn.execute(
+            "SELECT 1 FROM projects WHERE id = ?", (normalized_project_id,)
+        ).fetchone() is None:
+            raise AIUsageLedgerError("品牌项目不存在")
+        rows = conn.execute(
+            f"""
+            SELECT
+                ledger.*,
+                project.name AS project_name,
+                article.title AS article_title
+            FROM ai_usage_ledger AS ledger
+            LEFT JOIN projects AS project ON project.id = ledger.project_id
+            LEFT JOIN articles AS article ON article.id = ledger.article_id
+            WHERE {' AND '.join(where)}
+            ORDER BY ledger.created_at DESC, ledger.id DESC
+            """,
+            tuple(params),
+        ).fetchall()
+
+    records = [_serialize_record(row) for row in rows]
+    # Metadata is intentionally excluded from the billing endpoint even though
+    # the ledger itself only persists allow-listed values. A bill needs usage,
+    # price and identity fields, never prompts or provider payloads.
+    for record in records:
+        record.pop("metadata", None)
+
+    summary = _summarize_bill_records(records)
+    return {
+        "ledger_version": AI_COST_LEDGER_VERSION,
+        "generated_at": generated_at.isoformat().replace("+00:00", "Z"),
+        "period": {
+            "days": normalized_days,
+            "start": (
+                period_start.isoformat().replace("+00:00", "Z")
+                if period_start is not None
+                else None
+            ),
+            "end": generated_at.isoformat().replace("+00:00", "Z"),
+        },
+        "filters": {
+            "project_id": normalized_project_id,
+            "operation": normalized_operation,
+            "cost_status": normalized_cost_status,
+        },
+        "summary": summary,
+        "by_operation": _group_bill_records(records, ("operation",)),
+        "by_model": _group_bill_records(
+            [
+                {**record, "provider": record["canonical_provider"]}
+                for record in records
+            ],
+            ("provider", "model"),
+        ),
+        "by_project": _group_bill_records(records, ("project_id", "project_name")),
+        "by_day": _group_bill_by_day(records),
+        "records": records[:normalized_limit],
+        "record_window": {
+            "matched": len(records),
+            "returned": min(len(records), normalized_limit),
+            "limit": normalized_limit,
+            "has_more": len(records) > normalized_limit,
+        },
+        "publishing": {
+            "token_usage_applicable": False,
+            "message": "登录、上传与发布若未调用模型，Token 和模型费用均为不适用，不记作 0。",
+        },
+        "pricing": {
+            "configuration": AI_PRICE_CATALOG_ENV,
+            "semantics": "金额是调用时单价快照的估算值；未知用量或未定价记录不计入已知金额，最终以供应商账单为准。",
         },
     }
 
@@ -592,6 +717,111 @@ def _calculate_cost(
     }
 
 
+def _summarize_bill_records(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    token_fields = (
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cached_tokens",
+        "reasoning_tokens",
+    )
+    token_totals: dict[str, int | None] = {}
+    for field in token_fields:
+        values = [
+            int(record[field])
+            for record in records
+            if record.get(field) is not None
+        ]
+        token_totals[field] = sum(values) if values else None
+
+    calculated_costs = _cost_totals(records)
+    calculated_count = sum(
+        record.get("cost_status") == "calculated" for record in records
+    )
+    record_count = len(records)
+    return {
+        "operation_count": record_count,
+        "known_total_tokens": token_totals["total_tokens"],
+        "token_totals": token_totals,
+        "known_token_record_count": sum(
+            record.get("total_tokens") is not None for record in records
+        ),
+        "calculated_cost_count": calculated_count,
+        "cost_coverage_percent": (
+            round(calculated_count * 100 / record_count, 1) if record_count else 0.0
+        ),
+        "unknown_cost_count": record_count - calculated_count,
+        "unknown_usage_count": sum(
+            record.get("usage_status") == "unknown" for record in records
+        ),
+        "unpriced_count": sum(
+            record.get("cost_status") == "unpriced" for record in records
+        ),
+        "insufficient_usage_count": sum(
+            record.get("cost_status") == "insufficient_usage" for record in records
+        ),
+        "calculated_costs": calculated_costs,
+    }
+
+
+def _cost_totals(records: Sequence[Mapping[str, Any]]) -> list[dict[str, str]]:
+    totals: dict[str, Decimal] = {}
+    for record in records:
+        if record.get("cost_status") != "calculated":
+            continue
+        raw_amount = record.get("estimated_cost")
+        if raw_amount is None:
+            continue
+        try:
+            amount = Decimal(str(raw_amount))
+        except (InvalidOperation, ValueError):
+            continue
+        if not amount.is_finite() or amount < 0:
+            continue
+        currency = str(record.get("currency") or "UNKNOWN").strip() or "UNKNOWN"
+        totals[currency] = totals.get(currency, Decimal("0")) + amount
+    return [
+        {"currency": currency, "estimated_cost": _decimal_text(amount)}
+        for currency, amount in sorted(totals.items())
+    ]
+
+
+def _group_bill_records(
+    records: Sequence[Mapping[str, Any]],
+    fields: tuple[str, ...],
+) -> list[dict[str, Any]]:
+    groups: dict[tuple[Any, ...], list[Mapping[str, Any]]] = {}
+    for record in records:
+        key = tuple(record.get(field) for field in fields)
+        groups.setdefault(key, []).append(record)
+    output: list[dict[str, Any]] = []
+    for key, items in groups.items():
+        row = {field: value for field, value in zip(fields, key)}
+        row.update(_summarize_bill_records(items))
+        output.append(row)
+    return sorted(
+        output,
+        key=lambda item: (
+            -int(item.get("operation_count") or 0),
+            *(str(item.get(field) or "") for field in fields),
+        ),
+    )
+
+
+def _group_bill_by_day(records: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    groups: dict[str, list[Mapping[str, Any]]] = {}
+    for record in records:
+        created_at = str(record.get("created_at") or "")
+        day = created_at[:10] if len(created_at) >= 10 else "unknown"
+        groups.setdefault(day, []).append(record)
+    output = []
+    for day, items in sorted(groups.items()):
+        row = {"date": day}
+        row.update(_summarize_bill_records(items))
+        output.append(row)
+    return output
+
+
 def _group_records(records: list[dict[str, Any]], fields: tuple[str, ...]) -> list[dict[str, Any]]:
     groups: dict[tuple[str, ...], list[dict[str, Any]]] = {}
     for record in records:
@@ -674,6 +904,18 @@ def _optional_positive_int(value: Any, field: str) -> int | None:
     return number
 
 
+def _bounded_integer(value: Any, field: str, *, minimum: int, maximum: int) -> int:
+    if isinstance(value, bool):
+        raise AIUsageLedgerError(f"{field} 必须是整数")
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise AIUsageLedgerError(f"{field} 必须是整数") from exc
+    if not minimum <= number <= maximum:
+        raise AIUsageLedgerError(f"{field} 必须在 {minimum} 到 {maximum} 之间")
+    return number
+
+
 def _nonnegative_decimal(value: Any) -> Decimal:
     if isinstance(value, bool):
         raise AIUsageLedgerError("价格必须是非负数字")
@@ -712,6 +954,7 @@ __all__ = [
     "AIUsageLedgerError",
     "attach_article_to_usage",
     "canonicalize_provider",
+    "get_ai_usage_bill",
     "get_ai_usage_records_by_references",
     "get_project_ai_cost_summary",
     "normalize_usage",
