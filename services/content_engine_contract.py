@@ -8,6 +8,27 @@ from typing import Any, Mapping, Sequence
 
 
 CONTENT_ENGINE_CONTRACT_VERSION = "1.0"
+MIN_ARTICLE_LENGTH = 200
+MAX_ARTICLE_LENGTH = 3000
+
+
+def parse_article_length(value: Any) -> int:
+    """Parse one exact integer article length without truncating JSON floats."""
+
+    if isinstance(value, bool):
+        raise ValueError("文章长度必须是整数")
+    try:
+        number = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("文章长度必须是整数") from exc
+    if str(value).strip() != str(number):
+        raise ValueError("文章长度必须是整数")
+    if not MIN_ARTICLE_LENGTH <= number <= MAX_ARTICLE_LENGTH:
+        raise ValueError(
+            f"文章长度必须在 {MIN_ARTICLE_LENGTH} 到 "
+            f"{MAX_ARTICLE_LENGTH} 字之间"
+        )
+    return number
 
 
 class ContentEngineError(RuntimeError):
@@ -74,8 +95,7 @@ class ContentGenerationRequest:
             raise ValueError("品牌项目缺少名称，不能生成内容")
         if not self.topic.strip():
             raise ValueError("文章主题不能为空")
-        if self.length not in {600, 1000, 1500}:
-            raise ValueError("文章长度仅支持 600、1000、1500")
+        parse_article_length(self.length)
         if not self.content_type.strip():
             raise ValueError("内容类型不能为空")
         if not self.request_id.strip():
@@ -99,7 +119,7 @@ class ContentGenerationRequest:
             project_context=dict(project_context),
             topic=str(topic or "").strip(),
             keywords=tuple(_normalize_strings(keywords)),
-            length=int(length),
+            length=parse_article_length(length),
             content_type=str(content_type or "").strip(),
             target_platform=str(target_platform or "").strip(),
             template_instruction=str(template_instruction or "").strip(),

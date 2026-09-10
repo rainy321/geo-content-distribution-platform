@@ -38,41 +38,45 @@ async def click_exact_publish_and_observe(
     try:
         button = await _require_single_exact_button(page, label)
         await button.click(timeout=5_000)
-        for _ in range(30):
-            await page.wait_for_timeout(500)
-            current_url = str(page.url or "")
-            public_url = _extract_public_note_url(current_url)
-            if public_url:
-                return {
-                    "status": "success",
-                    "success": True,
-                    "url": public_url,
-                    "message": "小红书已跳转到公开笔记页面",
-                }
-            if "/publish/success" in current_url:
-                if title.strip():
-                    try:
-                        reconciled = await _reconcile_posted_note(page, title.strip())
-                    except Exception as exc:
-                        detail = str(exc).strip() or exc.__class__.__name__
-                        reconciled = {
-                            "status": "processing",
-                            "success": False,
-                            "message": (
-                                "小红书已显示发布成功页，但已发布列表对账失败："
-                                f"{detail}"
-                            ),
-                        }
-                    if reconciled:
-                        return reconciled
-                return {
-                    "status": "processing",
-                    "success": False,
-                    "message": "小红书已显示发布成功页，等待取得可核验的公开笔记链接",
-                }
-            blocking = await _detect_manual_verification(page)
-            if blocking:
-                raise RuntimeError(blocking)
+        try:
+            for _ in range(30):
+                await page.wait_for_timeout(500)
+                current_url = _safe_page_url(page)
+                public_url = _extract_public_note_url(current_url)
+                if public_url:
+                    return {
+                        "status": "success",
+                        "success": True,
+                        "url": public_url,
+                        "message": "小红书已跳转到公开笔记页面",
+                    }
+                if "/publish/success" in current_url:
+                    if title.strip():
+                        try:
+                            reconciled = await _reconcile_posted_note(page, title.strip())
+                        except Exception as exc:
+                            detail = str(exc).strip() or exc.__class__.__name__
+                            reconciled = {
+                                "status": "processing",
+                                "success": False,
+                                "message": (
+                                    "小红书已显示发布成功页，但已发布列表对账失败："
+                                    f"{detail}"
+                                ),
+                            }
+                        if reconciled:
+                            return reconciled
+                    return {
+                        "status": "processing",
+                        "success": False,
+                        "message": "小红书已显示发布成功页，等待取得可核验的公开笔记链接",
+                    }
+                blocking = await _detect_manual_verification(page)
+                if blocking:
+                    raise RuntimeError(blocking)
+        except Exception as exc:
+            if not _is_post_submit_page_transition(exc):
+                raise
     finally:
         try:
             page.remove_listener("response", record_response)
@@ -234,3 +238,20 @@ async def _extract_public_url_from_responses(responses: list[Any]) -> str:
 def _extract_public_note_url(value: str) -> str:
     match = _PUBLIC_NOTE_URL_PATTERN.search(value)
     return match.group(0) if match else ""
+
+
+def _is_post_submit_page_transition(exc: Exception) -> bool:
+    detail = str(exc).lower()
+    return (
+        ("execution context was destroyed" in detail and "navigation" in detail)
+        or "target page, context or browser has been closed" in detail
+        or "target closed" in detail
+        or "page has been closed" in detail
+    )
+
+
+def _safe_page_url(page: Any) -> str:
+    try:
+        return str(page.url or "")
+    except Exception:
+        return ""

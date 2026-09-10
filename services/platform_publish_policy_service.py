@@ -10,7 +10,7 @@ from services.platform_capability_service import (
 )
 
 
-PLATFORM_PUBLISH_POLICY_VERSION = "2026-09-10.2"
+PLATFORM_PUBLISH_POLICY_VERSION = "2026-09-10.4"
 
 
 # This matrix intentionally distinguishes a verified field constraint from a
@@ -70,9 +70,9 @@ _PLATFORM_PUBLISH_POLICIES: dict[str, dict[str, Any]] = {
             "basis": "not_verified",
         },
         "tags": {
-            "submission_mode": "topic_picker",
-            "max_count": 5,
-            "basis": "repository_adapter_behavior",
+            "submission_mode": "not_submitted_by_article_adapter",
+            "max_count": 0,
+            "basis": "product_operational_guardrail",
         },
     },
     "sohu": {
@@ -104,7 +104,7 @@ _PLATFORM_PUBLISH_POLICIES: dict[str, dict[str, Any]] = {
         },
         "content": {
             "hard_limit": 1000,
-            "safe_limit": 900,
+            "safe_limit": 800,
             "fixed_reserve": 30,
             "tags_share_content_limit": True,
             "basis": "user_editor_screenshot_2026_09_10",
@@ -112,8 +112,8 @@ _PLATFORM_PUBLISH_POLICIES: dict[str, dict[str, Any]] = {
         },
         "tags": {
             "submission_mode": "topic_picker",
-            "max_count": None,
-            "basis": "not_verified",
+            "max_count": 5,
+            "basis": "product_operational_guardrail",
         },
     },
     "douyin": {
@@ -127,15 +127,15 @@ _PLATFORM_PUBLISH_POLICIES: dict[str, dict[str, Any]] = {
         },
         "content": {
             "hard_limit": 1000,
-            "safe_limit": 920,
+            "safe_limit": 800,
             "fixed_reserve": 24,
             "tags_share_content_limit": True,
             "basis": "existing_repository_policy",
         },
         "tags": {
             "submission_mode": "literal_hashtags",
-            "max_count": None,
-            "basis": "not_verified",
+            "max_count": 5,
+            "basis": "product_operational_guardrail",
         },
     },
     "kuaishou": {
@@ -148,7 +148,7 @@ _PLATFORM_PUBLISH_POLICIES: dict[str, dict[str, Any]] = {
         },
         "content": {
             "hard_limit": 500,
-            "safe_limit": 450,
+            "safe_limit": 380,
             "fixed_reserve": 18,
             "tags_share_content_limit": True,
             "basis": "existing_repository_policy",
@@ -169,7 +169,7 @@ _PLATFORM_PUBLISH_POLICIES: dict[str, dict[str, Any]] = {
         },
         "content": {
             "hard_limit": 2000,
-            "safe_limit": 2000,
+            "safe_limit": 1800,
             "fixed_reserve": 0,
             "tags_share_content_limit": False,
             "basis": "existing_repository_policy",
@@ -214,8 +214,11 @@ _PLATFORM_PUBLISH_POLICIES: dict[str, dict[str, Any]] = {
         },
         "tags": {
             "submission_mode": "literal_hashtags",
-            "max_count": None,
-            "basis": "not_verified",
+            # This is a product-side operational guardrail, not a claim about
+            # TikTok's current platform quota. Keeping the browser interaction
+            # bounded prevents long tag lists from exhausting the job timeout.
+            "max_count": 5,
+            "basis": "product_operational_guardrail",
         },
     },
 }

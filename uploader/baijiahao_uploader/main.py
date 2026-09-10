@@ -605,6 +605,15 @@ BAIJIAHAO_ARTICLE_URLS = [
     "https://baijiahao.baidu.com/builder/rc/edit?type=news",
 ]
 
+# Topic selection is optional metadata, never a reason to hold the whole
+# publication pipeline open.  Repeatedly deleting and retyping several brand
+# phrases looks like automation to the platform and was observed to consume
+# roughly ninety seconds before a risk-control challenge. Do not interact with
+# the topic picker by default. An explicitly opted-in advanced flow may attempt
+# the first cleaned topic once and then continue without a topic.
+BAIJIAHAO_TOPIC_TOTAL_TIMEOUT_SECONDS = 8.0
+BAIJIAHAO_TOPIC_CLEANUP_TIMEOUT_SECONDS = 1.0
+
 
 class BaiJiaHaoArticle(object):
     """百家号图文文章发布（type=news，非视频、非动态）。"""
@@ -619,6 +628,7 @@ class BaiJiaHaoArticle(object):
         dry_run=False,
         cover_path=None,
         ai_generated=False,
+        enable_topic_picker=False,
     ):
         self.title = str(title or "").strip()
         if len(self.title) < 2:
@@ -633,6 +643,7 @@ class BaiJiaHaoArticle(object):
         self.dry_run = bool(dry_run)
         self.cover_path = cover_path
         self.ai_generated = bool(ai_generated)
+        self.enable_topic_picker = bool(enable_topic_picker)
 
     def _normalize_tags(self) -> list[str]:
         tags = [str(t).strip().lstrip("#") for t in (self.tags or []) if str(t).strip()]
@@ -643,7 +654,7 @@ class BaiJiaHaoArticle(object):
                 continue
             seen.add(tag)
             normalized.append(tag)
-        return normalized[:5]
+        return normalized[:1]
 
     def _compose_body(self) -> str:
         return (self.body or "").strip()
@@ -1401,24 +1412,13 @@ class BaiJiaHaoArticle(object):
         except Exception:
             pass
 
-    async def insert_topics_in_body(self, page: Page, editor) -> None:
-        """在正文末尾逐个键入 #话题 并鼠标点选下拉（参考头条实现）。"""
-        tags = self._normalize_tags()
-        if not tags:
-            return
-
+    async def _attempt_single_topic(self, page: Page, editor, tag: str) -> str:
         editor = await self._get_body_editable(page, editor)
+        if await self._editor_contains_confirmed_topic(editor, tag):
+            baijiahao_logger.info("正文中已含目标话题，跳过插入")
+            return "topic_already_present"
 
-        existing = set()
-        for node_tag in tags:
-            if await self._editor_contains_confirmed_topic(editor, node_tag):
-                existing.add(node_tag)
-        tags = [t for t in tags if t not in existing]
-        if not tags:
-            baijiahao_logger.info("正文中已含全部话题，跳过插入")
-            return
-
-        baijiahao_logger.info(f"准备在正文内键入并点选话题（同行空格分隔）: {tags}")
+        baijiahao_logger.info(f"准备在正文内键入并点选一个话题: #{tag}")
         await self._move_caret_to_editor_end(page, editor)
         if not await self._ensure_editor_focused(page, editor):
             baijiahao_logger.warning("插入话题前未能聚焦正文，继续尝试键盘输入")
@@ -1444,72 +1444,72 @@ class BaiJiaHaoArticle(object):
             await page.keyboard.type(" ", delay=40)
         await page.wait_for_timeout(200)
 
-        added = []
-        failed = []
-        for idx, tag in enumerate(tags):
-            try:
-                if idx > 0:
-                    try:
-                        need_space = await editor.evaluate(
-                            """(el) => {
-                                const sel = window.getSelection();
-                                if (!sel || !sel.rangeCount) return true;
-                                const range = sel.getRangeAt(0);
-                                const pre = range.cloneRange();
-                                pre.selectNodeContents(el);
-                                pre.setEnd(range.startContainer, range.startOffset);
-                                const text = pre.toString();
-                                if (!text) return true;
-                                const ch = text.slice(-1);
-                                return !(ch === ' ' || ch === '\\u00a0');
-                            }"""
-                        )
-                    except Exception:
-                        need_space = False
-                    if need_space:
-                        await page.keyboard.type(" ", delay=40)
-                        await page.wait_for_timeout(120)
+        before_nodes = await self._count_confirmed_topics(editor)
+        await self._type_topic_query(page, editor, tag)
+        clicked, picked_name = await self._click_topic_suggestion(
+            page, tag, editor=editor, before_nodes=before_nodes
+        )
 
-                before_nodes = await self._count_confirmed_topics(editor)
-                await self._type_topic_query(page, editor, tag)
-                clicked, picked_name = await self._click_topic_suggestion(
-                    page, tag, editor=editor, before_nodes=before_nodes
-                )
+        if clicked and await self._topic_click_succeeded(
+            editor, picked_name or tag, before_nodes
+        ):
+            await self._cleanup_leftover_topic_typing(
+                editor, tag, picked_name or tag
+            )
+            await page.wait_for_timeout(250)
+            await self._ensure_inline_after_topic(page, editor)
+            baijiahao_logger.success(f"已点选话题: #{picked_name or tag}")
+            return "topic_selected"
 
-                if not clicked:
-                    baijiahao_logger.warning(f"首次未点到，快速重试一次: #{tag}")
-                    await self._clear_partial_topic_input(page, editor, tag)
-                    await page.wait_for_timeout(400)
-                    await self._type_topic_query(page, editor, tag)
-                    clicked, picked_name = await self._click_topic_suggestion(
-                        page, tag, editor=editor, before_nodes=before_nodes
-                    )
+        baijiahao_logger.warning(
+            f"话题 #{tag} 无可用精确匹配，已跳过话题并继续发布"
+        )
+        await self._clear_partial_topic_input(page, editor, tag)
+        return "topic_skipped_no_match"
 
-                if clicked and await self._topic_click_succeeded(editor, picked_name or tag, before_nodes):
-                    await self._cleanup_leftover_topic_typing(editor, tag, picked_name or tag)
-                    added.append(picked_name or tag)
-                    await page.wait_for_timeout(250)
-                    await self._ensure_inline_after_topic(page, editor)
-                else:
-                    failed.append(tag)
-                    raw = await self._find_topic_dropdown_candidates(page, tag)
-                    visible = [str(c.get("text") or "")[:30] for c in raw[:5]]
-                    if visible:
-                        baijiahao_logger.warning(f"未点选到话题: #{tag}，平台下拉: {visible}")
-                    else:
-                        baijiahao_logger.warning(f"未点选到话题: #{tag}（未出现话题下拉）")
-                    await self._clear_partial_topic_input(page, editor, tag)
-            except Exception as exc:
-                failed.append(tag)
-                baijiahao_logger.warning(f"插入话题 #{tag} 失败: {exc}")
-                await self._clear_partial_topic_input(page, editor, tag)
+    async def _clear_partial_topic_input_bounded(
+        self, page: Page, editor, tag: str
+    ) -> None:
+        try:
+            await asyncio.wait_for(
+                self._clear_partial_topic_input(page, editor, tag),
+                timeout=BAIJIAHAO_TOPIC_CLEANUP_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            baijiahao_logger.warning("话题残留清理超时，已放弃清理并继续发布")
+        except Exception as exc:
+            baijiahao_logger.warning(f"话题残留清理失败，已继续发布: {exc}")
 
-        if added:
-            baijiahao_logger.success(f"已点选话题（同行空格分隔）: {added}")
-        if failed:
-            baijiahao_logger.warning(f"未能点选的话题: {failed}")
-        if not added and failed:
-            baijiahao_logger.warning("未能插入任何话题")
+    async def insert_topics_in_body(self, page: Page, editor) -> str:
+        """默认跳过话题；显式启用时在总时间预算内只尝试一个。"""
+        if not self.enable_topic_picker:
+            baijiahao_logger.info("百家号话题为可选字段，默认不操作话题输入控件")
+            return "topic_skipped_disabled"
+
+        tags = self._normalize_tags()
+        if not tags:
+            return "topic_skipped_empty"
+
+        tag = tags[0]
+
+        try:
+            return await asyncio.wait_for(
+                self._attempt_single_topic(page, editor, tag),
+                timeout=BAIJIAHAO_TOPIC_TOTAL_TIMEOUT_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            baijiahao_logger.warning(
+                f"话题 #{tag} 整体流程超过 "
+                f"{BAIJIAHAO_TOPIC_TOTAL_TIMEOUT_SECONDS:g} 秒，已跳过"
+            )
+            await self._clear_partial_topic_input_bounded(page, editor, tag)
+            return "topic_skipped_timeout"
+        except Exception as exc:
+            baijiahao_logger.warning(
+                f"话题 #{tag} 尝试异常，已跳过并继续发布: {exc}"
+            )
+            await self._clear_partial_topic_input_bounded(page, editor, tag)
+            return "topic_skipped_error"
 
     async def _confirm_cover_dialog(self, page: Page) -> bool:
         confirm_candidates = [

@@ -80,6 +80,29 @@ class ZhihuPublishFlowTests(unittest.IsolatedAsyncioTestCase):
             "https://zhuanlan.zhihu.com/p/2078070222595035345",
         )
 
+    async def test_target_close_after_click_can_still_use_destination_url(self):
+        button = Mock()
+        button.is_visible = AsyncMock(return_value=True)
+        button.is_enabled = AsyncMock(return_value=True)
+        button.click = AsyncMock()
+
+        page = Mock()
+        page.url = "https://zhuanlan.zhihu.com/p/2078070222595035345"
+        page.get_by_role.return_value = _CandidateList([button])
+        page.wait_for_timeout = AsyncMock(
+            side_effect=RuntimeError(
+                "Target page, context or browser has been closed"
+            )
+        )
+        page.wait_for_load_state = AsyncMock(side_effect=RuntimeError("Target closed"))
+        page.on = Mock()
+        page.remove_listener = Mock()
+
+        result = await click_exact_publish_and_observe(page)
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["url"], page.url)
+
 
 if __name__ == "__main__":
     unittest.main()

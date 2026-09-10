@@ -15,20 +15,57 @@ from utils.base_social_media import set_init_script
 TIKTOK_UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload?lang=en"
 TIKTOK_UPLOAD_URL_PATTERN = "**/tiktokstudio/upload**"
 TIKTOK_CONTENT_URL_PATTERN = "**/tiktokstudio/content**"
+TIKTOK_OPTIONAL_COVER_TIMEOUT_MS = 3_000
+TIKTOK_COVER_CONTROL_PATTERN = re.compile(
+    r"^(?:Upload|Edit|Change|Select) cover$|^(?:上传|编辑|更换|选择)封面$",
+    re.IGNORECASE,
+)
+TIKTOK_COVER_CONFIRM_PATTERN = re.compile(
+    r"^(?:Confirm|Save|Done|Apply|确认|确定|保存|完成|应用)$",
+    re.IGNORECASE,
+)
 from utils.files_times import get_absolute_path
 from utils.log import tiktok_logger
 
 
-def _browser_launch_options(*, headless: bool, args=None):
+def _browser_launch_options(*, headless: bool, args=None, executable_path=None):
     options = {"headless": headless}
     if args:
         options["args"] = list(args)
-    executable_value = str(LOCAL_CHROME_PATH or "").strip()
+    configured_path = LOCAL_CHROME_PATH if executable_path is None else executable_path
+    executable_value = str(configured_path or "").strip()
     if executable_value not in {"", "."}:
         options["executable_path"] = executable_value
     else:
         options["channel"] = "chrome"
     return options
+
+
+async def _best_effort_close(target, *, label: str, timeout_seconds: float = 5) -> None:
+    """Close Playwright resources without hiding the publish outcome."""
+
+    if target is None:
+        return
+    try:
+        await asyncio.wait_for(target.close(), timeout=timeout_seconds)
+    except Exception as exc:
+        tiktok_logger.warning(
+            f"TikTok {label} cleanup was skipped ({exc.__class__.__name__})"
+        )
+
+
+async def _best_effort_storage_state(context, account_file, *, timeout_seconds: float = 5):
+    if context is None:
+        return
+    try:
+        await asyncio.wait_for(
+            context.storage_state(path=f"{account_file}"),
+            timeout=timeout_seconds,
+        )
+    except Exception as exc:
+        tiktok_logger.warning(
+            f"TikTok cookie refresh was skipped ({exc.__class__.__name__})"
+        )
 
 
 async def cookie_auth(account_file):
@@ -88,8 +125,8 @@ async def cookie_auth(account_file):
             tiktok_logger.error("[+] cookie expired")
             return False
         finally:
-            await context.close()
-            await browser.close()
+            await _best_effort_close(context, label="context")
+            await _best_effort_close(browser, label="browser")
 
 
 async def tiktok_setup(account_file, handle=False):
@@ -145,6 +182,9 @@ class TiktokVideo(object):
         self.headless = LOCAL_CHROME_HEADLESS if headless is None else bool(headless)
         self.preview_seconds = max(0, int(preview_seconds))
         self.locator_base = None
+        # The adapter uses this boundary to distinguish a safe pre-submit
+        # failure from a state that must be reconciled on TikTok first.
+        self.post_click_attempted = False
 
     async def set_schedule_time(self, page, publish_date):
         schedule_input_element = self.locator_base.get_by_label('Schedule')
@@ -211,10 +251,10 @@ class TiktokVideo(object):
         await file_chooser.set_files(self.file_path)
 
     async def upload(self, playwright: Playwright) -> None:
-        launch_kwargs = {"headless": self.headless}
-        executable_value = str(self.local_executable_path or "").strip()
-        if executable_value not in {"", "."}:
-            launch_kwargs["executable_path"] = executable_value
+        launch_kwargs = _browser_launch_options(
+            headless=self.headless,
+            executable_path=self.local_executable_path,
+        )
         browser = await playwright.chromium.launch(**launch_kwargs)
         context = await browser.new_context(storage_state=f"{self.account_file}")
         # context = await set_init_script(context)
@@ -278,7 +318,11 @@ class TiktokVideo(object):
         await self.dismiss_upload_interstitials(page)
         if self.thumbnail_path:
             tiktok_logger.info(f'[+] Uploading thumbnail file {self.title}.png')
-            await self.upload_thumbnails(page)
+            if not await self.upload_thumbnails(page):
+                tiktok_logger.warning(
+                    "TikTok custom cover was unavailable; continuing with the "
+                    "platform-generated cover"
+                )
 
         if self.publish_date != 0:
             await self.set_schedule_time(page, self.publish_date)
@@ -293,9 +337,9 @@ class TiktokVideo(object):
                 tiktok_logger.warning(f"[dry-run] Preview capture failed: {exc}")
             if self.preview_seconds:
                 await page.wait_for_timeout(self.preview_seconds * 1000)
-            await context.storage_state(path=f"{self.account_file}")
-            await context.close()
-            await browser.close()
+            await _best_effort_storage_state(context, self.account_file)
+            await _best_effort_close(context, label="context")
+            await _best_effort_close(browser, label="browser")
             return
 
         await self.click_publish(page)
@@ -307,12 +351,12 @@ class TiktokVideo(object):
                 "TikTok accepted the submission but its public URL is not visible yet"
             )
 
-        await context.storage_state(path=f"{self.account_file}")  # save cookie
+        await _best_effort_storage_state(context, self.account_file)
         tiktok_logger.info('  [-] update cookie！')
         await asyncio.sleep(2)  # close delay for look the video status
         # close all
-        await context.close()
-        await browser.close()
+        await _best_effort_close(context, label="context")
+        await _best_effort_close(browser, label="browser")
         if public_url:
             return {
                 "status": "success",
@@ -433,16 +477,142 @@ class TiktokVideo(object):
             )
         return True
 
+    @staticmethod
+    async def _first_present(locator):
+        """Return a locator immediately when it exists; never wait on stale UI."""
+
+        candidate = locator.first
+        try:
+            return candidate if await candidate.count() else None
+        except Exception:
+            return None
+
+    @classmethod
+    async def _first_visible(cls, locator):
+        candidate = await cls._first_present(locator)
+        if candidate is None:
+            return None
+        try:
+            return candidate if await candidate.is_visible() else None
+        except Exception:
+            return None
+
+    async def _cover_file_input(self):
+        return await self._first_present(
+            self.locator_base.locator(
+                'div.cover-edit-panel:not(.hide-panel) '
+                'input[type="file"][accept*="image"], '
+                '.cover-edit-container input[type="file"][accept*="image"], '
+                'input[type="file"][data-e2e*="cover"]'
+            )
+        )
+
+    async def _dismiss_optional_cover_editor(self, page):
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+
     async def upload_thumbnails(self, page):
-        await self.locator_base.locator(".cover-container").click()
-        await self.locator_base.locator(".cover-edit-container >> text=Upload cover").click()
-        async with page.expect_file_chooser() as fc_info:
-            await self.locator_base.locator(".upload-image-upload-area").click()
-            file_chooser = await fc_info.value
-            await file_chooser.set_files(self.thumbnail_path)
-        await self.locator_base.locator('div.cover-edit-panel:not(.hide-panel)').get_by_role(
-            "button", name="Confirm").click()
-        await page.wait_for_timeout(3000)  # wait 3s, fix it later
+        """Best-effort custom cover upload across old and localized Studio UIs.
+
+        A custom thumbnail is optional. TikTok changes this editor independently
+        of the main upload form, so missing controls must not prevent Post.
+        """
+
+        if not self.thumbnail_path:
+            return False
+
+        try:
+            image_input = await self._cover_file_input()
+            if image_input is None:
+                cover_entry = await self._first_visible(
+                    self.locator_base.locator(
+                        '.cover-container, button[data-e2e*="cover"], '
+                        '[role="button"][data-e2e*="cover"]'
+                    )
+                )
+                if cover_entry is not None:
+                    await cover_entry.click(timeout=TIKTOK_OPTIONAL_COVER_TIMEOUT_MS)
+                    image_input = await self._cover_file_input()
+
+            if image_input is None:
+                named_control = await self._first_visible(
+                    self.locator_base.get_by_role(
+                        "button",
+                        name=TIKTOK_COVER_CONTROL_PATTERN,
+                    )
+                )
+                if named_control is None:
+                    named_control = await self._first_visible(
+                        self.locator_base.get_by_text(
+                            TIKTOK_COVER_CONTROL_PATTERN,
+                            exact=True,
+                        )
+                    )
+                if named_control is not None:
+                    await named_control.click(
+                        timeout=TIKTOK_OPTIONAL_COVER_TIMEOUT_MS
+                    )
+                    image_input = await self._cover_file_input()
+
+            uploaded = False
+            if image_input is not None:
+                await image_input.set_input_files(
+                    self.thumbnail_path,
+                    timeout=TIKTOK_OPTIONAL_COVER_TIMEOUT_MS,
+                )
+                uploaded = True
+            else:
+                upload_area = await self._first_visible(
+                    self.locator_base.locator(
+                        '.upload-image-upload-area, '
+                        '[data-e2e="cover-upload"], '
+                        '[data-e2e="upload-cover"]'
+                    )
+                )
+                if upload_area is None:
+                    await self._dismiss_optional_cover_editor(page)
+                    return False
+                async with page.expect_file_chooser(
+                    timeout=TIKTOK_OPTIONAL_COVER_TIMEOUT_MS
+                ) as fc_info:
+                    await upload_area.click(
+                        timeout=TIKTOK_OPTIONAL_COVER_TIMEOUT_MS
+                    )
+                file_chooser = await fc_info.value
+                await file_chooser.set_files(self.thumbnail_path)
+                uploaded = True
+
+            confirm_button = await self._first_visible(
+                self.locator_base.get_by_role(
+                    "button",
+                    name=TIKTOK_COVER_CONFIRM_PATTERN,
+                )
+            )
+            if confirm_button is not None:
+                await confirm_button.click(
+                    timeout=TIKTOK_OPTIONAL_COVER_TIMEOUT_MS
+                )
+            else:
+                unfinished_editor = await self._first_visible(
+                    self.locator_base.locator(
+                        'div.cover-edit-panel:not(.hide-panel), '
+                        '[role="dialog"][data-e2e*="cover"]:visible'
+                    )
+                )
+                if unfinished_editor is not None:
+                    await self._dismiss_optional_cover_editor(page)
+                    return False
+            await page.wait_for_timeout(500)
+            return uploaded
+        except Exception as exc:
+            tiktok_logger.warning(
+                "TikTok optional cover was skipped after a Studio UI change "
+                f"({exc.__class__.__name__})"
+            )
+            await self._dismiss_optional_cover_editor(page)
+            return False
 
     async def change_language(self, page):
         # set the language to english
@@ -489,6 +659,12 @@ class TiktokVideo(object):
             await page.screenshot(full_page=True, path=before_path)
         except Exception as exc:
             tiktok_logger.warning(f"TikTok pre-submit screenshot failed: {exc}")
+        # Arm the reconciliation boundary before dispatch. Playwright may send
+        # the click successfully and then raise while the page navigates or
+        # closes, so treating a click exception as definitely pre-submit can
+        # cause a duplicate post on retry. Disabled/missing controls still fail
+        # above this boundary without changing the flag.
+        self.post_click_attempted = True
         await publish_button.click()
         tiktok_logger.info("  [-] Post clicked once; waiting for a definitive result")
         await self.confirm_incomplete_copyright_check(page)
@@ -507,10 +683,16 @@ class TiktokVideo(object):
                 tiktok_logger.warning(
                     f"TikTok post-submit screenshot failed: {screenshot_exc}"
                 )
-            diagnostic_texts = await page.locator(
-                '[role="alert"]:visible, [role="dialog"]:visible, '
-                '[class*="toast"]:visible, [class*="error"]:visible'
-            ).all_inner_texts()
+            try:
+                diagnostic_texts = await page.locator(
+                    '[role="alert"]:visible, [role="dialog"]:visible, '
+                    '[class*="toast"]:visible, [class*="error"]:visible'
+                ).all_inner_texts()
+            except Exception:
+                # A successful navigation can close the old execution context.
+                # Keep the stable post-submit outcome instead of replacing it
+                # with an incidental TargetClosed/ExecutionContext exception.
+                diagnostic_texts = []
             diagnostic = " | ".join(
                 dict.fromkeys(
                     text.strip().replace("\n", " ")[:240]

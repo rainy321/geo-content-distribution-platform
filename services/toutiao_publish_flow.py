@@ -74,7 +74,7 @@ async def click_exact_publish_and_observe(page: Any) -> dict[str, Any]:
         except Exception:
             pass
 
-    current_url = str(page.url or "")
+    current_url = _safe_page_url(page)
     direct_url = _extract_public_article_url(current_url)
     if direct_url:
         return {
@@ -257,4 +257,18 @@ def _extract_public_article_url(value: str) -> str:
 
 def _is_navigation_context_error(exc: Exception) -> bool:
     detail = str(exc).lower()
-    return "execution context was destroyed" in detail and "navigation" in detail
+    return (
+        ("execution context was destroyed" in detail and "navigation" in detail)
+        or "target page, context or browser has been closed" in detail
+        or "target closed" in detail
+        or "page has been closed" in detail
+    )
+
+
+def _safe_page_url(page: Any) -> str:
+    try:
+        return str(page.url or "")
+    except Exception:
+        # The response listener is stronger evidence than reading a URL from a
+        # page object that was replaced or closed during post-submit navigation.
+        return ""

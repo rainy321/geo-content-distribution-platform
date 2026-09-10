@@ -4,12 +4,14 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from services.media_publisher_adapters import (
     BilibiliPublisherAdapter,
     DouyinPublisherAdapter,
+    TiktokPublisherAdapter,
     _bilibili_publish_runner,
+    _tiktok_publish_runner,
 )
 from services.publisher_adapter import PublishContent
 
@@ -240,6 +242,103 @@ class MediaPublisherAdapterTests(unittest.TestCase):
         )
         self.assertEqual(result.status, "scheduled")
         self.assertEqual(called, [])
+
+    @patch("uploader.tk_uploader.main_chrome.TiktokVideo")
+    def test_tiktok_adapter_timeout_before_post_is_failed(self, publisher_class):
+        publisher = publisher_class.return_value
+        publisher.post_click_attempted = False
+
+        async def wait_until_cancelled():
+            await asyncio.sleep(60)
+
+        async def logged_in(_account):
+            return True
+
+        publisher.main = AsyncMock(side_effect=wait_until_cancelled)
+        adapter = TiktokPublisherAdapter(
+            "account.json",
+            login_checker=logged_in,
+            timeout_seconds=0.02,
+        )
+
+        result = adapter.publish(
+            PublishContent(
+                "tiktok",
+                "标题",
+                "正文",
+                video="demo.mp4",
+            )
+        )
+
+        self.assertEqual(result.status, "failed")
+        self.assertIn("尚未提交", result.message)
+
+
+class TiktokPublishRunnerTests(unittest.IsolatedAsyncioTestCase):
+    @patch("uploader.tk_uploader.main_chrome.TiktokVideo")
+    async def test_runner_caps_tags_with_product_policy(self, publisher_class):
+        publisher = publisher_class.return_value
+        publisher.post_click_attempted = False
+        publisher.main = AsyncMock(
+            return_value={"status": "processing", "message": "accepted"}
+        )
+        content = PublishContent(
+            "tiktok",
+            "标题",
+            "正文",
+            video="demo.mp4",
+            tags=tuple(f"标签{index}" for index in range(8)),
+        )
+
+        result = await _tiktok_publish_runner(content, "account.json")
+
+        self.assertEqual(result["status"], "processing")
+        self.assertEqual(
+            publisher_class.call_args.kwargs["tags"],
+            [f"标签{index}" for index in range(5)],
+        )
+
+    @patch("uploader.tk_uploader.main_chrome.TiktokVideo")
+    async def test_pre_post_failure_is_failed_not_unknown_processing(
+        self,
+        publisher_class,
+    ):
+        publisher = publisher_class.return_value
+        publisher.post_click_attempted = False
+        publisher.main = AsyncMock(
+            side_effect=RuntimeError("cover control locator timed out")
+        )
+        content = PublishContent(
+            "tiktok",
+            "标题",
+            "正文",
+            video="demo.mp4",
+        )
+
+        result = await _tiktok_publish_runner(content, "account.json")
+
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("点击 Post 前", result["message"])
+        self.assertIn("尚未提交", result["message"])
+        self.assertNotIn("最终状态未知", result["message"])
+
+    @patch("uploader.tk_uploader.main_chrome.TiktokVideo")
+    async def test_post_click_failure_requires_reconciliation(self, publisher_class):
+        publisher = publisher_class.return_value
+        publisher.post_click_attempted = True
+        publisher.main = AsyncMock(side_effect=RuntimeError("target closed"))
+        content = PublishContent(
+            "tiktok",
+            "标题",
+            "正文",
+            video="demo.mp4",
+        )
+
+        result = await _tiktok_publish_runner(content, "account.json")
+
+        self.assertEqual(result["status"], "processing")
+        self.assertIn("Post", result["message"])
+        self.assertIn("不会自动重试", result["message"])
 
 
 if __name__ == "__main__":

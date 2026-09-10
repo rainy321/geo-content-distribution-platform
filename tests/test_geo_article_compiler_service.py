@@ -114,7 +114,7 @@ class GEOArticleCompilerServiceTests(unittest.TestCase):
         )
         self.assertEqual(first["platform_profile"]["key"], "douyin")
         self.assertEqual(first["platform_profile"]["title_safe_limit"], 18)
-        self.assertEqual(first["platform_profile"]["content_safe_limit"], 920)
+        self.assertEqual(first["platform_profile"]["content_safe_limit"], 800)
         self.assertEqual(
             first["evidence"][0]["canonical_url"],
             "https://geo.example.com/products/dongclaw",
@@ -170,6 +170,50 @@ class GEOArticleCompilerServiceTests(unittest.TestCase):
             len(long_form["query_matrix"]["generation_targets"]),
             5,
         )
+
+    def test_200_character_blueprint_prioritizes_one_complete_answer(self):
+        blueprint = build_geo_article_blueprint(
+            self.project(),
+            "DongClaw 是什么？",
+            self.project()["keywords"],
+            "问答",
+            "xiaohongshu",
+            200,
+            12,
+        )
+
+        self.assertEqual(blueprint["length"], 200)
+        self.assertIn("只完整回答主查询和优先问题列表第一项", blueprint["instruction"])
+        self.assertIn("2–4 个短段落", blueprint["instruction"])
+        self.assertIn("不强制 H2/H3、FAQ", blueprint["instruction"])
+        self.assertNotIn("至少覆盖列表前三项", blueprint["instruction"])
+
+    def test_blueprint_accepts_arbitrary_length_inside_range(self):
+        blueprint = build_geo_article_blueprint(
+            self.project(),
+            "DongClaw 如何部署？",
+            self.project()["keywords"],
+            "行业科普",
+            "zhihu",
+            735,
+            12,
+        )
+        self.assertEqual(blueprint["length"], 735)
+
+        for length in (199, 3001):
+            with self.subTest(length=length), self.assertRaisesRegex(
+                GEOArticleCompilerError,
+                "length",
+            ):
+                build_geo_article_blueprint(
+                    self.project(),
+                    "DongClaw 如何部署？",
+                    self.project()["keywords"],
+                    "行业科普",
+                    "zhihu",
+                    length,
+                    12,
+                )
 
     def test_consumes_only_known_visibility_rules_and_never_raw_answers(self):
         project = self.project(

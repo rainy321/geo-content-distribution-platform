@@ -686,6 +686,16 @@ def _build_prompt(
             f" 原始目标为 {length} 字，已按目标平台 {platform_safe_limit} 字安全线压缩，"
             "不得用截断的半句话凑长度。"
         )
+    if effective_length <= 400:
+        structure_requirement = (
+            "使用 2–4 个紧凑短段落，优先完整回答一个问题；不强制 H2/H3。"
+        )
+        faq_requirement = (
+            "短稿不强制 FAQ 和重复总结；有可核验证据时保留来源及适用边界。"
+        )
+    else:
+        structure_requirement = "使用清晰的 H2/H3 内容结构。"
+        faq_requirement = "包含 FAQ 和总结。"
     return f"""
 请根据以下资料生成一篇适合搜索引擎、生成式 AI 以及内容媒体平台收录的中文文章。
 
@@ -704,9 +714,9 @@ GEO 文章编译约束：
 1. 生成一个自然、可读的标题。
 2. {length_requirement}
 3. 自然出现品牌实体并覆盖目标关键词，不允许关键词堆砌。
-4. 使用清晰的 H2/H3 内容结构。
+4. {structure_requirement}
 5. 只使用输入中能够确认的品牌或产品事实，不编造数据。
-6. 包含 FAQ 和总结。
+6. {faq_requirement}
 7. 内容应适合媒体平台直接发布。
 8. 开头先直接回答主题问题，再给背景；关键事实需写明条件、时间或来源边界。
 9. 不得把官网地址本身当作第三方证明，不得生成输入中不存在的链接、数字、客户案例、认证或引用。

@@ -19,6 +19,19 @@ class _Candidates:
         return self.items[index]
 
 
+class _Request:
+    method = "POST"
+
+
+class _Response:
+    request = _Request()
+    url = "https://creator.xiaohongshu.com/api/note/publish"
+    status = 200
+
+    async def json(self):
+        return {"url": "https://www.xiaohongshu.com/explore/66d123abc456def789012345"}
+
+
 class XiaohongshuPublishFlowTests(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def _button():
@@ -65,6 +78,27 @@ class XiaohongshuPublishFlowTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result["status"], "success")
         self.assertEqual(result["url"], page.url)
+
+    async def test_target_close_after_click_keeps_public_response(self):
+        button = self._button()
+        page = Mock()
+        page.url = "https://creator.xiaohongshu.com/publish"
+        page.get_by_role.return_value = _Candidates([button])
+        page.wait_for_timeout = AsyncMock(
+            side_effect=RuntimeError(
+                "Target page, context or browser has been closed"
+            )
+        )
+        page.remove_listener = Mock()
+        page.on = Mock(side_effect=lambda _event, callback: callback(_Response()))
+
+        result = await click_exact_publish_and_observe(page)
+
+        self.assertEqual(result["status"], "success")
+        self.assertEqual(
+            result["url"],
+            "https://www.xiaohongshu.com/explore/66d123abc456def789012345",
+        )
 
     async def test_internal_success_page_reconciles_exact_published_note(self):
         button = self._button()

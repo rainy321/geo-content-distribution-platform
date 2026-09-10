@@ -1019,6 +1019,35 @@ async def _default_zhihu_publication_checker(
     )
 
 
+async def _finish_observed_publish(
+    publisher: Any,
+    observed_result: dict[str, Any],
+    *,
+    missing_result_message: str,
+) -> dict[str, Any]:
+    """Keep submit evidence when legacy cleanup fails after the click callback.
+
+    Several legacy uploaders save cookies and close their browser after the
+    service callback has already classified the platform response. A stale or
+    externally closed page/context must not replace that stronger evidence or
+    invite an unsafe duplicate retry.
+    """
+
+    try:
+        await publisher.main()
+    except asyncio.CancelledError:
+        if observed_result:
+            return observed_result
+        raise
+    except Exception:
+        if observed_result:
+            return observed_result
+        raise
+    if not observed_result:
+        raise RuntimeError(missing_result_message)
+    return observed_result
+
+
 async def _default_zhihu_publish_runner(
     content: PublishContent,
     account_file: str,
@@ -1044,10 +1073,11 @@ async def _default_zhihu_publish_runner(
     # Keep the legacy uploader untouched while correcting its fuzzy publish
     # selector at the service-adapter boundary.
     publisher.click_publish = click_publish
-    await publisher.main()
-    if not observed_result:
-        raise RuntimeError("知乎发布流程结束，但未产生可核验的提交结果")
-    return observed_result
+    return await _finish_observed_publish(
+        publisher,
+        observed_result,
+        missing_result_message="知乎发布流程结束，但未产生可核验的提交结果",
+    )
 
 
 async def _default_toutiao_login_checker(account_file: str) -> bool:
@@ -1085,10 +1115,11 @@ async def _default_toutiao_publish_runner(
         observed_result.update(await click_exact_publish_and_observe(page))
 
     publisher.publish = click_publish
-    await publisher.main()
-    if not observed_result:
-        raise RuntimeError("今日头条发布流程结束，但未产生可核验的提交结果")
-    return observed_result
+    return await _finish_observed_publish(
+        publisher,
+        observed_result,
+        missing_result_message="今日头条发布流程结束，但未产生可核验的提交结果",
+    )
 
 
 async def _default_sohu_login_checker(account_file: str) -> bool:
@@ -1126,10 +1157,11 @@ async def _default_sohu_publish_runner(
         observed_result.update(await click_exact_publish_and_observe(page))
 
     publisher.publish = click_publish
-    await publisher.main()
-    if not observed_result:
-        raise RuntimeError("搜狐号发布流程结束，但未产生可核验的提交结果")
-    return observed_result
+    return await _finish_observed_publish(
+        publisher,
+        observed_result,
+        missing_result_message="搜狐号发布流程结束，但未产生可核验的提交结果",
+    )
 
 
 async def _default_baijiahao_login_checker(account_file: str) -> bool:
@@ -1167,10 +1199,11 @@ async def _default_baijiahao_publish_runner(
         observed_result.update(await click_exact_publish_and_observe(page))
 
     publisher.publish = click_publish
-    await publisher.main()
-    if not observed_result:
-        raise RuntimeError("百家号发布流程结束，但未产生可核验的提交结果")
-    return observed_result
+    return await _finish_observed_publish(
+        publisher,
+        observed_result,
+        missing_result_message="百家号发布流程结束，但未产生可核验的提交结果",
+    )
 
 
 async def _default_xiaohongshu_login_checker(account_file: str) -> bool:
@@ -1216,10 +1249,11 @@ async def _default_xiaohongshu_publish_runner(
         ai_generated=True,
         publish_callback=observe_publish,
     )
-    await publisher.main()
-    if not observed_result:
-        raise RuntimeError("小红书发布流程结束，但未产生可核验的提交结果")
-    return observed_result
+    return await _finish_observed_publish(
+        publisher,
+        observed_result,
+        missing_result_message="小红书发布流程结束，但未产生可核验的提交结果",
+    )
 
 
 def _run_with_timeout(

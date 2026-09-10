@@ -39,6 +39,36 @@ class ContentEngineContractTests(unittest.TestCase):
             self.request(request_id="request-c", topic="另一个主题").fingerprint(),
         )
 
+    def test_accepts_short_and_custom_article_lengths(self):
+        for length in (200, 235, 3000):
+            with self.subTest(length=length):
+                request = ContentGenerationRequest.create(
+                    project_context={"id": 7, "name": "XX科技"},
+                    topic="测试主题",
+                    keywords=[],
+                    length=length,
+                    content_type="行业科普",
+                    target_platform="",
+                    request_id=f"length-{length}",
+                )
+                self.assertEqual(request.length, length)
+
+    def test_rejects_article_lengths_outside_supported_range(self):
+        for length in (199, 200.5, True, 3001):
+            with self.subTest(length=length), self.assertRaisesRegex(
+                ValueError,
+                "文章长度",
+            ):
+                ContentGenerationRequest.create(
+                    project_context={"id": 7, "name": "XX科技"},
+                    topic="测试主题",
+                    keywords=[],
+                    length=length,
+                    content_type="行业科普",
+                    target_platform="",
+                    request_id=f"length-{length}",
+                )
+
     def test_normalizes_success_fixture_without_promoting_provider_score(self):
         result = ContentGenerationResult.from_payload(
             load_fixture("success.json"),

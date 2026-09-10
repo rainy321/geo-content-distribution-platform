@@ -586,9 +586,9 @@
 
       <div v-else class="job-list">
         <article v-for="job in jobs" :key="job.job_id" class="job-row">
-          <div :class="['status-signal', job.status]">
+          <div :class="['status-signal', job.status, jobOutcome(job).category]">
             <span />
-            <small>{{ statusLabel(job.status) }}</small>
+            <small>{{ job.demo ? `演示 / ${statusLabel(job.status)}` : jobOutcome(job).label }}</small>
           </div>
 
           <div class="job-identity">
@@ -609,7 +609,7 @@
 
           <div class="job-progress">
             <div class="progress-copy">
-              <span>{{ job.message || defaultStatusMessage(job.status) }}</span>
+              <span>{{ jobOutcome(job).reason || defaultStatusMessage(job.status) }}</span>
               <b>{{ statusProgress(job.status) }}%</b>
             </div>
             <div class="progress-track" :class="job.status">
@@ -650,13 +650,21 @@
               登录并重建任务
             </el-button>
             <el-button
-              v-else-if="['failed', 'need_action'].includes(job.status) && !job.reconciliation_required"
+              v-else-if="jobOutcome(job).action === 'fix_and_rebuild'"
+              type="primary"
+              plain
+              @click="repairJobContent(job)"
+            >
+              修复正文后重建
+            </el-button>
+            <el-button
+              v-else-if="jobOutcome(job).retry_allowed && !job.reconciliation_required"
               type="primary"
               plain
               :loading="busyJobIds.has(job.job_id)"
               @click="retryJob(job)"
             >
-              {{ job.status === 'need_action' ? '完成验证后继续' : '重新发布' }}
+              {{ job.status === 'failed' ? '验证修复后重试' : '完成验证后重试' }}
             </el-button>
             <el-button
               v-else-if="job.demo && job.status === 'queued'"
@@ -781,6 +789,11 @@ import {
   frequencyGuidanceLabel,
   refreshEditableVariant
 } from '@/utils/publishPreflight'
+import {
+  formatPublishOutcomeSummary,
+  normalizePublishOutcome,
+  summarizePublishOutcomes
+} from '@/utils/publishOutcome'
 
 const route = useRoute()
 const router = useRouter()
@@ -1748,12 +1761,7 @@ const executeRealBatch = async () => {
   }
 
   batchExecuting.value = true
-  const outcomes = preparationIssues.map(item => ({
-    job_id: item.job.job_id,
-    platform: item.job.platform,
-    status: 'skipped',
-    message: item.reason
-  }))
+  const outcomes = []
   try {
     for (const job of preparedJobs) {
       markJobBusy(job.job_id, true)
@@ -1761,21 +1769,36 @@ const executeRealBatch = async () => {
         const response = await publishApi.executeRealJob(job)
         const result = response.data || {}
         applyJobSnapshot(result)
-        outcomes.push({
-          job_id: job.job_id,
-          platform: job.platform,
-          status: result.reconciliation_required
-            ? 'awaiting_reconcile'
-            : (result.status || 'unknown'),
-          message: result.message || defaultStatusMessage(result.status)
-        })
+        outcomes.push(normalizePublishOutcome(result, {
+          jobId: job.job_id,
+          platform: job.platform
+        }))
       } catch (error) {
-        outcomes.push({
-          job_id: job.job_id,
+        const requestMessage = batchFailureMessage(error)
+        let latest = null
+        try {
+          const latestResponse = await publishApi.getJob(job.job_id)
+          latest = latestResponse.data || null
+          if (latest) applyJobSnapshot(latest)
+        } catch (refreshError) {
+          console.warn('执行请求异常后读取持久化任务失败:', refreshError)
+        }
+        outcomes.push(normalizePublishOutcome(latest || {}, {
+          jobId: job.job_id,
           platform: job.platform,
-          status: 'request_error',
-          message: batchFailureMessage(error)
-        })
+          category: latest ? undefined : 'action_required',
+          reason: latest
+            ? undefined
+            : `请求结果无法确认：${requestMessage}`,
+          nextAction: latest
+            ? undefined
+            : '刷新任务并检查平台后台；确认未产生内容前禁止重试。',
+          retryAllowed: latest ? undefined : false,
+          validationRequired: true,
+          transportNote: `执行请求异常：${requestMessage}；${
+            latest ? '已按刷新后的持久化任务状态归类。' : '未能读取最新任务状态。'
+          }`
+        }))
       } finally {
         markJobBusy(job.job_id, false)
         toggleBatchJob(job.job_id, false)
@@ -1787,35 +1810,50 @@ const executeRealBatch = async () => {
     await fetchJobs(true)
   }
 
-  const counts = outcomes.reduce((summary, outcome) => {
-    summary[outcome.status] = (summary[outcome.status] || 0) + 1
-    return summary
-  }, {})
-  const summaryParts = [
-    counts.success ? `成功 ${counts.success}` : '',
-    counts.awaiting_reconcile ? `已提交待核验 ${counts.awaiting_reconcile}` : '',
-    counts.processing ? `执行状态未知 ${counts.processing}` : '',
-    counts.need_action ? `需本人验证 ${counts.need_action}` : '',
-    counts.failed ? `明确失败 ${counts.failed}` : '',
-    counts.skipped ? `安全跳过 ${counts.skipped}` : '',
-    counts.request_error ? `请求异常 ${counts.request_error}` : ''
-  ].filter(Boolean)
+  const batchSummary = summarizePublishOutcomes(outcomes)
+  const counts = batchSummary.counts
   const outcomeLines = outcomes.map(outcome => h(
     'li',
     { style: { margin: '4px 0' } },
-    `JOB-${String(outcome.job_id).padStart(5, '0')} · ${platformName(outcome.platform)} · ${statusLabel(outcome.status)}：${outcome.message}`
+    [
+      `JOB-${String(outcome.job_id).padStart(5, '0')} · ${platformName(outcome.platform)} · ${outcome.label}`,
+      h('div', { style: { marginTop: '2px' } }, `原因：${outcome.reason}`),
+      h('div', { style: { color: '#985b16' } }, `下一步：${outcome.next_action}`),
+      outcome.transport_note
+        ? h('div', { style: { color: '#6f7778' } }, outcome.transport_note)
+        : null
+    ]
+  ))
+  const preparationLines = preparationIssues.map(item => h(
+    'li',
+    { style: { margin: '3px 0' } },
+    `JOB-${String(item.job.job_id).padStart(5, '0')} · ${platformName(item.job.platform)}：${item.reason}`
   ))
   await ElMessageBox.alert(
     h('div', { style: { lineHeight: '1.6' } }, [
-      h('p', { style: { margin: '0 0 8px', fontWeight: '700' } }, summaryParts.join('；') || '批次已结束'),
+      h('p', { style: { margin: '0 0 4px', fontWeight: '700' } },
+        `本次执行结果：${formatPublishOutcomeSummary(batchSummary)}`),
+      h('p', { style: { margin: '0 0 8px', color: '#6f7778', fontSize: '11px' } },
+        `分母仅含本次强确认后实际请求的 ${preparedJobs.length} 条任务，不包含页面上的其他历史任务。`),
       h('ul', { style: { maxHeight: '260px', overflow: 'auto', margin: 0, paddingLeft: '20px', fontSize: '11px' } }, outcomeLines),
-      (counts.awaiting_reconcile || counts.processing || counts.request_error)
-        ? h('p', { style: { margin: '10px 0 0', color: '#985b16' } },
-            '状态不明的任务没有自动重试。请先在平台后台核验，再使用“核验平台结果”收口。')
+      preparationIssues.length
+        ? h('div', { style: { marginTop: '10px', paddingTop: '8px', borderTop: '1px solid #e5ebe9' } }, [
+            h('p', { style: { margin: '0 0 4px', fontWeight: '700' } },
+              `预检排除 ${preparationIssues.length} 条（未访问平台，不计入本次执行分母）`),
+            h('ul', { style: { margin: 0, paddingLeft: '20px', fontSize: '11px' } }, preparationLines)
+          ])
         : null,
-      counts.need_action
+      counts.platform_processing
+        ? h('p', { style: { margin: '10px 0 0', color: '#985b16' } },
+            '“平台处理中/审核中”表示已有平台受理证据；等待审核或按每条提示核验，禁止重复提交。')
+        : null,
+      counts.action_required
         ? h('p', { style: { margin: '8px 0 0', color: '#985b16' } },
-            '需要本人验证的任务已暂停；完成短信、扫码、滑块等验证后，可从任务列表继续。')
+            '“需要人工处理”可能是本人验证、账号问题或没有平台回执；请严格按每条“下一步”处理。')
+        : null,
+      counts.failed
+        ? h('p', { style: { margin: '8px 0 0', color: '#985b16' } },
+            '“明确失败”仅可在修复原因并确认平台未产生内容后手动重试。')
         : null
     ]),
     '连续发布批次已结束',
@@ -1984,30 +2022,44 @@ const executeRealJob = async (job) => {
 }
 
 const retryJob = async (job) => {
-  if (job.status === 'need_action') {
-    const platform = platformByKey(job.platform)
-    try {
-      await ElMessageBox.confirm(
-        h('div', { style: { lineHeight: '1.65' } }, [
-          h('p', { style: { margin: '0 0 8px', fontWeight: '700' } }, job.message || '上次流程需要人工确认。'),
-          h('p', { style: { margin: '0 0 8px' } }, platform.verification?.notice || '请准备完成平台要求的短信、扫码、滑块或安全验证。'),
-          h('p', { style: { margin: 0, color: '#985b16' } },
-            '继续前请先在平台后台核对是否已经发布，避免状态不明时重复发送；重新排队后仍需再次执行强确认。')
-        ]),
-        '继续待人工任务',
-        {
-          confirmButtonText: '已核对平台，重新排队',
-          cancelButtonText: '先不继续',
-          type: 'warning'
-        }
-      )
-    } catch {
-      return
-    }
-  }
-  markJobBusy(job.job_id, true)
+  let current = job
   try {
-    const response = await publishApi.retryJob(job.job_id)
+    const currentResponse = await publishApi.getJob(job.job_id)
+    current = currentResponse.data || job
+    applyJobSnapshot(current)
+  } catch (error) {
+    console.error('重试前读取任务失败:', error)
+    ElMessage.error('无法校验任务最新状态，已阻止重试')
+    return
+  }
+  const outcome = jobOutcome(current)
+  if (!outcome.retry_allowed || outcome.reconciliation_required) {
+    ElMessage.warning(outcome.next_action || '当前任务不允许重试')
+    return
+  }
+  try {
+    await ElMessageBox.confirm(
+      h('div', { style: { lineHeight: '1.65' } }, [
+        h('p', { style: { margin: '0 0 8px', fontWeight: '700' } }, `原因：${outcome.reason}`),
+        h('p', { style: { margin: '0 0 8px' } }, `要求：${outcome.next_action}`),
+        h('p', { style: { margin: 0, color: '#985b16' } },
+          '重新排队不会立即发布；后续仍需再次执行真实发布强确认。')
+      ]),
+      '验证完成后重新排队',
+      {
+        confirmButtonText: current.status === 'failed'
+          ? '已修复并核对未发布，重新排队'
+          : '已完成验证并核对未发布，重新排队',
+        cancelButtonText: '先不继续',
+        type: 'warning'
+      }
+    )
+  } catch {
+    return
+  }
+  markJobBusy(current.job_id, true)
+  try {
+    const response = await publishApi.retryJob(current.job_id)
     const retried = response.data
     if (retried.demo) {
       await publishApi.executeDemoJob(retried.job_id)
@@ -2019,8 +2071,12 @@ const retryJob = async (job) => {
   } catch (error) {
     console.error('重试发布任务失败:', error)
   } finally {
-    markJobBusy(job.job_id, false)
+    markJobBusy(current.job_id, false)
   }
+}
+
+const repairJobContent = job => {
+  router.push({ path: '/content-create', query: { articleId: job.article_id } })
 }
 
 const resetReconciliationDialog = () => {
@@ -2112,17 +2168,12 @@ const clearJobFilters = () => {
 }
 
 const platformName = (key) => platforms.value.find(platform => platform.key === key)?.name || key
-const batchStatusLabels = {
-  awaiting_reconcile: '已提交待核验',
-  skipped: '安全跳过',
-  request_error: '请求异常',
-  unknown: '结果未知'
-}
 const statusLabel = (status) => (
   statusOptions.find(item => item.value === status)?.label
-  || batchStatusLabels[status]
   || status
 )
+
+const jobOutcome = job => normalizePublishOutcome(job)
 
 const latestPlatformState = (platformKey) => {
   const job = jobs.value.find(item => item.platform === platformKey)
@@ -2149,6 +2200,10 @@ const defaultStatusMessage = (status) => ({
 
 const jobNextStep = job => {
   if (!job) return ''
+  const backendNextAction = String(job.outcome?.next_action || '').trim()
+  if (backendNextAction) {
+    return `下一步：${backendNextAction.replace(/^下一步[:：]\s*/, '')}`
+  }
   if (job.reconciliation_required) {
     return '下一步：先到平台后台核对是否已产生内容，再点“核验平台结果”；核验前不要重复提交。'
   }
@@ -3226,6 +3281,9 @@ onBeforeUnmount(() => {
   &.processing > span, &.queued > span { background: #4a9ed0; }
   &.need_action > span, &.scheduled > span { background: var(--amber); }
   &.failed > span { background: var(--danger); }
+  &.published > span { background: var(--signal); }
+  &.platform_processing > span { background: #4a9ed0; }
+  &.action_required > span { background: var(--amber); }
 }
 
 .job-identity,

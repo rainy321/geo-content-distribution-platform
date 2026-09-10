@@ -99,8 +99,16 @@ class PlatformPublishPolicyServiceTests(unittest.TestCase):
             adapt_tags_for_platform("toutiao", tags)["selected"], ["核心"]
         )
         self.assertEqual(len(adapt_tags_for_platform("kuaishou", tags)["selected"]), 4)
-        self.assertEqual(len(adapt_tags_for_platform("baijiahao", tags)["selected"]), 5)
+        self.assertEqual(adapt_tags_for_platform("baijiahao", tags)["selected"], [])
+        self.assertEqual(len(adapt_tags_for_platform("xiaohongshu", tags)["selected"]), 5)
+        self.assertEqual(len(adapt_tags_for_platform("douyin", tags)["selected"]), 5)
         self.assertEqual(len(adapt_tags_for_platform("sohu", tags)["selected"]), 6)
+        tiktok = adapt_tags_for_platform("tiktok", tags)
+        self.assertEqual(len(tiktok["selected"]), 5)
+        self.assertEqual(
+            tiktok["policy"]["basis"],
+            "product_operational_guardrail",
+        )
         self.assertEqual(adapt_tags_for_platform("zhihu", tags)["selected"], [])
 
     def test_tag_reserve_uses_only_tags_the_adapter_can_submit(self):
@@ -112,7 +120,7 @@ class PlatformPublishPolicyServiceTests(unittest.TestCase):
         self.assertEqual(kuaishou["tag_count_used"], 4)
         self.assertEqual(kuaishou["tag_count_dropped"], 6)
         self.assertTrue(kuaishou["tags_share_content_limit"])
-        self.assertEqual(bilibili["safe_limit"], 2000)
+        self.assertEqual(bilibili["safe_limit"], 1800)
         self.assertEqual(bilibili["tag_characters"], 0)
         self.assertFalse(bilibili["tags_share_content_limit"])
 

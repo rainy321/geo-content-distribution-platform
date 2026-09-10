@@ -1003,6 +1003,8 @@ import {
 } from '@/utils/visibilitySampling'
 import { diagnosticRetestDelta } from '@/utils/dashboardPresentation'
 
+defineOptions({ name: 'AiVisibility' })
+
 const router = useRouter()
 const formRef = ref(null)
 const resultHeading = ref(null)

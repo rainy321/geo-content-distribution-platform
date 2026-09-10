@@ -174,11 +174,25 @@
           </el-form-item>
 
           <el-form-item label="文章长度" prop="length">
-            <el-radio-group v-model="brief.length" class="length-options" :disabled="generating" @change="markBlueprintStale">
+            <div class="length-control">
+              <el-radio-group v-model="brief.length" class="length-options" :disabled="generating" @change="markBlueprintStale">
+              <el-radio-button :value="200">200 字</el-radio-button>
               <el-radio-button :value="600">600 字</el-radio-button>
               <el-radio-button :value="1000">1000 字</el-radio-button>
               <el-radio-button :value="1500">1500 字</el-radio-button>
-            </el-radio-group>
+              </el-radio-group>
+              <el-input-number
+                v-model="brief.length"
+                :min="200"
+                :max="3000"
+                :step="50"
+                :disabled="generating"
+                controls-position="right"
+                aria-label="自定义目标字数"
+                @change="markBlueprintStale"
+              />
+              <small>可自定义 200–3000 字；发布时仍会按各平台安全线自动生成短版。</small>
+            </div>
           </el-form-item>
 
           <div class="form-pair">
@@ -1894,6 +1908,25 @@ onBeforeUnmount(() => {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
+}
+
+.length-control {
+  display: grid;
+  width: 100%;
+  grid-template-columns: minmax(0, 1fr) 148px;
+  gap: 10px;
+  align-items: center;
+
+  small {
+    grid-column: 1 / -1;
+    color: #829095;
+    font-size: 11px;
+    line-height: 1.55;
+  }
+
+  :deep(.el-input-number) {
+    width: 100%;
+  }
 }
 
 .creation-engine-bus {

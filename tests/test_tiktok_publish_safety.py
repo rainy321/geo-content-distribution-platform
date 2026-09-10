@@ -56,13 +56,57 @@ class TiktokPublishSafetyTests(unittest.IsolatedAsyncioTestCase):
             dialog_result = MagicMock()
             dialog_result.first = empty_dialog
             diagnostics = MagicMock()
-            diagnostics.all_inner_texts = AsyncMock(return_value=[])
+            diagnostics.all_inner_texts = AsyncMock(
+                side_effect=RuntimeError(
+                    "Target page, context or browser has been closed"
+                )
+            )
             page.locator.side_effect = [*[dialog_result] * 20, diagnostics]
 
             with self.assertRaisesRegex(RuntimeError, "automatic retry was disabled"):
                 await publisher.click_publish(page)
 
         button.click.assert_awaited_once()
+        self.assertTrue(publisher.post_click_attempted)
+
+    async def test_post_control_click_exception_requires_reconciliation(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            publisher = self._publisher(Path(temp_dir) / "account.json")
+            button = MagicMock()
+            button.wait_for = AsyncMock()
+            button.get_attribute = AsyncMock(return_value=None)
+            button.click = AsyncMock(side_effect=RuntimeError("overlay intercepted"))
+            publisher.locator_base = MagicMock()
+            publisher.locator_base.locator.return_value.first = button
+            page = MagicMock()
+            page.screenshot = AsyncMock()
+
+            with self.assertRaisesRegex(RuntimeError, "overlay intercepted"):
+                await publisher.click_publish(page)
+
+        self.assertTrue(publisher.post_click_attempted)
+
+    async def test_target_closed_during_click_cannot_be_treated_as_safe_retry(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            publisher = self._publisher(Path(temp_dir) / "account.json")
+            button = MagicMock()
+            button.wait_for = AsyncMock()
+            button.get_attribute = AsyncMock(return_value=None)
+            button.click = AsyncMock(
+                side_effect=RuntimeError(
+                    "Target page, context or browser has been closed"
+                )
+            )
+            publisher.locator_base = MagicMock()
+            publisher.locator_base.locator.return_value.first = button
+            page = MagicMock()
+            page.screenshot = AsyncMock()
+
+            with self.assertRaisesRegex(RuntimeError, "Target page"):
+                await publisher.click_publish(page)
+
+        button.click.assert_awaited_once()
+        self.assertTrue(publisher.post_click_attempted)
 
     async def test_known_copyright_prompt_is_confirmed_once(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -141,8 +185,91 @@ class TiktokPublishSafetyTests(unittest.IsolatedAsyncioTestCase):
                 await publisher.upload(playwright)
 
         playwright.chromium.launch.assert_awaited_once_with(
-            headless=publisher.headless
+            headless=publisher.headless,
+            channel="chrome",
         )
+
+    async def test_localized_cover_control_uses_image_input_without_old_text_selector(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            thumbnail = str(Path(temp_dir) / "cover.png")
+            publisher = self._publisher(
+                Path(temp_dir) / "account.json",
+                thumbnail_path=thumbnail,
+            )
+            publisher.locator_base = MagicMock()
+
+            missing = MagicMock()
+            missing.count = AsyncMock(return_value=0)
+            missing_result = MagicMock()
+            missing_result.first = missing
+
+            image_input = MagicMock()
+            image_input.count = AsyncMock(side_effect=[0, 1])
+            image_input.set_input_files = AsyncMock()
+            input_result = MagicMock()
+            input_result.first = image_input
+
+            def locate(selector):
+                if 'input[type="file"]' in selector:
+                    return input_result
+                return missing_result
+
+            publisher.locator_base.locator.side_effect = locate
+
+            localized_control = MagicMock()
+            localized_control.count = AsyncMock(return_value=1)
+            localized_control.is_visible = AsyncMock(return_value=True)
+            localized_control.click = AsyncMock()
+            localized_result = MagicMock()
+            localized_result.first = localized_control
+
+            confirm = MagicMock()
+            confirm.count = AsyncMock(return_value=1)
+            confirm.is_visible = AsyncMock(return_value=True)
+            confirm.click = AsyncMock()
+            confirm_result = MagicMock()
+            confirm_result.first = confirm
+            publisher.locator_base.get_by_role.side_effect = [
+                localized_result,
+                confirm_result,
+            ]
+
+            page = MagicMock()
+            page.wait_for_timeout = AsyncMock()
+            page.keyboard.press = AsyncMock()
+
+            uploaded = await publisher.upload_thumbnails(page)
+
+        self.assertTrue(uploaded)
+        localized_control.click.assert_awaited_once()
+        image_input.set_input_files.assert_awaited_once_with(
+            thumbnail,
+            timeout=3000,
+        )
+        confirm.click.assert_awaited_once()
+        publisher.locator_base.get_by_text.assert_not_called()
+
+    async def test_missing_cover_ui_is_optional_and_returns_immediately(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            publisher = self._publisher(
+                Path(temp_dir) / "account.json",
+                thumbnail_path=str(Path(temp_dir) / "cover.png"),
+            )
+            absent = MagicMock()
+            absent.count = AsyncMock(return_value=0)
+            absent_result = MagicMock()
+            absent_result.first = absent
+            publisher.locator_base = MagicMock()
+            publisher.locator_base.locator.return_value = absent_result
+            publisher.locator_base.get_by_role.return_value = absent_result
+            publisher.locator_base.get_by_text.return_value = absent_result
+            page = MagicMock()
+            page.keyboard.press = AsyncMock()
+
+            uploaded = await publisher.upload_thumbnails(page)
+
+        self.assertFalse(uploaded)
+        page.keyboard.press.assert_awaited_once_with("Escape")
 
     async def test_joyride_overlay_is_dismissed_before_editing(self):
         with tempfile.TemporaryDirectory() as temp_dir:

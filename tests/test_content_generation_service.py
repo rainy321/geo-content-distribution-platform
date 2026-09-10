@@ -79,7 +79,14 @@ class ContentGenerationServiceTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def request(self, *, request_id="request-1", idempotency_key="idem-1", topic="测试主题"):
+    def request(
+        self,
+        *,
+        request_id="request-1",
+        idempotency_key="idem-1",
+        topic="测试主题",
+        length=1000,
+    ):
         return ContentGenerationRequest.create(
             project_context={
                 "id": self.project_id,
@@ -92,7 +99,7 @@ class ContentGenerationServiceTests(unittest.TestCase):
             },
             topic=topic,
             keywords=["AI Agent"],
-            length=1000,
+            length=length,
             content_type="行业科普",
             target_platform="zhihu",
             request_id=request_id,
@@ -141,6 +148,41 @@ class ContentGenerationServiceTests(unittest.TestCase):
         )
         persisted = get_run(self.db_path, result["generation"]["run_id"])
         self.assertNotRegex(persisted["result_payload"]["content"], "作者占位|待补充")
+
+    def test_oversized_model_output_is_compressed_before_scoring_and_persistence(self):
+        payload = engine_payload()
+        payload["content"] = (
+            "XX科技的企业 AI Agent 用于验证业务流程。" * 25
+            + "\n\n限制与风险：结果取决于输入资料并需要人工复核。"
+        )
+        original_length = len(payload["content"])
+        primary = MockContentEngineAdapter([payload])
+
+        result = ContentGenerationService(self.db_path, primary).generate(
+            self.request(length=200)
+        )
+
+        self.assertGreater(original_length, 200)
+        self.assertLessEqual(len(result["content"]), 200)
+        self.assertIn("限制与风险", result["content"])
+        warning = next(
+            item
+            for item in result["generation"]["warnings"]
+            if "自动压缩" in item
+        )
+        self.assertIn(f"{original_length} →", warning)
+        persisted = get_run(self.db_path, result["generation"]["run_id"])
+        self.assertEqual(persisted["result_payload"]["content"], result["content"])
+
+    def test_content_inside_requested_length_is_not_reported_as_compressed(self):
+        primary = MockContentEngineAdapter([engine_payload()])
+        result = ContentGenerationService(self.db_path, primary).generate(
+            self.request(length=200)
+        )
+
+        self.assertFalse(
+            any("自动压缩" in item for item in result["generation"]["warnings"])
+        )
 
     def test_only_connection_failure_falls_back(self):
         primary = MockContentEngineAdapter(

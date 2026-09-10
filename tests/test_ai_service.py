@@ -142,9 +142,25 @@ class AIServiceTests(unittest.TestCase):
             target_platform="抖音",
         )
 
-        self.assertIn("正文约 920 字", prompt)
+        self.assertIn("正文约 800 字", prompt)
         self.assertIn("原始目标为 1500 字", prompt)
         self.assertIn("目标平台：抖音", prompt)
+
+    def test_200_character_prompt_uses_compact_structure_without_forced_faq(self):
+        prompt = _build_prompt(
+            project=self.project,
+            topic="企业 AI Agent 是什么？",
+            keywords=["AI Agent"],
+            length=200,
+            content_type="问答",
+            target_platform="小红书",
+        )
+
+        self.assertIn("正文约 200 字", prompt)
+        self.assertIn("2–4 个紧凑短段落", prompt)
+        self.assertIn("不强制 H2/H3", prompt)
+        self.assertIn("短稿不强制 FAQ", prompt)
+        self.assertNotIn("短内容至少覆盖列表前三项", prompt)
 
     def test_disables_default_thinking_for_alibaba_qwen_38(self):
         captured = {}

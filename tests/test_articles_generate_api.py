@@ -85,6 +85,44 @@ class ArticleGenerationApiTests(unittest.TestCase):
         self.assertEqual(generation_request.target_platform, "zhihu")
 
     @patch("sau_backend._create_content_generation_service")
+    def test_accepts_200_and_custom_article_lengths(self, mock_factory):
+        mock_factory.return_value.generate.return_value = {
+            "title": "短稿",
+            "summary": "",
+            "content": "正文",
+            "tags": [],
+            "faq": [],
+        }
+
+        for length in (200, 235, 3000):
+            with self.subTest(length=length):
+                response = self.client.post(
+                    "/api/articles/generate",
+                    json={
+                        "project_id": self.project_id,
+                        "topic": "测试自定义长度",
+                        "length": length,
+                    },
+                )
+                self.assertEqual(response.status_code, 200)
+                request = mock_factory.return_value.generate.call_args.args[0]
+                self.assertEqual(request.length, length)
+
+    def test_rejects_article_lengths_outside_supported_range(self):
+        for length in (199, 200.5, True, 3001):
+            with self.subTest(length=length):
+                response = self.client.post(
+                    "/api/articles/generate",
+                    json={
+                        "project_id": self.project_id,
+                        "topic": "测试非法长度",
+                        "length": length,
+                    },
+                )
+                self.assertEqual(response.status_code, 400)
+                self.assertIn("文章长度", response.get_json()["msg"])
+
+    @patch("sau_backend._create_content_generation_service")
     def test_request_keywords_override_project_keywords(self, mock_factory):
         mock_factory.return_value.generate.return_value = {
             "title": "标题",

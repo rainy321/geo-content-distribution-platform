@@ -139,9 +139,12 @@ try {
             tests.test_geo_article_compiler_service `
             tests.test_geo_article_compiler_api `
             tests.test_ai_service `
+            tests.test_content_engine_contract `
+            tests.test_content_hygiene_service `
             tests.test_content_generation_service `
             tests.test_content_generation_api_v1 `
             tests.test_articles_api `
+            tests.test_articles_generate_api `
             tests.test_articles_optimize_api `
             tests.test_geo_score_service `
             tests.test_geo_score_api `
@@ -153,7 +156,9 @@ try {
             tests.test_publish_job_executor `
             tests.test_publish_job_service `
             tests.test_publish_jobs_api `
+            tests.test_publish_outcome_service `
             tests.test_publish_preflight_service `
+            tests.test_platform_publish_policy_service `
             tests.test_publish_reconcile_api `
             tests.test_publish_scheduler_service `
             tests.test_worker_entrypoint `
@@ -167,7 +172,18 @@ try {
             tests.test_login_sse `
             tests.test_toutiao_login `
             tests.test_zhihu_login `
+            tests.test_baijiahao_article_topics `
+            tests.test_baijiahao_publish_flow `
+            tests.test_sohu_publish_flow `
+            tests.test_toutiao_article_topics `
+            tests.test_toutiao_publish_flow `
+            tests.test_xiaohongshu_uploader `
+            tests.test_xiaohongshu_publish_flow `
+            tests.test_zhihu_publish_flow `
+            tests.test_tencent_publish_safety `
             tests.test_tiktok_publish_safety `
+            tests.test_geo_blackbox_experiment_service `
+            tests.test_geo_blackbox_experiment_api `
             tests.test_material_api `
             tests.test_p2_content_workflows `
             tests.test_dashboard_service `
@@ -437,7 +453,7 @@ try {
         }
         algorithm = [ordered]@{
             integration_version = "ai-visibility-python-port-1.1.0"
-            article_compiler_version = "geo-article-compiler-2.1.1"
+            article_compiler_version = "geo-article-compiler-2.2.0"
             ai_citeability_version = "ai-citeability-rules-2.1.1"
             handoff_archive_sha256 = "2ff20604dad3b68807c47d0f3aef3d59ce613bf927dcde0b90ad80bc4b96e96c"
             source_rights_status = "pending_written_authorization"
@@ -446,7 +462,10 @@ try {
         product_features = [ordered]@{
             geo_diagnostic_version = "geo-commercial-diagnostic-1.3.0"
             ai_cost_ledger_version = "ai-cost-ledger-1.2.0"
-            platform_content_policy_version = "2026-09-10.2"
+            platform_content_policy_version = "2026-09-10.4"
+            publish_outcome_version = "publish-outcome-1.0.0"
+            content_hygiene_version = "content-hygiene-1.1.0"
+            geo_blackbox_panel_version = "geo-blackbox-panel-1.0.0"
             unified_ai_config_storage = "windows_dpapi_current_user"
             channel_recommendations = $true
             bounded_topic_matching = $true

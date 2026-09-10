@@ -412,18 +412,51 @@ async def _tiktok_login_checker(account_file: str) -> bool:
 
 
 async def _tiktok_publish_runner(content: PublishContent, account_file: str):
+    from services.platform_publish_policy_service import adapt_tags_for_platform
     from uploader.tk_uploader.main_chrome import TiktokVideo
 
+    tag_preview = adapt_tags_for_platform("tiktok", content.tags)
     publisher = TiktokVideo(
         title=content.title,
         file_path=content.video,
-        tags=list(content.tags),
+        tags=list(tag_preview["selected"]),
         publish_date=0,
         account_file=account_file,
         thumbnail_path=content.images[0] if content.images else None,
         headless=False,
     )
-    return await publisher.main()
+    try:
+        return await publisher.main()
+    except asyncio.CancelledError:
+        # The synchronous adapter enforces its timeout with wait_for(), which
+        # cancels this coroutine. Convert that cancellation while the publisher
+        # object still exposes whether Post was reached.
+        return _tiktok_interrupted_result(publisher, error=None)
+    except Exception as exc:
+        return _tiktok_interrupted_result(publisher, error=exc)
+
+
+def _tiktok_interrupted_result(publisher: Any, *, error: Exception | None):
+    if bool(getattr(publisher, "post_click_attempted", False)):
+        return {
+            "status": "processing",
+            "message": (
+                "TikTok 已触发一次 Post 点击，但平台结果未能确认；"
+                "请先在 TikTok Studio 核对，系统不会自动重试"
+            ),
+        }
+    status = classify_publisher_error(error) if error is not None else "failed"
+    if status == "need_action":
+        message = (
+            "TikTok 在点击 Post 前被登录、验证或页面结构阻断，尚未提交；"
+            "请处理平台提示后重试"
+        )
+    else:
+        message = (
+            "TikTok 在点击 Post 前中止，尚未提交；"
+            "可在修正页面或素材问题后安全重试"
+        )
+    return {"status": status, "message": message}
 
 
 def _is_public_http_url(value: str) -> bool:

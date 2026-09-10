@@ -38,7 +38,7 @@
 | 当前本机分析实现 | `services/ai_visibility_service.py` |
 | 当前本机分析总版本 | `ai-visibility-python-port-1.1.0` |
 | 本轮内容编译实现 | `services/geo_article_compiler_service.py` |
-| 本轮内容编译主版本 | `geo-article-compiler-2.1.1` |
+| 本轮内容编译主版本 | `geo-article-compiler-2.2.0` |
 
 交接包自述是“完整开发源码快照”，不是安装程序、生产数据或已上线服务。ZIP 内未发现 `LICENSE` 或 `NOTICE` 文件；因此，文件完整性可以验证，但对外分发、转授权和商业再分发权不能仅由 ZIP 本身推定。
 
@@ -106,6 +106,22 @@ priority = expected_impact × confidence × business_importance / max(effort, 0.
 ```
 
 它用于安排“先改什么”，不是预测收入。上游规则建议内容/引用问题一般在 21 天后复测、站点审计问题一般在 14 天后复测；短时间演示只能作为基线与流程验收，不能宣称已经产生因果提升。
+
+### 4.1 结果驱动黑盒实验面板
+
+`geo-blackbox-panel-1.0.0` 把已有 DongClaw 回答证据组织为固定实验面板，而不是猜测平台内部权重：
+
+```text
+处理组 / 对照组
+  × 基线 / 第 7 天 / 第 14 天 / 第 30 天
+  × 完全相同的 provider、model、surface、搜索设置、问题与重复序号
+  -> 提及、引用、推荐位次和显著度的描述性变化
+  -> 处理组变化 - 对照组变化
+```
+
+缺失时间点保持缺失，失败样本保留在分母，模型或采样口径漂移时拒绝做伪比较，同一份原始回答也不能冒充两个实验观察。该面板只处理已经留存的回答报告，不会自行抓站、查索引或调用模型。`Public / Crawl / Index / Retrieval / Citation / BrandMention / Prominence / FactAccuracy / RecommendationShare` 必须分开展示：其中 Crawl 属于模型供应商内部状态，当前不可观测；Index 尚未测量；FactAccuracy 仍需独立的品牌主张—证据图谱后才能计算。因而该版本可以做可审计的基线与纵向对照，不能把描述性差异写成已证明的因果提升。
+
+桌面后端提供 `GET /api/geo/blackbox/truth-matrix` 查看当前能力边界，以及 `POST /api/geo/blackbox/imported-panel` 评估最多八个导入槽位。两个接口都受本机管理员登录保护；后者不持久化、不联网、不调用模型，只接受严格的 JSON 证据合同。
 
 ## 5. 可对客户展示的真实说法
 

@@ -17,6 +17,7 @@ from services.publisher_adapter import (
     _default_toutiao_publish_runner,
     _default_xiaohongshu_publish_runner,
     _default_zhihu_publish_runner,
+    _finish_observed_publish,
     _markdown_to_platform_text,
 )
 
@@ -86,6 +87,62 @@ class DemoPublisherTests(unittest.TestCase):
         self.assertIn(publish_at.isoformat(), result.message)
         with self.assertRaisesRegex(ValueError, "publish_at"):
             self.publisher.schedule(self.content)
+
+
+class ObservedPublishCleanupTests(unittest.IsolatedAsyncioTestCase):
+    async def test_cleanup_error_cannot_override_observed_submit_result(self):
+        publisher = AsyncMock()
+        publisher.main.side_effect = RuntimeError(
+            "Target page, context or browser has been closed"
+        )
+        observed = {
+            "status": "processing",
+            "success": False,
+            "message": "平台已接受提交，等待审核",
+        }
+
+        result = await _finish_observed_publish(
+            publisher,
+            observed,
+            missing_result_message="missing",
+        )
+
+        self.assertIs(result, observed)
+
+    async def test_cleanup_timeout_cannot_override_observed_submit_result(self):
+        publisher = AsyncMock()
+
+        async def hang_during_cleanup():
+            await asyncio.sleep(60)
+
+        publisher.main.side_effect = hang_during_cleanup
+        observed = {
+            "status": "processing",
+            "success": False,
+            "message": "平台已接受提交，等待审核",
+        }
+
+        result = await asyncio.wait_for(
+            _finish_observed_publish(
+                publisher,
+                observed,
+                missing_result_message="missing",
+            ),
+            timeout=0.01,
+        )
+
+        self.assertIs(result, observed)
+
+    async def test_pre_submit_error_without_observation_is_not_swallowed(self):
+        publisher = AsyncMock()
+        publisher.main.side_effect = RuntimeError("editor locator failed")
+
+        with self.assertRaisesRegex(RuntimeError, "editor locator failed"):
+            await _finish_observed_publish(
+                publisher,
+                {},
+                missing_result_message="missing",
+            )
 
 
 class ZhihuPublisherAdapterTests(unittest.TestCase):

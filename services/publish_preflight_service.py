@@ -12,7 +12,7 @@ from services.platform_publish_policy_service import (
 )
 
 
-PUBLISH_CONTENT_POLICY_VERSION = "2026-09-10.2"
+PUBLISH_CONTENT_POLICY_VERSION = "2026-09-10.4"
 
 
 class PublishContentLimitError(ValueError):
@@ -23,7 +23,7 @@ _CONTENT_POLICIES: dict[str, dict[str, Any]] = {
     "xiaohongshu": {
         "content_mode": "image_note",
         "hard_limit": 1000,
-        "default_safe_limit": 900,
+        "default_safe_limit": 800,
         "fixed_reserve": 30,
         "tags_share_content_limit": True,
         "label": "笔记正文",
@@ -37,7 +37,7 @@ _CONTENT_POLICIES: dict[str, dict[str, Any]] = {
     "douyin": {
         "content_mode": "image_note",
         "hard_limit": 1000,
-        "default_safe_limit": 920,
+        "default_safe_limit": 800,
         "fixed_reserve": 24,
         "tags_share_content_limit": True,
         "label": "作品描述",
@@ -48,7 +48,7 @@ _CONTENT_POLICIES: dict[str, dict[str, Any]] = {
     "kuaishou": {
         "content_mode": "image_note",
         "hard_limit": 500,
-        "default_safe_limit": 450,
+        "default_safe_limit": 380,
         "fixed_reserve": 18,
         "tags_share_content_limit": True,
         "label": "作品描述",
@@ -59,7 +59,7 @@ _CONTENT_POLICIES: dict[str, dict[str, Any]] = {
     "bilibili": {
         "content_mode": "video_description",
         "hard_limit": 2000,
-        "default_safe_limit": 2000,
+        "default_safe_limit": 1800,
         "fixed_reserve": 0,
         "tags_share_content_limit": False,
         "label": "视频简介",

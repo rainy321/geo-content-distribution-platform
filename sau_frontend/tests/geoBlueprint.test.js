@@ -179,4 +179,8 @@ test('content creation wires blueprint preview and citeability to the existing s
   assert.match(component, /scoreResult\.citeability\.dimensions/)
   assert.match(component, /发布前门禁预检/)
   assert.match(component, /不代表页面已被抓取、收录或被模型引用/)
+  assert.match(component, /:value="200">200 字/)
+  assert.match(component, /:min="200"/)
+  assert.match(component, /:max="3000"/)
+  assert.match(component, /可自定义 200–3000 字/)
 })

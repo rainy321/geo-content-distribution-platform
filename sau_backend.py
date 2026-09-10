@@ -104,6 +104,11 @@ from services.geo_diagnostic_service import (
     get_geo_diagnostic_run,
     list_geo_diagnostic_runs,
 )
+from services.geo_blackbox_experiment_service import (
+    GEOBlackboxExperimentError,
+    build_geo_blackbox_truth_matrix,
+    evaluate_geo_blackbox_panel,
+)
 from services.dashboard_service import get_dashboard_overview
 from services.demo_seed_service import seed_demo_data
 from services.local_auth_service import (
@@ -151,6 +156,8 @@ from services.content_generation_run_service import (
 )
 from services.content_engine_contract import (
     CONTENT_ENGINE_CONTRACT_VERSION,
+    MAX_ARTICLE_LENGTH,
+    MIN_ARTICLE_LENGTH,
     ContentEngineConfigurationError,
     ContentEngineError,
     ContentEngineProtocolError,
@@ -158,6 +165,7 @@ from services.content_engine_contract import (
     ContentEngineTimeoutError,
     ContentEngineUnavailableError,
     ContentGenerationRequest,
+    parse_article_length,
 )
 from services.content_generation_service import (
     ContentGenerationInProgressError,
@@ -201,6 +209,7 @@ from services.publish_preflight_service import (
     get_publish_title_policy,
     get_platform_verification_policy,
 )
+from services.publish_outcome_service import classify_publish_outcome
 from services.platform_publish_policy_service import (
     evaluate_platform_offline_preflight,
     get_platform_publish_policy,
@@ -1105,7 +1114,8 @@ def frontend_history_fallback(frontend_path):
     return send_from_directory(build_dir, "index.html")
 
 
-ARTICLE_LENGTHS = {600, 1000, 1500}
+ARTICLE_LENGTH_MIN = MIN_ARTICLE_LENGTH
+ARTICLE_LENGTH_MAX = MAX_ARTICLE_LENGTH
 BATCH_GENERATION_LIMIT = 20
 ARTICLE_CONTENT_TYPES = {
     "行业科普",
@@ -1532,11 +1542,9 @@ def _prepare_generation_request(data):
     if not topic:
         return None, (jsonify({"code": 400, "msg": "文章主题不能为空", "data": None}), 400)
     try:
-        length = int(data.get("length", 1000))
-    except (TypeError, ValueError):
-        return None, (jsonify({"code": 400, "msg": "文章长度必须是整数", "data": None}), 400)
-    if length not in ARTICLE_LENGTHS:
-        return None, (jsonify({"code": 400, "msg": "文章长度仅支持 600、1000、1500", "data": None}), 400)
+        length = parse_article_length(data.get("length", 1000))
+    except ValueError as exc:
+        return None, (jsonify({"code": 400, "msg": str(exc), "data": None}), 400)
     content_type = str(data.get("content_type") or "行业科普").strip()
     if content_type not in ARTICLE_CONTENT_TYPES:
         return None, (jsonify({"code": 400, "msg": "不支持的内容类型", "data": None}), 400)
@@ -2352,6 +2360,104 @@ def analyze_geo_visibility():
     return jsonify({"code": 200, "msg": "success", "data": result}), 200
 
 
+@app.route('/api/geo/blackbox/truth-matrix', methods=['GET'])
+def get_geo_blackbox_truth_matrix():
+    """Describe only the GEO capabilities supported by retained evidence."""
+
+    if request.args:
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "GEO 真值矩阵接口不接受查询参数",
+                "data": None,
+            }
+        ), 400
+    return jsonify(
+        {
+            "code": 200,
+            "msg": "success",
+            "data": build_geo_blackbox_truth_matrix(),
+        }
+    ), 200
+
+
+@app.route('/api/geo/blackbox/imported-panel', methods=['POST'])
+def evaluate_imported_geo_blackbox_panel():
+    """Evaluate imported evidence without storage, network, or model calls."""
+
+    maximum_request_bytes = 8 * 1024 * 1024
+    if (
+        request.content_length is not None
+        and request.content_length > maximum_request_bytes
+    ):
+        return jsonify(
+            {
+                "code": 413,
+                "msg": "GEO 黑盒实验面板请求不能超过 8 MB",
+                "data": None,
+            }
+        ), 413
+    if not request.is_json:
+        return jsonify(
+            {
+                "code": 415,
+                "msg": "GEO 黑盒实验面板只接受 JSON 请求",
+                "data": None,
+            }
+        ), 415
+    content_encoding = str(request.headers.get("Content-Encoding") or "").strip().lower()
+    if content_encoding not in {"", "identity"}:
+        return jsonify(
+            {
+                "code": 415,
+                "msg": "GEO 黑盒实验面板不接受压缩请求体",
+                "data": None,
+            }
+        ), 415
+
+    raw_body = request.stream.read(maximum_request_bytes + 1)
+    if len(raw_body) > maximum_request_bytes:
+        return jsonify(
+            {
+                "code": 413,
+                "msg": "GEO 黑盒实验面板请求不能超过 8 MB",
+                "data": None,
+            }
+        ), 413
+    try:
+        data = json.loads(raw_body)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return jsonify(
+            {"code": 400, "msg": "GEO 黑盒实验面板 JSON 无效", "data": None}
+        ), 400
+    if not isinstance(data, dict):
+        return jsonify(
+            {"code": 400, "msg": "请求数据必须是 JSON 对象", "data": None}
+        ), 400
+
+    allowed_fields = {"snapshots"}
+    unsupported_fields = sorted(set(data) - allowed_fields)
+    if unsupported_fields:
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "实验面板请求包含不支持的字段: "
+                + ", ".join(unsupported_fields),
+                "data": None,
+            }
+        ), 400
+    if "snapshots" not in data:
+        return jsonify(
+            {"code": 400, "msg": "snapshots 字段必填", "data": None}
+        ), 400
+
+    try:
+        result = evaluate_geo_blackbox_panel(data["snapshots"])
+    except GEOBlackboxExperimentError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    return jsonify({"code": 200, "msg": "评估完成", "data": result}), 200
+
+
 @app.route('/api/geo/visibility/sample', methods=['POST'])
 def sample_geo_visibility():
     """Run explicitly confirmed live samples against the configured AI model."""
@@ -2773,12 +2879,16 @@ def build_geo_content_blueprint():
     if not isinstance(keywords, list):
         return jsonify({"code": 400, "msg": "keywords 必须是字符串数组", "data": None}), 400
     try:
-        length = int(data.get("length", 1000))
-        query_count = int(data.get("query_count", 12))
+        length = parse_article_length(data.get("length", 1000))
+    except ValueError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    raw_query_count = data.get("query_count", 12)
+    try:
+        query_count = int(raw_query_count)
     except (TypeError, ValueError):
-        return jsonify({"code": 400, "msg": "length 和 query_count 必须是整数", "data": None}), 400
-    if length not in ARTICLE_LENGTHS:
-        return jsonify({"code": 400, "msg": "文章长度仅支持 600、1000、1500", "data": None}), 400
+        return jsonify({"code": 400, "msg": "query_count 必须是整数", "data": None}), 400
+    if isinstance(raw_query_count, bool) or str(raw_query_count).strip() != str(query_count):
+        return jsonify({"code": 400, "msg": "query_count 必须是整数", "data": None}), 400
     if query_count < 6 or query_count > 30:
         return jsonify({"code": 400, "msg": "query_count 仅支持 6 到 30", "data": None}), 400
 
@@ -3976,6 +4086,29 @@ def _publish_job_payload(
             job=job,
             article=article,
         )
+    can_execute_real = bool(
+        not job["demo"]
+        and not app.config.get("DEMO_MODE", False)
+        and _real_publishing_authorized()
+        and app.config.get("ALLOW_REAL_PUBLISHING", False)
+        and app.config.get("PUBLISHING_RUNTIME_READY", False)
+        and job.get("account_id") is not None
+        and job["platform"] in REAL_PUBLISH_PLATFORMS
+        and (
+            job["platform"] != BILIBILI_PLATFORM_KEY
+            or app.config.get("ENABLE_BILIBILI_RUNTIME", False)
+        )
+        and job["status"] == "queued"
+    )
+    outcome = classify_publish_outcome(
+        status=job["status"],
+        message=job["message"],
+        reconciliation_required=job.get("reconciliation_required", False),
+        result_url=job["result_url"],
+        can_execute_real=can_execute_real,
+        account_id=job.get("account_id"),
+        demo=job["demo"],
+    )
     payload = {
         "job_id": job["id"],
         "article_id": job["article_id"],
@@ -4001,20 +4134,8 @@ def _publish_job_payload(
         "created_at": job["created_at"],
         "started_at": job["started_at"],
         "finished_at": job["finished_at"],
-        "can_execute_real": bool(
-            not job["demo"]
-            and not app.config.get("DEMO_MODE", False)
-            and _real_publishing_authorized()
-            and app.config.get("ALLOW_REAL_PUBLISHING", False)
-            and app.config.get("PUBLISHING_RUNTIME_READY", False)
-            and job.get("account_id") is not None
-            and job["platform"] in REAL_PUBLISH_PLATFORMS
-            and (
-                job["platform"] != BILIBILI_PLATFORM_KEY
-                or app.config.get("ENABLE_BILIBILI_RUNTIME", False)
-            )
-            and job["status"] == "queued"
-        ),
+        "can_execute_real": can_execute_real,
+        "outcome": outcome,
     }
     if "article_title" in job:
         payload["article_title"] = job["article_title"]

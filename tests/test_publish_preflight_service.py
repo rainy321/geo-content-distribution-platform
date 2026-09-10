@@ -67,7 +67,7 @@ class PublishPreflightServiceTests(unittest.TestCase):
                 publish_title="字" * 19,
             )
 
-    def test_bilibili_description_is_frozen_at_2000_without_hidden_truncation(self):
+    def test_bilibili_description_keeps_headroom_below_2000_hard_limit(self):
         exact = "字" * 2000
         result = build_platform_publish_variant(
             platform="bilibili",
@@ -75,16 +75,18 @@ class PublishPreflightServiceTests(unittest.TestCase):
             content=exact,
             tags=[],
         )
-        self.assertEqual(result["publish_content"], exact)
+        self.assertNotEqual(result["publish_content"], exact)
+        self.assertLessEqual(result["publish_length"], 1800)
         self.assertEqual(result["content_policy"]["hard_limit"], 2000)
+        self.assertEqual(result["content_policy"]["safe_limit"], 1800)
 
-        with self.assertRaisesRegex(PublishContentLimitError, "当前 2001 字"):
+        with self.assertRaisesRegex(PublishContentLimitError, "当前 1801 字"):
             build_platform_publish_variant(
                 platform="bilibili",
                 title="视频标题",
                 content="原稿",
                 tags=[],
-                publish_content="字" * 2001,
+                publish_content="字" * 1801,
             )
 
     def test_plain_text_conversion_happens_before_job_creation(self):

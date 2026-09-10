@@ -85,6 +85,36 @@ class ToutiaoPublishFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "processing")
         self.assertIn("等待平台审核", result["message"])
 
+    async def test_target_close_after_click_keeps_captured_submission_evidence(self):
+        button = Mock()
+        button.is_visible = AsyncMock(return_value=True)
+        button.is_enabled = AsyncMock(return_value=True)
+        button.click = AsyncMock()
+
+        page = Mock()
+        page.url = "https://mp.toutiao.com/profile_v4/graphic/articles"
+        page.get_by_role.side_effect = self._role_lookup({"发布": [button]})
+        page.wait_for_timeout = AsyncMock(
+            side_effect=RuntimeError(
+                "Target page, context or browser has been closed"
+            )
+        )
+        page.wait_for_load_state = AsyncMock(
+            side_effect=RuntimeError("Target closed")
+        )
+        page.remove_listener = Mock()
+
+        def register(_event, callback):
+            callback(_Response())
+
+        page.on = Mock(side_effect=register)
+
+        result = await click_exact_publish_and_observe(page)
+
+        button.click.assert_awaited_once()
+        self.assertEqual(result["status"], "processing")
+        self.assertIn("等待平台审核", result["message"])
+
     async def test_draft_save_success_is_not_submission_acceptance(self):
         evidence = await _summarize_submission_responses(
             [

@@ -630,7 +630,7 @@ class DesktopPackagingContractTests(unittest.TestCase):
             build_script,
         )
         self.assertIn(
-            'article_compiler_version = "geo-article-compiler-2.1.1"',
+            'article_compiler_version = "geo-article-compiler-2.2.0"',
             build_script,
         )
         self.assertIn(

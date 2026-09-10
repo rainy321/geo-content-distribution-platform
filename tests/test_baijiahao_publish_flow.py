@@ -73,6 +73,25 @@ class BaijiahaoPublishFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "processing")
         button.click.assert_awaited_once()
 
+    async def test_target_close_after_click_keeps_accepted_response(self):
+        button = self._button()
+        page = Mock()
+        page.url = "https://baijiahao.baidu.com/builder/rc/edit?type=news"
+        page.get_by_role.return_value = _Candidates([button])
+        page.wait_for_timeout = AsyncMock(
+            side_effect=RuntimeError(
+                "Target page, context or browser has been closed"
+            )
+        )
+        page.wait_for_load_state = AsyncMock(side_effect=RuntimeError("Target closed"))
+        page.remove_listener = Mock()
+        page.on = Mock(side_effect=lambda _event, callback: callback(_Response()))
+
+        result = await click_exact_publish_and_observe(page)
+
+        self.assertEqual(result["status"], "processing")
+        self.assertIn("等待平台审核", result["message"])
+
     async def test_public_url_from_response_is_success(self):
         evidence = await _summarize_responses(
             [_Response({"url": "https://baijiahao.baidu.com/s?id=123456789"})]

@@ -50,7 +50,7 @@ class GEOArticleCompilerApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         blueprint = response.get_json()["data"]
-        self.assertEqual(blueprint["compiler_version"], "geo-article-compiler-2.1.1")
+        self.assertEqual(blueprint["compiler_version"], "geo-article-compiler-2.2.0")
         self.assertEqual(blueprint["query_matrix"]["total"], 12)
         self.assertEqual(blueprint["query_matrix"]["primary_intent"], "comparison")
         self.assertFalse(blueprint["methodology"]["external_model_used"])

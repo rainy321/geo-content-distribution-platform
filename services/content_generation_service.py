@@ -24,7 +24,10 @@ from services.content_generation_run_service import (
     mark_succeeded,
     mark_unknown,
 )
-from services.content_hygiene_service import sanitize_generated_content
+from services.content_hygiene_service import (
+    constrain_generated_content_length,
+    sanitize_generated_content,
+)
 from services.geo_score_service import score_geo_content
 from services.geo_article_compiler_service import score_ai_citeability
 
@@ -179,6 +182,28 @@ class ContentGenerationService:
                             [
                                 *result.warnings,
                                 "已移除未完成的作者、日期或证据占位标记",
+                            ]
+                        )
+                    ),
+                )
+            length_guard = constrain_generated_content_length(
+                result.content,
+                request.length,
+            )
+            if length_guard.changed:
+                result = replace(
+                    result,
+                    content=length_guard.content,
+                    warnings=tuple(
+                        dict.fromkeys(
+                            [
+                                *result.warnings,
+                                (
+                                    "模型正文超过目标字数，已在本地按完整语句自动压缩："
+                                    f"{length_guard.original_length} → "
+                                    f"{length_guard.final_length} 字（上限 "
+                                    f"{length_guard.limit} 字）"
+                                ),
                             ]
                         )
                     ),
