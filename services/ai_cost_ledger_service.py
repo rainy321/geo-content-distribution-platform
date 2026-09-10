@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
-AI_COST_LEDGER_VERSION = "ai-cost-ledger-1.2.0"
+AI_COST_LEDGER_VERSION = "ai-cost-ledger-1.2.1"
 AI_PRICE_CATALOG_ENV = "AI_PRICE_CATALOG_JSON"
 AI_USAGE_OPERATIONS = frozenset(
     {"generate", "optimize", "platform_adapt", "visibility_sample"}

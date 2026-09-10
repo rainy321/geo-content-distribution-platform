@@ -157,6 +157,52 @@ class ContentEngineAdapterTests(unittest.TestCase):
         self.assertEqual(result.usage["input_tokens"], 120)
         self.assertEqual(result.usage["output_tokens"], 80)
 
+    def test_openai_compatible_adapter_preserves_actual_configured_provider(self):
+        def fake_post(*args, **kwargs):
+            return FakeResponse(
+                {
+                    "id": "doubao-request-1",
+                    "model": "doubao-seed-2-1-turbo-260628",
+                    "choices": [
+                        {
+                            "message": {
+                                "content": json.dumps(
+                                    {
+                                        "title": "豆包标题",
+                                        "summary": "摘要",
+                                        "content": "北京同于野科技有限公司的说明。",
+                                        "tags": ["同于野"],
+                                        "faq": [],
+                                    },
+                                    ensure_ascii=False,
+                                )
+                            }
+                        }
+                    ],
+                    "usage": {
+                        "prompt_tokens": 30,
+                        "completion_tokens": 20,
+                        "total_tokens": 50,
+                    },
+                }
+            )
+
+        adapter = QwenContentEngineAdapter(
+            settings=AISettings(
+                base_url="https://ark.cn-beijing.volces.com/api/v3",
+                api_key="secret",
+                model="doubao-seed-2-1-turbo-260628",
+                provider="doubao",
+            ),
+            http_post=fake_post,
+        )
+
+        result = adapter.generate(request())
+
+        self.assertEqual(result.engine, "doubao")
+        self.assertEqual(result.engine_version, "doubao-seed-2-1-turbo-260628")
+        self.assertEqual(result.usage["total_tokens"], 50)
+
     def test_mock_adapter_is_deterministic(self):
         adapter = MockContentEngineAdapter(
             [{"title": "Mock 标题", "content": "## 正文\nMock 正文"}]

@@ -20,6 +20,7 @@ from services.ai_service import (
     AISettings,
     generate_geo_content_detailed,
     is_definite_pre_send_connection_error,
+    provider_label_for_settings,
 )
 from services.content_engine_contract import (
     CONTENT_ENGINE_CONTRACT_VERSION,
@@ -60,6 +61,7 @@ class QwenContentEngineAdapter:
 
     def generate(self, request: ContentGenerationRequest) -> ContentGenerationResult:
         try:
+            effective_settings = self.settings or AISettings.from_environment()
             generated = generate_geo_content_detailed(
                 project=request.project_context,
                 topic=request.topic,
@@ -68,7 +70,7 @@ class QwenContentEngineAdapter:
                 content_type=request.content_type,
                 target_platform=request.target_platform,
                 template_instruction=request.template_instruction,
-                settings=self.settings,
+                settings=effective_settings,
                 http_post=self.http_post,
                 strict=True,
             )
@@ -89,9 +91,14 @@ class QwenContentEngineAdapter:
         except AIServiceError as exc:
             raise ContentEngineError(str(exc), trace_id=request.request_id) from exc
 
+        # ``QwenContentEngineAdapter`` is the historical name of the generic
+        # OpenAI-compatible transport.  The actual configured vendor can be
+        # Qwen, Doubao, DeepSeek or a custom service, so persist the resolved
+        # provider instead of mislabelling every generation and bill as Qwen.
+        actual_provider = provider_label_for_settings(effective_settings)
         payload = {
             **dict(generated.article),
-            "engine": self.name,
+            "engine": actual_provider,
             "engine_version": generated.model,
             "request_id": request.request_id,
             "trace_id": generated.provider_request_id or request.request_id,
@@ -100,7 +107,7 @@ class QwenContentEngineAdapter:
         }
         return ContentGenerationResult.from_payload(
             payload,
-            default_engine=self.name,
+            default_engine=actual_provider,
             default_engine_version=generated.model,
             request_id=request.request_id,
             trace_id=generated.provider_request_id,
