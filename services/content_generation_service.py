@@ -200,12 +200,12 @@ class ContentGenerationService:
                 primary_error,
                 run,
                 request,
-                attempted_engine=self.primary_adapter.name,
+                attempted_engine=_adapter_provider_name(self.primary_adapter),
             )
             if primary_error.safe_to_fallback and self.fallback_adapter is not None:
                 try:
                     result = self.fallback_adapter.generate(request).with_fallback(
-                        self.primary_adapter.name,
+                        _adapter_provider_name(self.primary_adapter),
                         f"主引擎连接失败，已回退到 {self.fallback_adapter.name}",
                     )
                 except ContentEngineError as fallback_error:
@@ -213,8 +213,8 @@ class ContentGenerationService:
                         fallback_error,
                         run,
                         request,
-                        attempted_engine=self.fallback_adapter.name,
-                        fallback_from=self.primary_adapter.name,
+                        attempted_engine=_adapter_provider_name(self.fallback_adapter),
+                        fallback_from=_adapter_provider_name(self.primary_adapter),
                     )
                     self._record_error(run.run_id, fallback_error)
                     raise
@@ -230,7 +230,7 @@ class ContentGenerationService:
                 error,
                 run,
                 request,
-                attempted_engine=self.primary_adapter.name,
+                attempted_engine=_adapter_provider_name(self.primary_adapter),
             )
             mark_failed(self.database_path, run.run_id, error)
             raise error from exc
@@ -839,6 +839,12 @@ class ContentGenerationService:
         error.run_id = run.run_id
         error.request_id = run.request_id
         raise error
+
+
+def _adapter_provider_name(adapter: ContentEngineAdapter) -> str:
+    """Use a vendor identity for audit fields while preserving route names."""
+
+    return str(getattr(adapter, "provider_name", "") or adapter.name).strip()
 
 
 _LOCAL_CONTENT_WARNING_PREFIXES = (

@@ -10,10 +10,16 @@ from unittest.mock import Mock, patch
 import requests
 
 from db.createTable import initialize_database
-from services.ai_service import AIOptimizationResult, AIServiceError, AISettings
+from services.ai_service import (
+    AIGenerationResult,
+    AIOptimizationResult,
+    AIServiceError,
+    AISettings,
+)
 from services.content_engine_adapters import (
     ColleagueContentEngineAdapter,
     MockContentEngineAdapter,
+    QwenContentEngineAdapter,
 )
 from services.content_engine_contract import (
     ContentEngineTimeoutError,
@@ -148,6 +154,91 @@ class ContentGenerationServiceTests(unittest.TestCase):
         self.assertEqual(
             run["result_payload"]["generation"]["ai_role"]["source_role"],
             "writer",
+        )
+
+    def test_openai_compatible_success_persists_actual_provider_to_run_and_ledger(self):
+        settings = AISettings(
+            provider="doubao",
+            base_url="https://ark.cn-beijing.volces.com/api/v3",
+            api_key="synthetic-secret",
+            model="doubao-writer-model",
+        )
+        generated = AIGenerationResult(
+            article=engine_payload(
+                title="豆包生成结果",
+                usage={"input_tokens": 30, "output_tokens": 20, "total_tokens": 50},
+            ),
+            model="doubao-writer-model-202609",
+            provider_request_id="doubao-request-success",
+            elapsed_ms=4,
+            usage={"input_tokens": 30, "output_tokens": 20, "total_tokens": 50},
+        )
+        adapter = QwenContentEngineAdapter(settings=settings)
+
+        with patch(
+            "services.content_engine_adapters.generate_geo_content_detailed",
+            return_value=generated,
+        ):
+            result = ContentGenerationService(self.db_path, adapter).generate(
+                self.request(request_id="doubao-success", idempotency_key="doubao-success-key")
+            )
+
+        self.assertEqual(adapter.name, "qwen")
+        self.assertEqual(adapter.provider_name, "doubao")
+        self.assertEqual(result["generation"]["engine"], "doubao")
+        run = get_run(self.db_path, result["generation"]["run_id"])
+        self.assertEqual(run["configured_engine"], "qwen")
+        self.assertEqual(run["actual_engine"], "doubao")
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            receipt = conn.execute(
+                """
+                SELECT provider, model, usage_status, total_tokens
+                FROM ai_usage_ledger WHERE operation = 'generate'
+                """
+            ).fetchone()
+        self.assertEqual(
+            receipt,
+            ("doubao", "doubao-writer-model-202609", "reported", 50),
+        )
+
+    def test_openai_compatible_timeout_persists_actual_provider_to_unknown_receipt(self):
+        def read_timeout(*args, **kwargs):
+            raise requests.ReadTimeout("synthetic timeout")
+
+        adapter = QwenContentEngineAdapter(
+            settings=AISettings(
+                provider="doubao",
+                base_url="https://ark.cn-beijing.volces.com/api/v3",
+                api_key="synthetic-secret",
+                model="doubao-writer-model",
+            ),
+            http_post=read_timeout,
+        )
+
+        with self.assertRaises(ContentEngineTimeoutError) as raised:
+            ContentGenerationService(self.db_path, adapter).generate(
+                self.request(
+                    request_id="doubao-timeout",
+                    idempotency_key="doubao-timeout-key",
+                    website="https://www.example.com",
+                )
+            )
+
+        run = get_run(self.db_path, raised.exception.run_id)
+        self.assertEqual(run["configured_engine"], "qwen")
+        self.assertEqual(run["actual_engine"], "doubao")
+        self.assertEqual(run["status"], "unknown")
+        self.assertEqual(raised.exception.attempted_engine, "doubao")
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            receipt = conn.execute(
+                """
+                SELECT provider, model, usage_status, total_tokens, cost_status
+                FROM ai_usage_ledger WHERE operation = 'generate'
+                """
+            ).fetchone()
+        self.assertEqual(
+            receipt,
+            ("doubao", "unknown", "unknown", None, "unknown_usage"),
         )
 
     def test_unconfigured_reviewer_is_explicit_writer_only_without_fake_receipt(self):

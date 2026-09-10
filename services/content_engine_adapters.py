@@ -59,6 +59,16 @@ class QwenContentEngineAdapter:
         self.http_post = http_post
         self.version = settings.model if settings is not None else (os.getenv("AI_MODEL", "").strip() or "unknown")
 
+    @property
+    def provider_name(self) -> str:
+        """Return the configured vendor without changing the legacy route name."""
+
+        try:
+            settings = self.settings or AISettings.from_environment()
+        except AIConfigurationError:
+            return self.name
+        return provider_label_for_settings(settings)
+
     def generate(self, request: ContentGenerationRequest) -> ContentGenerationResult:
         try:
             effective_settings = self.settings or AISettings.from_environment()

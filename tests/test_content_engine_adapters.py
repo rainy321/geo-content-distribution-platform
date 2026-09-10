@@ -199,6 +199,8 @@ class ContentEngineAdapterTests(unittest.TestCase):
 
         result = adapter.generate(request())
 
+        self.assertEqual(adapter.name, "qwen")
+        self.assertEqual(adapter.provider_name, "doubao")
         self.assertEqual(result.engine, "doubao")
         self.assertEqual(result.engine_version, "doubao-seed-2-1-turbo-260628")
         self.assertEqual(result.usage["total_tokens"], 50)
