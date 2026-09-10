@@ -50,8 +50,12 @@ try {
         throw "geo_desktop.py APP_VERSION does not match project version $version"
     }
     $frontendPackage = Get-Content -Raw -LiteralPath (Join-Path $frontendRoot "package.json") | ConvertFrom-Json
-    $frontendLock = Get-Content -Raw -LiteralPath (Join-Path $frontendRoot "package-lock.json") | ConvertFrom-Json
-    if ($frontendPackage.version -ne $version -or $frontendLock.version -ne $version) {
+    # npm lockfiles use packages[""] for the root package.  PowerShell's
+    # PSCustomObject JSON conversion rejects that valid empty property name,
+    # while a hashtable preserves it and still lets us validate the top-level
+    # release version.
+    $frontendLock = Get-Content -Raw -LiteralPath (Join-Path $frontendRoot "package-lock.json") | ConvertFrom-Json -AsHashtable
+    if ($frontendPackage.version -ne $version -or $frontendLock["version"] -ne $version) {
         throw "Frontend package versions do not match project version $version"
     }
     $versionParts = @($version.Split('.') | ForEach-Object { [int]$_ })
