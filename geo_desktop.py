@@ -95,6 +95,39 @@ def resolve_data_root(environ: Mapping[str, str] | None = None) -> Path:
     return (Path.home() / ".geo-content-platform").resolve()
 
 
+def resolve_desktop_ai_runtime(
+    paths: DesktopPaths,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Return the configured public provider/model without exposing secrets.
+
+    ``CONTENT_ENGINE`` names the legacy adapter route (normally ``qwen``), not
+    the OpenAI-compatible provider selected by the user. Desktop diagnostics
+    must read unified AI metadata rather than present the route as a provider.
+    """
+
+    values = os.environ if environ is None else environ
+    provider = str(values.get("AI_PROVIDER", "")).strip().lower()
+    model = str(values.get("AI_MODEL", "")).strip()
+    try:
+        from services.unified_ai_config_service import (
+            UnifiedAIConfigError,
+            UnifiedAIConfigService,
+        )
+
+        status = UnifiedAIConfigService(paths.ai_config).status()
+        if status.configured:
+            provider = str(status.provider or provider).strip().lower()
+            model = str(status.model or model).strip()
+    except (UnifiedAIConfigError, OSError, ValueError):
+        # Diagnostic metadata must never prevent the desktop shell starting.
+        pass
+    return {
+        "provider": provider or "unconfigured",
+        "model": model or "unknown",
+    }
+
+
 def resolve_resource_root() -> Path:
     """Return the PyInstaller extraction root or the source checkout root."""
 
@@ -403,6 +436,7 @@ class DesktopApi:
         from services.local_auth_service import LocalAuthService
 
         auth_status = LocalAuthService(self.paths.auth_config).status()
+        ai_runtime = resolve_desktop_ai_runtime(self.paths)
         publishing_profile = str(
             self.build_info.get("publishing_profile") or PUBLISHING_PROFILE_SAFE
         )
@@ -446,7 +480,8 @@ class DesktopApi:
             "desktop": True,
             "version": APP_VERSION,
             "data_directory": str(self.paths.root),
-            "content_engine": str(os.getenv("CONTENT_ENGINE", "qwen")),
+            "content_engine": ai_runtime["provider"],
+            "content_engine_model": ai_runtime["model"],
             "fallback_engine": str(
                 os.getenv("CONTENT_ENGINE_FALLBACK", "disabled")
             ),

@@ -966,7 +966,6 @@ const generateButtonLabel = computed(() => {
   if (isRateLimited.value) return `${rateLimitRemaining.value} 秒后可重试`
   return 'AI 生成 GEO 内容'
 })
-const expectedEngineLabel = computed(() => engineStatus.value?.engine || '内容引擎')
 const unifiedAIEngineLabel = computed(() => {
   if (!unifiedAIStatus.configured) return '统一 AI 引擎尚未配置'
   if (unifiedAIStatus.providerLabel && unifiedAIStatus.model) {
@@ -974,6 +973,11 @@ const unifiedAIEngineLabel = computed(() => {
   }
   return unifiedAIStatus.model || unifiedAIStatus.providerLabel || '运行环境模型'
 })
+const expectedEngineLabel = computed(() => (
+  unifiedAIStatus.configured
+    ? unifiedAIEngineLabel.value
+    : (engineStatus.value?.engine || '内容引擎')
+))
 
 const tokenUsageLabel = computed(() => {
   const usage = generationReceipt.value?.tokenUsage
@@ -1377,7 +1381,7 @@ const fetchUnifiedAIStatus = async () => {
 }
 
 const handleUnifiedAIConfigChanged = () => {
-  void fetchUnifiedAIStatus()
+  void Promise.all([fetchUnifiedAIStatus(), fetchEngineStatus()])
 }
 
 const loadGeoBlueprint = async () => {
@@ -2059,6 +2063,7 @@ onMounted(async () => {
 
 onActivated(() => {
   if (!initialRouteHydrated || generating.value) return
+  void Promise.all([fetchUnifiedAIStatus(), fetchEngineStatus()])
   const articleId = Number.parseInt(route.query.articleId, 10)
   if (
     Number.isInteger(articleId)

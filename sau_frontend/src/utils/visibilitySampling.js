@@ -6,6 +6,10 @@ const numberOrNull = value => {
   return Number.isFinite(number) ? number : null
 }
 
+// Keep this display contract aligned with the backend sampling policy.  The
+// authoritative value is still returned on every new sampling receipt.
+export const VISIBILITY_SAMPLE_OUTPUT_TOKEN_LIMIT = 768
+
 export const VISIBILITY_PROVIDER_PRESETS = Object.freeze([
   Object.freeze({
     id: 'qwen',
@@ -174,6 +178,19 @@ export const normalizeVisibilitySamplingResponse = value => {
       promptSha256: String(disclosure.prompt_sha256 || ''),
       boundary: String(disclosure.boundary || '')
     },
+    requestPolicy: root.request_policy && typeof root.request_policy === 'object'
+      ? {
+          execution: String(root.request_policy.execution || ''),
+          maxOutputTokens: numberOrNull(root.request_policy.max_output_tokens),
+          timeoutSeconds: numberOrNull(root.request_policy.timeout_seconds),
+          connectionTestEquivalent: Boolean(root.request_policy.connection_test_equivalent)
+        }
+      : {
+          execution: '',
+          maxOutputTokens: null,
+          timeoutSeconds: null,
+          connectionTestEquivalent: false
+        },
     grounding: root.grounding && typeof root.grounding === 'object' ? root.grounding : {},
     retryPolicy: root.retry_policy && typeof root.retry_policy === 'object' ? root.retry_policy : {}
   }

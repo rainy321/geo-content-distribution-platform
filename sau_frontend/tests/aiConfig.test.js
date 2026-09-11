@@ -252,6 +252,7 @@ test('content creation and visibility show the same unified engine bus', () => {
   const visibility = readFileSync(new URL('../src/views/AiVisibility.vue', import.meta.url), 'utf8')
   assert.match(creation, /UNIFIED AI BUS/)
   assert.match(creation, /fetchUnifiedAIStatus/)
+  assert.match(creation, /unifiedAIStatus\.configured\s*\?\s*unifiedAIEngineLabel\.value/)
   assert.match(visibility, /UNIFIED AI BUS/)
   assert.match(visibility, /useUnifiedEngine: true/)
 })

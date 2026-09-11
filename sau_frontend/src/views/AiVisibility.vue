@@ -330,6 +330,31 @@
                 <small v-if="liveSamplingReceipt.failure.outcomeUnknown">远端结果未知：先查模型账单，不要直接重发。</small>
               </div>
 
+              <section v-if="hasUnknownSamplingOutcome" class="sampling-recovery-rail" aria-label="结果未知恢复流程">
+                <header>
+                  <span>UNKNOWN OUTCOME / 安全恢复</span>
+                  <strong>连接正常，不等于完整回答能在时限内生成完</strong>
+                  <p>{{ samplingRequestPolicyText }}</p>
+                </header>
+                <ol>
+                  <li>
+                    <span>01</span>
+                    <div><strong>只查原请求</strong><small>读取本机保存的同一请求，不会调用模型。</small></div>
+                    <el-button :loading="samplingRecoveryLoading" @click="checkOriginalSamplingStatus">检查原请求状态</el-button>
+                  </li>
+                  <li>
+                    <span>02</span>
+                    <div><strong>核对供应商账单</strong><small>确认未知请求是否实际产生 Token 与费用。</small></div>
+                    <el-button @click="openSamplingCostLedger">打开成本账单</el-button>
+                  </li>
+                  <li>
+                    <span>03</span>
+                    <div><strong>明确创建新调用</strong><small>改为 1 次短回答；会产生新的请求身份和潜在费用。</small></div>
+                    <el-button type="primary" @click="confirmSingleReplacementSample">新建 1 次采样</el-button>
+                  </li>
+                </ol>
+              </section>
+
               <div v-if="liveSamplingReceipt?.executions.length" class="execution-receipts">
                 <article v-for="execution in liveSamplingReceipt.executions" :key="execution.index">
                   <span>#{{ String(execution.index).padStart(2, '0') }}</span>
@@ -1023,7 +1048,7 @@
 <script setup>
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowRight, Document, Grid, Link, Loading, Refresh, View, WarningFilled } from '@element-plus/icons-vue'
 
 import { projectApi } from '@/api/project'
@@ -1045,6 +1070,7 @@ import {
 } from '@/utils/visibilityResult'
 import {
   VISIBILITY_PROVIDER_PRESETS,
+  VISIBILITY_SAMPLE_OUTPUT_TOKEN_LIMIT,
   applyVisibilityProviderPreset,
   buildManualSampleImport,
   buildVisibilitySamplingRequest,
@@ -1078,6 +1104,7 @@ const diagnosticLoading = ref(false)
 const commercialLoading = ref(false)
 const commercialError = ref('')
 const samplingLoading = ref(false)
+const samplingRecoveryLoading = ref(false)
 const samplingError = ref('')
 const liveSamplingReceipt = ref(null)
 const samplingResumeMessage = ref('')
@@ -1160,6 +1187,16 @@ const samplingDraft = computed(() => ({
 }))
 const samplingIssues = computed(() => validateVisibilitySamplingDraft(samplingDraft.value))
 const canStartSampling = computed(() => !samplingLoading.value && samplingIssues.value.length === 0)
+const hasUnknownSamplingOutcome = computed(() => Boolean(
+  liveSamplingReceipt.value?.failure?.outcomeUnknown
+))
+const samplingRequestPolicyText = computed(() => {
+  const policy = liveSamplingReceipt.value?.requestPolicy || {}
+  const tokenLimit = policy.maxOutputTokens || VISIBILITY_SAMPLE_OUTPUT_TOKEN_LIMIT
+  const timeout = policy.timeoutSeconds
+  const timeoutText = timeout ? `，单次等待 ${timeout} 秒` : ''
+  return `连接测试只要求模型回复“OK”；真实采样会生成完整回答。新版采样已独立限制为最多 ${tokenLimit} 个输出 Token${timeoutText}，不再复用写稿的 4096 Token 预算。`
+})
 const parsedResponses = computed(() => parseVisibilityResponses(form.responsesText))
 const sampleCount = computed(() => parsedResponses.value.length)
 const responseError = computed(() => {
@@ -1557,6 +1594,56 @@ const applyLiveSamplingOutcome = async receipt => {
     void loadCommercialOverview(form.projectId)
     void runCommercialDiagnostic({ silent: true })
   }
+}
+
+const checkOriginalSamplingStatus = async () => {
+  const requestId = liveSamplingReceipt.value?.requestId
+  if (!requestId || samplingRecoveryLoading.value) return
+  samplingRecoveryLoading.value = true
+  try {
+    const response = await diagnosticsApi.getVisibilitySample(requestId, {
+      suppressGlobalError: true
+    })
+    await finishRestoredSampling(response.data)
+  } catch (error) {
+    const responseData = error?.response?.data
+    const terminalStatus = String(responseData?.data?.status || '')
+    if (['completed', 'partial', 'need_action'].includes(terminalStatus)) {
+      await finishRestoredSampling(responseData)
+    } else {
+      samplingError.value = `无法读取原请求：${readableError(error)}；没有创建新的模型调用。`
+    }
+  } finally {
+    samplingRecoveryLoading.value = false
+  }
+}
+
+const openSamplingCostLedger = () => {
+  router.push({
+    path: '/cost-ledger',
+    query: form.projectId ? { project_id: String(form.projectId) } : {}
+  })
+}
+
+const confirmSingleReplacementSample = async () => {
+  if (samplingLoading.value) return
+  try {
+    await ElMessageBox.confirm(
+      `这不是重试原请求，而是创建一个新的供应商调用。系统会把样本数改为 1，并将回答限制在 ${VISIBILITY_SAMPLE_OUTPUT_TOKEN_LIMIT} 个输出 Token 内；仍可能产生费用。请先核对供应商账单。`,
+      '确认新建 1 次采样',
+      {
+        confirmButtonText: '已核账，创建新调用',
+        cancelButtonText: '取消',
+        type: 'warning',
+        distinguishCancelAndClose: true
+      }
+    )
+  } catch {
+    return
+  }
+  sampling.sampleCount = 1
+  sampling.confirmed = true
+  await startLiveSampling()
 }
 
 const startLiveSampling = async () => {
@@ -2305,6 +2392,25 @@ onBeforeUnmount(() => {
   > footer small { color: var(--muted); font-size: 8px; }
 }
 .sampling-failure { margin: 12px 0 0; padding: 11px 12px; border: 1px solid #dfb6b2; background: #fff4f3; color: #8f4640; font-size: 10px; line-height: 1.55; p { margin: 4px 0 0; } small { display: block; margin-top: 6px; font-weight: 700; } }
+.sampling-recovery-rail {
+  margin-top: 12px;
+  border: 1px solid #d8c49f;
+  background: #fffaf1;
+  > header { padding: 13px 14px; border-bottom: 1px solid #e5d7bd; }
+  > header span { color: #8a642b; font: 700 8px/1 "Cascadia Mono", monospace; letter-spacing: .09em; }
+  > header strong { display: block; margin-top: 7px; color: #282522; font-size: 11px; }
+  > header p { margin: 5px 0 0; color: #6e6252; font-size: 9px; line-height: 1.55; }
+  ol { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0; padding: 0; list-style: none; }
+  li { display: grid; grid-template-columns: 28px minmax(0, 1fr); gap: 9px; align-content: start; padding: 13px; }
+  li + li { border-left: 1px solid #e5d7bd; }
+  li > span { display: grid; width: 26px; height: 26px; place-items: center; border: 1px solid #b99359; border-radius: 50%; color: #805a24; font: 700 8px/1 "Cascadia Mono", monospace; }
+  li > div { min-width: 0; }
+  li strong, li small { display: block; }
+  li strong { color: #2e2a25; font-size: 10px; }
+  li small { margin-top: 4px; color: #756958; font-size: 8px; line-height: 1.45; }
+  li :deep(.el-button) { grid-column: 1 / -1; width: 100%; margin-top: 9px; border-radius: 5px; }
+  li :deep(.el-button--primary) { border-color: var(--ink); background: var(--ink); }
+}
 .execution-receipts { display: grid; gap: 7px; margin-top: 13px; > article { display: grid; grid-template-columns: 32px minmax(0, 1fr) minmax(220px, auto); gap: 10px; align-items: center; padding: 10px 11px; border: 1px solid #e0e1de; border-radius: 5px; background: #fafaf8; } > article > span { color: #67696d; font: 700 9px/1 "Cascadia Mono", monospace; } > article > div { display: flex; min-width: 0; flex-direction: column; gap: 4px; } > article > div strong { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; } > article > div small { overflow: hidden; color: var(--muted); font: 8px/1.3 "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; } dl { display: grid; grid-template-columns: repeat(2, minmax(100px, 1fr)); gap: 10px; margin: 0; } dl > div { min-width: 0; } dt { color: #85878b; font-size: 7px; } dd { margin: 4px 0 0; color: #38393d; font-size: 8px; line-height: 1.35; } }
 .receipt-boundary { margin-top: 12px; padding: 11px 12px; border: 1px solid #e0e1de; background: #f6f6f3; p { margin: 0; color: #686a6f; font-size: 8px; line-height: 1.65; } p + p { margin-top: 4px; } strong { color: #303135; } }
 .captured-response-list { margin-top: 11px; border: 1px solid #dedfdb; border-radius: 5px; summary { padding: 10px 12px; cursor: pointer; color: #404145; font-size: 9px; font-weight: 700; } > article { padding: 12px; border-top: 1px solid #e3e4e1; } > article strong { font: 700 8px/1.3 "Cascadia Mono", monospace; } > article p { max-height: 180px; overflow: auto; margin: 8px 0 0; color: #55575b; font-size: 9px; line-height: 1.65; white-space: pre-wrap; } }
@@ -2889,6 +2995,8 @@ onBeforeUnmount(() => {
   .dispatch-confirm :deep(.el-button) { width: 100%; }
   .execution-receipts > article { grid-template-columns: 28px minmax(0, 1fr); }
   .execution-receipts dl { grid-column: 2; }
+  .sampling-recovery-rail ol { grid-template-columns: 1fr; }
+  .sampling-recovery-rail li + li { border-top: 1px solid #e5d7bd; border-left: 0; }
   .manual-divider { align-items: flex-start; flex-direction: column; gap: 5px; }
   .prompt-field, .responses-field { grid-column: auto; }
   .answer-guidance, .console-footer { align-items: flex-start; flex-direction: column; }

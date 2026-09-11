@@ -13,6 +13,7 @@ from services.ai_service import (
     sample_ai_prompt_detailed,
 )
 from services.ai_visibility_sampling_service import (
+    VISIBILITY_SAMPLE_MAX_OUTPUT_TOKENS,
     VisibilitySamplingConflictError,
     VisibilitySamplingInProgressError,
     VisibilitySamplingValidationError,
@@ -133,10 +134,26 @@ class AIVisibilitySamplingServiceTests(unittest.TestCase):
         self.assertIn("project_record", data["data_disclosure"]["not_sent_to_provider"])
         self.assertFalse(data["grounding"]["web_search_requested"])
         self.assertFalse(data["grounding"]["web_search_verified"])
+        self.assertEqual(
+            data["request_policy"]["max_output_tokens"],
+            VISIBILITY_SAMPLE_MAX_OUTPUT_TOKENS,
+        )
+        self.assertEqual(
+            data["request_policy"]["execution"],
+            "sequential_stop_on_first_failure",
+        )
+        self.assertFalse(data["request_policy"]["connection_test_equivalent"])
         self.assertEqual([set(item) for item in calls], [{"prompt", "settings"}] * 2)
         self.assertTrue(
             all(
                 item["prompt"] == "哪些 AI 助手部署产品值得考虑？"
+                for item in calls
+            )
+        )
+        self.assertTrue(
+            all(
+                item["settings"].max_tokens
+                == VISIBILITY_SAMPLE_MAX_OUTPUT_TOKENS
                 for item in calls
             )
         )

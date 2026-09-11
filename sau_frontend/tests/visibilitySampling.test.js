@@ -4,6 +4,7 @@ import test from 'node:test'
 
 import {
   VISIBILITY_PROVIDER_PRESETS,
+  VISIBILITY_SAMPLE_OUTPUT_TOKEN_LIMIT,
   applyVisibilityProviderPreset,
   buildManualSampleImport,
   buildVisibilitySamplingRequest,
@@ -146,7 +147,13 @@ test('partial result keeps completed evidence, honest unknown cost and failure a
         not_sent_to_provider: ['project_record', 'stored_articles'],
         prompt_sha256: 'abc'
       },
-      retry_policy: { automatic_retry: false }
+      retry_policy: { automatic_retry: false },
+      request_policy: {
+        execution: 'sequential_stop_on_first_failure',
+        max_output_tokens: 768,
+        timeout_seconds: 120,
+        connection_test_equivalent: false
+      }
     }
   })
 
@@ -156,6 +163,9 @@ test('partial result keeps completed evidence, honest unknown cost and failure a
   assert.equal(result.executions[0].receipt.costStatus, 'unknown_usage')
   assert.equal(result.failure.outcomeUnknown, true)
   assert.equal(result.retryPolicy.automatic_retry, false)
+  assert.equal(result.requestPolicy.maxOutputTokens, VISIBILITY_SAMPLE_OUTPUT_TOKEN_LIMIT)
+  assert.equal(result.requestPolicy.timeoutSeconds, 120)
+  assert.equal(result.requestPolicy.connectionTestEquivalent, false)
   assert.equal(buildManualSampleImport(result), 'DongClaw 是一个选项。')
   assert.equal(JSON.stringify(result).includes('api_key'), false)
 })
@@ -175,4 +185,8 @@ test('EXE visibility view defaults to the unified engine and keeps explicit-call
   assert.match(viewSource, /撤销导入/)
   assert.match(viewSource, /不会自动重试/)
   assert.match(viewSource, /保留原请求身份并继续查询/)
+  assert.match(viewSource, /检查原请求状态/)
+  assert.match(viewSource, /打开成本账单/)
+  assert.match(viewSource, /新建 1 次采样/)
+  assert.match(viewSource, /这不是重试原请求/)
 })

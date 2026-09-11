@@ -2329,6 +2329,7 @@ def get_content_engine_status():
     try:
         engine_health = _create_content_generation_service().health()
     except (ContentEngineError, AIConfigurationError) as exc:
+        writer_role = _public_ai_role_resolution("writer")
         return jsonify(
             {
                 "code": 200,
@@ -2338,8 +2339,12 @@ def get_content_engine_status():
                     "status": "unavailable",
                     "ready": False,
                     "primary": {
-                        "engine": str(os.getenv("CONTENT_ENGINE", "qwen")).strip().lower(),
-                        "version": "unknown",
+                        "engine": str(
+                            writer_role.get("provider") or "unconfigured"
+                        ).strip().lower(),
+                        "version": str(
+                            writer_role.get("model") or "unknown"
+                        ).strip(),
                         "ready": False,
                         "status": "not_configured",
                     },

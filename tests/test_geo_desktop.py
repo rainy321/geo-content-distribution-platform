@@ -27,6 +27,7 @@ from geo_desktop import (
     reserve_loopback_socket,
     resolve_browser_executable,
     resolve_data_root,
+    resolve_desktop_ai_runtime,
     resolve_frontend_dir,
 )
 
@@ -45,6 +46,20 @@ class DesktopPathsTests(unittest.TestCase):
     def test_uses_local_app_data_for_normal_windows_install(self):
         result = resolve_data_root({"LOCALAPPDATA": r"C:\Users\Demo\AppData\Local"})
         self.assertEqual(APP_DIRECTORY_NAME, result.name)
+
+    def test_runtime_ai_descriptor_uses_provider_not_legacy_route_name(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = resolve_desktop_ai_runtime(
+                DesktopPaths.from_root(directory),
+                {
+                    "CONTENT_ENGINE": "qwen",
+                    "AI_PROVIDER": "doubao",
+                    "AI_MODEL": "doubao-seed-2-1-pro-260628",
+                },
+            )
+
+        self.assertEqual(runtime["provider"], "doubao")
+        self.assertEqual(runtime["model"], "doubao-seed-2-1-pro-260628")
 
     def test_creates_isolated_runtime_directories(self):
         with tempfile.TemporaryDirectory() as directory:

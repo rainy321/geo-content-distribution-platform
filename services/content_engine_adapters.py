@@ -127,8 +127,15 @@ class QwenContentEngineAdapter:
     def health(self) -> dict[str, Any]:
         configured = self.settings is not None or AISettings.environment_is_configured()
         model = self.settings.model if self.settings is not None else os.getenv("AI_MODEL", "").strip()
+        provider = self.provider_name
+        public_provider = (
+            provider if provider in {"qwen", "doubao", "deepseek"} else "custom"
+        )
         return {
-            "engine": self.name,
+            # ``name`` is the legacy route identity (qwen); the health API is
+            # user-facing and must report the actual configured public provider
+            # without exposing a private custom hostname.
+            "engine": public_provider,
             "version": model or "unknown",
             "ready": configured,
             "status": "ready" if configured else "not_configured",

@@ -11,7 +11,7 @@ from unittest.mock import patch
 from db.createTable import initialize_database
 from sau_backend import _create_content_generation_service, app
 from services.ai_image_generation_service import AIImageGenerationResult
-from services.ai_service import AICompletionResult, AISettings
+from services.ai_service import AICompletionResult, AIConfigurationError, AISettings
 from services.unified_ai_config_service import UnifiedAIConfigService
 
 
@@ -362,6 +362,52 @@ class UnifiedAIConfigApiTests(unittest.TestCase):
         self.assertTrue(data["ready"])
         self.assertEqual(data["primary"]["engine"], "qwen")
         self.assertEqual(data["primary"]["version"], "synthetic-model")
+
+    def test_content_engine_health_reports_doubao_not_legacy_qwen_route(self):
+        saved = self.client.put(
+            "/api/ai/config",
+            json=self.save_payload(
+                provider="doubao",
+                base_url="https://ark.cn-beijing.volces.com/api/v3",
+                model="doubao-seed-2-1-pro-260628",
+            ),
+        )
+        self.assertEqual(saved.status_code, 200)
+
+        response = self.client.get("/api/content-engine/status")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()["data"]
+        self.assertTrue(data["ready"])
+        self.assertEqual(data["primary"]["engine"], "doubao")
+        self.assertEqual(
+            data["primary"]["version"],
+            "doubao-seed-2-1-pro-260628",
+        )
+
+    def test_unavailable_health_still_reports_saved_provider_not_route_name(self):
+        self.config_service.save(
+            **self.save_payload(
+                provider="doubao",
+                base_url="https://ark.cn-beijing.volces.com/api/v3",
+                model="doubao-seed-2-1-pro-260628",
+            )
+        )
+
+        with patch(
+            "sau_backend._create_content_generation_service",
+            side_effect=AIConfigurationError("synthetic unavailable"),
+        ):
+            response = self.client.get("/api/content-engine/status")
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()["data"]
+        self.assertFalse(data["ready"])
+        self.assertEqual(data["primary"]["engine"], "doubao")
+        self.assertEqual(
+            data["primary"]["version"],
+            "doubao-seed-2-1-pro-260628",
+        )
 
     @patch("sau_backend.sample_ai_prompt_detailed")
     def test_connection_test_uses_fixed_synthetic_prompt_and_saved_config(self, sample):

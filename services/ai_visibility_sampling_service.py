@@ -13,6 +13,7 @@ import hashlib
 import json
 import sqlite3
 from contextlib import closing
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit
@@ -36,7 +37,8 @@ from services.ai_visibility_service import (
 )
 
 
-VISIBILITY_SAMPLING_VERSION = "controlled-live-visibility-sampling-1.0.0"
+VISIBILITY_SAMPLING_VERSION = "controlled-live-visibility-sampling-1.1.0"
+VISIBILITY_SAMPLE_MAX_OUTPUT_TOKENS = 768
 MIN_SAMPLE_COUNT = 1
 MAX_SAMPLE_COUNT = 5
 MAX_PROMPT_LENGTH = 8_000
@@ -146,10 +148,25 @@ def run_ai_visibility_sample(
     analysis_inputs: list[dict[str, Any]] = []
     failure: dict[str, Any] | None = None
     provider = provider_label_for_settings(settings)
+    # A visibility probe asks for a short answer, not a full article.  Reusing
+    # the writer's 4096-token ceiling allowed reasoning/generation to run until
+    # the 120-second transport timeout even though the fixed "reply OK" health
+    # check succeeded.  Keep credentials, endpoint, model and timeout intact,
+    # but cap only this workflow's output budget.
+    sampling_settings = replace(
+        settings,
+        max_tokens=max(
+            1,
+            min(int(settings.max_tokens), VISIBILITY_SAMPLE_MAX_OUTPUT_TOKENS),
+        ),
+    )
 
     for index in range(1, normalized["sample_count"] + 1):
         try:
-            completion = sampler(prompt=normalized["prompt"], settings=settings)
+            completion = sampler(
+                prompt=normalized["prompt"],
+                settings=sampling_settings,
+            )
         except AIServiceError as exc:
             failure = _provider_failure(exc, sample_index=index)
             break
@@ -308,6 +325,12 @@ def run_ai_visibility_sample(
             normalized["prompt"], normalized["sample_count"]
         ),
         "grounding": _grounding_boundary(),
+        "request_policy": {
+            "execution": "sequential_stop_on_first_failure",
+            "max_output_tokens": sampling_settings.max_tokens,
+            "timeout_seconds": sampling_settings.timeout_seconds,
+            "connection_test_equivalent": False,
+        },
         "retry_policy": {
             "automatic_retry": False,
             "same_key_replays_saved_result": True,
@@ -667,6 +690,7 @@ def _connect(database_path: str | Path) -> sqlite3.Connection:
 __all__ = [
     "MAX_SAMPLE_COUNT",
     "MIN_SAMPLE_COUNT",
+    "VISIBILITY_SAMPLE_MAX_OUTPUT_TOKENS",
     "VISIBILITY_SAMPLING_VERSION",
     "VisibilitySamplingConflictError",
     "VisibilitySamplingInProgressError",

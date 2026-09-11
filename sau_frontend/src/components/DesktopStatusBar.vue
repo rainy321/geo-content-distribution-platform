@@ -8,7 +8,7 @@
     <el-tooltip :content="publishingHint" placement="bottom">
       <div class="desktop-copy">
         <strong>桌面工作区</strong>
-        <span>{{ status.content_engine || '内容引擎' }} · {{ publishingLabel }}</span>
+        <span>{{ publishingLabel }} · 本机模式</span>
       </div>
     </el-tooltip>
     <el-tooltip content="打开本机数据目录" placement="bottom">
