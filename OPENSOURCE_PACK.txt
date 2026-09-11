@@ -1,4 +1,11 @@
-﻿OmniPost 开源打包说明
-已排除 cookies、cookiesFile、conf.py、数据库、logs、videoFile、.venv、node_modules、调试截图等。
-请复制 conf.example.py 为 conf.py 后再运行。
-远程仓库：https://github.com/rehatRobot/omnipost.git
+GEO Content Platform 源码交付说明
+
+请勿直接压缩工作目录。统一使用 PowerShell 7 执行：
+pwsh -NoProfile -File .\scripts\package_source.ps1
+
+脚本只导出当前 Git 提交，并排除 Cookie、账号会话、数据库、日志、
+本机 AI 配置、.venv、node_modules、output、.build 和历史 release。
+conf.py 只包含从环境变量读取的公开默认值，因此与 conf.example.py 一并保留。
+
+当前包属于内部工程交接；同事算法书面授权完成前，不得把包状态描述为
+已经完成对外商业源码分发授权。详见 docs/source-package.md。

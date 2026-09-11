@@ -2,7 +2,7 @@
 
 ## Test target
 
-- Reference: `C:\Users\zack\AppData\Local\Temp\codex-clipboard-27ef9968-c8c3-4a95-8934-9fdf71f189ba.png`
+- Reference: user-provided desktop UI reference image (not included in the source package).
 - Implementation: Vue interface embedded by the Windows EXE; no public-site delivery is implied.
 - Primary viewport: 1536 x 1024, DPR 1.
 - Responsive viewport: 1280 x 800, DPR 1.
@@ -10,10 +10,12 @@
 
 ## Evidence
 
-- Full reference/implementation comparison: `D:\CodexData\.codex\visualizations\2026\09\09\01a083cb-007a-7531-80c4-d5470fef5590\geo-reference-comparison.png` (3072 x 1100).
-- Dashboard at reference viewport: `D:\CodexData\.codex\visualizations\2026\09\09\01a083cb-007a-7531-80c4-d5470fef5590\geo-dashboard-reference-pass1.png` (1536 x 1024).
-- AI visibility and diagnostic workflow: `D:\CodexData\.codex\visualizations\2026\09\09\01a083cb-007a-7531-80c4-d5470fef5590\geo-ai-visibility-pass1.png` (1536 x 1024).
-- Dashboard responsive check: `D:\CodexData\.codex\visualizations\2026\09\09\01a083cb-007a-7531-80c4-d5470fef5590\geo-dashboard-1280.png` (1280 x 800).
+- Full reference/implementation comparison: `geo-reference-comparison.png` (3072 x 1100).
+- Dashboard at reference viewport: `geo-dashboard-reference-pass1.png` (1536 x 1024).
+- AI visibility and diagnostic workflow: `geo-ai-visibility-pass1.png` (1536 x 1024).
+- Dashboard responsive check: `geo-dashboard-1280.png` (1280 x 800).
+
+The rendered QA images live in the private design-review workspace and are intentionally not copied into a source delivery. The filenames above preserve the audit trail without leaking machine-specific paths.
 
 ## Visual comparison
 

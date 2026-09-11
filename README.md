@@ -33,7 +33,7 @@
 - [架构概览](#架构概览)
 - [环境要求](#环境要求)
 - [安装](#安装)
-- [在线演示与部署边界](#在线演示与部署边界)
+- [桌面交付与历史-Web-边界](#桌面交付与历史-web-边界)
 - [快速开始](#快速开始)
 - [平台能力](#平台能力)
 - [配置说明](#配置说明)
@@ -77,7 +77,7 @@
 ## 环境要求
 
 - Python **3.10+**（推荐 3.11）
-- Node.js **18+**（仅使用 Web 前端时需要）
+- Node.js **18+**（开发界面或构建内嵌 Vue 的桌面 EXE 时需要）
 - Windows / macOS / Linux
 - 推荐使用 [`uv`](https://github.com/astral-sh/uv) 管理依赖
 
@@ -160,50 +160,17 @@ DEMO_MODE=true python sau_backend.py
 
 Demo Mode 首次连接到**完全空的数据库**时，会在一个事务内准备“XX科技（示例数据）”、6 篇带“示例数据”标签的文章，以及覆盖成功、失败、等待确认和计划中状态的演示发布历史。重复启动不会重复写入；只要数据库里已有任意项目、文章或发布任务，种子服务就会跳过，不会把样例混进用户数据。可通过 `SEED_DEMO_DATA=false` 单独关闭这一行为。
 
-## 在线演示与部署边界
+## 桌面交付与历史 Web 边界
 
-Vercel 生产地址：[https://geo-content-distribution-platform.vercel.app](https://geo-content-distribution-platform.vercel.app)
+当前产品只交付 Windows 桌面 EXE，不再把旧 Vercel 演示站或独立网页部署作为产品入口。桌面程序在随机的 `127.0.0.1` 端口运行内置 Flask API，并通过 Edge WebView2 显示打包后的 `sau_frontend/`，因此前端目录仍是桌面软件源码的一部分。
 
-这是真实可访问的 GEO 管理台与 Demo API 部署，但不是云端媒体发布 Worker。线上固定使用 `DEMO_MODE=true`、`ALLOW_REAL_PUBLISHING=false`，不保存本地账号 Cookie，也不打包 Playwright、Patchright 和 OpenCV。SQLite、素材和示例数据位于 Vercel 函数的临时目录，实例重建后可能重置；默认 AI 连接已通过 Vercel Production 环境变量配置，密钥类型为 Secret。真实媒体登录和发布继续由本地浏览器 Worker 执行。
-
-当前在线演示启用了单运营者访问口令：口令只在部署环境中保存，验证成功后由后端签发 HttpOnly、SameSite=Lax 的短期会话 Cookie。AI 生成、优化和登录尝试默认使用进程内限流；配置 Upstash Redis 的两个 REST Secret 后会自动切换为跨实例原子计数，供应商暂时不可用时退回已预热的本地安全网。接入真实业务数据前，仍必须增加持久数据库/对象存储；云端真实媒体发布还需要独立长驻 Worker，且不得把媒体 Cookie 或模型密钥写进仓库或前端变量。
-
-### 生产访问控制与独立 Worker
-
-同时配置 `APP_ACCESS_PASSWORD` 和 `APP_SESSION_SECRET` 即可启用轻量访问门；只配置口令但缺少会话密钥时，后端会拒绝启动，避免误以为站点已受保护。该机制面向单一运营者和 MVP 演示，不是多用户权限系统。
-
-如果 Web 与调度器运行在同一台受控机器，保持 `RUN_PUBLISH_SCHEDULER=true` 即可；当前调度器只自动执行 Demo，并把到期真实任务推进到等待人工确认的队列。拆成独立进程时，Web 设置为 `RUN_PUBLISH_SCHEDULER=false`，再启动：
-
-```bash
-# 启动前自检；不会打开或访问任何发布平台
-sau-worker --check
-
-sau-worker
-
-# 只处理一批到期任务，适合外部 Cron
-sau-worker --once
-```
-
-Vercel 控制面、持久数据库、私有素材和本地/长驻 Worker 的生产拆分方案见 [生产基础设施落地清单](docs/production-infrastructure-plan.md)。
-
-`--check` 会验证数据库、Cookie/素材目录、已连接账号数量，以及真实模式所需的浏览器运行时；它只做本地准备与检查，不会访问知乎等发布平台。Worker 继续复用同一套 SQLite、素材目录、Cookie 目录、授权指纹和 PublisherAdapter。Web 与 Worker 必须挂载同一份持久数据；在没有持久存储的 Vercel 函数中不要启动媒体 Worker。
-
-### 6. Docker Compose 本地演示
-
-仓库提供 [`compose.yaml`](./compose.yaml)，默认只绑定本机 `127.0.0.1:5409`、开启 Demo Mode、关闭真实发布，并为 SQLite、Web Cookie 和媒体文件使用独立持久卷：
-
-```bash
-docker compose up --build -d
-docker compose ps
-```
-
-健康检查地址为 `http://127.0.0.1:5409/api/health`。首次构建需要下载 Python、Node 和 Chromium 依赖；当前 Compose 配置用于本机或受控内网演示，不是可直接暴露公网的生产安全配置。停止服务使用 `docker compose down`；不要附加 `-v`，除非确定要删除本地演示数据库、Cookie 和媒体持久卷。
+仓库暂时保留 `sau_web.py`、Docker/Compose、Vercel 和服务器部署样例，用于历史兼容、测试和后续代码迁移；这些文件不表示网站仍在维护，也不是运行 EXE 的前置条件。详细边界见 [历史 Web 说明](./docs/legacy-web.md) 与 [Windows 桌面版交付说明](./docs/windows-desktop.md)。
 
 ## 快速开始
 
-### 方式 A：Web 发布中心
+### 方式 A：桌面发布中心
 
-1. 启动后端 + 前端
+1. 启动 Windows EXE；源码开发时才分别启动后端与前端
 2. 在「品牌项目」维护品牌事实和核心关键词
 3. 使用「AI 内容创作」生成稿件，在「内容库」标记为就绪
 4. 在「发布中心」选择稿件与多个平台，创建即时或定时任务
@@ -211,7 +178,9 @@ docker compose ps
 
 适合日常运营与多账号可视化管理。
 
-### GEO Web API
+### 桌面内置 API
+
+以下接口由 EXE 内部的本机 Flask 服务提供；它们是桌面界面与业务层之间的契约，不代表需要部署公网网站。
 
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
@@ -382,6 +351,7 @@ cd sau_frontend && npm run build
 | [docs/update.md](./docs/update.md) | 更新说明 |
 | [docs/CLI.md](./docs/CLI.md) | `sau` CLI |
 | [docs/agent-bootstrap.md](./docs/agent-bootstrap.md) | 交给 AI Agent 的启动提示词 |
+| [docs/source-package.md](./docs/source-package.md) | 干净源码包的范围、生成、验收与重建说明 |
 | [docs/legacy-web.md](./docs/legacy-web.md) | 历史 Web 说明 |
 | [skills/*/SKILL.md](./skills) | 各平台 Agent Skill |
 
