@@ -123,6 +123,24 @@ try {
         }
     }
 
+    $verifiedSourceCommit = (git rev-parse HEAD).Trim()
+    Assert-NativeSuccess -Operation "Rechecking source commit" -ExitCode $LASTEXITCODE
+    if ($verifiedSourceCommit -ne $sourceCommit) {
+        throw "HEAD changed while tests were running; refusing to attach test results to a different snapshot."
+    }
+    $postTestStatus = @(git status --porcelain --untracked-files=all)
+    Assert-NativeSuccess -Operation "Rechecking Git source status" -ExitCode $LASTEXITCODE
+    $postTestDirtyEntries = @(
+        $postTestStatus | Where-Object {
+            $_ -and
+            -not $_.StartsWith("?? output/") -and
+            -not $_.StartsWith('?? "output/')
+        }
+    )
+    if ($postTestDirtyEntries.Count -gt 0) {
+        throw "Source files changed while tests were running; refusing to package an unverified snapshot."
+    }
+
     $buildInstant = [DateTime]::UtcNow
     $builtAtUtc = $buildInstant.ToString("yyyy-MM-ddTHH:mm:ssZ")
     $releaseId = (
@@ -139,16 +157,11 @@ try {
     New-Item -ItemType Directory -Path $packageRoot -Force | Out-Null
 
     Write-Host "[3/6] Exporting the committed source snapshot"
-    & git archive --format=zip "--output=$snapshotArchive" HEAD
+    & git archive --format=zip "--output=$snapshotArchive" $sourceCommit
     Assert-NativeSuccess -Operation "Exporting committed source" -ExitCode $LASTEXITCODE
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [System.IO.Compression.ZipFile]::ExtractToDirectory($snapshotArchive, $packageRoot)
 
-    $scannableExtensions = @(
-        ".bat", ".css", ".env", ".html", ".ini", ".js", ".json", ".lock",
-        ".md", ".ps1", ".py", ".scss", ".sh", ".toml", ".ts", ".txt",
-        ".vue", ".yaml", ".yml"
-    )
     $secretPatterns = [ordered]@{
         private_key = '-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----'
         openai_style_key = '(?<![A-Za-z0-9])sk-[A-Za-z0-9._-]{32,}'
@@ -158,13 +171,6 @@ try {
     }
     $scanCount = 0
     foreach ($file in Get-ChildItem -LiteralPath $packageRoot -File -Recurse) {
-        $isTextCandidate = (
-            $file.Length -le 2MB -and
-            ($scannableExtensions -contains $file.Extension.ToLowerInvariant() -or $file.Name.StartsWith(".env"))
-        )
-        if (-not $isTextCandidate) {
-            continue
-        }
         $scanCount += 1
         $text = [System.IO.File]::ReadAllText($file.FullName)
         foreach ($entry in $secretPatterns.GetEnumerator()) {
@@ -220,7 +226,7 @@ try {
             frontend_regression = $testStatus
             frontend_production_build = $testStatus
             high_confidence_secret_scan = "passed"
-            scanned_text_files = $scanCount
+            scanned_files = $scanCount
         }
         dependency_locks = @("uv.lock", "sau_frontend/package-lock.json")
         build_entrypoints = @(
@@ -272,12 +278,38 @@ try {
         if (@($segments | Where-Object { $forbiddenSegments -contains $_ }).Count -gt 0) {
             throw "Forbidden local-state path found in source ZIP: $relative"
         }
-        if ($relative -eq ".env" -or $relative.EndsWith("/.env") -or $relative.EndsWith(".db") -or $relative.EndsWith(".sqlite")) {
+        $lowerRelative = $relative.ToLowerInvariant()
+        $hasForbiddenRuntimeSuffix = (
+            $lowerRelative.EndsWith(".db") -or
+            $lowerRelative.EndsWith(".sqlite") -or
+            $lowerRelative.EndsWith(".sqlite3") -or
+            $lowerRelative.EndsWith(".db-wal") -or
+            $lowerRelative.EndsWith(".db-shm") -or
+            $lowerRelative.EndsWith(".sqlite-wal") -or
+            $lowerRelative.EndsWith(".sqlite-shm")
+        )
+        if ($lowerRelative -eq ".env" -or $lowerRelative.EndsWith("/.env") -or $hasForbiddenRuntimeSuffix) {
             throw "Forbidden runtime file found in source ZIP: $relative"
         }
     }
+    $verifiedManifestPath = Join-Path $verifiedPackageRoot "SOURCE-MANIFEST.json"
+    $verifiedManifest = Get-Content -Raw -LiteralPath $verifiedManifestPath | ConvertFrom-Json
+    if ($verifiedManifest.source.commit -ne $sourceCommit) {
+        throw "Source manifest commit does not match the packaged Git snapshot."
+    }
+    if ($verifiedManifest.distribution_scope -ne "internal_engineering_handoff") {
+        throw "Source manifest does not preserve the internal distribution boundary."
+    }
     $verifiedInventoryPath = Join-Path $verifiedPackageRoot "SOURCE-FILES.sha256"
-    foreach ($line in Get-Content -LiteralPath $verifiedInventoryPath) {
+    $verifiedInventoryHash = (Get-FileHash -LiteralPath $verifiedInventoryPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    if ($verifiedInventoryHash -ne $verifiedManifest.snapshot.inventory_sha256) {
+        throw "Source inventory hash does not match the manifest."
+    }
+    $verifiedInventoryLines = @(Get-Content -LiteralPath $verifiedInventoryPath)
+    if ($verifiedInventoryLines.Count -ne [int]$verifiedManifest.snapshot.file_count) {
+        throw "Source inventory entry count does not match the manifest."
+    }
+    foreach ($line in $verifiedInventoryLines) {
         if ($line -notmatch '^([0-9A-F]{64})  (.+)$') {
             throw "Invalid source inventory line."
         }
@@ -292,15 +324,6 @@ try {
             throw "Source inventory hash mismatch: $relative"
         }
     }
-    $verifiedManifestPath = Join-Path $verifiedPackageRoot "SOURCE-MANIFEST.json"
-    $verifiedManifest = Get-Content -Raw -LiteralPath $verifiedManifestPath | ConvertFrom-Json
-    if ($verifiedManifest.source.commit -ne $sourceCommit) {
-        throw "Source manifest commit does not match the packaged Git snapshot."
-    }
-    if ($verifiedManifest.distribution_scope -ne "internal_engineering_handoff") {
-        throw "Source manifest does not preserve the internal distribution boundary."
-    }
-
     Write-Host "[6/6] Publishing the immutable source delivery"
     $releaseDirectory = Join-Path $releaseBaseRoot $releaseId
     if (Test-Path -LiteralPath $releaseDirectory) {
@@ -325,7 +348,7 @@ try {
         archive_bytes = $zipBytes
         archive_sha256 = $zipHash.ToLowerInvariant()
         archive_extract_verification = "passed"
-        file_inventory_verification = "passed"
+        snapshot_inventory_verification = "passed"
         forbidden_local_state_check = "passed"
         tests = $testStatus
         verified_at_utc = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
@@ -334,8 +357,9 @@ try {
         ($receipt | ConvertTo-Json -Depth 6) + "`n"
     )
     New-Item -ItemType Directory -Path $releaseBaseRoot -Force | Out-Null
+    Assert-PathWithin -Path $stagedReleaseDirectory -Parent $stagingRoot
     Assert-PathWithin -Path $releaseDirectory -Parent $releaseBaseRoot
-    Move-Item -LiteralPath $stagedReleaseDirectory -Destination $releaseDirectory
+    [System.IO.Directory]::Move($stagedReleaseDirectory, $releaseDirectory)
     $finalZip = Join-Path $releaseDirectory ($releaseId + ".zip")
 
     Write-Host "Source package ready: $finalZip"

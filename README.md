@@ -1,6 +1,6 @@
 # GEO 智能内容分发平台
 
-这是一个基于 **OmniPost** uploader 能力构建的 GEO 内容生产与自动分发平台：品牌资料进入系统后，可完成 AI 内容生成、规则型 GEO Score、AI 优化、多平台即时/定时发布和结果追踪。原项目的视频、图文 uploader、Web 账号管理和统一 CLI（`sau`）继续保留。
+这是一个基于 **OmniPost** uploader 能力构建的 GEO 内容生产与自动分发平台：品牌资料进入系统后，可完成 AI 内容生成、规则型 GEO Score、AI 优化、多平台即时/定时发布和结果追踪。原项目的视频、图文 uploader、桌面内嵌账号管理和统一 CLI（`sau`）继续保留。
 
 当前二开版本在保留原 uploader 与 CLI 的基础上，增加了品牌项目、AI 内容生成、GEO Score、内容库、统一发布任务、Demo Mode 和定时发布链路。新业务模块与原 uploader 解耦，真实平台仍需人工登录并遵守平台验证流程。
 
@@ -48,25 +48,25 @@
 
 - **多平台发布**：抖音、B 站、小红书、快手、视频号、百家号、今日头条、搜狐号、知乎、TikTok 等
 - **视频 + 图文**：部分平台支持图文 / 文章（见能力表）
-- **账号与 Cookie 管理**：Web 扫码 / 导入 Cookie，CLI `login` / `check`
+- **账号与 Cookie 管理**：桌面端扫码 / 导入 Cookie，CLI `login` / `check`
 - **定时发布**：多数平台支持（以各平台后台能力为准）
 - **统一 CLI**：`sau <platform> <action>`，便于脚本化与 Agent 调用
 - **可扩展 uploader**：每个平台独立模块，便于二开接入新平台
 - **GEO 内容工作流**：品牌底稿 → AI 生成 → GEO 评分/优化 → 内容库 → 多渠道分发
 - **内容生产提效**：内置/自定义内容模板、最多 5 个主题批量生成、Excel/CSV 批量导入
 - **图片工作流**：从素材库智能推荐封面，或自动生成 1200×628 中性 GEO 封面并关联稿件
-- **统一 Web 分发**：10 个渠道共用同一发布清单；图文渠道校验图片，视频渠道校验视频
+- **统一桌面分发**：10 个渠道共用同一发布清单；图文渠道校验图片，视频渠道校验视频
 - **可追踪发布任务**：`queued / processing / success / failed / need_action / scheduled`
 - **安全 Demo Mode**：完整执行任务状态链，但明确标记为演示且不访问真实平台
 
-为什么还需要这种项目：上传是高频、重复、流程固定的工作。与其每次让通用 Browser Agent 临场解析页面，不如把已验证的发布链路固化成脚本 / CLI / Web 任务。
+为什么还需要这种项目：上传是高频、重复、流程固定的工作。与其每次让通用 Browser Agent 临场解析页面，不如把已验证的发布链路固化成脚本、CLI 和桌面任务。
 
 ## 架构概览
 
 | 部分 | 说明 |
 | --- | --- |
-| `sau_backend.py` | Flask API：账号、素材、发布任务 |
-| `sau_frontend/` | Vue3 + Element Plus 管理台（账号 / 素材 / 发布中心） |
+| `sau_backend.py` | 桌面内置的回环 Flask API：账号、素材、发布任务 |
+| `sau_frontend/` | EXE 内嵌的 Vue3 + Element Plus 管理台（账号 / 素材 / 发布中心） |
 | `services/` | GEO 评分、AI、项目/文章、发布适配器、执行器与调度服务 |
 | `uploader/*` | 各平台 Playwright / 专用运行时上传实现 |
 | `sau_cli.py` | 统一 CLI 入口（安装后命令为 `sau`） |
@@ -78,7 +78,7 @@
 
 - Python **3.10+**（推荐 3.11）
 - Node.js **18+**（开发界面或构建内嵌 Vue 的桌面 EXE 时需要）
-- Windows / macOS / Linux
+- Windows（桌面 EXE）；macOS / Linux 仅保留 Python CLI 与源码开发能力
 - 推荐使用 [`uv`](https://github.com/astral-sh/uv) 管理依赖
 
 ## 安装
@@ -99,7 +99,7 @@ uv venv
 
 uv pip install -e .
 
-# 使用 Web 管理台时安装 Web 可选依赖
+# 开发桌面内嵌界面或历史 Web 兼容层时安装 web 可选依赖
 uv pip install -e ".[web]"
 ```
 
@@ -254,9 +254,9 @@ python examples/upload_article_to_baijiahao.py
 
 抖音 / 快手 / 小红书 / B 站优先用 `sau ...`，不必再走旧示例主路径。
 
-### GEO Web 统一内容链路
+### 桌面统一内容链路
 
-GEO Web 已把模板、批量文章、Excel/CSV 导入、自动配图和 10 个渠道接进同一条内容分发链路：
+Windows 桌面版已把模板、批量文章、Excel/CSV 导入、自动配图和 10 个渠道接进同一条内容分发链路：
 
 1. 在「AI 内容创作」选择内置或自定义模板，也可一次生成最多 5 个主题草稿。
 2. 在「内容库」下载标准 Excel 模板并批量导入文章。
@@ -264,7 +264,7 @@ GEO Web 已把模板、批量文章、Excel/CSV 导入、自动配图和 10 个�
 4. 图片可从素材库智能推荐，也可让系统生成中性 GEO 封面；视频从素材库上传选择。
 5. 每个渠道创建独立、可追踪的发布任务，真实执行仍受 `ALLOW_REAL_PUBLISHING` 和逐次确认保护。
 
-接口和部署边界详见 [`docs/p2-web-integration.md`](./docs/p2-web-integration.md)。
+这部分能力的历史接入记录见 [`docs/p2-web-integration.md`](./docs/p2-web-integration.md)；当前交付边界以桌面版文档为准。
 
 ## 平台能力
 
@@ -275,7 +275,7 @@ GEO Web 已把模板、批量文章、Excel/CSV 导入、自动配图和 10 个�
 | 小红书 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 浏览器自动化 |
 | 快手 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | 浏览器自动化 |
 | 视频号 | ✅ | ✅ | ❌ | ✅ | ❌ | ❌ | `tencent_uploader` |
-| 百家号 | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | Web / examples |
+| 百家号 | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | 桌面端 / examples |
 | 今日头条 | ✅ | ✅ | ✅ | ✅ | ❌ | ❌ | 图文为「发文章」，非微头条 |
 | 搜狐号 | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | 仅图文；标题 5–72 字；封面 **大于 450×300**，jpg/jpeg/png，≤10MB |
 | 知乎 | ✅ | ❌ | ✅ | ✅ | ❌ | ❌ | 第一期仅文章 |
@@ -286,11 +286,11 @@ GEO Web 已把模板、批量文章、Excel/CSV 导入、自动配图和 10 个�
 ## 配置说明
 
 - 运行配置：[`conf.py`](./conf.py) 提供安全默认值，使用环境变量覆盖本地差异
-- Cookie 目录：`cookies/`（CLI / 示例）与 `cookiesFile/`（Web 账号）
+- Cookie 目录：`cookies/`（CLI / 示例）与 `cookiesFile/`（桌面账号）
 - 素材目录：常见为 `videoFile/`（以后端实际配置为准）
 - 日志：`logs/`
 
-GEO Web 运行环境变量：
+桌面内置服务运行环境变量：
 
 可从 [`.env.example`](./.env.example) 查看无敏感值模板；当前应用不会自动读取 `.env`，请在启动进程或部署平台中显式设置变量。
 
@@ -319,20 +319,20 @@ GEO Web 运行环境变量：
 | `GEO_REAL_PUBLISHING_AUTHORIZED` | `false` | 不可变构建是否授权真实发布；不能只靠总开关替代 |
 | `GEO_PUBLISHING_RUNTIME_READY` | `false` | Chrome 与打包驱动离线探针是否通过；启动时计算 |
 | `DATABASE_PATH` | `db/database.db` | 可覆盖 SQLite 路径，便于隔离环境 |
-| `COOKIES_DIRECTORY` | `cookiesFile` | Web 登录、账号检测和真实发布共用的 Cookie 目录 |
+| `COOKIES_DIRECTORY` | `cookiesFile` | 桌面登录、账号检测和真实发布共用的 Cookie 目录 |
 | `MEDIA_ROOT` | `videoFile` | 上传图片/视频、生成封面和发布素材的运行目录 |
 | `PUBLISH_SCHEDULER_INTERVAL_SECONDS` | `15` | 到期任务检查间隔，最少 5 秒 |
-| `RUN_PUBLISH_SCHEDULER` | `true` | Web 进程是否内置调度器；使用独立 `sau-worker` 时设为 `false` |
+| `RUN_PUBLISH_SCHEDULER` | `true` | 内置服务进程是否启动调度器；使用独立 `sau-worker` 时设为 `false` |
 | `SERVER_HOST` | `127.0.0.1` | 后端监听地址；容器内需显式设为 `0.0.0.0` |
 | `SERVER_PORT` | `5409` | 后端监听端口；非法值会回退到 5409 |
 
-Web 管理台的“系统设置”支持为当前浏览器填写自定义 OpenAI-compatible API。三项填写完整时，自定义配置优先于服务器默认值；服务地址和模型名保存在浏览器本地，API Key 只放在当前标签页的 `sessionStorage`，关闭标签页后清除。自定义配置只随生成和优化请求发送，服务器状态接口不会返回密钥、地址或模型值。服务地址必须使用公开 HTTPS URL，后端拒绝本机、私网、保留地址和 URL 内嵌凭据。
+桌面管理台的“系统设置”支持统一配置写稿、调优、回测和生图模型。Windows 下 API Key 经 DPAPI 加密后只供当前系统用户使用，状态接口只返回“已配置”，不会返回密钥；未单独配置的角色按界面说明回退到写稿模型。服务地址必须使用公开 HTTPS URL，后端拒绝本机、私网、保留地址和 URL 内嵌凭据。
 
 定时任务由 APScheduler 在 `python sau_backend.py` 启动时注册。每次 tick 会原子地将到期任务从 `scheduled` 提升为 `queued`；Demo 任务随后自动执行。当前版本对真实任务固定关闭后台执行：到点只排队，用户必须打开具体任务，核对同源正文快照、平台、账号、素材和任务版本后再从手动入口执行。历史数据库中的 `auto_execute=1` 任务会在访问平台前转为 `need_action`。桌面宿主、独立后端和 `sau-worker` 都执行同一 fail-closed 边界；失败或状态不明不会自动重试。
 
 10 个渠道的真实发布默认关闭。只有同时满足 `DEMO_MODE=false`、不可变构建授权、`ALLOW_REAL_PUBLISHING=true`、本机运行时探针通过、任务本身不是 Demo，并且操作者在发布中心对当前任务逐次确认时才会进入真实适配器。所有适配器都会先验证登录状态。知乎发布前通过当前账号的公开文章列表精确匹配标题，已存在时直接返回原链接；发布后最多轮询 3 次公开文章结果并自动对账，不会自动重复点击“发布”。其余渠道只有取得平台公开内容链接才标记 `success`；发布器明确完成提交但暂时没有公开链接时保持 `processing`，发布器超时或最终状态未知时转为 `need_action`，两种情况都要求先到平台后台核对，避免盲目重试造成重复内容。百家号、小红书、抖音和快手要求图片，可由操作者选择素材，也可启用受控自动配图；Bilibili、视频号和 TikTok 要求视频。扫码、验证码、实名、风控或 Cookie 失效会进入“待人工确认”，系统不会绕过平台安全机制。五个 P2 渠道的代码适配已完成，真实账号验收状态以 [`docs/p2-web-integration.md`](./docs/p2-web-integration.md) 为准。
 
-> 部署安全边界：当前 Vercel 公网站运行无媒体 Cookie、关闭真实发布的可重建 Demo，并配置服务器端 AI Secret、运营访问门和应用内 AI 限流；跨域凭据请求仅允许显式白名单来源。Vercel Serverless 实例之间不共享内存限流和 SQLite，因此持续对外服务仍应接入 Upstash/Vercel WAF 等共享限流、持久数据库与对象存储，并把媒体浏览器 Worker 隔离在受控环境，不能把本地后端和 `cookiesFile/` 直接暴露到公网。
+> 桌面安全边界：内置 API 默认只绑定随机 `127.0.0.1` 端口，媒体 Cookie、SQLite 数据库和 DPAPI 模型配置都属于当前 Windows 用户的本机运行状态，不进入源码包。不要把本地后端、`cookiesFile/` 或用户数据目录直接暴露到公网。
 
 开发回归：
 
@@ -341,7 +341,7 @@ uv run python -m unittest discover -s tests -v
 cd sau_frontend && npm run build
 ```
 
-开源或分享仓库前请确认敏感文件已被忽略，可参考 [`.gitignore`](./.gitignore)。
+生成内部源码交接包请使用 [`scripts/package_source.ps1`](./scripts/package_source.ps1)，不要直接压缩工作目录；范围与验收步骤见 [源码交付说明](./docs/source-package.md)。
 
 ## 文档索引
 
@@ -397,6 +397,6 @@ cd sau_frontend && npm run build
 
 ## 许可证
 
-本项目采用 [MIT License](./LICENSE)。
+仓库中由相应版权方合法授权的代码采用 [MIT License](./LICENSE)。MIT 文本不构成对来源不明或尚未完成权利确认材料的权属证明。
 
-使用或二次发布时，请保留许可证与版权声明，并保留对上游项目与 `biliup` 的致谢信息。
+使用或二次发布时，请保留许可证与版权声明，并保留对上游项目与 `biliup` 的致谢信息。当前同事算法移植层的交接包未附独立许可证，外部商业分发前还需完成书面权利确认；详见 [GEO 算法融合说明](./docs/GEO算法融合说明.md) 与 [源码交付说明](./docs/source-package.md)。

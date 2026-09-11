@@ -39,7 +39,8 @@ The colleague handoff archive used as a reference for the AI visibility port
 did not contain its own LICENSE or NOTICE. This inventory does not cure that
 missing rights statement. Until written authorization or a verifiable license
 is supplied, builds containing that port remain limited to the distribution
-scope stated in GEO-Content-Platform.manifest.json.
+scope stated in GEO-Content-Platform.manifest.json (Windows binary delivery) or
+SOURCE-MANIFEST.json (source delivery).
 
 This file is an engineering inventory, not a legal opinion or a complete
 redistribution notice. The project owner must generate a complete dependency

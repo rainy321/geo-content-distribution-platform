@@ -6,6 +6,8 @@
 
 当前产品交付以 Windows 桌面软件为主。`sau_frontend/` 仍然是 EXE 内嵌界面的源代码，不能因为历史公网 Web 已停用而删除；`docs/legacy-web.md`、`sau_web.py` 和部署样例仅用于兼容与历史说明，不代表需要重新部署网站。
 
+`pyproject.toml` 中的 Python 发行名 `social-auto-upload` 为兼容原有 CLI、依赖锁和 uploader 生态而保留；产品与源码交付名称使用 `GEO Content Platform`。这两个名称指向同一代码库，不是缺少第二套源码。
+
 ## 源码包包含
 
 - Python 后端、桌面宿主、服务层、发布适配器和平台 uploader；
@@ -22,7 +24,7 @@
 - `%LOCALAPPDATA%\GEOContentPlatform` 下的生产数据库、账号会话、Cookie、素材、日志、备份、WebView 状态和受 Windows DPAPI 保护的 AI 配置；
 - 仓库中的未跟踪文件、真实 `.env`、数据库文件和任何运行时密钥。
 
-源码打包只读取 `git archive HEAD`，因此本机目录即使存在 Cookie、数据库或历史 EXE，也不会进入源码包。打包前还会对快照执行高置信度密钥特征扫描；测试中的合成占位凭据不会被误当作真实配置。
+源码打包只读取启动时锁定的 Git 提交（`git archive <commit>`），并在测试后确认提交和工作树未变化，因此本机目录即使存在 Cookie、数据库或历史 EXE，也不会进入源码包。打包前还会对快照执行高置信度密钥特征扫描；测试中的合成占位凭据不会被误当作真实配置。
 
 ## 生成源码包
 
@@ -40,7 +42,7 @@ pwsh -NoProfile -File .\scripts\package_source.ps1
 4. 从当前提交生成干净快照；
 5. 扫描高置信度密钥特征；
 6. 生成逐文件 SHA-256 清单与源码 manifest；
-7. 压缩后在独立临时目录重新解压并逐文件核验；
+7. 压缩后在独立临时目录重新解压，并按 Git 快照清单逐文件核验；
 8. 在临时目录完整组装后，以一次原子目录移动把版本化 ZIP、校验和、manifest 和验收回执提升到 `release/source/`。
 
 只有同一提交已经独立完成回归时，才可显式使用 `-SkipTests`。manifest 和回执会如实标记跳过状态。
@@ -82,4 +84,4 @@ pwsh -NoProfile -File .\scripts\build_windows_desktop.ps1 -PublishingProfile aut
 
 ## 权利与签名边界
 
-当前算法交接材料仍标记为 `pending_written_authorization`。源码包保留现有许可证和第三方声明，但这不替代对同事算法、平台自动化和第三方运行时的书面授权审查。重新构建的 EXE 默认也不会自动获得 Authenticode 签名，对外分发前需另行完成代码签名与合规验收。
+当前算法交接材料仍标记为 `pending_written_authorization`。仓库中的 MIT 文本适用于相应版权方有权授权的代码，但不能单独证明同事交接材料的权属或许可范围；这个“内部工程交接”标识是发布准备状态，不试图修改已有许可证。源码包保留现有许可证和第三方声明，但在同事算法来源完成书面确认前，不能据此宣称整个快照已经通过外部商业再分发权利审核。重新构建的 EXE 默认也不会自动获得 Authenticode 签名，对外分发前需另行完成代码签名与合规验收。

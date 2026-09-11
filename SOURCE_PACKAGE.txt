@@ -1,4 +1,6 @@
-GEO Content Platform 源码交付说明
+GEO Content Platform 内部源码交付说明
+
+本文件不是新增或替代许可证，也不表示整个快照已完成外部商业分发权利审核。
 
 请勿直接压缩工作目录。统一使用 PowerShell 7 执行：
 pwsh -NoProfile -File .\scripts\package_source.ps1
