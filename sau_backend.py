@@ -241,7 +241,10 @@ from services.publish_preflight_service import (
     get_publish_title_policy,
     get_platform_verification_policy,
 )
-from services.publish_outcome_service import classify_publish_outcome
+from services.publish_outcome_service import (
+    classify_publish_outcome,
+    detect_safe_publish_repair,
+)
 from services.platform_publish_policy_service import (
     evaluate_platform_offline_preflight,
     get_platform_publish_policy,
@@ -4494,6 +4497,7 @@ def preview_publish_variants():
                 tags=article.get("tags") or (),
                 publish_title=title_override,
                 publish_content=override,
+                required_phrases=(str(project.get("name") or "").strip(),),
             )
             variant["citeability"] = evaluate_publish_citeability(
                 title=variant["title"],
@@ -4731,6 +4735,9 @@ def create_publish_task():
                 tags=article_for_gate.get("tags") or (),
                 publish_title=publish_title,
                 publish_content=publish_content,
+                required_phrases=(
+                    str(project_for_gate.get("name") or "").strip(),
+                ),
             )
             citeability = evaluate_publish_citeability(
                 title=exact_variant["title"],
@@ -4865,6 +4872,96 @@ def retry_publish_task(job_id):
         return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
     return jsonify(
         {"code": 200, "msg": "发布任务已重新排队", "data": _publish_job_payload(job)}
+    ), 200
+
+
+@app.route('/api/publish/jobs/<int:job_id>/auto-repair', methods=['POST'])
+def auto_repair_publish_task(job_id):
+    """Safely re-arm one task only when the adapter proved no submit occurred.
+
+    This endpoint never visits a platform.  It applies the deterministic local
+    repair boundary and requeues the immutable job snapshot.  The caller may
+    execute that snapshot once within the already-confirmed batch; ambiguous,
+    submitted, verification and account-risk outcomes are rejected here.
+    """
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify(
+            {"code": 400, "msg": "自动修复请求不能为空", "data": None}
+        ), 400
+    if data.get("confirm_pre_submit") is not True:
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "自动修复前必须确认发布器记录为尚未提交",
+                "data": None,
+            }
+        ), 400
+    provided_job_id = data.get("job_id")
+    expected_state_version = data.get("state_version")
+    if (
+        isinstance(provided_job_id, bool)
+        or not isinstance(provided_job_id, int)
+        or isinstance(expected_state_version, bool)
+        or not isinstance(expected_state_version, int)
+        or expected_state_version < 0
+    ):
+        return jsonify(
+            {"code": 400, "msg": "自动修复任务或状态版本无效", "data": None}
+        ), 400
+    if provided_job_id != job_id:
+        return jsonify(
+            {"code": 409, "msg": "自动修复任务标识不一致，请刷新后重试", "data": None}
+        ), 409
+
+    try:
+        current = get_publish_job(app.config["DATABASE_PATH"], job_id)
+    except PublishJobNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    if int(current.get("state_version", -1)) != expected_state_version:
+        return jsonify(
+            {
+                "code": 409,
+                "msg": "任务状态已变化，自动修复未执行；请刷新任务列表",
+                "data": None,
+            }
+        ), 409
+
+    repair = detect_safe_publish_repair(
+        status=current.get("status"),
+        message=current.get("message"),
+        reconciliation_required=current.get("reconciliation_required", False),
+    )
+    if not repair["eligible"] or not repair["automatic_retry_allowed"]:
+        return jsonify(
+            {
+                "code": 409,
+                "msg": repair["summary"],
+                "data": {
+                    "job": _publish_job_payload(current),
+                    "repair": repair,
+                },
+            }
+        ), 409
+
+    try:
+        repaired = retry_publish_job(
+            app.config["DATABASE_PATH"],
+            job_id,
+            expected_state_version=expected_state_version,
+        )
+    except InvalidPublishJobTransitionError as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+    return jsonify(
+        {
+            "code": 200,
+            "msg": "已自动应用安全恢复策略并重新排队；本接口未访问平台",
+            "data": {
+                "job": _publish_job_payload(repaired),
+                "repair": repair,
+            },
+        }
     ), 200
 
 

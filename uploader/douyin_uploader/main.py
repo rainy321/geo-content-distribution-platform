@@ -1074,14 +1074,49 @@ class DouYinNote(DouYinBaseUploader):
             except Exception:
                 continue
 
+        # The creator centre has shipped variants where the upload landing page
+        # no longer exposes a stable "发布图文" tab even though the dedicated
+        # image route still works.  This is a pre-submit navigation repair: it
+        # never clicks a final publish control and is therefore safe to try.
+        fallback_urls = (
+            "https://creator.douyin.com/creator-micro/content/post/image?enter_from=publish_page",
+            "https://creator.douyin.com/creator-micro/content/post/image",
+        )
+        for fallback_url in fallback_urls:
+            try:
+                await page.goto(
+                    fallback_url,
+                    wait_until="domcontentloaded",
+                    timeout=15_000,
+                )
+                await self._raise_if_visible_account_risk(
+                    page,
+                    include_verification=True,
+                )
+                try:
+                    await image_inputs.first.wait_for(state="attached", timeout=5_000)
+                except Exception:
+                    await page.wait_for_timeout(500)
+                if (
+                    "/creator-micro/content/post/image" in str(getattr(page, "url", ""))
+                    and await page.locator('input[type="file"]').count()
+                ):
+                    douyin_logger.info(_msg("🧭", "已自动切换到图文直达发布页"))
+                    return
+            except Exception:
+                continue
+
         await self._raise_if_visible_account_risk(page, include_verification=True)
-        raise RuntimeError("抖音页面结构变化：未找到图文发布入口，尚未提交")
+        raise RuntimeError(
+            "抖音页面结构变化：常规入口与图文直达入口均不可用，尚未提交"
+        )
 
     async def _upload_note_images(self, page: Page) -> None:
         candidates = (
             page.locator('input[type="file"][accept*="image"]').first,
             page.locator("div[class^='container'] input[accept*='image']").first,
             page.locator("div[class*='container'] input[accept*='image']").first,
+            page.locator('input[type="file"]').first,
         )
         for candidate in candidates:
             try:
@@ -1122,17 +1157,29 @@ class DouYinNote(DouYinBaseUploader):
         douyin_logger.info(_msg("📤", "小人正在上传图片"))
         await self._upload_note_images(page)
 
-        while True:
+        entered_editor = False
+        for wait_round in range(60):
             try:
                 await page.wait_for_url(
-                    "**/creator-micro/content/post/image?**",
+                    "**/creator-micro/content/post/image**",
                     timeout=3000,
                 )
                 douyin_logger.info(_msg("🥳", "已经进入图文发布页面"))
+                entered_editor = True
                 break
             except Exception:
                 douyin_logger.debug(_msg("🧍", "小人还在等图片上传完成"))
+                if wait_round % 5 == 4:
+                    await self._raise_if_visible_account_risk(
+                        page,
+                        include_verification=True,
+                    )
                 await asyncio.sleep(0.5)
+        if not entered_editor:
+            raise RuntimeError(
+                "抖音图片上传后 210 秒内未进入编辑页，尚未提交；"
+                "软件已停止等待并允许安全修复一次"
+            )
 
         await asyncio.sleep(1)
         douyin_logger.info(_msg("✍️", "小人开始填标题、描述和话题"))

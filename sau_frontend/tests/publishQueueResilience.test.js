@@ -36,7 +36,7 @@ test('job polling runs only for active jobs, is serial and has a hard bound', ()
 
 test('batch execution isolates failures and always reports each prepared item', () => {
   assert.match(source, /for \(const job of preparedJobs\)/)
-  assert.match(source, /outcomes\.push\(normalizePublishOutcome\(result/)
+  assert.match(source, /outcomes\.push\(await executeConfirmedJobWithSafeRepair\(job\)\)/)
   assert.match(source, /const latestResponse = await publishApi\.getJob\(job\.job_id\)/)
   assert.match(source, /已按刷新后的持久化任务状态归类/)
   assert.doesNotMatch(source, /status: 'request_error'/)
@@ -44,8 +44,8 @@ test('batch execution isolates failures and always reports each prepared item', 
   assert.match(source, /const outcomeLines = outcomes\.map/)
   assert.match(source, /summarizePublishOutcomes\(outcomes\)/)
   assert.match(source, /分母仅含本次强确认后实际请求的/)
-  assert.match(source, /普通单项失败不拖住其他账号，也不会自动重试/)
-  assert.match(source, /封禁、限制、登录失效或本人验证，则冻结该账号余下任务/)
+  assert.match(source, /明确记录为“尚未提交”的页面或浏览器故障会自动修复并且只重试一次/)
+  assert.match(source, /审核中、结果未知、封禁、登录失效或本人验证绝不自动重发/)
 })
 
 
@@ -66,4 +66,16 @@ test('retry is gated by the latest backend outcome and an explicit validation co
   assert.match(source, /已修复并核对未发布，重新排队/)
   assert.match(source, /已完成验证并核对未发布，重新排队/)
   assert.match(source, /jobOutcome\(job\)\.action === 'fix_and_rebuild'/)
+})
+
+
+test('safe pre-submit failures use one bounded automatic repair path', () => {
+  assert.match(source, /const executeConfirmedJobWithSafeRepair = async job =>/)
+  assert.match(source, /!outcome\.auto_repair_eligible/)
+  assert.match(source, /!outcome\.automatic_retry_allowed/)
+  assert.match(source, /await publishApi\.autoRepairJob\(first\.snapshot\)/)
+  assert.match(source, /const second = await executeConfirmedJobRequest\(repairedJob\)/)
+  assert.match(source, /autoRepairMaxAttempts: 1/)
+  assert.match(source, /已停止继续循环/)
+  assert.doesNotMatch(source, /while\s*\([^)]*autoRepair/i)
 })

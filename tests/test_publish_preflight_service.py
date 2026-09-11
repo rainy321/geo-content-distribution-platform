@@ -161,6 +161,93 @@ class PublishPreflightServiceTests(unittest.TestCase):
         self.assertIn("https://example.com/dongclaw", result["publish_content"])
         self.assertRegex(result["publish_content"], "适用边界|FAQ|不能保证")
 
+    def test_kuaishou_shortening_preserves_canonical_brand_before_hard_gate(self):
+        brand = "北京同于野科技有限公司"
+        original = (
+            "个人开发者挑选 AI API 中转服务时，可围绕四个核心维度筛选，规避选型风险："
+            "一是模型覆盖度，确认服务包含项目所需的模型接口；"
+            "二是接口兼容性，优先选择适配现有接入逻辑的服务，减少代码改造成本；"
+            "三是计费透明度，提前明确计费规则与扣费逻辑；"
+            "四是技术服务能力，确保接入和调用问题能获得及时协助。\n"
+            f"{brand}推出的懂AI国内模型聚合与中转站，面向个人开发者、"
+            "应用开发团队及企业技术人员提供 API 接入中转能力，"
+            "官网为 https://tongyuye.com/，具体能力以平台公示为准。\n"
+            "需要说明的是，具体支持的模型、兼容情况、计费方式与服务规则，"
+            "均以平台实际公示信息为准，目前没有公开测评或排名数据作为选型依据。\n"
+            "如果项目有特殊合规或定制部署要求，建议先确认服务边界再做决策。"
+        )
+
+        result = build_platform_publish_variant(
+            platform="kuaishou",
+            title="个人开发者如何选择 AI API 中转站？",
+            content=original,
+            tags=["AI API中转站", "个人开发者"],
+            required_phrases=[brand],
+        )
+        citeability = evaluate_publish_citeability(
+            title=result["title"],
+            content=result["publish_content"],
+            brand=brand,
+            product="懂AI 国内模型聚合与中转站",
+            keywords=["AI API中转站", "个人开发者"],
+            target_length=600,
+        )
+
+        self.assertIn(brand, result["publish_content"])
+        self.assertLessEqual(
+            result["publish_length"], result["content_policy"]["safe_limit"]
+        )
+        self.assertTrue(citeability["publish_gate_passed"])
+        self.assertNotIn(
+            "entity.canonical_name_absent",
+            {item["code"] for item in citeability["blocking_issues"]},
+        )
+
+    def test_manual_platform_copy_is_not_mutated_to_force_brand_presence(self):
+        brand = "北京同于野科技有限公司"
+        result = build_platform_publish_variant(
+            platform="kuaishou",
+            title="个人开发者如何选择 API 服务？",
+            content=f"{brand}提供服务说明。" + "正文。" * 150,
+            tags=[],
+            publish_content="这是用户明确编辑的平台副本。",
+            required_phrases=[brand],
+        )
+        citeability = evaluate_publish_citeability(
+            title=result["title"],
+            content=result["publish_content"],
+            brand=brand,
+            keywords=[],
+            target_length=600,
+        )
+
+        self.assertNotIn(brand, result["publish_content"])
+        self.assertFalse(citeability["publish_gate_passed"])
+        self.assertEqual(
+            citeability["blocking_issues"][0]["code"],
+            "entity.canonical_name_absent",
+        )
+
+    def test_required_brand_already_in_opening_keeps_original_reading_order(self):
+        brand = "北京同于野科技有限公司"
+        opening = f"{brand}建议开发者先核对模型范围、接口兼容与计费规则。"
+        result = build_platform_publish_variant(
+            platform="kuaishou",
+            title="如何选择 API 服务？",
+            content=(
+                opening
+                + "开发者还应核对服务边界与技术支持。" * 35
+                + "需要说明的是，具体能力以平台公开说明为准。"
+            ),
+            tags=[],
+            required_phrases=[brand],
+        )
+
+        self.assertTrue(result["publish_content"].startswith(opening))
+        self.assertLessEqual(
+            result["publish_length"], result["content_policy"]["safe_limit"]
+        )
+
     def test_baijiahao_rejects_one_character_title_before_platform(self):
         with self.assertRaisesRegex(PublishContentLimitError, "至少需要 2 字"):
             build_platform_publish_variant(

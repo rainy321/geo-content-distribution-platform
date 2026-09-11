@@ -120,3 +120,32 @@ test('summary names only the four user-facing categories and includes an exact t
   )
   assert.doesNotMatch(label, /请求异常|已提交待核验|结果未知/)
 })
+
+
+test('backend safe-repair metadata is preserved without inventing eligibility', () => {
+  const safe = normalizePublishOutcome({
+    job_id: 12,
+    status: 'failed',
+    outcome: {
+      category: 'failed',
+      reason: '点击发布前失败，尚未提交。',
+      next_action: '自动刷新发布入口。',
+      action: 'auto_repair',
+      retry_allowed: true,
+      validation_required: true,
+      reconciliation_required: false,
+      auto_repair_eligible: true,
+      automatic_retry_allowed: true,
+      auto_repair_strategy: 'refresh_publish_route',
+      auto_repair_max_attempts: 1
+    }
+  })
+  const unknown = normalizePublishOutcome({ job_id: 13, status: 'failed' })
+
+  assert.equal(safe.auto_repair_eligible, true)
+  assert.equal(safe.automatic_retry_allowed, true)
+  assert.equal(safe.auto_repair_strategy, 'refresh_publish_route')
+  assert.equal(safe.auto_repair_max_attempts, 1)
+  assert.equal(unknown.auto_repair_eligible, false)
+  assert.equal(unknown.automatic_retry_allowed, false)
+})

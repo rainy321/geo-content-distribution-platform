@@ -153,6 +153,43 @@ class PublishJobsApiTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(stored_original, original)
 
+    def test_kuaishou_preflight_keeps_project_brand_in_automatic_short_copy(self):
+        opening = (
+            "个人开发者选择 AI API 服务时，应核对模型范围、接口兼容、计费规则与技术支持。"
+            * 7
+        )
+        original = (
+            f"{opening}\n"
+            "XX科技提供面向开发团队的 API 接入服务，具体能力以官网公示为准。\n"
+            "需要说明的是，公开资料不足时不应推断客户案例、效果数据或平台排名。\n"
+            "项目存在特殊合规要求时，应先确认服务边界再做决策。"
+        )
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE articles SET title = ?, content = ? WHERE id = ?",
+                    (
+                        "个人开发者如何选择 AI API 服务？",
+                        original,
+                        self.article_id,
+                    ),
+                )
+
+        response = self.client.post(
+            "/api/publish/preflight",
+            json={"article_id": self.article_id, "platforms": ["kuaishou"]},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        variant = response.get_json()["data"]["variants"][0]
+        self.assertTrue(variant["adapted"])
+        self.assertIn("XX科技", variant["publish_content"])
+        self.assertTrue(variant["citeability"]["publish_gate_passed"])
+        self.assertNotIn(
+            "entity.canonical_name_absent",
+            {item["code"] for item in variant["citeability"]["blocking_issues"]},
+        )
+
     def test_create_rejects_manual_platform_copy_above_safe_limit(self):
         response = self.client.post(
             "/api/publish",
@@ -458,6 +495,68 @@ class PublishJobsApiTests(unittest.TestCase):
         self.assertEqual(retried["status"], "queued")
         self.assertEqual(retried["message"], "")
         self.assertIsNone(retried["started_at"])
+
+    def test_auto_repairs_only_explicit_pre_submit_failure(self):
+        job = self._create_job()
+        transition_publish_job(self.db_path, job["job_id"], "processing")
+        failed = transition_publish_job(
+            self.db_path,
+            job["job_id"],
+            "failed",
+            message=(
+                "抖音在点击发布前失败，尚未提交："
+                "页面结构变化，未找到图文发布入口"
+            ),
+        )
+
+        response = self.client.post(
+            f"/api/publish/jobs/{job['job_id']}/auto-repair",
+            json={
+                "confirm_pre_submit": True,
+                "job_id": job["job_id"],
+                "state_version": failed["state_version"],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()["data"]
+        self.assertEqual(payload["job"]["status"], "queued")
+        self.assertEqual(payload["repair"]["strategy"], "refresh_publish_route")
+        self.assertEqual(payload["repair"]["max_attempts"], 1)
+
+    def test_auto_repair_rejects_ambiguous_or_stale_failure(self):
+        job = self._create_job()
+        transition_publish_job(self.db_path, job["job_id"], "processing")
+        failed = transition_publish_job(
+            self.db_path,
+            job["job_id"],
+            "failed",
+            message="已点击发布一次但平台最终状态未知",
+        )
+        payload = {
+            "confirm_pre_submit": True,
+            "job_id": job["job_id"],
+            "state_version": failed["state_version"],
+        }
+
+        ambiguous = self.client.post(
+            f"/api/publish/jobs/{job['job_id']}/auto-repair",
+            json=payload,
+        )
+        stale = self.client.post(
+            f"/api/publish/jobs/{job['job_id']}/auto-repair",
+            json={**payload, "state_version": failed["state_version"] - 1},
+        )
+
+        self.assertEqual(ambiguous.status_code, 409)
+        self.assertFalse(
+            ambiguous.get_json()["data"]["repair"]["automatic_retry_allowed"]
+        )
+        self.assertEqual(stale.status_code, 409)
+        current = self.client.get(
+            f"/api/publish/jobs/{job['job_id']}"
+        ).get_json()["data"]
+        self.assertEqual(current["status"], "failed")
 
     def test_real_job_cannot_be_executed_by_safe_demo_endpoint(self):
         app.config["DEMO_MODE"] = False

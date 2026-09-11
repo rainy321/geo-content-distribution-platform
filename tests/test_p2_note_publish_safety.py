@@ -1,3 +1,4 @@
+import inspect
 import unittest
 
 from uploader.douyin_uploader.main import DouYinNote
@@ -31,6 +32,16 @@ class P2NotePublishSafetyTests(unittest.TestCase):
                 self.assertTrue(callable(getattr(uploader_class, method_name, None)))
 
         self.assertEqual(KUAISHOU_MANAGE_URL_PATTERN, "**/article/manage/**")
+
+    def test_douyin_note_repairs_missing_tab_with_bounded_direct_route(self):
+        switch_source = inspect.getsource(DouYinNote._switch_to_image_post)
+        upload_source = inspect.getsource(DouYinNote.upload_note_content)
+
+        self.assertIn("/creator-micro/content/post/image?enter_from=publish_page", switch_source)
+        self.assertIn('wait_until="domcontentloaded"', switch_source)
+        self.assertIn("for wait_round in range(60)", upload_source)
+        self.assertIn("尚未提交", upload_source)
+        self.assertNotIn("while True", upload_source)
 
 
 if __name__ == "__main__":

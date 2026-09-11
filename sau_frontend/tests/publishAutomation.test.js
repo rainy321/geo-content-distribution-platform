@@ -57,12 +57,14 @@ test('automatic setup never chooses among multiple accounts or rotates an accoun
 })
 
 
-test('confirmed real jobs execute serially in one queue and are never retried implicitly', () => {
+test('confirmed real jobs execute serially and only safe pre-submit failures get one retry', () => {
   assert.match(source, /if \(!listedJobs\.length\)[\s\S]{0,180}batchExecuting\.value = true[\s\S]{0,180}const accountsLoaded = await fetchAccounts\(\)/)
-  assert.match(source, /for \(const job of preparedJobs\) \{[\s\S]{0,260}await publishApi\.executeRealJob\(job\)/)
+  assert.match(source, /for \(const job of preparedJobs\) \{[\s\S]{0,260}executeConfirmedJobWithSafeRepair\(job\)/)
   assert.doesNotMatch(source, /Promise\.all\([^)]*executeRealJob/s)
-  assert.match(source, /普通单项失败不拖住其他账号，也不会自动重试/)
-  assert.match(source, /封禁、限制、登录失效或本人验证，则冻结该账号余下任务/)
+  assert.match(source, /明确记录为“尚未提交”的页面或浏览器故障会自动修复并且只重试一次/)
+  assert.match(source, /审核中、结果未知、封禁、登录失效或本人验证绝不自动重发/)
+  assert.match(source, /await publishApi\.autoRepairJob\(first\.snapshot\)/)
+  assert.match(source, /autoRepairMaxAttempts: 1/)
   assert.match(source, /await fetchJobs\(true\)/)
 })
 

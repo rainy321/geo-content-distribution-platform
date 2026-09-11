@@ -122,6 +122,12 @@ export const normalizePublishOutcome = (source = {}, overrides = {}) => {
     : typeof backend.validation_required === 'boolean'
       ? backend.validation_required
       : category !== 'published'
+  const autoRepairEligible = typeof overrides.autoRepairEligible === 'boolean'
+    ? overrides.autoRepairEligible
+    : backend.auto_repair_eligible === true
+  const automaticRetryAllowed = typeof overrides.automaticRetryAllowed === 'boolean'
+    ? overrides.automaticRetryAllowed
+    : backend.automatic_retry_allowed === true
   return {
     job_id: Number(source?.job_id ?? overrides.jobId ?? 0) || 0,
     platform: String(source?.platform ?? overrides.platform ?? ''),
@@ -134,6 +140,19 @@ export const normalizePublishOutcome = (source = {}, overrides = {}) => {
     retry_allowed: Boolean(retryAllowed),
     validation_required: Boolean(validationRequired),
     reconciliation_required: reconciliationRequired,
+    auto_repair_eligible: Boolean(autoRepairEligible),
+    automatic_retry_allowed: Boolean(automaticRetryAllowed),
+    auto_repair_strategy: String(
+      overrides.autoRepairStrategy ?? backend.auto_repair_strategy ?? 'none'
+    ),
+    auto_repair_summary: String(
+      overrides.autoRepairSummary ?? backend.auto_repair_summary ?? ''
+    ).trim(),
+    auto_repair_max_attempts: Number(
+      overrides.autoRepairMaxAttempts ?? backend.auto_repair_max_attempts ?? 0
+    ) || 0,
+    auto_repair_attempted: Boolean(overrides.autoRepairAttempted),
+    auto_repair_note: String(overrides.autoRepairNote || '').trim(),
     transport_note: String(overrides.transportNote || '').trim()
   }
 }

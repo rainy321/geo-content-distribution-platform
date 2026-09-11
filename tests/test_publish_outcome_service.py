@@ -3,6 +3,7 @@ import unittest
 from services.publish_outcome_service import (
     PUBLISH_OUTCOME_CATEGORIES,
     classify_publish_outcome,
+    detect_safe_publish_repair,
 )
 
 
@@ -112,6 +113,37 @@ class PublishOutcomeServiceTests(unittest.TestCase):
         self.assertEqual(outcome["category"], "action_required")
         self.assertTrue(outcome["validation_required"])
         self.assertEqual(outcome["action"], "validate_then_retry")
+
+    def test_explicit_pre_submit_route_failure_is_safe_for_one_auto_repair(self):
+        outcome = classify_publish_outcome(
+            status="failed",
+            message=(
+                "抖音在点击发布前失败，尚未提交："
+                "抖音页面结构变化：未找到图文发布入口，尚未提交"
+            ),
+            account_id=7,
+        )
+
+        self.assertEqual(outcome["action"], "auto_repair")
+        self.assertTrue(outcome["auto_repair_eligible"])
+        self.assertTrue(outcome["automatic_retry_allowed"])
+        self.assertEqual(outcome["auto_repair_strategy"], "refresh_publish_route")
+        self.assertEqual(outcome["auto_repair_max_attempts"], 1)
+
+    def test_unknown_submission_or_human_gate_is_never_auto_repaired(self):
+        ambiguous = detect_safe_publish_repair(
+            status="failed",
+            message="已点击发布但平台最终状态未知，尚未提交信息不可信",
+        )
+        verification = detect_safe_publish_repair(
+            status="failed",
+            message="在点击发布前失败，尚未提交：平台要求短信验证码",
+        )
+
+        self.assertFalse(ambiguous["eligible"])
+        self.assertFalse(ambiguous["automatic_retry_allowed"])
+        self.assertFalse(verification["eligible"])
+        self.assertIn("账号或本人验证", verification["summary"])
 
 
 if __name__ == "__main__":

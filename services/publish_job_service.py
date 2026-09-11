@@ -164,6 +164,7 @@ def create_publish_job(
                 tags=_normalize_authorization_tags(article_row["tags"]),
                 publish_title=publish_title,
                 publish_content=publish_content,
+                required_phrases=(str(article_row["project_name"] or "").strip(),),
             )
             assert_platform_publish_variant_ready(variant)
             resolved_account_id = _resolve_publish_account_id(
@@ -1142,7 +1143,18 @@ def _connect(database_path: str | Path) -> sqlite3.Connection:
 
 def _fetch_authorization_article(conn: sqlite3.Connection, article_id: int):
     return conn.execute(
-        "SELECT id, title, content, tags, status FROM articles WHERE id = ?",
+        """
+        SELECT
+            articles.id,
+            articles.title,
+            articles.content,
+            articles.tags,
+            articles.status,
+            projects.name AS project_name
+        FROM articles
+        JOIN projects ON projects.id = articles.project_id
+        WHERE articles.id = ?
+        """,
         (article_id,),
     ).fetchone()
 

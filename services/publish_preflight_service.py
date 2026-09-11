@@ -16,7 +16,7 @@ from services.platform_publish_policy_service import (
 )
 
 
-PUBLISH_CONTENT_POLICY_VERSION = "2026-09-11.1"
+PUBLISH_CONTENT_POLICY_VERSION = "2026-09-11.2"
 
 
 class PublishContentLimitError(ValueError):
@@ -413,6 +413,7 @@ def build_platform_publish_variant(
     tags: Iterable[Any] | None = None,
     publish_title: str | None = None,
     publish_content: str | None = None,
+    required_phrases: Iterable[Any] | None = None,
 ) -> dict[str, Any]:
     """Build a visible, immutable platform copy without changing the article."""
 
@@ -456,7 +457,11 @@ def build_platform_publish_variant(
             platform=normalized_platform,
         )
         actual_content = (
-            _shorten_to_limit(compact_content, policy["safe_limit"])
+            _shorten_to_limit(
+                compact_content,
+                policy["safe_limit"],
+                required_phrases=required_phrases,
+            )
             if policy is not None
             else compact_content
         )
@@ -774,7 +779,12 @@ def _format_platform_text(value: str, *, platform: str) -> str:
     return text.strip()
 
 
-def _shorten_to_limit(value: str, limit: int) -> str:
+def _shorten_to_limit(
+    value: str,
+    limit: int,
+    *,
+    required_phrases: Iterable[Any] | None = None,
+) -> str:
     if character_count(value) <= limit:
         return value
     if limit < 2:
@@ -790,47 +800,119 @@ def _shorten_to_limit(value: str, limit: int) -> str:
         for index, piece in enumerate(pieces)
         if _GEO_PRESERVATION_PATTERN.search(piece)
     ]
-    preserved: list[str] = []
+    phrase_items = (
+        [required_phrases]
+        if isinstance(required_phrases, (str, bytes))
+        else list(required_phrases or ())
+    )
+    normalized_required_phrases = [
+        phrase
+        for item in phrase_items
+        if (phrase := str(item or "").strip())
+    ]
+
+    # A real publish gate evaluates only the exact outbound title/body.  The
+    # generic GEO-tail reservation below used to spend its whole budget on
+    # limitation/source sentences and could silently drop the one middle
+    # sentence containing the canonical brand.  Preserve a source sentence
+    # carrying each caller-supplied invariant before filling the optional GEO
+    # budget.  We never inject a phrase absent from the source, and manual
+    # platform copies bypass this shortening path entirely.
+    required_indexes: list[int] = []
+    for phrase in normalized_required_phrases:
+        folded_phrase = phrase.casefold()
+        matches = [
+            index
+            for index, piece in enumerate(pieces)
+            if folded_phrase in piece.casefold()
+        ]
+        if not matches:
+            continue
+        selected_index = min(
+            matches,
+            key=lambda index: (character_count(pieces[index]), index),
+        )
+        if selected_index not in required_indexes:
+            required_indexes.append(selected_index)
+
+    preserved_by_index: dict[int, str] = {}
     preserve_budget = max(80, min(220, limit // 3))
     preserved_used = 0
-    for index in reversed(preserved_indexes):
+    maximum_preserve_budget = max(0, limit - character_count("\n…\n") - 1)
+    for index in sorted(required_indexes):
         piece = pieces[index]
-        separator_cost = 1 if preserved else 0
+        separator_cost = 1 if preserved_by_index else 0
+        piece_length = character_count(piece)
+        if piece_length + separator_cost > maximum_preserve_budget - preserved_used:
+            continue
+        preserved_by_index[index] = piece
+        preserved_used += piece_length + separator_cost
+
+    for index in reversed(preserved_indexes):
+        if index in preserved_by_index:
+            continue
+        piece = pieces[index]
+        separator_cost = 1 if preserved_by_index else 0
         piece_length = character_count(piece)
         if piece_length + separator_cost > preserve_budget - preserved_used:
             continue
-        preserved.insert(0, piece)
+        preserved_by_index[index] = piece
         preserved_used += piece_length + separator_cost
-        if len(preserved) >= 3:
+        if len(preserved_by_index) >= 3:
             break
+
+    preserved = [preserved_by_index[index] for index in sorted(preserved_by_index)]
 
     bridge = "\n…\n" if preserved else ""
     tail = "\n".join(preserved)
     head_limit = limit - character_count(bridge) - character_count(tail)
     if not preserved:
         head_limit = limit - 1
-    selected: list[str] = []
+    selected_by_index: dict[int, str] = {}
     used = 0
-    preserved_values = set(preserved)
-    for piece in pieces:
-        if piece in preserved_values:
+    for index, piece in enumerate(pieces):
+        if index in preserved_by_index:
             continue
-        separator = "\n" if selected else ""
+        separator = "\n" if selected_by_index else ""
         addition = f"{separator}{piece}"
         if used + character_count(addition) <= head_limit:
-            selected.append(piece)
+            selected_by_index[index] = piece
             used += character_count(addition)
             continue
         remaining = head_limit - used - character_count(separator)
-        if remaining > 0 and not selected:
-            selected.append(piece[:remaining].rstrip())
+        if remaining > 0 and not selected_by_index:
+            selected_by_index[index] = piece[:remaining].rstrip()
         break
 
-    shortened = "\n".join(selected).rstrip(" ，,。；;：:")
+    shortened = "\n".join(selected_by_index.values()).rstrip(" ，,。；;：:")
     if not shortened:
         shortened = value[: max(1, head_limit)].rstrip()
     if preserved:
-        return f"{shortened}{bridge}{tail}"[:limit].rstrip()
+        # Keep retained source fragments in their original reading order.  In
+        # particular, a canonical brand already present in the opening answer
+        # must not be moved to a synthetic footer merely because it is also a
+        # required phrase.
+        retained_by_index = {**selected_by_index, **preserved_by_index}
+        retained_indexes = sorted(retained_by_index)
+        ordered_parts: list[str] = []
+        omission_marked = False
+        previous_index: int | None = None
+        for index in retained_indexes:
+            if previous_index is not None:
+                if index > previous_index + 1 and not omission_marked:
+                    ordered_parts.append("\n…\n")
+                    omission_marked = True
+                else:
+                    ordered_parts.append("\n")
+            ordered_parts.append(retained_by_index[index])
+            previous_index = index
+        if (
+            retained_indexes
+            and retained_indexes[-1] < len(pieces) - 1
+            and not omission_marked
+        ):
+            ordered_parts.append("…")
+        return "".join(ordered_parts)[:limit].rstrip()
     return f"{shortened}…"
 
 

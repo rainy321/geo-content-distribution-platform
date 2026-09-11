@@ -325,8 +325,8 @@
                   <span>AI 可引用性</span>
                   <strong v-if="!platformDrafts[platform.key]?.citeability_current">内容编辑后正在重新检查…</strong>
                   <strong v-else>
-                    {{ platformDrafts[platform.key]?.citeability_score ?? '—' }}
-                    / {{ platformDrafts[platform.key]?.citeability_pass_score ?? 75 }}
+                    质量分 {{ platformDrafts[platform.key]?.citeability_score ?? '—' }} / 100
+                    · 建议线 {{ platformDrafts[platform.key]?.citeability_pass_score ?? 75 }}
                     · {{ citeabilityStatusLabel(platformDrafts[platform.key]) }}
                   </strong>
                 </div>
@@ -760,6 +760,16 @@
               修复正文后重建
             </el-button>
             <el-button
+              v-else-if="jobOutcome(job).action === 'auto_repair'"
+              type="primary"
+              plain
+              :loading="busyJobIds.has(job.job_id)"
+              :disabled="batchExecuting"
+              @click="autoRepairFailedJob(job)"
+            >
+              自动修复并重新排队
+            </el-button>
+            <el-button
               v-else-if="jobOutcome(job).retry_allowed && !job.reconciliation_required"
               type="primary"
               plain
@@ -1102,7 +1112,7 @@ const citeabilityStatusLabel = draft => {
   if (!citeabilityRequired.value) {
     return draft?.citeability_passed === true ? '质量线已达（仅供参考）' : '低于质量建议线（仅供参考）'
   }
-  if (citeabilityHardBlocked(draft)) return '发布硬门禁未通过'
+  if (citeabilityHardBlocked(draft)) return 'P0 硬阻断（与质量分无关）'
   if (draft?.citeability_publish_gate_passed === true && draft?.citeability_passed !== true) {
     return '可发布，建议先优化'
   }
@@ -2401,7 +2411,7 @@ const executeRealBatch = async ({
                 `${preparationIssues.length} 个已变化任务将跳过，不会访问平台。`)
             : null,
           h('p', { style: { margin: '8px 0 0', color: '#985b16', fontWeight: '700' } },
-            '每项独立执行：普通单项失败不拖住其他账号，也不会自动重试；若识别到封禁、限制、登录失效或本人验证，则冻结该账号余下任务。平台可能弹出本人验证窗口。'),
+            '每项独立执行：明确记录为“尚未提交”的页面或浏览器故障会自动修复并且只重试一次；审核中、结果未知、封禁、登录失效或本人验证绝不自动重发。'),
           h('p', { style: { margin: '8px 0 0' } }, `请输入“${confirmationPhrase}”继续。`)
         ]),
         recoveryMode ? '恢复确认 · 仅继续明确排队任务' : '强确认 · 连续真实发布',
@@ -2433,13 +2443,7 @@ const executeRealBatch = async ({
     for (const job of preparedJobs) {
       markJobBusy(job.job_id, true)
       try {
-        const response = await publishApi.executeRealJob(job)
-        const result = response.data || {}
-        applyJobSnapshot(result)
-        outcomes.push(normalizePublishOutcome(result, {
-          jobId: job.job_id,
-          platform: job.platform
-        }))
+        outcomes.push(await executeConfirmedJobWithSafeRepair(job))
       } catch (error) {
         const requestMessage = batchFailureMessage(error)
         let latest = null
@@ -2490,6 +2494,9 @@ const executeRealBatch = async ({
       h('div', { style: { color: '#985b16' } }, `下一步：${outcome.next_action}`),
       outcome.transport_note
         ? h('div', { style: { color: '#6f7778' } }, outcome.transport_note)
+        : null,
+      outcome.auto_repair_note
+        ? h('div', { style: { color: '#137b76', fontWeight: '700' } }, outcome.auto_repair_note)
         : null
     ]
   ))
@@ -2522,12 +2529,117 @@ const executeRealBatch = async ({
         : null,
       counts.failed
         ? h('p', { style: { margin: '8px 0 0', color: '#985b16' } },
-            '“明确失败”仅可在修复原因并确认平台未产生内容后手动重试。')
+            '“明确失败”中可安全恢复的项目已经自动修复并只重试一次；仍失败的项目已停止，避免形成循环或重复发布。')
         : null
     ]),
     '连续发布批次已结束',
     { confirmButtonText: '查看任务列表' }
   )
+}
+
+const executeConfirmedJobRequest = async job => {
+  try {
+    const response = await publishApi.executeRealJob(job)
+    const snapshot = response.data || {}
+    applyJobSnapshot(snapshot)
+    return {
+      snapshot,
+      outcome: normalizePublishOutcome(snapshot, {
+        jobId: job.job_id,
+        platform: job.platform
+      })
+    }
+  } catch (error) {
+    const requestMessage = batchFailureMessage(error)
+    let snapshot = null
+    try {
+      const latestResponse = await publishApi.getJob(job.job_id)
+      snapshot = latestResponse.data || null
+      if (snapshot) applyJobSnapshot(snapshot)
+    } catch (refreshError) {
+      console.warn('执行请求异常后读取持久化任务失败:', refreshError)
+    }
+    return {
+      snapshot,
+      outcome: normalizePublishOutcome(snapshot || {}, {
+        jobId: job.job_id,
+        platform: job.platform,
+        category: snapshot ? undefined : 'action_required',
+        reason: snapshot ? undefined : `请求结果无法确认：${requestMessage}`,
+        nextAction: snapshot
+          ? undefined
+          : '刷新任务并检查平台后台；确认未产生内容前禁止重试。',
+        retryAllowed: snapshot ? undefined : false,
+        validationRequired: true,
+        transportNote: `执行请求异常：${requestMessage}；${
+          snapshot ? '已按刷新后的持久化任务状态归类。' : '未能读取最新任务状态。'
+        }`
+      })
+    }
+  }
+}
+
+const executeConfirmedJobWithSafeRepair = async job => {
+  const first = await executeConfirmedJobRequest(job)
+  const outcome = first.outcome
+  if (
+    !first.snapshot
+    || !outcome.auto_repair_eligible
+    || !outcome.automatic_retry_allowed
+    || outcome.reconciliation_required
+  ) {
+    return outcome
+  }
+
+  try {
+    const repairResponse = await publishApi.autoRepairJob(first.snapshot)
+    const repairedJob = repairResponse.data?.job
+    const repair = repairResponse.data?.repair || {}
+    if (!repairedJob || repairedJob.status !== 'queued' || !repairedJob.can_execute_real) {
+      return normalizePublishOutcome(first.snapshot, {
+        jobId: job.job_id,
+        platform: job.platform,
+        autoRepairAttempted: true,
+        autoRepairNote: '软件已识别可修复问题，但重新排队后的任务未满足执行条件，已安全停止。',
+        transportNote: outcome.transport_note
+      })
+    }
+    applyJobSnapshot(repairedJob)
+    const second = await executeConfirmedJobRequest(repairedJob)
+    return normalizePublishOutcome(second.snapshot || {}, {
+      jobId: job.job_id,
+      platform: job.platform,
+      category: second.snapshot ? undefined : second.outcome.category,
+      reason: second.outcome.reason,
+      nextAction: second.outcome.next_action,
+      action: second.outcome.action,
+      retryAllowed: second.outcome.retry_allowed,
+      validationRequired: second.outcome.validation_required,
+      reconciliationRequired: second.outcome.reconciliation_required,
+      autoRepairEligible: false,
+      automaticRetryAllowed: false,
+      autoRepairStrategy: repair.strategy || outcome.auto_repair_strategy,
+      autoRepairMaxAttempts: 1,
+      autoRepairAttempted: true,
+      autoRepairNote: second.outcome.category === 'published'
+        || second.outcome.category === 'platform_processing'
+        ? '软件已自动修复发布链路并重试 1 次，平台已接收本次操作。'
+        : '软件已自动修复并重试 1 次；问题仍存在，已停止继续循环。',
+      transportNote: [outcome.transport_note, second.outcome.transport_note]
+        .filter(Boolean)
+        .join('；')
+    })
+  } catch (error) {
+    return normalizePublishOutcome(first.snapshot, {
+      jobId: job.job_id,
+      platform: job.platform,
+      autoRepairEligible: false,
+      automaticRetryAllowed: false,
+      autoRepairAttempted: true,
+      autoRepairNote: `自动修复未能完成：${batchFailureMessage(error)}；任务已停止，不会循环重试。`,
+      transportNote: outcome.transport_note
+    })
+  }
 }
 
 const executeRealJob = async (job) => {
@@ -2741,6 +2853,33 @@ const retryJob = async (job) => {
     console.error('重试发布任务失败:', error)
   } finally {
     markJobBusy(current.job_id, false)
+  }
+}
+
+const autoRepairFailedJob = async job => {
+  markJobBusy(job.job_id, true)
+  try {
+    const currentResponse = await publishApi.getJob(job.job_id)
+    const current = currentResponse.data || job
+    const outcome = jobOutcome(current)
+    if (
+      !outcome.auto_repair_eligible
+      || !outcome.automatic_retry_allowed
+      || outcome.reconciliation_required
+    ) {
+      ElMessage.warning(outcome.next_action || '该任务不能安全自动修复')
+      return
+    }
+    const response = await publishApi.autoRepairJob(current)
+    const repaired = response.data?.job
+    if (!repaired) throw new Error('自动修复未返回任务快照')
+    applyJobSnapshot(repaired)
+    ElMessage.success('问题已自动修复并重新排队；点击连续发布后将按同一快照发送')
+    await fetchJobs(true)
+  } catch (error) {
+    console.error('自动修复发布任务失败:', error)
+  } finally {
+    markJobBusy(job.job_id, false)
   }
 }
 
@@ -3756,6 +3895,7 @@ onBeforeUnmount(() => {
 }
 
 .asset-panel {
+  position: relative;
   margin-top: 18px;
   border: 1px solid var(--rule);
   background: #fbfdfc;

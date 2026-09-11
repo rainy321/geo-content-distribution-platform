@@ -25,6 +25,14 @@ export const publishApi = {
     return http.post(`/api/publish/jobs/${id}/retry`)
   },
 
+  autoRepairJob(job) {
+    return http.post(`/api/publish/jobs/${job.job_id}/auto-repair`, {
+      confirm_pre_submit: true,
+      job_id: job.job_id,
+      state_version: job.state_version
+    })
+  },
+
   executeDemoJob(id) {
     return http.post(`/api/publish/jobs/${id}/execute`)
   },

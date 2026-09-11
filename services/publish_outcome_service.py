@@ -44,6 +44,124 @@ _AMBIGUOUS_SUBMISSION_MARKERS = (
     "请求异常",
 )
 
+_PRE_SUBMISSION_MARKERS = (
+    "在点击发布前失败，尚未提交",
+    "在点击发表前中止，尚未提交",
+    "在点击 post 前中止，尚未提交",
+    "点击发布前失败，尚未提交",
+    "点击发表前中止，尚未提交",
+    "点击 post 前中止，尚未提交",
+    "尚未提交",
+    "未访问平台",
+)
+
+_SUBMISSION_MAY_HAVE_HAPPENED_MARKERS = (
+    "已点击发布",
+    "已点击发表",
+    "已触发一次",
+    "已接受提交",
+    "提交成功",
+    "提交审核",
+    "审核中",
+    "处理中",
+    "最终状态未知",
+    "结果未知",
+    "状态未知",
+    "无回执",
+    "未收到回执",
+    "未取得明确发布结果",
+)
+
+_HUMAN_OR_ACCOUNT_MARKERS = (
+    "短信",
+    "验证码",
+    "扫码",
+    "滑块",
+    "安全验证",
+    "本人验证",
+    "登录",
+    "cookie",
+    "账号离线",
+    "账号失效",
+    "账号异常",
+    "封禁",
+    "封号",
+    "违规",
+    "限流",
+    "操作频繁",
+)
+
+_PUBLISH_ROUTE_MARKERS = (
+    "页面结构",
+    "未找到图文发布入口",
+    "未找到图片上传控件",
+    "未找到可用的图文发布按钮",
+    "未找到可用发布按钮",
+    "浏览器页面",
+)
+
+_TRANSIENT_RUNTIME_MARKERS = (
+    "网络或浏览器连接异常",
+    "连接异常",
+    "页面加载失败",
+    "浏览器已关闭",
+    "target closed",
+    "timeout",
+    "超时",
+)
+
+
+def detect_safe_publish_repair(
+    *,
+    status: Any,
+    message: Any = "",
+    reconciliation_required: Any = False,
+) -> dict[str, Any]:
+    """Describe the only failures that software may repair automatically.
+
+    The decisive boundary is evidence from the publisher adapter that the final
+    submit control was never reached.  A timeout alone is never enough.  Login,
+    verification and account-risk gates always remain human actions.
+    """
+
+    normalized_status = str(status or "unknown").strip().lower()
+    normalized_message = str(message or "").strip()
+    lowered = normalized_message.casefold()
+    result = {
+        "eligible": False,
+        "automatic_retry_allowed": False,
+        "strategy": "none",
+        "summary": "该结果不能安全自动重试。",
+        "max_attempts": 0,
+    }
+    if normalized_status != "failed" or bool(reconciliation_required):
+        return result
+    if not any(marker in lowered for marker in _PRE_SUBMISSION_MARKERS):
+        return result
+    if any(marker in lowered for marker in _SUBMISSION_MAY_HAVE_HAPPENED_MARKERS):
+        return result
+    if any(marker in lowered for marker in _HUMAN_OR_ACCOUNT_MARKERS):
+        result["summary"] = "检测到账号或本人验证问题，必须由账号持有人处理。"
+        return result
+
+    if any(marker in lowered for marker in _PUBLISH_ROUTE_MARKERS):
+        strategy = "refresh_publish_route"
+        summary = "已确认尚未提交；软件可刷新发布入口并用同一快照重试一次。"
+    elif any(marker in lowered for marker in _TRANSIENT_RUNTIME_MARKERS):
+        strategy = "restart_publisher"
+        summary = "已确认尚未提交；软件可重启本次浏览器发布链路并重试一次。"
+    else:
+        strategy = "retry_same_snapshot"
+        summary = "已确认尚未提交；软件可保留原任务快照并安全重试一次。"
+
+    return {
+        "eligible": True,
+        "automatic_retry_allowed": True,
+        "strategy": strategy,
+        "summary": summary,
+        "max_attempts": 1,
+    }
+
 
 def classify_publish_outcome(
     *,
@@ -68,6 +186,11 @@ def classify_publish_outcome(
     normalized_url = str(result_url or "").strip()
     needs_reconciliation = bool(reconciliation_required)
     is_demo = bool(demo)
+    automatic_repair = detect_safe_publish_repair(
+        status=normalized_status,
+        message=normalized_message,
+        reconciliation_required=needs_reconciliation,
+    )
 
     if normalized_status == "success":
         category = "published"
@@ -119,11 +242,15 @@ def classify_publish_outcome(
     elif normalized_status == "failed":
         category = "failed"
         reason = normalized_message or "发布任务已明确失败，未记录为发布成功。"
-        next_action = (
-            "根据失败原因修复正文、素材、账号或运行环境；确认平台未产生内容后，"
-            "再手动重新排队。"
-        )
-        action = "retry_after_validation"
+        if automatic_repair["eligible"]:
+            next_action = automatic_repair["summary"]
+            action = "auto_repair"
+        else:
+            next_action = (
+                "根据失败原因修复正文、素材、账号或运行环境；确认平台未产生内容后，"
+                "再手动重新排队。"
+            )
+            action = "retry_after_validation"
         retry_allowed = True
         validation_required = True
     else:
@@ -147,6 +274,13 @@ def classify_publish_outcome(
         "validation_required": validation_required,
         "reconciliation_required": needs_reconciliation,
         "source_status": normalized_status,
+        "auto_repair_eligible": bool(automatic_repair["eligible"]),
+        "automatic_retry_allowed": bool(
+            automatic_repair["automatic_retry_allowed"]
+        ),
+        "auto_repair_strategy": str(automatic_repair["strategy"]),
+        "auto_repair_summary": str(automatic_repair["summary"]),
+        "auto_repair_max_attempts": int(automatic_repair["max_attempts"]),
     }
 
 
@@ -231,4 +365,5 @@ __all__ = [
     "PUBLISH_OUTCOME_CATEGORIES",
     "PUBLISH_OUTCOME_VERSION",
     "classify_publish_outcome",
+    "detect_safe_publish_repair",
 ]

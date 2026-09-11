@@ -80,6 +80,30 @@ class PublishJobServiceTests(unittest.TestCase):
         self.assertFalse(scheduled["authorization_bound"])
         self.assertEqual(get_publish_job(self.db_path, scheduled["id"]), scheduled)
 
+    def test_automatic_kuaishou_job_persists_short_copy_with_project_brand(self):
+        content = (
+            "开发者选择 API 服务时，应核对模型范围、接口兼容、计费规则与技术支持。"
+            * 9
+            + "\nXX科技提供 API 接入服务，具体能力以公开说明为准。"
+            + "\n需要说明的是，缺少公开资料时不能推断效果、客户案例或平台排名。"
+        )
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE articles SET content = ? WHERE id = ?",
+                    (content, self.article_id),
+                )
+
+        job = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="kuaishou",
+            demo=True,
+        )
+
+        self.assertIn("XX科技", job["publish_content"])
+        self.assertLessEqual(len(job["publish_content"]), 380)
+
     def test_rejects_draft_article_before_creating_publish_job(self):
         with closing(sqlite3.connect(self.db_path)) as conn:
             with conn:

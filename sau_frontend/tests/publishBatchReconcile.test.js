@@ -23,8 +23,10 @@ test('visible queued real jobs can be selected and executed as one confirmed seq
   assert.match(distributionSource, /formatPublishOutcomeSummary\(batchSummary\)/)
   assert.match(distributionSource, /不包含页面上的其他历史任务/)
   assert.match(distributionSource, /await fetchJobs\(true\)/)
-  assert.match(distributionSource, /普通单项失败不拖住其他账号，也不会自动重试/)
-  assert.match(distributionSource, /封禁、限制、登录失效或本人验证，则冻结该账号余下任务/)
+  assert.match(distributionSource, /明确记录为“尚未提交”的页面或浏览器故障会自动修复并且只重试一次/)
+  assert.match(distributionSource, /审核中、结果未知、封禁、登录失效或本人验证绝不自动重发/)
+  assert.match(publishApiSource, /\/api\/publish\/jobs\/\$\{job\.job_id\}\/auto-repair/)
+  assert.match(publishApiSource, /confirm_pre_submit: true/)
 })
 
 
