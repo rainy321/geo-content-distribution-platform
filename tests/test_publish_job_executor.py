@@ -583,6 +583,34 @@ class PublishJobExecutorTests(unittest.TestCase):
         self.assertEqual(account_status, 0)
         self.assertEqual(risk_category, "verification_required")
 
+    def test_processing_result_with_visible_ban_becomes_action_required(self):
+        account_id = self._create_connected_account()
+        job = self._create_job(account_id=account_id)
+        publisher = StubPublisher(
+            "zhihu",
+            PublishResult(
+                success=False,
+                platform="zhihu",
+                status="processing",
+                message="平台页面显示账号已被永久封禁",
+            ),
+        )
+
+        result = execute_publish_job(
+            self.db_path,
+            job["id"],
+            publisher_factory=lambda _job: publisher,
+        )
+
+        self.assertEqual(result["status"], "need_action")
+        self.assertFalse(result["reconciliation_required"])
+        self.assertIn("permanent_ban", result["message"])
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            account_status = conn.execute(
+                "SELECT status FROM user_info WHERE id = ?", (account_id,)
+            ).fetchone()[0]
+        self.assertEqual(account_status, 0)
+
     def test_failed_result_with_network_error_does_not_freeze_account(self):
         account_id = self._create_connected_account()
         job = self._create_job(account_id=account_id)

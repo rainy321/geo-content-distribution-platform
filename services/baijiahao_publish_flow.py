@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from services.platform_page_risk_service import raise_if_visible_platform_account_risk
+
 
 _PUBLIC_ARTICLE_URL_PATTERN = re.compile(
     r"https?://baijiahao\.baidu\.com/s\?id=\d+"
@@ -81,6 +83,7 @@ async def click_exact_publish_and_observe(
 ) -> dict[str, Any]:
     """Click one exact Baijiahao publish button and report observed evidence."""
 
+    await raise_if_visible_platform_account_risk(page, platform_name="百家号")
     responses: list[Any] = []
 
     def record_response(response: Any) -> None:
@@ -112,6 +115,7 @@ async def click_exact_publish_and_observe(
         except Exception:
             pass
 
+    await raise_if_visible_platform_account_risk(page, platform_name="百家号")
     public_url = _extract_public_article_url(_safe_page_url(page))
     if public_url:
         return {

@@ -10,6 +10,7 @@ import {
   normalizeUnifiedAIBaseUrl,
   normalizeUnifiedAIStatus,
   resolveUnifiedAIChatEndpoint,
+  resolveUnifiedAIImageEndpoint,
   unifiedAIProviderConfigurationHint,
   unifiedAICredentialLabel
 } from '../src/utils/aiConfig.js'
@@ -177,6 +178,21 @@ test('provider endpoints are normalized without duplicate or injected v1 paths',
   assert.equal(
     normalizeUnifiedAIBaseUrl('https://API.EXAMPLE.COM:443/v1/'),
     'https://api.example.com/v1'
+  )
+})
+
+test('image endpoint replaces a pasted chat endpoint without duplicate paths', () => {
+  assert.equal(
+    resolveUnifiedAIImageEndpoint('https://gateway.example.com/v1'),
+    'https://gateway.example.com/v1/images/generations'
+  )
+  assert.equal(
+    resolveUnifiedAIImageEndpoint('https://gateway.example.com/v1/chat/completions'),
+    'https://gateway.example.com/v1/images/generations'
+  )
+  assert.equal(
+    resolveUnifiedAIImageEndpoint('https://gateway.example.com/v1/images/generations'),
+    'https://gateway.example.com/v1/images/generations'
   )
 })
 

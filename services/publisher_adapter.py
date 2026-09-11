@@ -1406,7 +1406,16 @@ def _normalize_guarded_public_result(
 def classify_publisher_error(error: Exception | str) -> str:
     """Map platform safety/login failures to the shared task status."""
 
-    normalized = str(error).lower()
+    raw = str(error)
+    try:
+        from services.media_account_risk_service import classify_media_account_risk
+
+        risk = classify_media_account_risk(raw)
+    except Exception:
+        risk = None
+    if risk and risk.get("category") != "network_error":
+        return "need_action"
+    normalized = raw.lower()
     return (
         "need_action"
         if any(marker in normalized for marker in _NEED_ACTION_MARKERS)

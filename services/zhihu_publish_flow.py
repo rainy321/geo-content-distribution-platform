@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from services.platform_page_risk_service import raise_if_visible_platform_account_risk
+
 
 _ARTICLE_URL_PATTERN = re.compile(r"https://zhuanlan\.zhihu\.com/p/\d+")
 _SUBMISSION_METHODS = frozenset({"POST", "PUT", "PATCH"})
@@ -18,6 +20,7 @@ async def click_exact_publish_and_observe(page: Any) -> dict[str, Any]:
     exposes a published article URL or an explicit successful publish signal.
     """
 
+    await raise_if_visible_platform_account_risk(page, platform_name="知乎")
     submission_responses: list[Any] = []
 
     def record_response(response: Any) -> None:
@@ -62,6 +65,7 @@ async def click_exact_publish_and_observe(page: Any) -> dict[str, Any]:
         except Exception:
             pass
 
+    await raise_if_visible_platform_account_risk(page, platform_name="知乎")
     current_url = _safe_page_url(page)
     direct_url = _extract_article_url(current_url)
     if direct_url:

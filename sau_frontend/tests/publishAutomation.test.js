@@ -71,9 +71,11 @@ test('one batch confirmation creates and immediately executes every selected rea
   assert.match(source, /return `确认并立即发布 \$\{dispatchTaskCount\.value\} 项`/)
   assert.match(source, /const executeImmediately = Boolean\([\s\S]{0,140}!scheduleEnabled\.value/)
   assert.match(source, /const createdRealJobs = \[\]/)
-  assert.match(source, /else createdRealJobs\.push\(job\)/)
-  assert.match(source, /await executeRealBatch\(\{\s*jobsOverride: createdRealJobs,\s*skipConfirmation: true\s*\}\)/)
+  assert.match(source, /createdRealJobs\.push\(job\)[\s\S]{0,260}mergePublishBatchCheckpoint/)
+  assert.match(source, /await executeRealBatch\(\{\s*jobsOverride: createdRealJobs,\s*skipConfirmation: true,\s*checkpointBatchId: recoveryBatchId\s*\}\)/)
   assert.match(source, /if \(!skipConfirmation\) \{[\s\S]{0,1500}ElMessageBox\.prompt/)
+  assert.match(source, /recoverInterruptedPublishBatch/)
+  assert.match(source, /已提交、处理中、待核验或成功的任务不会重发/)
 })
 
 
@@ -124,7 +126,9 @@ test('every channel card distinguishes browser publishing from billable AI work'
 
 
 test('automatic cover discloses and opens the independently configurable IMAGE role', () => {
-  assert.match(source, /外部 IMAGE 生图角色可独立配置/)
-  assert.match(source, /当前自动封面仍由本地确定性绘图生成/)
+  assert.match(source, /如需调用外部 IMAGE 模型，请先点“生成封面”/)
+  assert.match(source, /调用与成本均会留痕/)
+  assert.match(source, /confirm_external_call: true/)
+  assert.match(source, /Idempotency-Key/)
   assert.match(source, /router\.push\(\{ path: '\/settings', query: \{ role: 'image' \} \}\)/)
 })

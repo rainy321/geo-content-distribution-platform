@@ -51,7 +51,9 @@ export const operationLabel = value => ({
   generate: '文章生成',
   optimize: 'GEO 调优',
   platform_adapt: '平台适配',
-  visibility_sample: 'AI 可见度采样'
+  visibility_sample: 'AI 可见度采样',
+  image_generate: 'AI 生图',
+  connection_test: '模型连通测试'
 }[String(value)] || String(value || '未知操作'))
 
 export const costStatusLabel = value => ({
@@ -70,7 +72,7 @@ export const usageStatusLabel = value => ({
 export const normalizeCostBill = response => {
   const root = unwrap(response)
   const summary = normalizeAggregate(root.summary || {})
-  const validOperations = new Set(['generate', 'optimize', 'platform_adapt', 'visibility_sample'])
+  const validOperations = new Set(['generate', 'optimize', 'platform_adapt', 'visibility_sample', 'image_generate', 'connection_test'])
   const records = array(root.records).filter(item => validOperations.has(String(item?.operation))).map(item => ({
     id: item?.id ?? null,
     projectId: numberOrNull(item?.project_id),

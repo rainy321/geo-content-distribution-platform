@@ -324,7 +324,9 @@ const operationOptions = [
   { label: '文章生成', value: 'generate' },
   { label: 'GEO 调优', value: 'optimize' },
   { label: '平台适配', value: 'platform_adapt' },
-  { label: 'AI 可见度采样', value: 'visibility_sample' }
+  { label: 'AI 可见度采样', value: 'visibility_sample' },
+  { label: 'AI 生图', value: 'image_generate' },
+  { label: '模型连通测试', value: 'connection_test' }
 ]
 const statusOptions = [
   { label: '已核算', value: 'calculated' },

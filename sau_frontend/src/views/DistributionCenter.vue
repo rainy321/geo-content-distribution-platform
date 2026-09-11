@@ -80,6 +80,20 @@
       </button>
     </section>
 
+    <section v-if="interruptedBatchCount" class="publish-mode-banner recovery" role="alert">
+      <span>RECOVERY / SAFE</span>
+      <div>
+        <strong>发现 {{ interruptedBatchCount }} 个上次未执行完的排队任务</strong>
+        <p>只会重新读取任务状态；已提交、处理中、待核验或成功的任务不会重发。</p>
+      </div>
+      <el-button
+        type="warning"
+        plain
+        :loading="recoveryChecking || batchExecuting"
+        @click="recoverInterruptedPublishBatch"
+      >核对并继续剩余任务</el-button>
+    </section>
+
     <section
       v-if="accountBindingRequired"
       :class="['publish-mode-banner', publishingRuntimeReady ? 'armed' : 'blocked']"
@@ -414,7 +428,7 @@
               <strong>发布时自动匹配图片</strong>
               <span>优先按品牌、标题和标签推荐素材；没有合适图片时生成一张中性 GEO 封面。</span>
               <small class="image-model-disclosure">
-                外部 IMAGE 生图角色可独立配置；当前自动封面仍由本地确定性绘图生成。
+                自动配图优先复用素材并以本地封面兜底；如需调用外部 IMAGE 模型，请先点“生成封面”，调用与成本均会留痕。
                 <button type="button" @click="openImageModelSettings">配置生图模型</button>
               </small>
             </div>
@@ -914,6 +928,12 @@ import {
   isPublishedContentUrlRequired,
   platformVerificationDestination
 } from '@/utils/platformVerification'
+import {
+  clearPublishBatchCheckpoint,
+  mergePublishBatchCheckpoint,
+  readPublishBatchCheckpoint,
+  removePublishBatchJobIds
+} from '@/utils/publishBatchRecovery'
 
 const route = useRoute()
 const router = useRouter()
@@ -989,6 +1009,8 @@ const lastSyncedAt = ref(null)
 const busyJobIds = ref(new Set())
 const selectedJobIds = ref(new Set())
 const batchExecuting = ref(false)
+const interruptedBatchCount = ref(0)
+const recoveryChecking = ref(false)
 const reconciliationDialog = reactive({
   visible: false,
   job: null,
@@ -1015,6 +1037,7 @@ const JOB_POLL_INTERVAL_MS = 5000
 const JOB_POLL_MAX_ATTEMPTS = 120
 const JOB_POLL_MAX_CONSECUTIVE_FAILURES = 3
 const MAX_BATCH_ARTICLES = 20
+const PUBLISH_BATCH_ACTIVE_FLAG = '__geoPublishBatchExecutionActiveV1'
 
 const selectedArticle = computed(() => (
   articles.value.find(article => article.id === selectedArticleId.value) || null
@@ -1716,6 +1739,7 @@ const fetchJobs = async (pageOrSilent = false) => {
     jobs.value = response.data?.items || []
     Object.assign(jobPagination, response.data?.pagination || {})
     lastSyncedAt.value = new Date()
+    syncInterruptedBatchCount()
     return true
   } catch (error) {
     if (requestSerial !== jobsRequestSerial || pollingStopped) return null
@@ -1855,6 +1879,12 @@ const materialRecordToImage = record => ({
   previewUrl: materialApi.getMaterialPreviewUrl(record.file_path)
 })
 
+const makeClientRequestId = prefix => {
+  const randomPart = globalThis.crypto?.randomUUID?.()
+    || `${Date.now()}-${Math.random().toString(16).slice(2)}`
+  return `${prefix}:${randomPart}`
+}
+
 const recommendImage = async ({ silent = false } = {}) => {
   if (!selectedArticleId.value || imageRecommending.value) return
   imageRecommending.value = true
@@ -1877,12 +1907,38 @@ const recommendImage = async ({ silent = false } = {}) => {
 const generateCover = async () => {
   if (!selectedArticleId.value || coverGenerating.value) return
   coverGenerating.value = true
+  const requestId = makeClientRequestId(`cover-${selectedArticleId.value}`)
   try {
-    const response = await articleApi.generateCover(selectedArticleId.value)
+    const response = await articleApi.generateCover(
+      selectedArticleId.value,
+      {
+        confirm_external_call: true,
+        idempotency_key: requestId
+      },
+      {
+        headers: {
+          'X-Request-ID': requestId,
+          'Idempotency-Key': requestId
+        }
+      }
+    )
     selectedImage.value = materialRecordToImage(response.data)
-    ElMessage.success('中性 GEO 封面已生成并进入素材库')
+    ElMessage.success(
+      response.data?.generation_mode === 'external_ai'
+        ? 'IMAGE 模型封面已生成，Token / 成本回执已写入账单'
+        : '本地中性 GEO 封面已生成，未产生模型费用'
+    )
+    const receiptWarning = response.data?.warnings?.find(
+      item => item?.code === 'cost_receipt_not_recorded'
+    )
+    if (receiptWarning?.message) ElMessage.warning(receiptWarning.message)
   } catch (error) {
     console.error('生成文章封面失败:', error)
+    if (error?.response?.data?.data?.retry_forbidden) {
+      ElMessage.error('生图请求可能已经产生费用，系统已禁止自动重试；请先检查成本账单和素材库')
+    } else {
+      ElMessage.error(error?.response?.data?.msg || error?.message || '封面生成失败')
+    }
   } finally {
     coverGenerating.value = false
   }
@@ -2086,6 +2142,9 @@ const dispatchArticle = async () => {
   let demoCount = 0
   const creationFailures = []
   const createdRealJobs = []
+  const recoveryBatchId = executeImmediately
+    ? makeClientRequestId('publish-batch')
+    : ''
 
   for (const articleId of articleIds) {
     const article = articles.value.find(item => item.id === articleId)
@@ -2109,7 +2168,17 @@ const dispatchArticle = async () => {
         let job = response.data
         createdCount += 1
         if (job.demo) demoCount += 1
-        else createdRealJobs.push(job)
+        else {
+          createdRealJobs.push(job)
+          if (executeImmediately) {
+            mergePublishBatchCheckpoint(
+              window.localStorage,
+              [job.job_id],
+              { batchId: recoveryBatchId }
+            )
+            syncInterruptedBatchCount()
+          }
+        }
         if (job.demo && job.status === 'queued') {
           const executed = await publishApi.executeDemoJob(job.job_id)
           job = executed.data
@@ -2127,7 +2196,8 @@ const dispatchArticle = async () => {
   if (executeImmediately && createdRealJobs.length) {
     await executeRealBatch({
       jobsOverride: createdRealJobs,
-      skipConfirmation: true
+      skipConfirmation: true,
+      checkpointBatchId: recoveryBatchId
     })
   } else if (createdCount && !failedCount) {
     ElMessage.success(
@@ -2172,8 +2242,81 @@ const batchFailureMessage = error => (
   || '请求未完成，请核对本地任务状态和平台后台'
 )
 
-const executeRealBatch = async ({ jobsOverride = null, skipConfirmation = false } = {}) => {
-  if (batchExecuting.value) return
+const syncInterruptedBatchCount = () => {
+  const checkpoint = readPublishBatchCheckpoint(window.localStorage)
+  interruptedBatchCount.value = checkpoint?.job_ids?.length || 0
+  return checkpoint
+}
+
+const finishRealBatchExecution = () => {
+  batchExecuting.value = false
+  globalThis[PUBLISH_BATCH_ACTIVE_FLAG] = false
+  syncInterruptedBatchCount()
+}
+
+const recoverInterruptedPublishBatch = async ({ automatic = false } = {}) => {
+  if (recoveryChecking.value || batchExecuting.value) return
+  const checkpoint = syncInterruptedBatchCount()
+  if (!checkpoint) return
+  if (globalThis[PUBLISH_BATCH_ACTIVE_FLAG]) {
+    if (!automatic) ElMessage.info('原发布批次仍在当前软件进程中执行，无需重复恢复')
+    return
+  }
+
+  recoveryChecking.value = true
+  const detailResults = await Promise.allSettled(
+    checkpoint.job_ids.map(jobId => publishApi.getJob(jobId))
+  )
+  const recoverable = []
+  const settledOrUnsafeIds = []
+  let unreadableCount = 0
+  detailResults.forEach((result, index) => {
+    const jobId = checkpoint.job_ids[index]
+    if (result.status !== 'fulfilled') {
+      unreadableCount += 1
+      return
+    }
+    const job = result.value?.data
+    if (isBatchEligible(job)) recoverable.push(job)
+    else settledOrUnsafeIds.push(jobId)
+  })
+  if (settledOrUnsafeIds.length) {
+    removePublishBatchJobIds(window.localStorage, settledOrUnsafeIds)
+  }
+  syncInterruptedBatchCount()
+  recoveryChecking.value = false
+
+  if (!recoverable.length) {
+    if (!unreadableCount) {
+      clearPublishBatchCheckpoint(window.localStorage)
+      interruptedBatchCount.value = 0
+      if (!automatic) ElMessage.info('没有可安全恢复的排队任务；其他状态均未重发')
+    } else {
+      ElMessage.warning(`${unreadableCount} 个任务状态暂时读取失败，已保留断点且没有访问平台`)
+    }
+    return
+  }
+  if (unreadableCount) {
+    ElMessage.warning(`${unreadableCount} 个状态无法确认的任务已跳过，绝不会盲目重发`)
+  }
+  await executeRealBatch({
+    jobsOverride: recoverable,
+    skipConfirmation: false,
+    checkpointBatchId: checkpoint.batch_id,
+    recoveryMode: true
+  })
+}
+
+const executeRealBatch = async ({
+  jobsOverride = null,
+  skipConfirmation = false,
+  checkpointBatchId = '',
+  recoveryMode = false
+} = {}) => {
+  if (batchExecuting.value || globalThis[PUBLISH_BATCH_ACTIVE_FLAG]) {
+    ElMessage.info('已有真实发布批次正在执行，未启动重复批次')
+    return
+  }
   const listedJobs = Array.isArray(jobsOverride)
     ? [...jobsOverride]
     : [...batchJobsToRun.value]
@@ -2183,11 +2326,12 @@ const executeRealBatch = async ({ jobsOverride = null, skipConfirmation = false 
   }
 
   batchExecuting.value = true
+  globalThis[PUBLISH_BATCH_ACTIVE_FLAG] = true
 
   const accountsLoaded = await fetchAccounts()
   if (!accountsLoaded) {
     ElMessage.error('账号清单未载入，批次没有开始')
-    batchExecuting.value = false
+    finishRealBatchExecution()
     return
   }
 
@@ -2196,6 +2340,7 @@ const executeRealBatch = async ({ jobsOverride = null, skipConfirmation = false 
   )
   const preparedJobs = []
   const preparationIssues = []
+  const staleCheckpointJobIds = []
   detailResults.forEach((result, index) => {
     const listed = listedJobs[index]
     if (result.status !== 'fulfilled') {
@@ -2221,14 +2366,20 @@ const executeRealBatch = async ({ jobsOverride = null, skipConfirmation = false 
     } else if (!account) {
       reason = '绑定账号已离线或不存在'
     }
-    if (reason) preparationIssues.push({ job: listed, reason })
+    if (reason) {
+      preparationIssues.push({ job: listed, reason })
+      staleCheckpointJobIds.push(listed.job_id)
+    }
     else preparedJobs.push({ ...detail, boundAccount: account })
   })
+  if (staleCheckpointJobIds.length) {
+    removePublishBatchJobIds(window.localStorage, staleCheckpointJobIds)
+  }
 
   if (!preparedJobs.length) {
     await fetchJobs(true)
     ElMessage.error(`批次没有开始：${preparationIssues.map(item => item.reason).join('；')}`)
-    batchExecuting.value = false
+    finishRealBatchExecution()
     return
   }
 
@@ -2253,7 +2404,7 @@ const executeRealBatch = async ({ jobsOverride = null, skipConfirmation = false 
             '每项独立执行：普通单项失败不拖住其他账号，也不会自动重试；若识别到封禁、限制、登录失效或本人验证，则冻结该账号余下任务。平台可能弹出本人验证窗口。'),
           h('p', { style: { margin: '8px 0 0' } }, `请输入“${confirmationPhrase}”继续。`)
         ]),
-        '强确认 · 连续真实发布',
+        recoveryMode ? '恢复确认 · 仅继续明确排队任务' : '强确认 · 连续真实发布',
         {
           confirmButtonText: `连续执行 ${preparedJobs.length} 项`,
           cancelButtonText: '取消',
@@ -2265,10 +2416,17 @@ const executeRealBatch = async ({ jobsOverride = null, skipConfirmation = false 
         }
       )
     } catch {
-      batchExecuting.value = false
+      finishRealBatchExecution()
       return
     }
   }
+
+  mergePublishBatchCheckpoint(
+    window.localStorage,
+    preparedJobs.map(job => job.job_id),
+    { batchId: checkpointBatchId || makeClientRequestId('publish-batch') }
+  )
+  syncInterruptedBatchCount()
 
   const outcomes = []
   try {
@@ -2311,11 +2469,13 @@ const executeRealBatch = async ({ jobsOverride = null, skipConfirmation = false 
       } finally {
         markJobBusy(job.job_id, false)
         toggleBatchJob(job.job_id, false)
+        removePublishBatchJobIds(window.localStorage, [job.job_id])
+        syncInterruptedBatchCount()
         await fetchJobs(true)
       }
     }
   } finally {
-    batchExecuting.value = false
+    finishRealBatchExecution()
     await fetchJobs(true)
   }
 
@@ -2869,6 +3029,10 @@ onMounted(async () => {
       await router.replace({ path: '/publish-center' })
     }
   }
+  syncInterruptedBatchCount()
+  if (interruptedBatchCount.value && !globalThis[PUBLISH_BATCH_ACTIVE_FLAG]) {
+    await recoverInterruptedPublishBatch({ automatic: true })
+  }
   scheduleJobPoll()
 })
 
@@ -3061,6 +3225,15 @@ onBeforeUnmount(() => {
     > span { color: #a35e12; }
     strong { color: #62431e; }
     p { color: #796345; }
+  }
+
+  &.recovery {
+    grid-template-columns: 128px minmax(0, 1fr) auto;
+    border-color: #e0b77d;
+    border-left-color: #c9852d;
+    background: #fffaf0;
+
+    > span { color: #985b16; }
   }
 
   &.blocked,
@@ -4173,7 +4346,8 @@ onBeforeUnmount(() => {
   .live-indicator { width: 100%; box-sizing: border-box; }
   .dispatch-form, .route-manifest { padding: 20px; }
   .platform-grid { grid-template-columns: repeat(2, 1fr); }
-  .publish-mode-banner { grid-template-columns: 1fr; gap: 7px; }
+  .publish-mode-banner,
+  .publish-mode-banner.recovery { grid-template-columns: 1fr; gap: 7px; }
   .account-route-row { grid-template-columns: 1fr; gap: 8px; }
   .account-route-error { align-items: stretch; flex-direction: column; }
   .asset-heading { grid-template-columns: 1fr auto; }

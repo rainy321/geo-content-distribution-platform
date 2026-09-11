@@ -211,9 +211,16 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                 "SELECT sql FROM sqlite_master "
                 "WHERE type = 'table' AND name = 'ai_usage_ledger'"
             ).fetchone()
+            existing_ai_usage_sql = str(
+                existing_ai_usage_ledger[0] if existing_ai_usage_ledger else ""
+            )
             migrate_ai_usage_operations = bool(
                 existing_ai_usage_ledger
-                and "visibility_sample" not in str(existing_ai_usage_ledger[0] or "")
+                and (
+                    "visibility_sample" not in existing_ai_usage_sql
+                    or "image_generate" not in existing_ai_usage_sql
+                    or "connection_test" not in existing_ai_usage_sql
+                )
             )
             if migrate_ai_usage_operations:
                 # SQLite cannot alter a CHECK constraint in place. Rebuild the
@@ -234,7 +241,8 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                     operation TEXT NOT NULL
                         CHECK (operation IN (
                             'generate', 'optimize', 'platform_adapt',
-                            'visibility_sample'
+                            'visibility_sample', 'image_generate',
+                            'connection_test'
                         )),
                     provider TEXT NOT NULL DEFAULT 'unknown',
                     model TEXT NOT NULL DEFAULT 'unknown',

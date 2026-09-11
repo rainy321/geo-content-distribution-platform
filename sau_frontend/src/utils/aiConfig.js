@@ -1,5 +1,6 @@
 const objectValue = value => (value && typeof value === 'object' ? value : {})
 const CHAT_COMPLETIONS_SUFFIX = '/chat/completions'
+const IMAGE_GENERATIONS_SUFFIX = '/images/generations'
 
 export const normalizeUnifiedAIBaseUrl = value => {
   const raw = String(value || '').trim()
@@ -49,6 +50,22 @@ export const resolveUnifiedAIChatEndpoint = value => {
     return `${parsed.origin}${CHAT_COMPLETIONS_SUFFIX}`
   }
   return `${parsed.origin}/v1${CHAT_COMPLETIONS_SUFFIX}`
+}
+
+export const resolveUnifiedAIImageEndpoint = value => {
+  const baseUrl = normalizeUnifiedAIBaseUrl(value)
+  const parsed = new URL(baseUrl)
+  const path = parsed.pathname.replace(/\/+$/, '')
+  const foldedPath = path.toLowerCase()
+  if (foldedPath.endsWith(IMAGE_GENERATIONS_SUFFIX)) return baseUrl
+  if (foldedPath.endsWith(CHAT_COMPLETIONS_SUFFIX)) {
+    return `${baseUrl.slice(0, -CHAT_COMPLETIONS_SUFFIX.length)}${IMAGE_GENERATIONS_SUFFIX}`
+  }
+  if (path) return `${baseUrl}${IMAGE_GENERATIONS_SUFFIX}`
+  if (knownProviderForHost(parsed.hostname) === 'deepseek') {
+    return `${parsed.origin}${IMAGE_GENERATIONS_SUFFIX}`
+  }
+  return `${parsed.origin}/v1${IMAGE_GENERATIONS_SUFFIX}`
 }
 
 const knownProviderForHost = hostname => {
@@ -134,7 +151,7 @@ export const AI_ROLE_DEFINITIONS = Object.freeze([
   Object.freeze({ id: 'writer', label: '写稿模型', code: 'WRITE', description: '生成文章与批量草稿' }),
   Object.freeze({ id: 'reviewer', label: '调优模型', code: 'REVIEW', description: '复核结构、证据和表达' }),
   Object.freeze({ id: 'evaluator', label: '回测模型', code: 'EVAL', description: 'AI 可见度真实采样' }),
-  Object.freeze({ id: 'image', label: '生图模型', code: 'IMAGE', description: '为后续外部生图预留' })
+  Object.freeze({ id: 'image', label: '生图模型', code: 'IMAGE', description: '生成文章封面并记录实际调用成本' })
 ])
 
 export const unifiedAIProviderPreset = id => (

@@ -111,7 +111,7 @@ export const normalizeCommercialDiagnosticHistory = response => {
 export const normalizeProjectCostSummary = response => {
   const root = unwrap(response)
   const summary = root.summary && typeof root.summary === 'object' ? root.summary : {}
-  const modelOperations = new Set(['generate', 'optimize', 'platform_adapt', 'visibility_sample'])
+  const modelOperations = new Set(['generate', 'optimize', 'platform_adapt', 'visibility_sample', 'image_generate', 'connection_test'])
   return {
     operationCount: Math.max(0, numberOrNull(summary.operation_count) ?? 0),
     knownTotalTokens: Math.max(0, numberOrNull(summary.known_total_tokens) ?? 0),
@@ -158,5 +158,7 @@ export const operationLabel = value => ({
   generate: '文章生成',
   optimize: 'GEO 调优',
   platform_adapt: '平台适配',
-  visibility_sample: 'AI 可见度采样'
+  visibility_sample: 'AI 可见度采样',
+  image_generate: 'AI 生图',
+  connection_test: '模型连通测试'
 }[String(value)] || String(value || '未知操作'))

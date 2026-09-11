@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from services.platform_page_risk_service import raise_if_visible_platform_account_risk
+
 
 _PUBLIC_NOTE_URL_PATTERN = re.compile(
     r"https?://(?:www\.)?xiaohongshu\.com/(?:explore|discovery/item)/[a-f0-9]+",
@@ -23,6 +25,7 @@ async def click_exact_publish_and_observe(
 ) -> dict[str, Any]:
     """Click one exact Xiaohongshu action and never retry the submission."""
 
+    await raise_if_visible_platform_account_risk(page, platform_name="小红书")
     responses: list[Any] = []
 
     def record_response(response: Any) -> None:
@@ -74,6 +77,7 @@ async def click_exact_publish_and_observe(
                 blocking = await _detect_manual_verification(page)
                 if blocking:
                     raise RuntimeError(blocking)
+                await raise_if_visible_platform_account_risk(page, platform_name="小红书")
         except Exception as exc:
             if not _is_post_submit_page_transition(exc):
                 raise
@@ -83,6 +87,7 @@ async def click_exact_publish_and_observe(
         except Exception:
             pass
 
+    await raise_if_visible_platform_account_risk(page, platform_name="小红书")
     public_url = await _extract_public_url_from_responses(responses)
     if public_url:
         return {

@@ -12,7 +12,10 @@ from services.geo_article_compiler_service import (
     GEOArticleCompilerError,
 )
 from services.project_service import ProjectNotFoundError, get_project
-from services.media_account_risk_service import record_publish_job_account_risk
+from services.media_account_risk_service import (
+    classify_media_account_risk,
+    record_publish_job_account_risk,
+)
 from services.platform_publish_policy_service import adapt_tags_for_platform
 from services.publish_job_service import (
     ConcurrentPublishJobUpdateError,
@@ -376,6 +379,22 @@ def _persist_result(
         )
     if bool(result.demo) != bool(job["demo"]):
         raise ValueError("发布结果的 Demo 标记与任务不一致")
+
+    if not result.success:
+        risk = classify_media_account_risk(result.message)
+        if risk and risk["category"] != "network_error" and result.status != "need_action":
+            result = PublishResult(
+                success=False,
+                platform=result.platform,
+                status="need_action",
+                url=result.url,
+                message=(
+                    f"{result.message}；已识别为{risk['label']}[{risk['category']}]。"
+                    f"{risk['recommended_action']}"
+                ).strip("；"),
+                published_at=result.published_at,
+                demo=result.demo,
+            )
 
     expected_success = result.status == "success"
     if result.success != expected_success:

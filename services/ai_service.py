@@ -611,6 +611,31 @@ def resolve_ai_chat_completions_url(base_url: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, endpoint_path, "", ""))
 
 
+def resolve_ai_image_generations_url(base_url: str) -> str:
+    """Resolve exactly one OpenAI-compatible image-generation endpoint.
+
+    Saved role configuration continues to store one credential-free API base.
+    This resolver deliberately mirrors the chat resolver while replacing a
+    pasted chat endpoint instead of appending a second, invalid endpoint.
+    """
+
+    normalized = normalize_ai_base_url(base_url)
+    parsed = urlsplit(normalized)
+    path = parsed.path.rstrip("/")
+    folded_path = path.casefold()
+    if folded_path.endswith("/images/generations"):
+        endpoint_path = path
+    elif folded_path.endswith("/chat/completions"):
+        endpoint_path = path[: -len("/chat/completions")] + "/images/generations"
+    elif path:
+        endpoint_path = f"{path}/images/generations"
+    elif _known_provider_for_host(parsed.hostname or "") == "deepseek":
+        endpoint_path = "/images/generations"
+    else:
+        endpoint_path = "/v1/images/generations"
+    return urlunsplit((parsed.scheme, parsed.netloc, endpoint_path, "", ""))
+
+
 def _known_provider_for_host(hostname: str) -> str:
     normalized = hostname.rstrip(".").lower()
     if normalized.endswith(".aliyuncs.com"):

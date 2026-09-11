@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from db.createTable import initialize_database
 from sau_backend import _create_content_generation_service, app
+from services.ai_image_generation_service import AIImageGenerationResult
 from services.ai_service import AICompletionResult, AISettings
 from services.unified_ai_config_service import UnifiedAIConfigService
 
@@ -230,8 +231,53 @@ class UnifiedAIConfigApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 400)
         self.assertNotIn(self.save_payload()["api_key"], response.get_data(as_text=True))
 
+    def test_image_role_reuses_same_service_credential_with_full_image_endpoint(self):
+        self.client.put("/api/ai/config", json=self.save_payload())
+
+        response = self.client.put(
+            "/api/ai/config/roles/image",
+            json={
+                "provider": "qwen",
+                "base_url": "https://api.example.test/compatible-mode/v1/images/generations",
+                "model": "synthetic-image-model",
+                "reuse_writer_credential": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        settings = self.config_service.load_settings("image")
+        self.assertEqual(settings.api_key, self.save_payload()["api_key"])
+        self.assertEqual(
+            settings.base_url,
+            "https://api.example.test/compatible-mode/v1/images/generations",
+        )
+
+    def test_reviewer_role_rejects_same_writer_model_connection(self):
+        self.config_service.save(**self.save_payload())
+
+        response = self.client.put(
+            "/api/ai/config/roles/reviewer",
+            json={
+                "provider": "qwen",
+                "base_url": "https://api.example.test/compatible-mode/v1",
+                "model": "synthetic-model",
+                "reuse_writer_credential": True,
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("调优模型必须与写稿模型不同", response.get_json()["msg"])
+        self.assertFalse(self.config_service.status().public_dict()["roles"]["reviewer"]["configured"])
+
+    @patch("sau_backend.store_ai_generated_cover")
+    @patch("sau_backend.generate_ai_article_cover")
     @patch("sau_backend.generate_article_cover")
-    def test_local_cover_reports_configured_image_role_as_not_invoked(self, generate):
+    def test_configured_image_role_is_invoked_and_costed(
+        self,
+        local_generate,
+        external_generate,
+        store_cover,
+    ):
         self.config_service.save(**self.save_payload())
         self.config_service.save_role(
             "image",
@@ -240,20 +286,35 @@ class UnifiedAIConfigApiTests(unittest.TestCase):
             model="image-model",
             api_key="image-secret",
         )
-        generate.return_value = {"id": 77, "source": "generated"}
+        external_generate.return_value = AIImageGenerationResult(
+            image_bytes=b"synthetic-image-bytes",
+            provider="custom",
+            model="image-model",
+            provider_request_id="synthetic-image-request-1",
+            elapsed_ms=7,
+            usage={"total_tokens": 12},
+            endpoint="https://images.example.test/v1/images/generations",
+        )
+        store_cover.return_value = {"id": 77, "source": "generated_ai"}
 
         response = self.client.post(
-            f"/api/articles/{self.article_id}/images/generate"
+            f"/api/articles/{self.article_id}/images/generate",
+            json={
+                "confirm_external_call": True,
+                "idempotency_key": "synthetic-cover-1",
+            },
+            headers={"Idempotency-Key": "synthetic-cover-1"},
         )
 
         self.assertEqual(response.status_code, 201)
         data = response.get_json()["data"]
-        self.assertEqual(data["generation_mode"], "local_deterministic")
-        self.assertEqual(
-            data["ai_role"]["execution"],
-            "configured_but_not_invoked",
-        )
+        self.assertEqual(data["generation_mode"], "external_ai")
+        self.assertEqual(data["ai_role"]["execution"], "invoked")
         self.assertEqual(data["ai_role"]["model"], "image-model")
+        self.assertEqual(data["ai_usage"]["total_tokens"], 12)
+        local_generate.assert_not_called()
+        external_generate.assert_called_once()
+        store_cover.assert_called_once()
         self.assertNotIn("image-secret", response.get_data(as_text=True))
 
     def test_invalid_save_does_not_replace_existing_good_config(self):
@@ -328,6 +389,48 @@ class UnifiedAIConfigApiTests(unittest.TestCase):
         self.assertFalse(data["data_disclosure"]["project_data_sent"])
         self.assertFalse(data["data_disclosure"]["api_key_returned"])
         self.assertNotIn(self.save_payload()["api_key"], response.get_data(as_text=True))
+
+    @patch("sau_backend.generate_ai_article_cover")
+    def test_image_connection_test_uses_image_endpoint_and_records_receipt(self, generate):
+        self.config_service.save(**self.save_payload())
+        self.config_service.save_role(
+            "image",
+            provider="custom",
+            base_url="https://images.example.test/v1/images/generations",
+            model="synthetic-image-model",
+            api_key="synthetic-image-secret",
+        )
+        generate.return_value = AIImageGenerationResult(
+            image_bytes=b"discarded-synthetic-image",
+            provider="custom",
+            model="synthetic-image-model",
+            provider_request_id="synthetic-image-test-1",
+            elapsed_ms=8,
+            usage={"total_tokens": 7},
+            endpoint="https://images.example.test/v1/images/generations",
+        )
+
+        response = self.client.post(
+            "/api/ai/config/test",
+            json={"confirm_external_call": True, "role": "image"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        settings = generate.call_args.kwargs["settings"]
+        self.assertEqual(settings.model, "synthetic-image-model")
+        data = response.get_json()["data"]
+        self.assertEqual(
+            data["endpoint"],
+            "https://images.example.test/v1/images/generations",
+        )
+        self.assertEqual(data["ai_usage"]["operation"], "connection_test")
+        self.assertEqual(data["ai_usage"]["total_tokens"], 7)
+        self.assertEqual(
+            data["data_disclosure"]["sent_to_provider"],
+            ["fixed_synthetic_image_prompt"],
+        )
+        self.assertFalse(data["data_disclosure"]["project_data_sent"])
+        self.assertNotIn("synthetic-image-secret", response.get_data(as_text=True))
 
     @patch("sau_backend.sample_ai_prompt_detailed")
     def test_ark_config_keeps_api_v3_endpoint_for_connection_test(self, sample):

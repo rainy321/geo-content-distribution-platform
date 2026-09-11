@@ -64,11 +64,11 @@
 
         <div v-if="reviewerSimilarityRisk" class="role-risk" role="status">
           <strong>调优模型与写稿模型相同</strong>
-          <span>可以继续使用，但两次输出更容易同质化；建议为 REVIEW 配置不同模型或服务商。</span>
+          <span>该旧配置不会再执行第二次付费调用。请为 REVIEW 更换模型 ID、服务商或服务地址后重新保存。</span>
         </div>
         <div v-if="selectedRole === 'image'" class="role-runtime-note" role="note">
-          <strong>生图连接当前不会被自动调用</strong>
-          <span>本版本封面仍由本地确定性绘图生成。这里保存的 IMAGE 配置会标记为 configured-but-not-invoked，不会虚报模型调用或费用。</span>
+          <strong>生图连接已接入文章封面流程</strong>
+          <span>配置后，发布中心“生成封面”会调用 /images/generations；未配置时才使用本地确定性封面。调用回执进入成本账单，服务商不返回 Token 时保持未知。</span>
         </div>
 
         <div v-if="statusError" class="config-error" role="status">
@@ -108,7 +108,10 @@
             >
               <template #prefix><el-icon><Connection /></el-icon></template>
             </el-input>
-            <p class="field-help">必须使用公开 HTTPS 地址；系统会自动且只补一次 /chat/completions。</p>
+            <p class="field-help">
+              必须使用公开 HTTPS 地址；系统会自动且只补一次
+              {{ selectedRole === 'image' ? '/images/generations' : '/chat/completions' }}。
+            </p>
             <p v-if="resolvedEndpointPreview" class="field-help endpoint-preview">
               实际请求地址：<code>{{ resolvedEndpointPreview }}</code>
             </p>
@@ -176,7 +179,11 @@
             </el-button>
           </div>
         </footer>
-        <p class="test-boundary">测试连接只会向当前模型发送固定合成文本“仅回复 OK”，不会发送项目、文章、账号或 Cookie。</p>
+        <p class="test-boundary">
+          {{ selectedRole === 'image'
+            ? '测试连接会生成并立即丢弃一张固定合成测试图，不发送项目、文章、账号或 Cookie；本次真实调用会进入成本账单。'
+            : '测试连接只会发送固定合成文本“仅回复 OK”，不发送项目、文章、账号或 Cookie；本次真实调用会进入成本账单。' }}
+        </p>
       </section>
 
       <aside class="routing-column">
@@ -302,6 +309,7 @@ import {
   buildUnifiedAIConfigPayload,
   normalizeUnifiedAIStatus,
   resolveUnifiedAIChatEndpoint,
+  resolveUnifiedAIImageEndpoint,
   unifiedAIProviderConfigurationHint,
   validateUnifiedAIProviderBinding
 } from '@/utils/aiConfig'
@@ -356,7 +364,9 @@ const normalizedEndpoint = value => {
 }
 const resolvedEndpointPreview = computed(() => {
   try {
-    return resolveUnifiedAIChatEndpoint(form.baseUrl)
+    return selectedRole.value === 'image'
+      ? resolveUnifiedAIImageEndpoint(form.baseUrl)
+      : resolveUnifiedAIChatEndpoint(form.baseUrl)
   } catch {
     return ''
   }

@@ -6,10 +6,11 @@ import re
 import sqlite3
 import uuid
 from contextlib import closing
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageOps, UnidentifiedImageError
 
 
 _PALETTES = (
@@ -19,6 +20,8 @@ _PALETTES = (
     ((104, 62, 27), (218, 142, 55), (248, 240, 227)),
 )
 _IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png"}
+_MAX_PROVIDER_IMAGE_BYTES = 15 * 1024 * 1024
+_MAX_PROVIDER_IMAGE_PIXELS = 40_000_000
 
 
 def recommend_article_images(
@@ -63,7 +66,7 @@ def recommend_article_images(
         ).lower()
         matched = [term for term in terms if term.lower() in searchable]
         score = len(matched) * 10
-        if record.get("source") == "generated":
+        if record.get("source") in {"generated", "generated_ai"}:
             score += 2
         if score <= 0:
             continue
@@ -192,6 +195,98 @@ def generate_article_cover(
                 "SELECT * FROM file_records WHERE id = ?",
                 (cursor.lastrowid,),
             ).fetchone()
+    return _serialize_record(row)
+
+
+def store_ai_generated_cover(
+    database_path: str | Path,
+    *,
+    media_root: str | Path,
+    article: Mapping[str, Any],
+    project: Mapping[str, Any],
+    image_bytes: bytes,
+) -> dict[str, Any]:
+    """Validate, normalize and persist one provider-generated cover.
+
+    Provider bytes are untrusted.  The saved asset is always decoded locally,
+    bounded by byte/pixel limits, flattened to RGB and converted to a portable
+    1200x628 PNG before it can enter a publishing job.
+    """
+
+    if not isinstance(image_bytes, bytes) or not image_bytes:
+        raise ValueError("生图服务没有返回可用图片")
+    if len(image_bytes) > _MAX_PROVIDER_IMAGE_BYTES:
+        raise ValueError("生图服务返回的图片超过 15MB 安全上限")
+    try:
+        with Image.open(BytesIO(image_bytes)) as source:
+            width, height = source.size
+            if width <= 0 or height <= 0 or width * height > _MAX_PROVIDER_IMAGE_PIXELS:
+                raise ValueError("生图服务返回的图片尺寸无效或过大")
+            try:
+                source.seek(0)
+            except EOFError:
+                pass
+            normalized = ImageOps.exif_transpose(source).convert("RGB")
+            normalized.load()
+    except (UnidentifiedImageError, OSError) as exc:
+        raise ValueError("生图服务返回的内容不是有效图片") from exc
+
+    cover = ImageOps.fit(
+        normalized,
+        (1200, 628),
+        method=Image.Resampling.LANCZOS,
+        centering=(0.5, 0.5),
+    )
+    draw = ImageDraw.Draw(cover, "RGBA")
+    draw.rectangle((0, 500, 1200, 628), fill=(6, 24, 28, 196))
+    label_font = _load_font(25, bold=True) or ImageFont.load_default()
+    brand_font = _load_font(18) or ImageFont.load_default()
+    title = str(article.get("title") or "GEO 内容").strip()[:60]
+    brand = str(project.get("name") or "GEO CONTENT").strip()[:40]
+    title_lines = _wrap_text(draw, title, label_font, max_width=1020, max_lines=2)
+    draw.multiline_text(
+        (58, 518),
+        "\n".join(title_lines),
+        fill=(255, 255, 255, 248),
+        font=label_font,
+        spacing=7,
+    )
+    draw.text((58, 596), brand, fill=(210, 238, 235, 230), font=brand_font)
+
+    root = Path(media_root).expanduser().resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    stored_filename = f"generated-ai-{uuid.uuid4().hex}.png"
+    output_path = (root / stored_filename).resolve()
+    try:
+        output_path.relative_to(root)
+    except ValueError as exc:
+        raise ValueError("生成图片保存路径无效") from exc
+    cover.save(output_path, format="PNG", optimize=True)
+    tags = _article_terms(article, project)[:20]
+    logical_filename = f"AI封面-{article.get('id', 'draft')}.png"
+    try:
+        with closing(_connect(database_path)) as conn:
+            with conn:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO file_records (
+                        filename, filesize, file_path, media_type, tags, source
+                    ) VALUES (?, ?, ?, 'image', ?, 'generated_ai')
+                    """,
+                    (
+                        logical_filename,
+                        round(output_path.stat().st_size / (1024 * 1024), 2),
+                        stored_filename,
+                        json.dumps(tags, ensure_ascii=False),
+                    ),
+                )
+                row = conn.execute(
+                    "SELECT * FROM file_records WHERE id = ?",
+                    (cursor.lastrowid,),
+                ).fetchone()
+    except sqlite3.Error:
+        output_path.unlink(missing_ok=True)
+        raise
     return _serialize_record(row)
 
 

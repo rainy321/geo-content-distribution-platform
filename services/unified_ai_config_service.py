@@ -35,6 +35,7 @@ from services.ai_service import (
     AISettings,
     provider_label_for_settings,
     resolve_ai_chat_completions_url,
+    resolve_ai_image_generations_url,
 )
 
 
@@ -521,14 +522,31 @@ class UnifiedAIConfigService:
             candidate_provider = _normalize_provider(provider)
             if not candidate_provider:
                 candidate_provider = provider_label_for_settings(candidate_settings)
-            candidate_endpoint = resolve_ai_chat_completions_url(
-                candidate_settings.base_url
+            endpoint_resolver = (
+                resolve_ai_image_generations_url
+                if normalized_role == "image"
+                else resolve_ai_chat_completions_url
             )
+            candidate_endpoint = endpoint_resolver(candidate_settings.base_url)
+            if normalized_role == "reviewer":
+                writer_provider = str(payload.get("provider") or "").strip().lower()
+                writer_endpoint = resolve_ai_chat_completions_url(
+                    str(payload.get("base_url") or "")
+                )
+                writer_model = str(payload.get("model") or "").strip()
+                if (
+                    candidate_provider == writer_provider
+                    and candidate_endpoint == writer_endpoint
+                    and candidate_settings.model == writer_model
+                ):
+                    raise AIConfigurationError(
+                        "调优模型必须与写稿模型不同；请更换模型 ID、服务商或服务地址后再保存"
+                    )
             existing_connection_matches = bool(
                 existing is not None
                 and candidate_provider == existing["provider"]
                 and candidate_endpoint
-                == resolve_ai_chat_completions_url(existing["base_url"])
+                == endpoint_resolver(existing["base_url"])
             )
             if not normalized_api_key and existing_connection_matches:
                 normalized_api_key = self._decrypt_record(existing)
@@ -547,7 +565,7 @@ class UnifiedAIConfigService:
                 if (
                     candidate_provider == payload["provider"]
                     and candidate_endpoint
-                    == resolve_ai_chat_completions_url(writer_settings.base_url)
+                    == endpoint_resolver(writer_settings.base_url)
                 ):
                     normalized_api_key = writer_settings.api_key
                     credential_source = "writer"

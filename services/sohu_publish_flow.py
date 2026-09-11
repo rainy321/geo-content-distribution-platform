@@ -3,6 +3,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from services.platform_page_risk_service import raise_if_visible_platform_account_risk
+
 
 _PUBLIC_ARTICLE_URL_PATTERN = re.compile(
     r"https?://(?:www\.)?sohu\.com/a/\d+_\d+/?"
@@ -87,6 +89,7 @@ async def click_exact_publish_and_observe(
 ) -> dict[str, Any]:
     """Click Sohu's exact publish action and return observable evidence only."""
 
+    await raise_if_visible_platform_account_risk(page, platform_name="搜狐号")
     submission_responses: list[Any] = []
 
     def record_response(response: Any) -> None:
@@ -123,6 +126,7 @@ async def click_exact_publish_and_observe(
         except Exception:
             pass
 
+    await raise_if_visible_platform_account_risk(page, platform_name="搜狐号")
     public_url = _extract_public_article_url(_safe_page_url(page))
     if public_url:
         return {

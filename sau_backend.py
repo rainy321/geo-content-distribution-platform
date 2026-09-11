@@ -39,6 +39,7 @@ from services.ai_service import (
     optimize_geo_content,
     provider_label_for_settings,
     resolve_ai_chat_completions_url,
+    resolve_ai_image_generations_url,
     sample_ai_prompt_detailed,
 )
 from services.ai_cost_ledger_service import (
@@ -48,6 +49,10 @@ from services.ai_cost_ledger_service import (
     get_project_ai_cost_summary,
     record_ai_usage,
     summarize_ai_usage_records,
+)
+from services.ai_image_generation_service import (
+    AIImageGenerationError,
+    generate_ai_article_cover,
 )
 from services.ai_visibility_service import (
     VisibilityAnalysisError,
@@ -101,6 +106,7 @@ from services.cover_image_service import (
     ensure_article_cover,
     generate_article_cover,
     recommend_article_images,
+    store_ai_generated_cover,
 )
 from services.geo_score_service import score_geo_content
 from services.geo_article_compiler_service import (
@@ -1299,7 +1305,11 @@ def _create_content_generation_service(settings=None):
     # Optional roles resolve to writer settings when absent. Do not pass that
     # fallback through as a reviewer: it would create a second billable call
     # while falsely presenting it as an independently configured review.
-    if reviewer_role.get("configured") and not reviewer_role.get("fallback"):
+    if (
+        reviewer_role.get("configured")
+        and not reviewer_role.get("fallback")
+        and not reviewer_role.get("same_as_writer")
+    ):
         reviewer_settings = _request_ai_settings({}, role="reviewer")
     return ContentGenerationService.from_environment(
         app.config["DATABASE_PATH"],
@@ -2127,7 +2137,7 @@ def clear_ai_config():
 
 @app.route('/api/ai/config/test', methods=['POST'])
 def test_ai_config_connection():
-    """Test the unified model using one fixed synthetic prompt only."""
+    """Test one saved role with synthetic input and record its real cost."""
 
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
@@ -2163,17 +2173,92 @@ def test_ai_config_connection():
     if rate_limit_response is not None:
         return rate_limit_response
     try:
-        result = sample_ai_prompt_detailed(
-            prompt="仅回复 OK",
-            settings=settings,
-        )
+        if role == "image":
+            result = generate_ai_article_cover(
+                article={"title": "合成连接测试，不含客户数据"},
+                project={"name": "GEO TEST", "product": "", "industry": "technology"},
+                settings=settings,
+            )
+            endpoint = resolve_ai_image_generations_url(settings.base_url)
+            sent_fields = ["fixed_synthetic_image_prompt"]
+            result_message = "固定合成图片测试已收到模型响应；测试图片已丢弃"
+        else:
+            result = sample_ai_prompt_detailed(
+                prompt="仅回复 OK",
+                settings=settings,
+            )
+            endpoint = resolve_ai_chat_completions_url(settings.base_url)
+            sent_fields = ["fixed_synthetic_prompt"]
+            result_message = "固定合成测试已收到模型响应"
     except AIProviderRateLimitError as exc:
         response = jsonify({"code": 429, "msg": str(exc), "data": None})
         if exc.retry_after_seconds is not None:
             response.headers["Retry-After"] = str(exc.retry_after_seconds)
         return response, 429
-    except (AIConnectError, AIReadTimeoutError, AIServiceError) as exc:
-        return jsonify({"code": 502, "msg": str(exc), "data": None}), 502
+    except AIConnectError as exc:
+        return jsonify({"code": 502, "msg": str(exc), "data": {"request_sent": False}}), 502
+    except AIImageGenerationError as exc:
+        usage_record = None
+        if exc.request_sent:
+            usage_record = _record_ai_connection_test_usage(
+                settings=settings,
+                role=role,
+                usage=exc.usage,
+                provider_request_id=exc.provider_request_id,
+                elapsed_ms=exc.elapsed_ms,
+                outcome="unknown" if exc.outcome_unknown else "failed_after_request",
+            )
+        return jsonify(
+            {
+                "code": 502,
+                "msg": str(exc),
+                "data": {
+                    "request_sent": exc.request_sent,
+                    "retry_forbidden": exc.request_sent,
+                    "ai_usage": usage_record,
+                },
+            }
+        ), 502
+    except AIReadTimeoutError as exc:
+        usage_record = _record_ai_connection_test_usage(
+            settings=settings,
+            role=role,
+            usage=None,
+            provider_request_id="",
+            elapsed_ms=0,
+            outcome="unknown",
+        )
+        return jsonify(
+            {
+                "code": 502,
+                "msg": str(exc),
+                "data": {"request_sent": True, "retry_forbidden": True, "ai_usage": usage_record},
+            }
+        ), 502
+    except AIServiceError as exc:
+        usage_record = _record_ai_connection_test_usage(
+            settings=settings,
+            role=role,
+            usage=None,
+            provider_request_id="",
+            elapsed_ms=0,
+            outcome="failed_after_request",
+        )
+        return jsonify(
+            {
+                "code": 502,
+                "msg": str(exc),
+                "data": {"request_sent": True, "retry_forbidden": True, "ai_usage": usage_record},
+            }
+        ), 502
+    usage_record = _record_ai_connection_test_usage(
+        settings=settings,
+        role=role,
+        usage=result.usage,
+        provider_request_id=result.provider_request_id,
+        elapsed_ms=result.elapsed_ms,
+        outcome="succeeded",
+    )
     return jsonify(
         {
             "code": 200,
@@ -2181,10 +2266,10 @@ def test_ai_config_connection():
             "data": {
                 "ok": True,
                 "status": "ready",
-                "message": "固定合成测试已收到模型响应",
+                "message": result_message,
                 "provider": provider_label_for_settings(settings),
                 "model": result.model,
-                "endpoint": resolve_ai_chat_completions_url(settings.base_url),
+                "endpoint": endpoint,
                 "role": role,
                 "ai_role": _public_ai_role_resolution(
                     role,
@@ -2192,8 +2277,9 @@ def test_ai_config_connection():
                 ),
                 "elapsed_ms": result.elapsed_ms,
                 "provider_request_id": result.provider_request_id,
+                "ai_usage": usage_record,
                 "data_disclosure": {
-                    "sent_to_provider": ["fixed_synthetic_prompt"],
+                    "sent_to_provider": sent_fields,
                     "project_data_sent": False,
                     "article_data_sent": False,
                     "account_data_sent": False,
@@ -2202,6 +2288,37 @@ def test_ai_config_connection():
             },
         }
     ), 200
+
+
+def _record_ai_connection_test_usage(
+    *,
+    settings,
+    role,
+    usage,
+    provider_request_id,
+    elapsed_ms,
+    outcome,
+):
+    try:
+        return record_ai_usage(
+            app.config["DATABASE_PATH"],
+            operation="connection_test",
+            provider=provider_label_for_settings(settings),
+            model=settings.model,
+            usage=usage,
+            usage_status="reported" if usage is not None else "unknown",
+            reference_type="ai_connection_test",
+            reference_id=provider_request_id or str(uuid.uuid4()),
+            metadata={
+                "role": role,
+                "outcome": outcome,
+                "elapsed_ms": max(0, int(elapsed_ms or 0)),
+                "synthetic_input_only": True,
+            },
+        )
+    except (AIUsageLedgerError, sqlite3.Error):
+        app.logger.exception("AI connection-test cost receipt could not be recorded")
+        return None
 
 
 @app.route('/api/content-engine/status', methods=['GET'])
@@ -3638,6 +3755,20 @@ def get_article_image_recommendations(article_id):
 
 @app.route('/api/articles/<int:article_id>/images/generate', methods=['POST'])
 def create_article_cover_image(article_id):
+    data = request.get_json(silent=True)
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求数据必须是对象", "data": None}), 400
+    unsupported = sorted(set(data) - {"confirm_external_call", "idempotency_key"})
+    if unsupported:
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "封面生成包含不支持的字段: " + ", ".join(unsupported),
+                "data": None,
+            }
+        ), 400
     try:
         article = get_article(app.config["DATABASE_PATH"], article_id)
     except ArticleNotFoundError as exc:
@@ -3645,32 +3776,238 @@ def create_article_cover_image(article_id):
     project = _get_project(article["project_id"])
     if project is None:
         return jsonify({"code": 409, "msg": "文章关联的品牌项目不存在", "data": None}), 409
-    record = generate_article_cover(
-        app.config["DATABASE_PATH"],
-        media_root=app.config["MEDIA_ROOT"],
-        article=article,
-        project=project,
-    )
     ai_status = _unified_ai_config_status_data()
     image_role = dict((ai_status.get("roles") or {}).get("image") or {})
+    use_external_image_model = bool(
+        image_role.get("configured") and not image_role.get("fallback")
+    )
+    if not use_external_image_model:
+        record = generate_article_cover(
+            app.config["DATABASE_PATH"],
+            media_root=app.config["MEDIA_ROOT"],
+            article=article,
+            project=project,
+        )
+        record = {
+            **record,
+            "generation_mode": "local_deterministic",
+            "ai_usage": None,
+            "ai_role": {
+                "role": "image",
+                "configured": False,
+                "fallback": bool(image_role.get("fallback")),
+                "provider": "",
+                "model": "",
+                "execution": "local_fallback",
+                "message": "IMAGE 角色未独立配置，本次由本地确定性绘图生成，未产生模型调用或费用。",
+            },
+        }
+        return jsonify({"code": 201, "msg": "本地文章封面已生成", "data": record}), 201
+
+    if data.get("confirm_external_call") is not True:
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "IMAGE 角色已配置；必须确认会向生图服务发送文章标题、品牌、产品和行业信息",
+                "data": {
+                    "external_call_required": True,
+                    "disclosed_fields": ["article_title", "brand", "product", "industry"],
+                },
+            }
+        ), 400
+    idempotency_key = str(
+        request.headers.get("Idempotency-Key")
+        or data.get("idempotency_key")
+        or ""
+    ).strip()
+    if (
+        not idempotency_key
+        or len(idempotency_key) > 160
+        or not re.fullmatch(r"[A-Za-z0-9._:-]+", idempotency_key)
+    ):
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "外部生图必须提供有效 Idempotency-Key，防止页面重试造成重复扣费",
+                "data": None,
+            }
+        ), 400
+    existing = get_ai_usage_records_by_references(
+        app.config["DATABASE_PATH"],
+        operation="image_generate",
+        reference_type="image_generation_request",
+        reference_ids=[idempotency_key],
+    ).get(idempotency_key)
+    if existing is not None:
+        return jsonify(
+            {
+                "code": 409,
+                "msg": "该生图请求已经有成本回执，系统不会重复调用；请到素材库检查结果",
+                "data": {"ai_usage": existing, "retry_forbidden": True},
+            }
+        ), 409
+    try:
+        settings = _request_ai_settings({}, role="image")
+        if settings is None:
+            raise AIConfigurationError("IMAGE 角色配置不可用，请在系统设置中重新保存")
+    except AIConfigurationError as exc:
+        return jsonify({"code": 503, "msg": str(exc), "data": None}), 503
+    rate_limit_response = _enforce_ai_rate_limit()
+    if rate_limit_response is not None:
+        return rate_limit_response
+    try:
+        generated = generate_ai_article_cover(
+            article=article,
+            project=project,
+            settings=settings,
+        )
+    except AIProviderRateLimitError as exc:
+        response = jsonify({"code": 429, "msg": str(exc), "data": None})
+        if exc.retry_after_seconds is not None:
+            response.headers["Retry-After"] = str(exc.retry_after_seconds)
+        return response, 429
+    except AIConnectError as exc:
+        return jsonify(
+            {
+                "code": 502,
+                "msg": str(exc),
+                "data": {"retry_forbidden": False, "request_sent": False},
+            }
+        ), 502
+    except AIImageGenerationError as exc:
+        usage_record = None
+        if exc.request_sent:
+            try:
+                usage_record = record_ai_usage(
+                    app.config["DATABASE_PATH"],
+                    operation="image_generate",
+                    provider=exc.provider or provider_label_for_settings(settings),
+                    model=exc.model or settings.model,
+                    usage=exc.usage,
+                    usage_status="reported" if exc.usage is not None else "unknown",
+                    project_id=article["project_id"],
+                    article_id=article_id,
+                    reference_type="image_generation_request",
+                    reference_id=idempotency_key,
+                    metadata={
+                        "outcome": "unknown" if exc.outcome_unknown else "failed_after_request",
+                        "provider_request_id": exc.provider_request_id,
+                        "elapsed_ms": exc.elapsed_ms,
+                        "retry_forbidden": True,
+                    },
+                )
+            except (AIUsageLedgerError, sqlite3.Error):
+                app.logger.exception(
+                    "image generation failure receipt could not be recorded article_id=%s",
+                    article_id,
+                )
+        status_code = 409 if exc.outcome_unknown else 502
+        response = jsonify(
+            {
+                "code": status_code,
+                "msg": str(exc),
+                "data": {
+                    "request_sent": exc.request_sent,
+                    "retry_forbidden": exc.request_sent,
+                    "ai_usage": usage_record,
+                },
+            }
+        )
+        response.headers["Idempotency-Key"] = idempotency_key
+        return response, status_code
+
+    try:
+        record = store_ai_generated_cover(
+            app.config["DATABASE_PATH"],
+            media_root=app.config["MEDIA_ROOT"],
+            article=article,
+            project=project,
+            image_bytes=generated.image_bytes,
+        )
+    except (ValueError, OSError, sqlite3.Error) as exc:
+        try:
+            usage_record = record_ai_usage(
+                app.config["DATABASE_PATH"],
+                operation="image_generate",
+                provider=generated.provider,
+                model=generated.model,
+                usage=generated.usage,
+                usage_status="reported" if generated.usage is not None else "unknown",
+                project_id=article["project_id"],
+                article_id=article_id,
+                reference_type="image_generation_request",
+                reference_id=idempotency_key,
+                metadata={
+                    "outcome": "provider_succeeded_storage_failed",
+                    "provider_request_id": generated.provider_request_id,
+                    "elapsed_ms": generated.elapsed_ms,
+                    "retry_forbidden": True,
+                },
+            )
+        except (AIUsageLedgerError, sqlite3.Error):
+            usage_record = None
+        app.logger.error(
+            "provider image could not be stored article_id=%s error_type=%s",
+            article_id,
+            type(exc).__name__,
+        )
+        response = jsonify(
+            {
+                "code": 502,
+                "msg": "生图服务已返回，但图片未能安全进入素材库；请核对成本回执，不要直接重试",
+                "data": {"retry_forbidden": True, "ai_usage": usage_record},
+            }
+        )
+        response.headers["Idempotency-Key"] = idempotency_key
+        return response, 502
+
+    warnings = []
+    try:
+        usage_record = record_ai_usage(
+            app.config["DATABASE_PATH"],
+            operation="image_generate",
+            provider=generated.provider,
+            model=generated.model,
+            usage=generated.usage,
+            usage_status="reported" if generated.usage is not None else "unknown",
+            project_id=article["project_id"],
+            article_id=article_id,
+            reference_type="image_generation_request",
+            reference_id=idempotency_key,
+            metadata={
+                "outcome": "succeeded",
+                "provider_request_id": generated.provider_request_id,
+                "elapsed_ms": generated.elapsed_ms,
+                "material_id": record.get("id"),
+                "usage_origin": "provider_response" if generated.usage is not None else "not_reported",
+            },
+        )
+    except (AIUsageLedgerError, sqlite3.Error):
+        usage_record = None
+        warnings.append(
+            {
+                "code": "cost_receipt_not_recorded",
+                "message": "封面已进入素材库，但成本回执写入失败；请核对供应商账单，不要重复生图。",
+            }
+        )
     record = {
         **record,
-        "generation_mode": "local_deterministic",
+        "generation_mode": "external_ai",
+        "ai_usage": usage_record,
+        "warnings": warnings,
         "ai_role": {
             "role": "image",
-            "configured": bool(image_role.get("configured")),
-            "fallback": bool(image_role.get("fallback")),
-            "provider": str(image_role.get("provider") or ""),
-            "model": str(image_role.get("model") or ""),
-            "execution": (
-                "configured_but_not_invoked"
-                if image_role.get("configured")
-                else "fallback_not_invoked"
-            ),
-            "message": "当前封面由本地确定性绘图生成，未调用生图服务且未产生模型费用。",
+            "configured": True,
+            "fallback": False,
+            "provider": generated.provider,
+            "model": generated.model,
+            "execution": "invoked",
+            "message": "已调用独立 IMAGE 角色；账单按服务商实际 Token 回执记录，未返回 Token 时保持未知。",
         },
     }
-    return jsonify({"code": 201, "msg": "文章封面已生成", "data": record}), 201
+    response = jsonify({"code": 201, "msg": "AI 文章封面已生成并进入素材库", "data": record})
+    response.headers["Idempotency-Key"] = idempotency_key
+    return response, 201
 
 
 @app.route('/api/articles/<int:article_id>', methods=['PUT'])

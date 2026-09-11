@@ -50,8 +50,8 @@ export const articleApi = {
     return http.get(`/api/articles/${id}/images/recommend`)
   },
 
-  generateCover(id) {
-    return http.post(`/api/articles/${id}/images/generate`)
+  generateCover(id, data = {}, config = {}) {
+    return http.post(`/api/articles/${id}/images/generate`, data, config)
   },
 
   getContentEngineStatus(config = {}) {
