@@ -11,6 +11,7 @@ import requests
 
 from db.createTable import initialize_database
 from services.ai_service import (
+    AIEvaluationResult,
     AIGenerationResult,
     AIOptimizationResult,
     AIServiceError,
@@ -407,6 +408,180 @@ class ContentGenerationServiceTests(unittest.TestCase):
         self.assertEqual(receipts[1]["model"], "review-model")
         self.assertEqual(receipts[0]["reference_type"], "generation_run")
         self.assertEqual(receipts[0]["reference_id"], receipts[1]["reference_id"])
+
+    def test_independent_writer_reviewer_evaluator_pipeline_keeps_full_audit(self):
+        reviewer = Mock(
+            return_value=AIOptimizationResult(
+                article={
+                    "title": "Reviewer title",
+                    "summary": "Reviewer summary",
+                    "content": (
+                        "## 直接答案\nXX科技的企业 AI Agent 适用于受控流程。\n\n"
+                        "## 验证边界\n结论仅根据文章内容判断，需要人工核验。"
+                    ),
+                    "tags": ["AI Agent", "受控流程"],
+                    "faq": [{"question": "如何验证？", "answer": "先做小范围测试。"}],
+                    "review_notes": {
+                        "strengths": ["实体明确"],
+                        "issues": ["缺少外部证据"],
+                        "changes": ["增加验证边界"],
+                    },
+                },
+                provider="deepseek",
+                model="review-model",
+                provider_request_id="review-provider-request",
+                elapsed_ms=10,
+                usage={"total_tokens": 20},
+            )
+        )
+        evaluator = Mock(
+            return_value=AIEvaluationResult(
+                evaluation={
+                    "verdict": "revise",
+                    "confidence": 0.8,
+                    "issues": ["缺少独立来源"],
+                    "suggestions": ["人工核验主张"],
+                    "fact_check_scope": "article_and_declared_sources_only_no_web",
+                    "external_verification": False,
+                },
+                provider="doubao",
+                model="evaluate-model",
+                provider_request_id="evaluate-provider-request",
+                elapsed_ms=12,
+                usage={"total_tokens": 15},
+            )
+        )
+        service = ContentGenerationService(
+            self.db_path,
+            MockContentEngineAdapter(
+                [engine_payload(title="Writer title", usage={"total_tokens": 30})]
+            ),
+            reviewer_settings=AISettings(
+                provider="deepseek",
+                base_url="https://review.example.test/v1",
+                api_key="review-secret",
+                model="review-model",
+            ),
+            reviewer_role={
+                "configured": True,
+                "fallback": False,
+                "source_role": "reviewer",
+                "same_as_writer": False,
+            },
+            reviewer_optimizer=reviewer,
+            evaluator_settings=AISettings(
+                provider="doubao",
+                base_url="https://ark.cn-beijing.volces.com/api/v3",
+                api_key="evaluate-secret",
+                model="evaluate-model",
+            ),
+            evaluator_role={
+                "configured": True,
+                "fallback": False,
+                "source_role": "evaluator",
+                "same_as_writer": False,
+                "same_as_reviewer": False,
+            },
+            evaluator=evaluator,
+        )
+        writer_geo = {
+            "score": 60,
+            "dimensions": {},
+            "suggestions": [],
+            "length_profile": {"key": "standard"},
+        }
+        reviewer_geo = {
+            "score": 82,
+            "dimensions": {},
+            "suggestions": [],
+            "length_profile": {"key": "standard"},
+        }
+        citeability = {"score": 80, "publish_gate_passed": True, "dimensions": {}}
+
+        with patch(
+            "services.content_generation_service.score_geo_content",
+            side_effect=[writer_geo, reviewer_geo],
+        ), patch(
+            "services.content_generation_service.score_ai_citeability",
+            side_effect=[citeability, citeability],
+        ):
+            result = service.generate(
+                self.request(request_id="pipeline-request", idempotency_key="pipeline-key")
+            )
+
+        pipeline = result["generation"]["agent_pipeline"]
+        self.assertEqual(
+            [stage["role"] for stage in pipeline["stages"]],
+            ["writer", "reviewer", "evaluator"],
+        )
+        self.assertTrue(
+            all(stage["agent_run_id"].startswith("generation:") for stage in pipeline["stages"])
+        )
+        self.assertEqual(pipeline["drafts"]["writer"]["title"], "Writer title")
+        self.assertEqual(pipeline["drafts"]["reviewer"]["title"], "Reviewer title")
+        self.assertTrue(pipeline["review_diff"]["changed"])
+        self.assertNotEqual(
+            pipeline["review_diff"]["before_sha256"],
+            pipeline["review_diff"]["after_sha256"],
+        )
+        self.assertEqual(pipeline["model_independence"]["distinct_model_count"], 3)
+        self.assertTrue(pipeline["model_independence"]["multi_model_executed"])
+        self.assertEqual(
+            result["generation"]["review"]["review_opinion"]["issues"],
+            ["缺少外部证据"],
+        )
+        evaluation = result["generation"]["evaluation"]
+        self.assertTrue(evaluation["completed"])
+        self.assertFalse(evaluation["external_verification"])
+        self.assertEqual(evaluation["provider_request_id"], "evaluate-provider-request")
+        reviewer.assert_called_once()
+        evaluator.assert_called_once()
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            operations = conn.execute(
+                "SELECT operation FROM ai_usage_ledger ORDER BY id"
+            ).fetchall()
+        self.assertEqual(operations, [("generate",), ("optimize",), ("evaluate",)])
+
+    def test_same_model_evaluator_is_not_invoked_or_billed_as_independent(self):
+        evaluator = Mock(side_effect=AssertionError("same model must not be invoked"))
+        service = ContentGenerationService(
+            self.db_path,
+            MockContentEngineAdapter([engine_payload(usage={"total_tokens": 5})]),
+            evaluator_settings=AISettings(
+                provider="mock",
+                base_url="https://api.example.test/v1",
+                api_key="same-secret",
+                model="test-1",
+            ),
+            evaluator_role={
+                "configured": True,
+                "fallback": False,
+                "source_role": "evaluator",
+                "same_as_writer": True,
+                "same_as_reviewer": False,
+            },
+            evaluator=evaluator,
+        )
+
+        result = service.generate(
+            self.request(request_id="same-evaluator", idempotency_key="same-evaluator-key")
+        )
+
+        evaluation = result["generation"]["evaluation"]
+        self.assertEqual(evaluation["mode"], "non_independent")
+        self.assertFalse(evaluation["invoked"])
+        self.assertEqual(evaluation["usage_status"], "not_invoked")
+        self.assertFalse(
+            result["generation"]["agent_pipeline"]["model_independence"][
+                "multi_model_executed"
+            ]
+        )
+        evaluator.assert_not_called()
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            operations = conn.execute(
+                "SELECT operation FROM ai_usage_ledger ORDER BY id"
+            ).fetchall()
+        self.assertEqual(operations, [("generate",)])
 
     def test_reviewer_failure_keeps_writer_and_records_unknown_attempt(self):
         writer_payload = engine_payload(title="Writer survives")

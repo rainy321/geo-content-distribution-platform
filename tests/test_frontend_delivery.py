@@ -147,6 +147,48 @@ class FrontendDeliveryTests(unittest.TestCase):
         self.assertIn("'/backend':", vite_config)
         self.assertNotIn("path.replace(/^\\/api/", vite_config)
 
+    def test_review_monitor_and_account_risks_are_visible_without_batch_modal(self):
+        frontend_root = Path(__file__).resolve().parents[1] / "sau_frontend" / "src"
+        app = (frontend_root / "App.vue").read_text(encoding="utf-8")
+        accounts = (frontend_root / "views" / "AccountManagement.vue").read_text(
+            encoding="utf-8"
+        )
+        distribution = (frontend_root / "views" / "DistributionCenter.vue").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("publishApi.getReviewMonitor", app)
+        self.assertIn("global-review-alerts", app)
+        self.assertIn("30_000", app)
+        self.assertIn("critical-risk-overview", accounts)
+        self.assertIn("有账号已停止自动发布", accounts)
+        self.assertIn("account.risk_event?.frozen === true", accounts)
+        self.assertIn("publish-risk-overview", distribution)
+        self.assertIn("job.account_risk?.frozen", distribution)
+        self.assertIn("job.review_monitor", distribution)
+        self.assertIn("后台只读监测中", distribution)
+        self.assertIn("publishApi.rearmReviewMonitor", distribution)
+        self.assertIn("不会重新提交文章", distribution)
+
+    def test_multi_model_visibility_panel_recovers_without_post_retry(self):
+        frontend_root = Path(__file__).resolve().parents[1] / "sau_frontend" / "src"
+        view = (frontend_root / "views" / "AiVisibility.vue").read_text(
+            encoding="utf-8"
+        )
+        api = (frontend_root / "api" / "diagnostics.js").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertIn("getVisibilityPanel(requestId", api)
+        self.assertIn("/api/geo/visibility/sample-panel/", api)
+        self.assertIn("mode: multiModel ? 'panel' : 'single'", view)
+        self.assertIn("pollPendingPanel", view)
+        self.assertIn("diagnosticsApi.getVisibilityPanel", view)
+        self.assertIn("pending.mode === 'panel'", view)
+        self.assertIn("SAMPLING_RESUME_MAX_MS", view)
+        self.assertIn("已停止自动查询并保留请求身份", view)
+        self.assertIn("不会重复调用", view)
+
 
 if __name__ == "__main__":
     unittest.main()

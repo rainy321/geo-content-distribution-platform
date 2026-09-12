@@ -70,6 +70,7 @@ export const validateVisibilitySamplingDraft = draft => {
     issues.push('真实采样次数必须是 1–5')
   }
   const useUnifiedEngine = draft?.useUnifiedEngine !== false
+  const multiModel = draft?.multiModel === true
   if (useUnifiedEngine) {
     if (!draft?.unifiedConfigured) issues.push('请先在系统设置中保存统一 AI 引擎')
   } else {
@@ -81,6 +82,12 @@ export const validateVisibilitySamplingDraft = draft => {
     }
     if (!model) issues.push('请填写精确模型 ID')
     if (!apiKey) issues.push('请填写本次覆盖使用的 API Key')
+  }
+  if (multiModel) {
+    if (!useUnifiedEngine) issues.push('多模型对照仅使用系统设置中已保存的独立角色')
+    if (Number(draft?.distinctConfiguredModelCount || 0) < 2) {
+      issues.push('至少配置 2 个不同的 API 模型后才能运行多模型对照')
+    }
   }
   if (draft?.confirmed !== true) issues.push('请确认本次外发边界')
   return [...new Set(issues)]
@@ -106,6 +113,24 @@ export const buildVisibilitySamplingRequest = draft => {
     }
   }
   return payload
+}
+
+export const buildVisibilityPanelRequest = draft => {
+  const panelDraft = { ...draft, multiModel: true, useUnifiedEngine: true }
+  const issues = validateVisibilitySamplingDraft(panelDraft)
+  if (issues.length) throw new Error(issues[0])
+  return {
+    project_id: panelDraft.projectId,
+    prompt: String(panelDraft.prompt).trim(),
+    sample_count: Number(panelDraft.sampleCount),
+    roles: asArray(panelDraft.roles).length
+      ? asArray(panelDraft.roles)
+      : ['writer', 'reviewer', 'evaluator'],
+    aliases: asArray(panelDraft.aliases),
+    competitors: asArray(panelDraft.competitors),
+    persist: Boolean(panelDraft.persist),
+    confirm_external_call: true
+  }
 }
 
 const unwrapSamplingPayload = value => {
@@ -162,6 +187,19 @@ export const normalizeVisibilitySamplingResponse = value => {
       model: String(item?.model || '')
     })).filter(item => item.text),
     analysis: root.analysis && typeof root.analysis === 'object' ? root.analysis : null,
+    channelType: String(root.channel_type || 'provider_api'),
+    entryPoint: String(root.entry_point || 'openai_compatible_chat_completions'),
+    distinctModelCount: Math.max(0, numberOrNull(root.distinct_model_count) ?? 0),
+    multiModelExecuted: Boolean(root.multi_model_executed),
+    consumerParity: root.consumer_parity && typeof root.consumer_parity === 'object'
+      ? root.consumer_parity
+      : { status: 'unverified', claim_allowed: false },
+    channelCoverage: asArray(root.channel_coverage).map(item => ({
+      channelType: String(item?.channel_type || ''),
+      status: String(item?.status || 'unverified'),
+      sampledModelCount: Math.max(0, numberOrNull(item?.sampled_model_count) ?? 0),
+      webSearchVerified: Boolean(item?.web_search_verified)
+    })),
     failure: root.failure && typeof root.failure === 'object'
       ? {
           code: String(root.failure.code || 'sampling_failed'),
@@ -193,6 +231,46 @@ export const normalizeVisibilitySamplingResponse = value => {
         },
     grounding: root.grounding && typeof root.grounding === 'object' ? root.grounding : {},
     retryPolicy: root.retry_policy && typeof root.retry_policy === 'object' ? root.retry_policy : {}
+  }
+}
+
+export const normalizeVisibilityPanelResponse = value => {
+  const root = unwrapSamplingPayload(value)
+  return {
+    status: ['completed', 'partial', 'need_action'].includes(String(root.status))
+      ? String(root.status)
+      : 'need_action',
+    needAction: Boolean(root.need_action),
+    requestId: String(root.request_id || ''),
+    idempotencyKey: String(root.idempotency_key || ''),
+    distinctModelCount: Math.max(0, numberOrNull(root.distinct_model_count) ?? 0),
+    multiModelExecuted: Boolean(root.multi_model_executed),
+    comparisonEligible: Boolean(root.comparison_eligible),
+    targets: asArray(root.targets).map(item => ({
+      role: String(item?.role || ''),
+      executionStatus: String(item?.execution_status || 'skipped'),
+      status: String(item?.status || 'not_configured'),
+      provider: String(item?.provider || ''),
+      model: String(item?.model || ''),
+      completedSampleCount: Math.max(0, numberOrNull(item?.completed_sample_count) ?? 0),
+      requestedSampleCount: Math.max(0, numberOrNull(item?.requested_sample_count) ?? 0),
+      skipReason: String(item?.skip_reason || ''),
+      channelType: String(item?.channel_type || 'provider_api'),
+      webSearchVerified: Boolean(item?.web_search_verified),
+      consumerSurfaceVerified: Boolean(item?.consumer_surface_verified),
+      failure: item?.failure && typeof item.failure === 'object' ? item.failure : null,
+      capturedResponses: asArray(item?.analysis?.samples)
+    })),
+    channelCoverage: asArray(root.channel_coverage).map(item => ({
+      channelType: String(item?.channel_type || ''),
+      status: String(item?.status || 'unverified'),
+      sampledModelCount: Math.max(0, numberOrNull(item?.sampled_model_count) ?? 0),
+      webSearchVerified: Boolean(item?.web_search_verified)
+    })),
+    consumerParity: root.consumer_parity && typeof root.consumer_parity === 'object'
+      ? root.consumer_parity
+      : { status: 'unverified', claim_allowed: false },
+    claimBoundary: String(root.claim_boundary || '')
   }
 }
 

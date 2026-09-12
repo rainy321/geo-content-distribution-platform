@@ -3,6 +3,7 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from db.createTable import initialize_database
@@ -13,10 +14,14 @@ from services.ai_service import (
     sample_ai_prompt_detailed,
 )
 from services.ai_visibility_sampling_service import (
+    IN_PROGRESS_EXPIRY_SECONDS,
     VISIBILITY_SAMPLE_MAX_OUTPUT_TOKENS,
     VisibilitySamplingConflictError,
     VisibilitySamplingInProgressError,
     VisibilitySamplingValidationError,
+    get_ai_visibility_sample_request,
+    refresh_ai_visibility_run_locally,
+    refresh_ai_visibility_sample_request_locally,
     run_ai_visibility_sample,
 )
 
@@ -95,6 +100,115 @@ class AIVisibilitySamplingServiceTests(unittest.TestCase):
         }
         values.update(overrides)
         return run_ai_visibility_sample(self.database_path, **values)
+
+    def test_single_request_reader_rejects_multi_model_panel_record(self):
+        with closing(sqlite3.connect(self.database_path)) as conn:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO ai_visibility_sample_requests (
+                        project_id, request_id, idempotency_key,
+                        request_fingerprint, status, result_json
+                    ) VALUES (?, ?, ?, ?, 'started', ?)
+                    """,
+                    (
+                        self.project_id,
+                        "panel-request",
+                        "panel-key",
+                        "f" * 64,
+                        json.dumps(
+                            {
+                                "record_type": "ai_visibility_model_panel",
+                                "manifest": {"roles": ["writer", "reviewer"]},
+                                "aggregate_result": None,
+                            }
+                        ),
+                    ),
+                )
+
+        with self.assertRaisesRegex(
+            VisibilitySamplingConflictError, "多模型采样"
+        ):
+            get_ai_visibility_sample_request(
+                self.database_path,
+                "panel-request",
+            )
+
+    def test_started_request_age_and_expiry_boundary_are_read_only(self):
+        created = datetime(2026, 9, 12, 0, 0, 0, tzinfo=timezone.utc)
+        created_text = created.isoformat(timespec="seconds").replace("+00:00", "Z")
+        with closing(sqlite3.connect(self.database_path)) as conn:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO ai_visibility_sample_requests (
+                        project_id, request_id, idempotency_key,
+                        request_fingerprint, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, 'started', ?, ?)
+                    """,
+                    (
+                        self.project_id,
+                        "age-request",
+                        "age-key",
+                        "a" * 64,
+                        created_text,
+                        created_text,
+                    ),
+                )
+
+        before_boundary = get_ai_visibility_sample_request(
+            self.database_path,
+            "age-request",
+            current_time=created
+            + timedelta(seconds=IN_PROGRESS_EXPIRY_SECONDS - 1),
+        )
+        at_boundary = get_ai_visibility_sample_request(
+            self.database_path,
+            "age-request",
+            current_time=created + timedelta(seconds=IN_PROGRESS_EXPIRY_SECONDS),
+        )
+
+        self.assertTrue(before_boundary["in_progress"])
+        self.assertEqual(
+            before_boundary["in_progress_age_seconds"],
+            IN_PROGRESS_EXPIRY_SECONDS - 1,
+        )
+        self.assertFalse(before_boundary["in_progress_expired"])
+        self.assertEqual(at_boundary["in_progress_age_seconds"], 900)
+        self.assertTrue(at_boundary["in_progress_expired"])
+        self.assertEqual(
+            at_boundary["in_progress_expiry_seconds"],
+            IN_PROGRESS_EXPIRY_SECONDS,
+        )
+        with closing(sqlite3.connect(self.database_path)) as conn:
+            stored = conn.execute(
+                """
+                SELECT status, result_json, created_at, updated_at
+                FROM ai_visibility_sample_requests WHERE request_id = ?
+                """,
+                ("age-request",),
+            ).fetchone()
+        self.assertEqual(stored, ("started", None, created_text, created_text))
+
+    def test_completed_request_does_not_report_in_progress_age(self):
+        def sampler(**_kwargs):
+            return AICompletionResult(
+                content="DongClaw 小龙虾值得考虑。",
+                model="sample-model",
+                provider_request_id="provider-one",
+                elapsed_ms=1,
+                usage=None,
+            )
+
+        sampled = self.run_sample(sampler, sample_count=1, persist=False)
+        record = get_ai_visibility_sample_request(
+            self.database_path,
+            sampled["request_id"],
+        )
+
+        self.assertFalse(record["in_progress"])
+        self.assertIsNone(record["in_progress_age_seconds"])
+        self.assertFalse(record["in_progress_expired"])
 
     def test_completed_samples_are_analyzed_costed_and_persisted(self):
         calls = []
@@ -211,6 +325,248 @@ class AIVisibilitySamplingServiceTests(unittest.TestCase):
                 conn.execute("SELECT COUNT(*) FROM ai_usage_ledger").fetchone()[0],
                 1,
             )
+
+    def test_project_keywords_change_reanalyzes_same_receipt_without_provider_call(self):
+        calls = []
+
+        def sampler(**_kwargs):
+            calls.append(1)
+            return AICompletionResult(
+                content="同于野AI API中转站面向开发者。",
+                model="sample-model",
+                provider_request_id="provider-one",
+                elapsed_ms=1,
+                usage={"total_tokens": 4},
+            )
+
+        first = self.run_sample(
+            sampler,
+            sample_count=1,
+            persist=False,
+            project={**self.project, "keywords": []},
+        )
+        self.assertFalse(
+            first["payload"]["data"]["analysis"]["samples"][0]["brand_mentioned"]
+        )
+
+        replay = self.run_sample(
+            sampler,
+            sample_count=1,
+            persist=False,
+            request_id="sampling-request-keyword-refresh",
+            project={**self.project, "keywords": ["同于野"]},
+        )
+
+        self.assertEqual(calls, [1])
+        self.assertTrue(replay["replayed"])
+        replay_data = replay["payload"]["data"]
+        self.assertTrue(replay_data["analysis"]["samples"][0]["brand_mentioned"])
+        self.assertEqual(replay_data["analysis_refresh"]["status"], "refreshed")
+        self.assertEqual(
+            replay_data["analysis_refresh"]["reason"],
+            "local_analysis_input_changed",
+        )
+        self.assertEqual(replay_data["analysis_refresh"]["provider_calls"], 0)
+        with closing(sqlite3.connect(self.database_path)) as conn:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM ai_usage_ledger").fetchone()[0],
+                1,
+            )
+
+    def test_historical_persisted_sample_is_refreshed_from_captured_text_only(self):
+        calls = []
+
+        def sampler(**_kwargs):
+            calls.append(1)
+            return AICompletionResult(
+                content="同于野AI API中转站面向开发者。",
+                model="sample-model",
+                provider_request_id="provider-one",
+                elapsed_ms=1,
+                usage=None,
+            )
+
+        sampled = self.run_sample(
+            sampler,
+            sample_count=1,
+            persist=True,
+            project={**self.project, "keywords": []},
+        )
+        request_id = sampled["request_id"]
+        with closing(sqlite3.connect(self.database_path)) as conn:
+            row = conn.execute(
+                "SELECT id, result_json FROM ai_visibility_sample_requests"
+            ).fetchone()
+            historical = json.loads(row[1])
+            historical_data = historical["data"]
+            historical_data.pop("local_analysis", None)
+            historical_data.pop("local_analysis_input_snapshot", None)
+            historical_data.pop("analysis_refresh", None)
+            historical_data["analysis"]["algorithm_versions"]["mention"] = (
+                "mention-python-port-1.1.0"
+            )
+            with conn:
+                conn.execute(
+                    "UPDATE ai_visibility_sample_requests SET result_json = ? WHERE id = ?",
+                    (json.dumps(historical, ensure_ascii=False), row[0]),
+                )
+            before_raw = conn.execute(
+                "SELECT result_json FROM ai_visibility_sample_requests WHERE id = ?",
+                (row[0],),
+            ).fetchone()[0]
+            before_ledger_count = conn.execute(
+                "SELECT COUNT(*) FROM ai_usage_ledger"
+            ).fetchone()[0]
+
+        refreshed = refresh_ai_visibility_sample_request_locally(
+            self.database_path,
+            request_id,
+            project={**self.project, "keywords": ["同于野"]},
+        )
+
+        self.assertEqual(calls, [1])
+        data = refreshed["result"]["data"]
+        self.assertTrue(data["analysis"]["samples"][0]["brand_mentioned"])
+        self.assertEqual(data["analysis_refresh"]["status"], "refreshed")
+        self.assertEqual(data["analysis_refresh"]["provider_calls"], 0)
+        self.assertEqual(data["analysis_refresh"]["network_requests"], 0)
+        with closing(sqlite3.connect(self.database_path)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT result_json FROM ai_visibility_sample_requests WHERE id = ?",
+                    (row[0],),
+                ).fetchone()[0],
+                before_raw,
+            )
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM ai_usage_ledger").fetchone()[0],
+                before_ledger_count,
+            )
+
+    def test_unpersisted_historical_sample_without_exact_inputs_stays_stale(self):
+        def sampler(**_kwargs):
+            return AICompletionResult(
+                content="同于野AI API中转站面向开发者。",
+                model="sample-model",
+                provider_request_id="provider-one",
+                elapsed_ms=1,
+                usage=None,
+            )
+
+        sampled = self.run_sample(
+            sampler,
+            sample_count=1,
+            persist=False,
+            project={**self.project, "keywords": []},
+        )
+        with closing(sqlite3.connect(self.database_path)) as conn:
+            row = conn.execute(
+                "SELECT id, result_json FROM ai_visibility_sample_requests"
+            ).fetchone()
+            historical = json.loads(row[1])
+            data = historical["data"]
+            data.pop("local_analysis", None)
+            data.pop("local_analysis_input_snapshot", None)
+            data.pop("analysis_refresh", None)
+            data["analysis"]["algorithm_versions"]["mention"] = (
+                "mention-python-port-1.1.0"
+            )
+            with conn:
+                conn.execute(
+                    "UPDATE ai_visibility_sample_requests SET result_json = ? WHERE id = ?",
+                    (json.dumps(historical, ensure_ascii=False), row[0]),
+                )
+
+        unresolved = refresh_ai_visibility_sample_request_locally(
+            self.database_path,
+            sampled["request_id"],
+            project={**self.project, "keywords": ["同于野"]},
+        )
+
+        data = unresolved["result"]["data"]
+        self.assertFalse(data["analysis"]["samples"][0]["brand_mentioned"])
+        self.assertEqual(data["analysis_refresh"]["status"], "stale_unresolved")
+        self.assertEqual(
+            data["analysis_refresh"]["reason"], "saved_analysis_inputs_incomplete"
+        )
+        self.assertFalse(data["analysis_refresh"]["performed"])
+
+    def test_persisted_run_refresh_returns_new_view_without_rewriting_history(self):
+        def sampler(**_kwargs):
+            return AICompletionResult(
+                content="同于野AI API中转站面向开发者。",
+                model="sample-model",
+                provider_request_id="provider-one",
+                elapsed_ms=1,
+                usage=None,
+            )
+
+        sampled = self.run_sample(
+            sampler,
+            sample_count=1,
+            persist=True,
+            project={**self.project, "keywords": []},
+        )
+        run_id = sampled["payload"]["data"]["run_id"]
+        with closing(sqlite3.connect(self.database_path)) as conn:
+            before = conn.execute(
+                "SELECT result_json FROM ai_visibility_runs WHERE id = ?", (run_id,)
+            ).fetchone()[0]
+
+        refreshed = refresh_ai_visibility_run_locally(
+            self.database_path,
+            run_id,
+            project={**self.project, "keywords": ["同于野"]},
+        )
+
+        self.assertTrue(refreshed["result"]["samples"][0]["brand_mentioned"])
+        self.assertEqual(refreshed["analysis_refresh"]["status"], "refreshed")
+        self.assertEqual(refreshed["analysis_refresh"]["provider_calls"], 0)
+        with closing(sqlite3.connect(self.database_path)) as conn:
+            after = conn.execute(
+                "SELECT result_json FROM ai_visibility_runs WHERE id = ?", (run_id,)
+            ).fetchone()[0]
+        self.assertEqual(after, before)
+
+    def test_persisted_run_with_invalid_saved_inputs_keeps_old_result_and_marks_stale(self):
+        def sampler(**_kwargs):
+            return AICompletionResult(
+                content="DongClaw 小龙虾值得考虑。",
+                model="sample-model",
+                provider_request_id="provider-one",
+                elapsed_ms=1,
+                usage=None,
+            )
+
+        sampled = self.run_sample(sampler, sample_count=1, persist=True)
+        run_id = sampled["payload"]["data"]["run_id"]
+        with closing(sqlite3.connect(self.database_path)) as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE ai_visibility_runs SET coverage_items_json = ? WHERE id = ?",
+                    (
+                        json.dumps(
+                            {"aliases": "not-an-array", "competitors": None}
+                        ),
+                        run_id,
+                    ),
+                )
+
+        unresolved = refresh_ai_visibility_run_locally(
+            self.database_path,
+            run_id,
+            project=self.project,
+        )
+
+        self.assertTrue(unresolved["result"]["samples"][0]["brand_mentioned"])
+        self.assertEqual(
+            unresolved["analysis_refresh"]["status"], "stale_unresolved"
+        )
+        self.assertEqual(
+            unresolved["analysis_refresh"]["reason"],
+            "saved_analysis_data_invalid",
+        )
+        self.assertFalse(unresolved["analysis_refresh"]["performed"])
 
     def test_changed_request_conflicts_before_new_model_call(self):
         calls = []

@@ -12,6 +12,7 @@ traceable to the reviewed hand-off snapshot.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import ipaddress
 import math
@@ -24,8 +25,8 @@ from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 import idna
 
 
-AI_VISIBILITY_ALGORITHM_VERSION = "ai-visibility-python-port-1.1.0"
-MENTION_PARSER_VERSION = "mention-python-port-1.1.0"
+AI_VISIBILITY_ALGORITHM_VERSION = "ai-visibility-python-port-1.5.0"
+MENTION_PARSER_VERSION = "mention-python-port-1.5.0"
 RANK_PARSER_VERSION = "rank-python-port-1.1.0"
 CITATION_PARSER_VERSION = "citation-inline-url-python-port-1.1.0"
 CITATION_EXTRACTION_VERSION = "explicit-response-url-1.0.0"
@@ -67,6 +68,63 @@ class VisibilityAnalysisError(ValueError):
     """Raised when visibility-analysis input violates the public contract."""
 
 
+def current_ai_visibility_algorithm_versions() -> dict[str, str]:
+    """Return the exact local parser/metric version set used for new results.
+
+    Keeping this in one public helper gives history readers a stable way to
+    decide whether saved response text needs to be parsed again.  It performs
+    no I/O and does not know how to call an AI provider.
+    """
+
+    return {
+        "integration": AI_VISIBILITY_ALGORITHM_VERSION,
+        "mention": MENTION_PARSER_VERSION,
+        "rank": RANK_PARSER_VERSION,
+        "citation": CITATION_PARSER_VERSION,
+        "citation_extraction": CITATION_EXTRACTION_VERSION,
+        "public_suffix_rules": PUBLIC_SUFFIX_RULESET_VERSION,
+        "source_classifier": SOURCE_CLASSIFIER_VERSION,
+        "sentiment": SENTIMENT_PARSER_VERSION,
+        "metrics": METRICS_ALGORITHM_VERSION,
+        "recommendations": RECOMMENDATION_RULE_SET_VERSION,
+    }
+
+
+def inspect_ai_visibility_analysis_freshness(
+    analysis: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Compare a saved result with the current deterministic implementation."""
+
+    if not isinstance(analysis, Mapping):
+        raise VisibilityAnalysisError("previous_analysis 必须是对象")
+    current_versions = current_ai_visibility_algorithm_versions()
+    raw_versions = analysis.get("algorithm_versions")
+    stored_versions = (
+        {
+            str(key): str(value)
+            for key, value in raw_versions.items()
+            if isinstance(key, str) and isinstance(value, str)
+        }
+        if isinstance(raw_versions, Mapping)
+        else {}
+    )
+    stale_components = [
+        component
+        for component, current_version in current_versions.items()
+        if stored_versions.get(component) != current_version
+    ]
+    status = "current" if not stale_components else (
+        "unversioned" if not stored_versions else "stale"
+    )
+    return {
+        "status": status,
+        "reanalysis_required": bool(stale_components),
+        "stale_components": stale_components,
+        "stored_versions": stored_versions,
+        "current_versions": current_versions,
+    }
+
+
 @dataclass(frozen=True)
 class _Entity:
     entity_id: str
@@ -74,6 +132,7 @@ class _Entity:
     entity_type: str
     aliases: tuple[str, ...]
     domains: tuple[str, ...]
+    alias_sources: tuple[tuple[str, tuple[str, ...]], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -115,6 +174,179 @@ _SHORT_TOKEN_BLACKLIST = {
     "us",
     "we",
 }
+# Category aliases are classified compositionally instead of by comparing only
+# a few complete phrases.  The residual algorithm below repeatedly peels these
+# generic modifiers/nouns from both ends, so combinations such as
+# ``企业 + 知识库`` and ``模型 + 服务 + 平台`` are rejected without enumerating
+# every possible full phrase.  A remaining token is still not automatically a
+# brand: request aliases must additionally be traceable to the configured
+# project/product or have a conservative Latin brand shape.
+_GENERIC_ENTITY_CATEGORY_FRAGMENTS = {
+    # Chinese modifiers and organization/technology descriptors.
+    "一站式",
+    "企业级",
+    "人工智能",
+    "生成式",
+    "大语言模型",
+    "大模型",
+    "私有化",
+    "本地化",
+    "国产化",
+    "自动化",
+    "智能化",
+    "数字化",
+    "有限责任公司",
+    "股份有限公司",
+    "有限公司",
+    "企业",
+    "公司",
+    "集团",
+    "科技",
+    "技术",
+    "行业",
+    "专业",
+    "通用",
+    "在线",
+    "国内",
+    "国际",
+    "全球",
+    "开源",
+    # Chinese category nouns and composable functional terms.
+    "知识管理",
+    "知识库",
+    "数据库",
+    "云计算",
+    "云服务",
+    "开发者平台",
+    "开发平台",
+    "开放平台",
+    "管理平台",
+    "服务平台",
+    "模型服务",
+    "中转服务",
+    "中转站",
+    "解决方案",
+    "人工",
+    "智能",
+    "知识",
+    "信息",
+    "数据",
+    "内容",
+    "媒体",
+    "营销",
+    "开发",
+    "开放",
+    "管理",
+    "运营",
+    "发布",
+    "创作",
+    "生成",
+    "搜索",
+    "问答",
+    "写作",
+    "分析",
+    "模型",
+    "接口",
+    "接入",
+    "中转",
+    "聚合",
+    "路由",
+    "网关",
+    "服务",
+    "平台",
+    "系统",
+    "软件",
+    "工具",
+    "方案",
+    "产品",
+    "应用",
+    "助手",
+    "引擎",
+    "中心",
+    "网络",
+    "云",
+    "与",
+    "和",
+    # English category words. Compact keys also catch forms such as
+    # ``EnterpriseKnowledgeBase`` while prefix/suffix-only peeling avoids
+    # deleting ``api`` from the middle of an unrelated name like Capital.
+    "artificial intelligence",
+    "generative ai",
+    "large language model",
+    "knowledge base",
+    "cloud service",
+    "developer platform",
+    "development platform",
+    "model service",
+    "open source",
+    "enterprise",
+    "business",
+    "knowledge",
+    "database",
+    "cloud",
+    "service",
+    "services",
+    "developer",
+    "development",
+    "platform",
+    "model",
+    "models",
+    "software",
+    "system",
+    "systems",
+    "tool",
+    "tools",
+    "solution",
+    "solutions",
+    "product",
+    "products",
+    "application",
+    "applications",
+    "automation",
+    "intelligent",
+    "intelligence",
+    "management",
+    "marketing",
+    "analytics",
+    "analysis",
+    "publishing",
+    "publish",
+    "content",
+    "media",
+    "data",
+    "gateway",
+    "routing",
+    "router",
+    "assistant",
+    "engine",
+    "center",
+    "search",
+    "writing",
+    "writer",
+    "agent",
+    "agents",
+    "global",
+    "online",
+    "private",
+    "local",
+    "smart",
+    "saas",
+    "llm",
+    "hub",
+    "app",
+    "apps",
+    "api",
+    "ai",
+}
+_GENERIC_ENTITY_CATEGORY_KEYS = tuple(
+    sorted(
+        {
+            re.sub(r"[^\w]", "", value.casefold(), flags=re.UNICODE)
+            for value in _GENERIC_ENTITY_CATEGORY_FRAGMENTS
+        },
+        key=lambda value: (-len(value), value),
+    )
+)
 _MATCH_PRIORITY = {"EXACT": 5, "ALIAS": 4, "DOMAIN": 3, "STRUCTURED": 2, "FUZZY": 1}
 _RECOMMENDATION_PATTERN = re.compile(
     r"(?:\brecommend(?:ed|ing|ation|s)?\b|"
@@ -372,16 +604,28 @@ def _normalize_responses(responses: Any) -> list[dict[str, Any]]:
     for index, item in enumerate(responses):
         provider: str | None = None
         model: str | None = None
+        channel_type: str | None = None
+        entry_point: str | None = None
+        web_search_verified: bool | None = None
+        consumer_surface_verified: bool | None = None
         if isinstance(item, str):
             text = item
         elif isinstance(item, Mapping):
-            unsupported = set(item) - {"text", "provider", "model"}
+            unsupported = set(item) - {
+                "text",
+                "provider",
+                "model",
+                "channel_type",
+                "entry_point",
+                "web_search_verified",
+                "consumer_surface_verified",
+            }
             if unsupported:
                 raise VisibilityAnalysisError(
                     f"responses[{index}] 包含不支持的字段: {', '.join(sorted(unsupported))}"
                 )
             text = item.get("text")
-            for field in ("provider", "model"):
+            for field in ("provider", "model", "channel_type", "entry_point"):
                 value = item.get(field)
                 if value is not None:
                     normalized = _required_text(
@@ -389,8 +633,22 @@ def _normalize_responses(responses: Any) -> list[dict[str, Any]]:
                     )
                     if field == "provider":
                         provider = normalized
-                    else:
+                    elif field == "model":
                         model = normalized
+                    elif field == "channel_type":
+                        channel_type = normalized
+                    else:
+                        entry_point = normalized
+            for field in ("web_search_verified", "consumer_surface_verified"):
+                value = item.get(field)
+                if value is not None and not isinstance(value, bool):
+                    raise VisibilityAnalysisError(
+                        f"responses[{index}].{field} 必须是布尔值"
+                    )
+                if field == "web_search_verified":
+                    web_search_verified = value
+                else:
+                    consumer_surface_verified = value
         else:
             raise VisibilityAnalysisError(
                 f"responses[{index}] 必须是字符串或包含 text 的对象"
@@ -408,6 +666,10 @@ def _normalize_responses(responses: Any) -> list[dict[str, Any]]:
                 "text": normalized_text,
                 "provider": provider,
                 "model": model,
+                "channel_type": channel_type,
+                "entry_point": entry_point,
+                "web_search_verified": web_search_verified,
+                "consumer_surface_verified": consumer_surface_verified,
             }
         )
     return output
@@ -478,6 +740,15 @@ def _parse_competitors(values: Sequence[Any]) -> list[dict[str, Any]]:
                 maximum_items=100,
                 maximum_length=160,
             )
+            aliases = [
+                alias
+                for alias in aliases
+                if _request_alias_is_admissible(
+                    alias,
+                    brand_name=name,
+                    project_product="",
+                )
+            ]
             raw_domains = _unique_strings(
                 item.get("domains", []),
                 field=f"competitors[{index}].domains",
@@ -496,29 +767,219 @@ def _parse_competitors(values: Sequence[Any]) -> list[dict[str, Any]]:
     return output
 
 
+def _compact_entity_term(value: str) -> str:
+    return re.sub(r"[^\w]", "", _canonical_term(value), flags=re.UNICODE)
+
+
+def _entity_term_residual(value: str) -> str:
+    """Return the non-category residue after conservative edge peeling."""
+
+    residual = _compact_entity_term(value)
+    previous = None
+    while residual and residual != previous:
+        previous = residual
+        for fragment in _GENERIC_ENTITY_CATEGORY_KEYS:
+            if residual == fragment:
+                return ""
+            if residual.startswith(fragment):
+                residual = residual[len(fragment) :]
+                break
+            if residual.endswith(fragment):
+                residual = residual[: -len(fragment)]
+                break
+    return residual
+
+
+def _is_distinctive_entity_term(value: str) -> bool:
+    compact = _compact_entity_term(value)
+    residual = _entity_term_residual(value)
+    if not compact or not residual:
+        return False
+    cjk_count = sum("\u3400" <= character <= "\u9fff" for character in residual)
+    ascii_count = sum(
+        character.isascii() and character.isalnum() for character in residual
+    )
+    original_cjk_count = sum(
+        "\u3400" <= character <= "\u9fff" for character in compact
+    )
+    original_ascii_count = sum(
+        character.isascii() and character.isalnum() for character in compact
+    )
+    if cjk_count >= 2:
+        return True
+    if (
+        original_cjk_count >= 1
+        and original_ascii_count >= 2
+        and (cjk_count + ascii_count) >= 1
+    ):
+        return True
+    return cjk_count == 0 and ascii_count >= 4
+
+
+def _request_alias_is_admissible(
+    value: str,
+    *,
+    brand_name: str,
+    project_product: str,
+) -> bool:
+    """Admit explicit aliases only with entity evidence or brand morphology.
+
+    Chinese and mixed-script aliases must be derivable from the configured
+    company/project name or product.  An unanchored Latin trade name remains
+    possible, but only when it looks like an identifier (all caps, CamelCase,
+    or contains a digit) instead of ordinary prose.  This is intentionally
+    conservative because an alias is used as scoring evidence, not merely as
+    a search keyword.
+    """
+
+    if not _is_distinctive_entity_term(value):
+        return False
+    alias_key = _compact_entity_term(value)
+    residual = _entity_term_residual(value)
+    known_keys = [_compact_entity_term(brand_name)]
+    # A product may anchor a nickname only if the product itself has already
+    # passed the category-residual gate.  Otherwise a generic configured
+    # product such as ``企业知识库`` could be wrapped in another generic phrase
+    # and smuggled back in as an explicit alias.
+    if project_product and _is_distinctive_entity_term(project_product):
+        known_keys.append(_compact_entity_term(project_product))
+    known_keys = tuple(key for key in known_keys if key)
+    directly_anchored = any(alias_key in key or key in alias_key for key in known_keys)
+    residual_anchor = (
+        len(residual) >= 3
+        and any(residual in key for key in known_keys)
+    )
+    if directly_anchored or residual_anchor:
+        return True
+
+    normalized = unicodedata.normalize("NFKC", value).strip()
+    if any(_is_cjk_character(character) for character in normalized):
+        return False
+    if re.search(r"\s", normalized):
+        return False
+    ascii_letters = [character for character in normalized if character.isascii() and character.isalpha()]
+    uppercase_count = sum(character.isupper() for character in ascii_letters)
+    lowercase_count = sum(character.islower() for character in ascii_letters)
+    return bool(ascii_letters) and (
+        any(character.isdigit() for character in normalized)
+        or (uppercase_count >= 3 and lowercase_count == 0)
+        or (uppercase_count >= 2 and lowercase_count >= 1)
+    )
+
+
+def _project_keyword_aliases(
+    *,
+    brand_name: str,
+    project_product: str,
+    project_keywords: Sequence[Any],
+) -> list[str]:
+    """Keep only project keywords that carry a known entity anchor.
+
+    A keyword is not a brand alias merely because it is a GEO target.  A
+    candidate must be a distinctive substring of the legal/project name, or
+    an exact distinctive token already present in the configured product
+    name.  Longer keywords containing such a confirmed name anchor are also
+    retained.  This admits ``同于野`` and ``同于野AI中转站`` while rejecting
+    generic targets such as ``AI API中转站`` and ``AI模型接口``.
+    """
+
+    normalized_keywords = _unique_strings(
+        project_keywords,
+        field="项目关键词",
+        maximum_items=100,
+        maximum_length=160,
+    )
+    brand_key = _compact_entity_term(brand_name)
+    product_tokens = {
+        _compact_entity_term(token)
+        for token in re.split(r"[\s/|｜·:：,，;；()（）\[\]【】_-]+", project_product)
+        if _is_distinctive_entity_term(token)
+    }
+    confirmed_name_anchors = {
+        _compact_entity_term(keyword)
+        for keyword in normalized_keywords
+        if _is_distinctive_entity_term(keyword)
+        and _compact_entity_term(keyword) in brand_key
+    }
+
+    output: list[str] = []
+    for keyword in normalized_keywords:
+        if not _is_distinctive_entity_term(keyword):
+            continue
+        keyword_key = _compact_entity_term(keyword)
+        carries_name_anchor = any(
+            anchor and anchor in keyword_key for anchor in confirmed_name_anchors
+        )
+        is_product_token = keyword_key in product_tokens
+        if carries_name_anchor or is_product_token:
+            output.append(keyword)
+    return output
+
+
 def _build_entities(
     *,
     project_name: str,
     project_product: str,
+    project_keywords: Sequence[Any],
     project_website: str,
     aliases: Sequence[Any] | None,
     competitors: Sequence[Any],
 ) -> tuple[list[_Entity], list[str]]:
     brand_name = _required_text(project_name, "项目名称", 160)
     warnings: list[str] = []
-    brand_aliases: list[str] = []
+    alias_records: dict[str, dict[str, Any]] = {}
+
+    def add_alias(value: str, source: str) -> None:
+        key = _canonical_term(value)
+        if not key or key == _canonical_term(brand_name):
+            return
+        record = alias_records.setdefault(key, {"term": value, "sources": []})
+        if source not in record["sources"]:
+            record["sources"].append(source)
+
     if project_product and _canonical_term(project_product) != _canonical_term(brand_name):
-        brand_aliases.append(_required_text(project_product, "项目产品", 160))
+        normalized_product = _required_text(project_product, "项目产品", 160)
+        if _is_distinctive_entity_term(normalized_product):
+            add_alias(normalized_product, "project_product")
+        else:
+            warnings.append("项目产品仅包含通用品类词，不作为品牌命中别名。")
+    for keyword in _project_keyword_aliases(
+        brand_name=brand_name,
+        project_product=project_product,
+        project_keywords=project_keywords,
+    ):
+        add_alias(keyword, "project_keyword")
     if aliases is not None:
-        brand_aliases.extend(
-            _unique_strings(
-                aliases,
-                field="aliases",
-                maximum_items=100,
-                maximum_length=160,
+        ignored_request_alias_count = 0
+        for alias in _unique_strings(
+            aliases,
+            field="aliases",
+            maximum_items=100,
+            maximum_length=160,
+        ):
+            # Request aliases are useful for real nicknames that do not occur
+            # in the legal name (for example an English product name), so they
+            # cannot require the project-keyword name anchor.  They must still
+            # pass the same generic/distinctive gate, otherwise a caller could
+            # turn a category word such as ``中转站`` into a brand mention in
+            # every ordinary answer about that category.
+            if _request_alias_is_admissible(
+                alias,
+                brand_name=brand_name,
+                project_product=project_product,
+            ):
+                add_alias(alias, "request_alias")
+            else:
+                ignored_request_alias_count += 1
+        if ignored_request_alias_count:
+            warnings.append(
+                f"已忽略 {ignored_request_alias_count} 个缺少可辨识品牌锚点的显式别名。"
             )
-        )
-    brand_aliases = _dedupe_terms(brand_aliases, excluded={_canonical_term(brand_name)})
+    brand_aliases = [record["term"] for record in alias_records.values()]
+    brand_alias_sources = tuple(
+        (record["term"], tuple(record["sources"]))
+        for record in alias_records.values()
+    )
 
     owned_domains: list[str] = []
     if project_website.strip():
@@ -535,6 +996,7 @@ def _build_entities(
             entity_type="brand",
             aliases=tuple(brand_aliases),
             domains=tuple(owned_domains),
+            alias_sources=brand_alias_sources,
         )
     ]
     for index, competitor in enumerate(parsed_competitors):
@@ -545,6 +1007,10 @@ def _build_entities(
                 entity_type="competitor",
                 aliases=tuple(competitor["aliases"]),
                 domains=tuple(competitor["domains"]),
+                alias_sources=tuple(
+                    (alias, ("competitor_alias",))
+                    for alias in competitor["aliases"]
+                ),
             )
         )
     lexical_term_count = sum(1 + len(entity.aliases) for entity in entities)
@@ -594,6 +1060,63 @@ def _word_character(value: str) -> bool:
     return bool(value) and (value.isalnum() or value == "_")
 
 
+def _is_cjk_character(value: str) -> bool:
+    return bool(value) and "\u3400" <= value <= "\u9fff"
+
+
+def _allows_cjk_brand_compound_boundary(
+    surface: str,
+    adjacent: str,
+) -> bool:
+    """Allow a distinctive CJK alias directly joined to an ASCII product tag.
+
+    JavaScript-style word boundaries treat CJK and ASCII letters alike, so a
+    configured alias such as ``同于野`` was incorrectly rejected inside
+    ``同于野AI API中转站``.  The exemption is deliberately one-way and narrow:
+    the complete matched surface must contain at least three CJK characters,
+    and the adjacent character must be ASCII alphanumeric.  CJK-in-CJK
+    substrings and short/generic aliases remain blocked.
+    """
+
+    compact = re.sub(r"\s+", "", surface)
+    return (
+        len(compact) >= 3
+        and all(_is_cjk_character(character) for character in compact)
+        and bool(adjacent)
+        and adjacent.isascii()
+        and adjacent.isalnum()
+    )
+
+
+def _allows_cjk_sentence_boundary(
+    surface: str,
+    before: str,
+    after: str,
+) -> bool:
+    """Handle normal Chinese prose without admitting embedded short aliases.
+
+    Chinese does not delimit words with spaces.  A three-character alias at a
+    sentence edge may therefore be followed by ``是``/``提供`` (or preceded by
+    ordinary prose) and still be an exact entity mention.  It is unsafe when
+    both sides are Chinese, as in ``不同于野外``.  A long legal name is
+    sufficiently distinctive to allow Chinese prose on both sides.
+    """
+
+    compact = re.sub(r"\s+", "", surface)
+    if len(compact) < 3 or not all(
+        _is_cjk_character(character) for character in compact
+    ):
+        return False
+    left_cjk = _is_cjk_character(before)
+    right_cjk = _is_cjk_character(after)
+    if len(compact) >= 6:
+        return left_cjk or right_cjk
+    if left_cjk == right_cjk:
+        return False
+    other_side = after if left_cjk else before
+    return not _word_character(other_side)
+
+
 def _context_around(text: str, start: int, end: int) -> str:
     return text[max(0, start - 80) : min(len(text), end + 80)]
 
@@ -638,8 +1161,18 @@ def _literal_matches(
         if lexical:
             before = text[start - 1] if start else ""
             after = text[end] if end < len(text) else ""
-            if (_word_character(surface[:1]) and _word_character(before)) or (
-                _word_character(surface[-1:]) and _word_character(after)
+            left_conflict = _word_character(surface[:1]) and _word_character(before)
+            right_conflict = _word_character(surface[-1:]) and _word_character(after)
+            left_allowed = not left_conflict or _allows_cjk_brand_compound_boundary(
+                surface, before
+            )
+            right_allowed = not right_conflict or _allows_cjk_brand_compound_boundary(
+                surface, after
+            )
+            if not (left_allowed and right_allowed) and not _allows_cjk_sentence_boundary(
+                surface,
+                before,
+                after,
             ):
                 continue
             compact = re.sub(r"[^\w]", "", _canonical_term(term), flags=re.UNICODE)
@@ -663,6 +1196,8 @@ def _candidate(
     confidence: float,
     ambiguous: bool,
     utf16_offsets: Sequence[int],
+    matched_term: str,
+    matched_term_sources: Sequence[str],
 ) -> dict[str, Any]:
     effective_confidence = min(confidence, 0.45) if ambiguous else confidence
     return {
@@ -674,6 +1209,8 @@ def _candidate(
         "evidence_quote": _evidence_quote(text, start, end),
         "is_valid": True,
         "match_type": match_type,
+        "matched_term": matched_term,
+        "matched_term_sources": list(matched_term_sources),
         "needs_review": ambiguous or effective_confidence < 0.75,
         # Public spans retain the source engine's JavaScript UTF-16 semantics.
         "span_end": utf16_offsets[end],
@@ -706,6 +1243,15 @@ def _levenshtein(left: str, right: str) -> int:
     return previous[-1]
 
 
+def _entity_term_sources(entity: _Entity, term: str) -> tuple[str, ...]:
+    if _canonical_term(term) == _canonical_term(entity.name):
+        return ("project_name",) if entity.entity_type == "brand" else ("competitor_name",)
+    for alias, sources in entity.alias_sources:
+        if _canonical_term(alias) == _canonical_term(term):
+            return tuple(sources)
+    return ("configured_alias",)
+
+
 def _detect_mentions(
     text: str, entities: Sequence[_Entity]
 ) -> tuple[list[dict[str, Any]], bool]:
@@ -718,10 +1264,18 @@ def _detect_mentions(
 
     candidates: list[dict[str, Any]] = []
     for entity in entities:
-        lexical_terms = [(entity.name, "EXACT", 0.99)] + [
-            (alias, "ALIAS", 0.92) for alias in entity.aliases
+        lexical_terms = [
+            (entity.name, "EXACT", 0.99, _entity_term_sources(entity, entity.name))
+        ] + [
+            (
+                alias,
+                "ALIAS",
+                0.92,
+                _entity_term_sources(entity, alias),
+            )
+            for alias in entity.aliases
         ]
-        for term, match_type, confidence in lexical_terms:
+        for term, match_type, confidence, term_sources in lexical_terms:
             ambiguous = len(term_owners.get(_canonical_term(term), ())) > 1
             for start, end, surface in _literal_matches(
                 text, searchable, term, lexical=True
@@ -737,6 +1291,8 @@ def _detect_mentions(
                         confidence=confidence,
                         ambiguous=ambiguous,
                         utf16_offsets=utf16_offsets,
+                        matched_term=term,
+                        matched_term_sources=term_sources,
                     )
                 )
         for domain in entity.domains:
@@ -760,6 +1316,12 @@ def _detect_mentions(
                         confidence=0.98,
                         ambiguous=False,
                         utf16_offsets=utf16_offsets,
+                        matched_term=domain,
+                        matched_term_sources=(
+                            ("project_website",)
+                            if entity.entity_type == "brand"
+                            else ("competitor_domain",)
+                        ),
                     )
                 )
 
@@ -799,6 +1361,21 @@ def _detect_mentions(
             break
         owner_ids = {entity.entity_id for entity, _ in fuzzy_owners}
         for entity, similarity in fuzzy_owners:
+            closest_terms = [
+                term
+                for term in (entity.name, *entity.aliases)
+                if abs(len(normalized_surface) - len(_canonical_term(term)))
+                <= max(1, math.floor(len(_canonical_term(term)) * 0.2))
+            ]
+            matched_term = min(
+                closest_terms or [entity.name],
+                key=lambda term: _levenshtein(
+                    normalized_surface, _canonical_term(term)
+                ),
+            )
+            matched_sources = (
+                _entity_term_sources(entity, matched_term)
+            )
             candidates.append(
                 _candidate(
                     entity=entity,
@@ -810,6 +1387,8 @@ def _detect_mentions(
                     confidence=min(0.79, similarity * 0.82),
                     ambiguous=len(owner_ids) > 1,
                     utf16_offsets=utf16_offsets,
+                    matched_term=matched_term,
+                    matched_term_sources=matched_sources,
                 )
             )
 
@@ -840,6 +1419,27 @@ def _detect_mentions(
                     item["surface_text"]
                     for item in sorted(
                         values, key=lambda value: value["_span_start_index"]
+                    )
+                ],
+                "matched_terms": [
+                    {
+                        "match_type": item["match_type"],
+                        "sources": list(item["matched_term_sources"]),
+                        "term": item["matched_term"],
+                    }
+                    for item in sorted(
+                        {
+                            (
+                                _canonical_term(item["matched_term"]),
+                                tuple(item["matched_term_sources"]),
+                                item["match_type"],
+                            ): item
+                            for item in values
+                        }.values(),
+                        key=lambda value: (
+                            -_MATCH_PRIORITY[value["match_type"]],
+                            _canonical_term(value["matched_term"]),
+                        ),
                     )
                 ],
                 "occurrence_count": len(spans),
@@ -1818,6 +2418,7 @@ def analyze_ai_visibility(
     project_id: int,
     project_name: str,
     project_product: str = "",
+    project_keywords: Sequence[Any] = (),
     project_website: str = "",
     stored_competitors: Sequence[Any] = (),
     prompt: str,
@@ -1829,8 +2430,10 @@ def analyze_ai_visibility(
 
     ``competitors=None`` means use the project's stored competitor list.  An
     explicit empty list intentionally disables competitor comparison for this
-    run.  The project's product is always retained as a useful brand alias,
-    while request aliases extend it.
+    run.  The project's product is always retained as a useful brand alias.
+    Project keywords are admitted only when they carry a confirmed name or
+    product token; request aliases extend that auditable local entity set only
+    after passing the same generic/distinctive-term gate.
     """
 
     if isinstance(project_id, bool) or not isinstance(project_id, int) or project_id <= 0:
@@ -1841,6 +2444,7 @@ def analyze_ai_visibility(
     entities, warnings = _build_entities(
         project_name=project_name,
         project_product=project_product or "",
+        project_keywords=project_keywords,
         project_website=project_website or "",
         aliases=aliases,
         competitors=effective_competitors,
@@ -1885,10 +2489,15 @@ def analyze_ai_visibility(
         evidence = [
             {
                 "confidence": mention["confidence"],
+                "canonical_entity": mention["entity_name"],
                 "entity_id": mention["entity_id"],
+                "matched_term": mention["matched_term"],
+                "matched_term_sources": mention["matched_term_sources"],
+                "match_type": mention["match_type"],
                 "quote": mention["evidence_quote"],
                 "start": mention["span_start"],
                 "end": mention["span_end"],
+                "surface_text": mention["surface_text"],
                 "type": "MENTION",
             }
             for mention in mentions
@@ -1908,6 +2517,9 @@ def analyze_ai_visibility(
                 "competitor_mentions": competitor_mentions,
                 "evidence": evidence,
                 "matched_aliases": brand_mention["matched_surfaces"]
+                if brand_mention is not None
+                else [],
+                "matched_entity_terms": brand_mention["matched_terms"]
                 if brand_mention is not None
                 else [],
                 "mentions": public_mentions,
@@ -1969,6 +2581,10 @@ def analyze_ai_visibility(
         ]
         entity_results.append(
             {
+                "alias_evidence": [
+                    {"term": alias, "sources": list(sources)}
+                    for alias, sources in entity.alias_sources
+                ],
                 "aliases": list(entity.aliases),
                 "average_rank": math.fsum(numeric_ranks) / len(numeric_ranks)
                 if numeric_ranks
@@ -2035,18 +2651,7 @@ def analyze_ai_visibility(
     warnings.extend(
         warning for sample in samples for warning in sample["warnings"]
     )
-    algorithm_versions = {
-        "integration": AI_VISIBILITY_ALGORITHM_VERSION,
-        "mention": MENTION_PARSER_VERSION,
-        "rank": RANK_PARSER_VERSION,
-        "citation": CITATION_PARSER_VERSION,
-        "citation_extraction": CITATION_EXTRACTION_VERSION,
-        "public_suffix_rules": PUBLIC_SUFFIX_RULESET_VERSION,
-        "source_classifier": SOURCE_CLASSIFIER_VERSION,
-        "sentiment": SENTIMENT_PARSER_VERSION,
-        "metrics": METRICS_ALGORITHM_VERSION,
-        "recommendations": RECOMMENDATION_RULE_SET_VERSION,
-    }
+    algorithm_versions = current_ai_visibility_algorithm_versions()
     return {
         "algorithm_versions": algorithm_versions,
         "citations": citations,
@@ -2085,6 +2690,10 @@ def analyze_ai_visibility(
             "name": entities[0].name,
             "product": project_product or "",
             "website": project_website or "",
+            "effective_brand_aliases": [
+                {"term": alias, "sources": list(sources)}
+                for alias, sources in entities[0].alias_sources
+            ],
         },
         "prompt": normalized_prompt,
         "recommendation_details": recommendation_details,
@@ -2126,6 +2735,94 @@ def analyze_ai_visibility(
     }
 
 
+def reanalyze_ai_visibility_locally(
+    *,
+    previous_analysis: Mapping[str, Any],
+    project_id: int,
+    project_name: str,
+    project_product: str = "",
+    project_keywords: Sequence[Any] = (),
+    project_website: str = "",
+    stored_competitors: Sequence[Any] = (),
+    prompt: str,
+    responses: Any,
+    aliases: Sequence[Any] | None = None,
+    competitors: Sequence[Any] | None = None,
+    force: bool = False,
+    reason: str | None = None,
+) -> dict[str, Any]:
+    """Refresh a saved analysis from captured text without provider or web I/O.
+
+    The signature intentionally contains neither settings nor a sampler.  A
+    current result is returned unchanged unless ``force`` is used for a known
+    local-input change (for example, newly configured project keywords).
+    """
+
+    freshness = inspect_ai_visibility_analysis_freshness(previous_analysis)
+    if not isinstance(force, bool):
+        raise VisibilityAnalysisError("force 必须是布尔值")
+    if reason is not None:
+        if not isinstance(reason, str) or not reason.strip() or len(reason.strip()) > 200:
+            raise VisibilityAnalysisError("reason 必须是 1 到 200 个字符的字符串")
+        normalized_reason = reason.strip()
+    else:
+        normalized_reason = None
+
+    if not force and not freshness["reanalysis_required"]:
+        return {
+            "analysis": copy.deepcopy(dict(previous_analysis)),
+            "refresh": {
+                **freshness,
+                "status": "current",
+                "performed": False,
+                "reason": None,
+                "provider_calls": 0,
+                "network_requests": 0,
+            },
+        }
+
+    refresh_reason = normalized_reason or (
+        "algorithm_version_changed"
+        if freshness["reanalysis_required"]
+        else "local_analysis_input_changed"
+    )
+    refreshed = analyze_ai_visibility(
+        project_id=project_id,
+        project_name=project_name,
+        project_product=project_product,
+        project_keywords=project_keywords,
+        project_website=project_website,
+        stored_competitors=stored_competitors,
+        prompt=prompt,
+        responses=responses,
+        aliases=aliases,
+        competitors=competitors,
+    )
+    refreshed["methodology"] = {
+        **refreshed["methodology"],
+        "local_reanalysis": {
+            "performed": True,
+            "reason": refresh_reason,
+            "provider_calls": 0,
+            "network_requests": 0,
+            "previous_algorithm_versions": freshness["stored_versions"],
+            "current_algorithm_versions": freshness["current_versions"],
+            "stale_components": freshness["stale_components"],
+        },
+    }
+    return {
+        "analysis": refreshed,
+        "refresh": {
+            **freshness,
+            "status": "refreshed",
+            "performed": True,
+            "reason": refresh_reason,
+            "provider_calls": 0,
+            "network_requests": 0,
+        },
+    }
+
+
 __all__ = [
     "AI_VISIBILITY_ALGORITHM_VERSION",
     "CITATION_EXTRACTION_VERSION",
@@ -2142,5 +2839,8 @@ __all__ = [
     "VisibilityAnalysisError",
     "analyze_ai_visibility",
     "classify_citation_source",
+    "current_ai_visibility_algorithm_versions",
+    "inspect_ai_visibility_analysis_freshness",
     "normalize_citation_url",
+    "reanalyze_ai_visibility_locally",
 ]

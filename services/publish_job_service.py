@@ -385,6 +385,7 @@ def claim_publish_job(
     *,
     message: str = "正在准备发布",
     expected_state_version: int | None = None,
+    include_account_credential_epoch: bool = False,
 ) -> dict[str, Any]:
     """Atomically move one queued job to processing for a single worker."""
 
@@ -429,7 +430,22 @@ def claim_publish_job(
                 raise InvalidPublishJobTransitionError("发布任务已被其他执行器领取")
             _sync_article_status(conn, current_row["article_id"])
             updated_row = _fetch_job(conn, job_id)
-    return _serialize_job(updated_row)
+            claimed_job = _serialize_job(updated_row)
+            if include_account_credential_epoch:
+                credential_row = conn.execute(
+                    """
+                    SELECT credential_epoch
+                    FROM user_info
+                    WHERE id = ? AND status != -2
+                    """,
+                    (claimed_job.get("account_id"),),
+                ).fetchone()
+                claimed_job["_account_credential_epoch"] = (
+                    int(credential_row["credential_epoch"])
+                    if credential_row is not None
+                    else None
+                )
+    return claimed_job
 
 
 def list_publish_jobs(

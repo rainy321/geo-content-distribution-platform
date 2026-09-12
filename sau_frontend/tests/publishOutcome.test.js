@@ -116,9 +116,37 @@ test('summary names only the four user-facing categories and includes an exact t
 
   assert.equal(
     label,
-    '已公开发布 2；平台处理中/审核中 1；需要人工处理 1；明确失败 1（合计 5）'
+    '平台已发布 2；平台处理中/审核中 1；需要人工处理 1；明确失败 1（合计 5）'
   )
   assert.doesNotMatch(label, /请求异常|已提交待核验|结果未知/)
+})
+
+
+test('a success URL stays anonymous-unverified until explicit public evidence exists', () => {
+  const outcome = normalizePublishOutcome({
+    job_id: 64,
+    status: 'success',
+    url: 'https://www.xiaohongshu.com/explore/6aa4f050000000001001f871'
+  })
+
+  assert.equal(outcome.label, '平台已发布')
+  assert.equal(outcome.publication_evidence.public_access_state, 'anonymous_unverified')
+  assert.equal(outcome.publication_evidence.anonymous_access_verified, false)
+  assert.equal(outcome.publication_evidence.can_claim_geo_crawlable, false)
+})
+
+
+test('legacy creator-side success is shown as pending instead of public success', () => {
+  const outcome = normalizePublishOutcome({
+    job_id: 64,
+    status: 'success',
+    message: '小红书创作中心“已发布”列表与 posted 接口已核验',
+    url: 'https://www.xiaohongshu.com/explore/6aa4f050000000001001f871'
+  })
+
+  assert.equal(outcome.category, 'platform_processing')
+  assert.equal(outcome.label, '平台处理中/审核中')
+  assert.equal(outcome.retry_allowed, false)
 })
 
 

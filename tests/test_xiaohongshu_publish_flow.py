@@ -186,11 +186,14 @@ class XiaohongshuPublishFlowTests(unittest.IsolatedAsyncioTestCase):
             "GEO 内容生成与分发链路测试说明",
         )
 
-        self.assertEqual(result["status"], "success")
+        self.assertEqual(result["status"], "processing")
+        self.assertFalse(result["success"])
         self.assertEqual(
             result["url"],
             "https://www.xiaohongshu.com/explore/6a977888000000001103bb96",
         )
+        self.assertIn("创作者侧证据", result["message"])
+        self.assertIn("GEO 可抓取性尚未核验", result["message"])
         published_tab.click.assert_awaited_once()
         page.goto.assert_awaited_once()
 

@@ -8,6 +8,7 @@ from unittest.mock import Mock, patch
 
 from db.createTable import initialize_database
 from services.article_service import get_article
+from services.media_account_risk_service import get_active_media_account_risk
 from services.publish_job_executor import (
     PublishConfirmationMismatchError,
     _build_publish_content,
@@ -738,6 +739,150 @@ class PublishJobExecutorTests(unittest.TestCase):
         latest = get_publish_job(self.db_path, job["id"])
         self.assertEqual(latest["status"], "need_action")
         self.assertEqual(latest["message"], "人工已接管当前任务")
+
+    def test_stale_risk_result_cannot_freeze_account_after_job_version_changes(self):
+        account_id = self._create_connected_account()
+        job = self._create_job(account_id=account_id)
+        test_case = self
+
+        class InterveningRiskResultPublisher(PublisherAdapter):
+            platform = "zhihu"
+
+            def login(self):
+                return True
+
+            def check_login(self):
+                return True
+
+            def publish(self, content):
+                transition_publish_job(
+                    test_case.db_path,
+                    job["id"],
+                    "need_action",
+                    message="新版发布尝试已由人工接管",
+                )
+                return PublishResult(
+                    False,
+                    self.platform,
+                    "need_action",
+                    message="旧发布页面提示账号已被永久封禁",
+                )
+
+            def schedule(self, content, publish_at=None):
+                raise AssertionError("执行器不应调用 schedule")
+
+        with self.assertRaises(ConcurrentPublishJobUpdateError):
+            execute_publish_job(
+                self.db_path,
+                job["id"],
+                publisher_factory=lambda _job: InterveningRiskResultPublisher(),
+            )
+
+        latest = get_publish_job(self.db_path, job["id"])
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            account_status = conn.execute(
+                "SELECT status FROM user_info WHERE id = ?",
+                (account_id,),
+            ).fetchone()[0]
+        self.assertEqual(latest["status"], "need_action")
+        self.assertEqual(latest["message"], "新版发布尝试已由人工接管")
+        self.assertEqual(account_status, 1)
+        self.assertIsNone(get_active_media_account_risk(self.db_path, account_id))
+
+    def test_stale_risk_exception_cannot_freeze_account_after_job_version_changes(self):
+        account_id = self._create_connected_account()
+        job = self._create_job(account_id=account_id)
+        test_case = self
+
+        class InterveningRiskExceptionPublisher(PublisherAdapter):
+            platform = "zhihu"
+
+            def login(self):
+                return True
+
+            def check_login(self):
+                return True
+
+            def publish(self, content):
+                transition_publish_job(
+                    test_case.db_path,
+                    job["id"],
+                    "need_action",
+                    message="新版异常处理已接管",
+                )
+                raise RuntimeError("旧发布页面提示账号已被永久封禁")
+
+            def schedule(self, content, publish_at=None):
+                raise AssertionError("执行器不应调用 schedule")
+
+        with self.assertRaises(ConcurrentPublishJobUpdateError):
+            execute_publish_job(
+                self.db_path,
+                job["id"],
+                publisher_factory=lambda _job: InterveningRiskExceptionPublisher(),
+            )
+
+        latest = get_publish_job(self.db_path, job["id"])
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            account_status = conn.execute(
+                "SELECT status FROM user_info WHERE id = ?",
+                (account_id,),
+            ).fetchone()[0]
+        self.assertEqual(latest["status"], "need_action")
+        self.assertEqual(latest["message"], "新版异常处理已接管")
+        self.assertEqual(account_status, 1)
+        self.assertIsNone(get_active_media_account_risk(self.db_path, account_id))
+
+    def test_risk_result_is_bound_to_claimed_account_credential_epoch(self):
+        account_id = self._create_connected_account()
+        job = self._create_job(account_id=account_id)
+        test_case = self
+
+        class ReloginDuringPublishPublisher(PublisherAdapter):
+            platform = "zhihu"
+
+            def login(self):
+                return True
+
+            def check_login(self):
+                return True
+
+            def publish(self, content):
+                with closing(sqlite3.connect(test_case.db_path)) as conn:
+                    with conn:
+                        conn.execute(
+                            """
+                            UPDATE user_info
+                            SET filePath = 'new-session.json', status = 1,
+                                credential_epoch = credential_epoch + 1
+                            WHERE id = ?
+                            """,
+                            (account_id,),
+                        )
+                return PublishResult(
+                    False,
+                    self.platform,
+                    "need_action",
+                    message="旧会话页面提示账号已被永久封禁",
+                )
+
+            def schedule(self, content, publish_at=None):
+                raise AssertionError("执行器不应调用 schedule")
+
+        result = execute_publish_job(
+            self.db_path,
+            job["id"],
+            publisher_factory=lambda _job: ReloginDuringPublishPublisher(),
+        )
+
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            account_status, credential_epoch = conn.execute(
+                "SELECT status, credential_epoch FROM user_info WHERE id = ?",
+                (account_id,),
+            ).fetchone()
+        self.assertEqual(result["status"], "need_action")
+        self.assertEqual((account_status, credential_epoch), (1, 2))
+        self.assertIsNone(get_active_media_account_risk(self.db_path, account_id))
 
     def test_rejects_wrong_publisher_without_invoking_it(self):
         job = self._create_job()

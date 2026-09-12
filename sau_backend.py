@@ -72,7 +72,17 @@ from services.ai_visibility_sampling_service import (
     VisibilitySamplingRequestNotFoundError,
     VisibilitySamplingValidationError,
     get_ai_visibility_sample_request,
+    refresh_ai_visibility_run_locally,
+    refresh_ai_visibility_sample_request_locally,
     run_ai_visibility_sample,
+)
+from services.ai_visibility_panel_service import (
+    VisibilityPanelConflictError,
+    VisibilityPanelInProgressError,
+    VisibilityPanelRequestNotFoundError,
+    VisibilityPanelValidationError,
+    get_ai_visibility_panel_request,
+    run_ai_visibility_panel,
 )
 from services.article_service import (
     ARTICLE_STATUSES,
@@ -157,7 +167,9 @@ from services.media_account_service import (
     get_media_accounts_overview,
 )
 from services.media_account_risk_service import (
+    ConcurrentMediaAccountCredentialUpdateError,
     FROZEN_RISK_CATEGORIES,
+    get_active_media_account_risk,
     get_active_media_account_risks,
     record_media_account_risk,
     resolve_media_account_risks,
@@ -250,6 +262,13 @@ from services.platform_publish_policy_service import (
     get_platform_publish_policy,
 )
 from services.publish_scheduler_runtime import create_publish_scheduler
+from services.publish_review_monitor_service import (
+    PublishReviewMonitorError,
+    acknowledge_publish_review_alert,
+    get_publish_review_monitor,
+    get_publish_review_overview,
+    rearm_publish_review_monitor,
+)
 from services.real_publisher_factory import (
     REAL_PUBLISH_PLATFORMS,
     create_real_publisher_factory,
@@ -1304,7 +1323,11 @@ def _create_content_generation_service(settings=None):
     reviewer_role = dict(
         ((config_status.get("roles") or {}).get("reviewer") or {})
     )
+    evaluator_role = dict(
+        ((config_status.get("roles") or {}).get("evaluator") or {})
+    )
     reviewer_settings = None
+    evaluator_settings = None
     # Optional roles resolve to writer settings when absent. Do not pass that
     # fallback through as a reviewer: it would create a second billable call
     # while falsely presenting it as an independently configured review.
@@ -1314,11 +1337,20 @@ def _create_content_generation_service(settings=None):
         and not reviewer_role.get("same_as_writer")
     ):
         reviewer_settings = _request_ai_settings({}, role="reviewer")
+    if (
+        evaluator_role.get("configured")
+        and not evaluator_role.get("fallback")
+        and not evaluator_role.get("same_as_writer")
+        and not evaluator_role.get("same_as_reviewer")
+    ):
+        evaluator_settings = _request_ai_settings({}, role="evaluator")
     return ContentGenerationService.from_environment(
         app.config["DATABASE_PATH"],
         qwen_settings=settings,
         reviewer_settings=reviewer_settings,
         reviewer_role=reviewer_role,
+        evaluator_settings=evaluator_settings,
+        evaluator_role=evaluator_role,
     )
 
 
@@ -1891,11 +1923,7 @@ def _unified_ai_config_status_data():
                 "updated_at": "",
                 "fallback": role != "writer",
                 "source_role": "writer",
-                **(
-                    {"same_as_writer": True}
-                    if role == "reviewer"
-                    else {}
-                ),
+                **({"same_as_writer": True} if role != "writer" else {}),
             }
             for role in ("writer", "reviewer", "evaluator", "image")
         }
@@ -1955,6 +1983,8 @@ def _public_ai_role_resolution(role, *, explicit_request=False):
         "source_role": str(role_status.get("source_role") or normalized_role),
         "provider": str(role_status.get("provider") or ""),
         "model": str(role_status.get("model") or ""),
+        "same_as_writer": bool(role_status.get("same_as_writer")),
+        "same_as_reviewer": bool(role_status.get("same_as_reviewer")),
     }
 
 
@@ -2905,6 +2935,7 @@ def analyze_geo_visibility():
             project_id=project_id,
             project_name=project.get("name") or "",
             project_product=project.get("product") or "",
+            project_keywords=project.get("keywords") or [],
             project_website=project.get("website") or "",
             stored_competitors=project.get("competitors") or [],
             prompt=data.get("prompt"),
@@ -3038,14 +3069,313 @@ def evaluate_imported_geo_blackbox_panel():
     return jsonify({"code": 200, "msg": "评估完成", "data": result}), 200
 
 
+@app.route('/api/geo/visibility/sample-panel', methods=['POST'])
+def sample_geo_visibility_panel():
+    """Compare distinct configured API models without claiming App parity."""
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
+    allowed_fields = {
+        "project_id",
+        "prompt",
+        "sample_count",
+        "roles",
+        "aliases",
+        "competitors",
+        "persist",
+        "confirm_external_call",
+        "idempotency_key",
+    }
+    unsupported = sorted(set(data) - allowed_fields)
+    if unsupported:
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "多模型采样包含不支持的字段: " + ", ".join(unsupported),
+                "data": None,
+            }
+        ), 400
+    try:
+        project_id = int(data.get("project_id"))
+    except (TypeError, ValueError):
+        project_id = 0
+    if project_id <= 0 or isinstance(data.get("project_id"), bool):
+        return jsonify({"code": 400, "msg": "project_id 必须是正整数", "data": None}), 400
+    project = _get_project(project_id)
+    if project is None:
+        return jsonify({"code": 404, "msg": "品牌项目不存在", "data": None}), 404
+
+    roles = data.get("roles", ["writer", "reviewer", "evaluator"])
+    if not isinstance(roles, list) or not 1 <= len(roles) <= 3:
+        return jsonify(
+            {"code": 400, "msg": "roles 必须包含 1 到 3 个 AI 角色", "data": None}
+        ), 400
+    try:
+        normalized_roles = [_normalize_ai_role(role) for role in roles]
+    except AIConfigurationError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    if "image" in normalized_roles or len(set(normalized_roles)) != len(normalized_roles):
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "多模型采样仅支持不重复的 writer、reviewer、evaluator",
+                "data": None,
+            }
+        ), 400
+
+    request_id = str(request.headers.get("X-Request-ID") or uuid.uuid4()).strip()
+    idempotency_key = str(
+        request.headers.get("Idempotency-Key")
+        or data.get("idempotency_key")
+        or ""
+    ).strip()
+    identity_pattern = r"[A-Za-z0-9._:-]+"
+    if not request_id or len(request_id) > 96 or not re.fullmatch(identity_pattern, request_id):
+        return jsonify({"code": 400, "msg": "X-Request-ID 格式无效", "data": None}), 400
+    if (
+        not idempotency_key
+        or len(idempotency_key) > 110
+        or not re.fullmatch(identity_pattern, idempotency_key)
+    ):
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "多模型 API 采样必须提供有效 Idempotency-Key",
+                "data": None,
+            }
+        ), 400
+    if data.get("confirm_external_call") is not True:
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "必须确认将同一 prompt 分别发送给列出的 API 模型",
+                "data": None,
+            }
+        ), 400
+
+    sample_count = data.get("sample_count", 1)
+    if (
+        isinstance(sample_count, bool)
+        or not isinstance(sample_count, int)
+        or not 1 <= sample_count <= 5
+    ):
+        return jsonify(
+            {"code": 400, "msg": "sample_count 必须是 1 到 5 的整数", "data": None}
+        ), 400
+
+    try:
+        config_status = _unified_ai_config_status_data()
+    except UnifiedAIConfigError as exc:
+        return jsonify({"code": 503, "msg": str(exc), "data": None}), 503
+    role_statuses = config_status.get("roles") or {}
+    targets = []
+    configured_call_count = 0
+    for role in normalized_roles:
+        role_status = dict(role_statuses.get(role) or {})
+        settings = None
+        if role == "writer" or (
+            role_status.get("configured") and not role_status.get("fallback")
+        ):
+            try:
+                settings = _request_ai_settings({}, role=role)
+            except AIConfigurationError:
+                settings = None
+        if settings is not None:
+            configured_call_count += 1
+        targets.append(
+            {"role": role, "role_status": role_status, "settings": settings}
+        )
+
+    if configured_call_count:
+        rate_limit_response = _enforce_ai_rate_limit(
+            cost=max(1, configured_call_count * sample_count)
+        )
+        if rate_limit_response is not None:
+            return rate_limit_response
+    try:
+        panel = run_ai_visibility_panel(
+            app.config["DATABASE_PATH"],
+            project=project,
+            prompt=data.get("prompt"),
+            sample_count=sample_count,
+            aliases=data.get("aliases") if "aliases" in data else None,
+            competitors=data.get("competitors") if "competitors" in data else None,
+            persist=data.get("persist", False),
+            confirm_external_call=data.get("confirm_external_call"),
+            targets=targets,
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+        )
+    except VisibilityPanelInProgressError as exc:
+        record = dict(exc.record)
+        if record.get("in_progress_expired"):
+            payload = dict(record.get("result") or {})
+            payload.update(
+                {
+                    "status": "need_action",
+                    "need_action": True,
+                    "outcome_unknown": True,
+                    "request_id": record.get("request_id", request_id),
+                    "idempotency_key": record.get(
+                        "idempotency_key", idempotency_key
+                    ),
+                    "replayed": True,
+                }
+            )
+            response = jsonify(
+                {
+                    "code": 504,
+                    "msg": (
+                        "多模型采样超过 15 分钟仍未收口；原调用结果未知，"
+                        "请核对模型账单和既有结果，系统不会自动重试"
+                    ),
+                    "data": payload,
+                }
+            )
+            response.headers["X-Request-ID"] = str(
+                record.get("request_id") or request_id
+            )
+            response.headers["Idempotency-Key"] = str(
+                record.get("idempotency_key") or idempotency_key
+            )
+            response.headers["Idempotency-Replayed"] = "true"
+            return response, 504
+        response = jsonify(
+            {
+                "code": 202,
+                "msg": "多模型采样仍在原进程中执行；请查询原请求，不会自动重试",
+                "data": {
+                    "status": "processing",
+                    "need_action": False,
+                    "request_id": record.get("request_id", request_id),
+                    "idempotency_key": record.get("idempotency_key", idempotency_key),
+                    "manifest": record.get("manifest") or {},
+                    "targets": record.get("targets") or [],
+                    "created_at": record.get("created_at"),
+                    "updated_at": record.get("updated_at"),
+                    "recovery_policy": record.get("recovery_policy") or {
+                        "read_only": True,
+                        "automatic_retry": False,
+                    },
+                },
+            }
+        )
+        response.headers["X-Request-ID"] = str(record.get("request_id") or request_id)
+        response.headers["Idempotency-Key"] = str(
+            record.get("idempotency_key") or idempotency_key
+        )
+        response.headers["Idempotency-Replayed"] = "true"
+        return response, 202
+    except VisibilityPanelConflictError as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+    except VisibilityPanelValidationError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+
+    status_code = 200 if panel["status"] == "completed" else (
+        207 if panel["status"] == "partial" else 503
+    )
+    response = jsonify(
+        {
+            "code": status_code,
+            "msg": (
+                "API 多模型采样完成；消费者网页与手机 App 仍为未验证"
+                if status_code == 200
+                else "API 多模型采样未全部完成；未自动重试"
+            ),
+            "data": panel,
+        }
+    )
+    response.headers["X-Request-ID"] = request_id
+    response.headers["Idempotency-Key"] = idempotency_key
+    response.headers["Idempotency-Replayed"] = (
+        "true" if panel.get("replayed") else "false"
+    )
+    return response, status_code
+
+
+@app.route('/api/geo/visibility/sample-panel/<string:request_id>', methods=['GET'])
+def get_geo_visibility_sample_panel(request_id):
+    """Resume a frozen multi-model panel without any provider call."""
+
+    try:
+        record = get_ai_visibility_panel_request(
+            app.config["DATABASE_PATH"],
+            request_id,
+        )
+    except VisibilityPanelRequestNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except VisibilityPanelConflictError as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+    except VisibilityPanelValidationError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+
+    if record.get("in_progress_expired"):
+        payload = dict(record.get("result") or {})
+        payload.update(
+            {
+                "status": "need_action",
+                "need_action": True,
+                "outcome_unknown": True,
+                "request_id": record["request_id"],
+                "idempotency_key": record["idempotency_key"],
+                "replayed": True,
+            }
+        )
+        status_code = 504
+        message = (
+            "多模型采样超过 15 分钟仍未收口；原调用结果未知，"
+            "请核对模型账单和既有结果，系统不会自动重试"
+        )
+    elif record["in_progress"] or not isinstance(record.get("result"), dict):
+        status_code = 202
+        payload = {
+            "status": "processing",
+            "need_action": False,
+            "request_id": record["request_id"],
+            "idempotency_key": record["idempotency_key"],
+            "manifest": record["manifest"],
+            "targets": record["targets"],
+            "created_at": record["created_at"],
+            "updated_at": record["updated_at"],
+            "recovery_policy": record["recovery_policy"],
+        }
+        message = "多模型采样仍在原进程中执行；只读恢复不会新增模型调用"
+    else:
+        payload = dict(record["result"])
+        payload["replayed"] = True
+        status_code = int(record.get("http_status") or 200)
+        message = (
+            "已恢复多模型 API 对照结果；没有重复调用模型"
+            if status_code == 200
+            else "已恢复未完整的多模型 API 对照结果；没有自动重试"
+        )
+
+    response = jsonify({"code": status_code, "msg": message, "data": payload})
+    response.headers["X-Request-ID"] = record["request_id"]
+    response.headers["Idempotency-Key"] = record["idempotency_key"]
+    response.headers["Idempotency-Replayed"] = "true"
+    return response, status_code
+
+
 @app.route('/api/geo/visibility/sample/<string:request_id>', methods=['GET'])
 def get_geo_visibility_sample(request_id):
     """Resume a durable sampling receipt without another provider call."""
 
     try:
-        record = get_ai_visibility_sample_request(
+        saved_record = get_ai_visibility_sample_request(
             app.config["DATABASE_PATH"],
             request_id,
+        )
+        project = _get_project(int(saved_record["project_id"]))
+        if project is None:
+            return jsonify(
+                {"code": 404, "msg": "采样关联的品牌项目不存在", "data": None}
+            ), 404
+        record = refresh_ai_visibility_sample_request_locally(
+            app.config["DATABASE_PATH"],
+            request_id,
+            project=project,
         )
     except VisibilitySamplingValidationError as exc:
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
@@ -3059,6 +3389,48 @@ def get_geo_visibility_sample(request_id):
                 "data": None,
             }
         ), 409
+
+    if record.get("in_progress_expired"):
+        response = jsonify(
+            {
+                "code": 504,
+                "msg": (
+                    "真实采样超过 15 分钟仍未收口；原模型调用结果未知，"
+                    "请核对模型账单和既有结果，系统不会自动重发"
+                ),
+                "data": {
+                    "status": "need_action",
+                    "need_action": True,
+                    "outcome_unknown": True,
+                    "request_id": record["request_id"],
+                    "idempotency_key": record["idempotency_key"],
+                    "project_id": record["project_id"],
+                    "requested_sample_count": 0,
+                    "completed_sample_count": 0,
+                    "unattempted_sample_count": 0,
+                    "persisted": False,
+                    "executions": [],
+                    "captured_responses": [],
+                    "created_at": record["created_at"],
+                    "failure": {
+                        "code": "provider_outcome_unknown",
+                        "message": (
+                            "原进程超过 15 分钟仍未写入最终回执；"
+                            "不能据此推断调用成功或失败"
+                        ),
+                        "outcome_unknown": True,
+                    },
+                    "retry_policy": {
+                        "automatic_retry": False,
+                        "action": "先核对模型账单与原请求；确认后再决定是否新建请求",
+                    },
+                },
+            }
+        )
+        response.headers["X-Request-ID"] = record["request_id"]
+        response.headers["Idempotency-Key"] = record["idempotency_key"]
+        response.headers["Idempotency-Replayed"] = "true"
+        return response, 504
 
     if record["status"] == "started" or not isinstance(record.get("result"), dict):
         response = jsonify(
@@ -3344,10 +3716,20 @@ def list_geo_visibility_runs():
 @app.route('/api/geo/visibility/runs/<int:run_id>', methods=['GET'])
 def get_geo_visibility_run(run_id):
     try:
-        row = get_ai_visibility_run(app.config["DATABASE_PATH"], run_id)
+        saved_row = get_ai_visibility_run(app.config["DATABASE_PATH"], run_id)
+        project = _get_project(int(saved_row["project_id"]))
+        if project is None:
+            return jsonify(
+                {"code": 404, "msg": "分析记录关联的品牌项目不存在", "data": None}
+            ), 404
+        row = refresh_ai_visibility_run_locally(
+            app.config["DATABASE_PATH"],
+            run_id,
+            project=project,
+        )
     except (VisibilityRunNotFoundError, ProjectNotFoundError) as exc:
         return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
-    except VisibilityRunValidationError as exc:
+    except (VisibilityRunValidationError, VisibilitySamplingValidationError) as exc:
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
     except VisibilityRunDataError:
         return jsonify(
@@ -4862,6 +5244,81 @@ def get_publish_task_detail(job_id):
     ), 200
 
 
+@app.route('/api/publish/review-monitor', methods=['GET'])
+def get_publish_review_monitor_overview():
+    """Read durable review/risk alerts without contacting any platform."""
+
+    unread_only = str(request.args.get("unread_only", "false")).strip().lower()
+    if unread_only not in {"true", "false", "1", "0"}:
+        return jsonify(
+            {"code": 400, "msg": "unread_only 必须是布尔值", "data": None}
+        ), 400
+    try:
+        alert_limit = int(request.args.get("alert_limit", "20"))
+        overview = get_publish_review_overview(
+            app.config["DATABASE_PATH"],
+            unread_only=unread_only in {"true", "1"},
+            alert_limit=alert_limit,
+        )
+    except (TypeError, ValueError) as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    response = jsonify({"code": 200, "msg": "success", "data": overview})
+    response.headers["Cache-Control"] = "no-store"
+    return response, 200
+
+
+@app.route(
+    '/api/publish/review-alerts/<int:alert_id>/acknowledge',
+    methods=['POST'],
+)
+def acknowledge_publish_review_alert_api(alert_id):
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or data.get("confirm_seen") is not True:
+        return jsonify(
+            {"code": 400, "msg": "请确认已看到该平台状态提醒", "data": None}
+        ), 400
+    try:
+        alert = acknowledge_publish_review_alert(
+            app.config["DATABASE_PATH"],
+            alert_id,
+        )
+    except LookupError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    return jsonify(
+        {"code": 200, "msg": "提醒已确认", "data": alert}
+    ), 200
+
+
+@app.route(
+    '/api/publish/jobs/<int:job_id>/review-monitor/rearm',
+    methods=['POST'],
+)
+def rearm_publish_review_monitor_api(job_id):
+    """Re-arm read-only checks; this route has no publisher dependency."""
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or data.get("confirm_read_only") is not True:
+        return jsonify(
+            {"code": 400, "msg": "请确认仅恢复只读平台核验", "data": None}
+        ), 400
+    try:
+        monitor = rearm_publish_review_monitor(
+            app.config["DATABASE_PATH"],
+            job_id,
+        )
+    except LookupError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except PublishReviewMonitorError as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+    return jsonify(
+        {
+            "code": 200,
+            "msg": "只读审核监测已恢复；不会提交或重提内容",
+            "data": monitor,
+        }
+    ), 200
+
+
 @app.route('/api/publish/jobs/<int:job_id>/retry', methods=['POST'])
 def retry_publish_task(job_id):
     try:
@@ -5312,6 +5769,20 @@ def _publish_job_payload(
         can_execute_real=can_execute_real,
         account_id=job.get("account_id"),
         demo=job["demo"],
+        public_access_status=job.get("public_access_status", ""),
+        public_access_checked_at=job.get("public_access_checked_at", ""),
+        public_access_method=job.get("public_access_method", ""),
+        public_access_detail=job.get("public_access_detail", ""),
+    )
+    account_risk = None
+    if job.get("account_id") is not None:
+        account_risk = get_active_media_account_risk(
+            app.config["DATABASE_PATH"],
+            int(job["account_id"]),
+        )
+    review_monitor = get_publish_review_monitor(
+        app.config["DATABASE_PATH"],
+        int(job["id"]),
     )
     payload = {
         "job_id": job["id"],
@@ -5340,6 +5811,8 @@ def _publish_job_payload(
         "finished_at": job["finished_at"],
         "can_execute_real": can_execute_real,
         "outcome": outcome,
+        "account_risk": account_risk,
+        "review_monitor": review_monitor,
     }
     if "article_title" in job:
         payload["article_title"] = job["article_title"]
@@ -5922,8 +6395,12 @@ def getAccounts():
         with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
-            cursor.execute('''
-            SELECT * FROM user_info WHERE status != -2''')
+            cursor.execute(
+                """
+                SELECT id, type, filePath, userName, status, last_checked_at
+                FROM user_info WHERE status != -2
+                """
+            )
             rows = cursor.fetchall()
             rows_list = [list(row) for row in rows]
 
@@ -5953,7 +6430,11 @@ async def getValidAccounts():
     with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "SELECT * FROM user_info WHERE status != ?",
+            """
+            SELECT id, type, filePath, userName, status, last_checked_at,
+                   credential_epoch
+            FROM user_info WHERE status != ?
+            """,
             (DISCONNECTED_ACCOUNT_STATUS,),
         )
         rows = cursor.fetchall()
@@ -5965,6 +6446,7 @@ async def getValidAccounts():
 
     for row in rows:
         account_id = int(row[0])
+        credential_epoch = int(row[6])
         active_risk = active_risks.get(account_id)
         if active_risk and active_risk["category"] in FROZEN_RISK_CATEGORIES:
             continue
@@ -5989,7 +6471,9 @@ async def getValidAccounts():
             )
             if flag:
                 resolve_recoverable_media_account_risks(
-                    app.config["DATABASE_PATH"], account_id
+                    app.config["DATABASE_PATH"],
+                    account_id,
+                    expected_credential_epoch=credential_epoch,
                 )
                 new_status = 1
             else:
@@ -5998,6 +6482,7 @@ async def getValidAccounts():
                     account_id,
                     source="login_check",
                     error_text="登录会话已失效，需要重新登录",
+                    expected_credential_epoch=credential_epoch,
                 )
                 new_status = 0
             with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
@@ -6007,13 +6492,20 @@ async def getValidAccounts():
                         UPDATE user_info
                         SET status = ?
                         WHERE id = ? AND status != ?
+                          AND credential_epoch = ?
                         """,
                         (
                             new_status,
                             account_id,
                             DISCONNECTED_ACCOUNT_STATUS,
+                            credential_epoch,
                         ),
                     )
+        except ConcurrentMediaAccountCredentialUpdateError:
+            # A successful re-login replaced the credential while the old
+            # asynchronous check was in flight.  Its result is obsolete and
+            # must not enable, disable or add risk to the new session.
+            continue
         except Exception as exc:
             # Keep the historical batch best-effort behavior, but preserve any
             # recognizable platform risk for the account card and preflight.
@@ -6023,8 +6515,14 @@ async def getValidAccounts():
                     account_id,
                     source="login_check",
                     error_text=str(exc),
+                    expected_credential_epoch=credential_epoch,
                 )
-            except (LookupError, sqlite3.Error, ValueError):
+            except (
+                ConcurrentMediaAccountCredentialUpdateError,
+                LookupError,
+                sqlite3.Error,
+                ValueError,
+            ):
                 pass
             continue
         finally:
@@ -6037,7 +6535,10 @@ async def getValidAccounts():
         rows_list = [
             list(row)
             for row in conn.execute(
-                "SELECT * FROM user_info WHERE status != ?",
+                """
+                SELECT id, type, filePath, userName, status, last_checked_at
+                FROM user_info WHERE status != ?
+                """,
                 (DISCONNECTED_ACCOUNT_STATUS,),
             ).fetchall()
         ]
@@ -7102,6 +7603,8 @@ def upload_cookie():
         cookies_root = _cookies_root()
         cookies_root.mkdir(parents=True, exist_ok=True)
         temporary_path = cookies_root / f".geo-cookie-upload-{uuid.uuid4().hex}.tmp"
+        new_cookie_path = None
+        old_cookie_path = None
         try:
             # Receive into a private temporary file first.  The lifecycle lock
             # is acquired only for the final account revalidation and atomic
@@ -7111,59 +7614,95 @@ def upload_cookie():
             with active_queues_lock:
                 with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
                     conn.row_factory = sqlite3.Row
-                    result = conn.execute(
-                        """
-                        SELECT id, type, filePath, userName, status
-                        FROM user_info
-                        WHERE id = ? AND status != ?
-                        """,
-                        (account_id, DISCONNECTED_ACCOUNT_STATUS),
-                    ).fetchone()
-                    if result is None:
-                        return jsonify(
-                            {"code": 404, "msg": "账号不存在或已解绑", "data": None}
-                        ), 404
-                    normalized_account_id = int(result["id"])
-                    session_key = (str(result["type"]), str(result["userName"]))
-                    if (
-                        normalized_account_id in active_account_checks
-                        or session_key in active_queues
-                    ):
-                        return jsonify(
-                            {"code": 409, "msg": "账号正在登录或检测，请稍后上传", "data": None}
-                        ), 409
-                    publishing = conn.execute(
-                        """
-                        SELECT 1
-                        FROM publish_jobs
-                        WHERE account_id = ? AND status = 'processing'
-                        LIMIT 1
-                        """,
-                        (normalized_account_id,),
-                    ).fetchone()
-                    if publishing is not None:
-                        return jsonify(
-                            {"code": 409, "msg": "账号正在发布，已拒绝替换凭证", "data": None}
-                        ), 409
-                    cookie_filename = _normalize_media_filename(result["filePath"])
-                    shared_reference = conn.execute(
-                        """
-                        SELECT 1
-                        FROM user_info
-                        WHERE id != ? AND status != ? AND filePath = ?
-                        LIMIT 1
-                        """,
-                        (
-                            normalized_account_id,
-                            DISCONNECTED_ACCOUNT_STATUS,
-                            cookie_filename,
-                        ),
-                    ).fetchone()
-                    if shared_reference is not None:
-                        return jsonify(
-                            {"code": 409, "msg": "多个账号共享该凭证文件，已拒绝覆盖", "data": None}
-                        ), 409
-                os.replace(temporary_path, cookies_root / cookie_filename)
+                    conn.execute("BEGIN IMMEDIATE")
+                    try:
+                        result = conn.execute(
+                            """
+                            SELECT id, type, filePath, userName, status,
+                                   credential_epoch
+                            FROM user_info
+                            WHERE id = ? AND status != ?
+                            """,
+                            (account_id, DISCONNECTED_ACCOUNT_STATUS),
+                        ).fetchone()
+                        if result is None:
+                            conn.rollback()
+                            return jsonify(
+                                {"code": 404, "msg": "账号不存在或已解绑", "data": None}
+                            ), 404
+                        normalized_account_id = int(result["id"])
+                        session_key = (str(result["type"]), str(result["userName"]))
+                        if (
+                            normalized_account_id in active_account_checks
+                            or session_key in active_queues
+                        ):
+                            conn.rollback()
+                            return jsonify(
+                                {"code": 409, "msg": "账号正在登录或检测，请稍后上传", "data": None}
+                            ), 409
+                        publishing = conn.execute(
+                            """
+                            SELECT 1
+                            FROM publish_jobs
+                            WHERE account_id = ? AND status = 'processing'
+                            LIMIT 1
+                            """,
+                            (normalized_account_id,),
+                        ).fetchone()
+                        if publishing is not None:
+                            conn.rollback()
+                            return jsonify(
+                                {"code": 409, "msg": "账号正在发布，已拒绝替换凭证", "data": None}
+                            ), 409
+
+                        old_cookie_filename = _normalize_media_filename(
+                            result["filePath"]
+                        )
+                        old_cookie_path = cookies_root / old_cookie_filename
+                        new_cookie_path = cookies_root / f"{uuid.uuid4().hex}.json"
+                        # The new file is private and unreferenced until the DB
+                        # pointer and monotonic credential epoch commit in one
+                        # transaction.  A verifier can therefore observe only
+                        # the complete old generation or the complete new one.
+                        os.replace(temporary_path, new_cookie_path)
+                        switched = conn.execute(
+                            """
+                            UPDATE user_info
+                            SET filePath = ?, status = 1,
+                                last_checked_at = CURRENT_TIMESTAMP,
+                                credential_epoch = credential_epoch + 1
+                            WHERE id = ? AND status != ?
+                              AND filePath = ? AND credential_epoch = ?
+                            """,
+                            (
+                                new_cookie_path.name,
+                                normalized_account_id,
+                                DISCONNECTED_ACCOUNT_STATUS,
+                                old_cookie_filename,
+                                int(result["credential_epoch"]),
+                            ),
+                        )
+                        if switched.rowcount != 1:
+                            raise RuntimeError("账号凭证已并发变化，请重新上传")
+                        conn.commit()
+                    except Exception:
+                        conn.rollback()
+                        if new_cookie_path is not None:
+                            new_cookie_path.unlink(missing_ok=True)
+                        raise
+
+                if old_cookie_path is not None and old_cookie_path != new_cookie_path:
+                    with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as cleanup_conn:
+                        still_referenced = cleanup_conn.execute(
+                            """
+                            SELECT 1 FROM user_info
+                            WHERE status != ? AND filePath = ?
+                            LIMIT 1
+                            """,
+                            (DISCONNECTED_ACCOUNT_STATUS, old_cookie_path.name),
+                        ).fetchone()
+                    if still_referenced is None:
+                        old_cookie_path.unlink(missing_ok=True)
 
             return jsonify({
                 "code": 200,

@@ -7,7 +7,9 @@ so the manifest cannot silently drift from the code it describes.
 
 from __future__ import annotations
 
+from services.ai_agent_audit_service import AI_AGENT_PIPELINE_VERSION
 from services.ai_cost_ledger_service import AI_COST_LEDGER_VERSION
+from services.ai_visibility_panel_service import VISIBILITY_PANEL_VERSION
 from services.ai_visibility_sampling_service import VISIBILITY_SAMPLING_VERSION
 from services.ai_visibility_service import AI_VISIBILITY_ALGORITHM_VERSION
 from services.content_diversity_service import DIVERSITY_VERSION
@@ -33,6 +35,7 @@ from services.geo_score_service import GEO_SCORE_VERSION
 from services.media_account_risk_service import MEDIA_ACCOUNT_RISK_VERSION
 from services.platform_publish_policy_service import PLATFORM_PUBLISH_POLICY_VERSION
 from services.publish_outcome_service import PUBLISH_OUTCOME_VERSION
+from services.publish_review_monitor_service import PUBLISH_REVIEW_MONITOR_VERSION
 from services.target_length_score_profile import TARGET_LENGTH_SCORE_PROFILE_VERSION
 from services.unified_ai_config_service import UNIFIED_AI_ROLE_ROUTER_VERSION
 
@@ -61,6 +64,9 @@ PRODUCT_FEATURE_VERSION_REGISTRY = {
     "dongclaw_evaluation_report_version": DONGCLAW_EVALUATION_REPORT_VERSION,
     "media_account_risk_version": MEDIA_ACCOUNT_RISK_VERSION,
     "unified_ai_role_router_version": UNIFIED_AI_ROLE_ROUTER_VERSION,
+    "ai_agent_pipeline_version": AI_AGENT_PIPELINE_VERSION,
+    "visibility_panel_version": VISIBILITY_PANEL_VERSION,
+    "publish_review_monitor_version": PUBLISH_REVIEW_MONITOR_VERSION,
 }
 
 

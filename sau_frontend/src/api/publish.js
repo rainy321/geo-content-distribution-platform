@@ -21,6 +21,22 @@ export const publishApi = {
     return http.get(`/api/publish/jobs/${id}`)
   },
 
+  getReviewMonitor(params = {}) {
+    return http.get('/api/publish/review-monitor', params)
+  },
+
+  acknowledgeReviewAlert(id) {
+    return http.post(`/api/publish/review-alerts/${id}/acknowledge`, {
+      confirm_seen: true
+    })
+  },
+
+  rearmReviewMonitor(id) {
+    return http.post(`/api/publish/jobs/${id}/review-monitor/rearm`, {
+      confirm_read_only: true
+    })
+  },
+
   retryJob(id) {
     return http.post(`/api/publish/jobs/${id}/retry`)
   },

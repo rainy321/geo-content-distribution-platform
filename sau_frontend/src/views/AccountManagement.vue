@@ -39,6 +39,34 @@
       </article>
     </section>
 
+    <section
+      v-if="criticalAccountRisks.length"
+      class="critical-risk-overview"
+      role="alert"
+      aria-label="需要立即处理的媒体账号风险"
+    >
+      <header>
+        <span>ACCOUNT RISK / {{ criticalAccountRisks.length }}</span>
+        <strong>有账号已停止自动发布</strong>
+        <p>封禁、临时限制、本人验证或登录失效已被软件拦截；不会自动换号或继续访问受限账号。</p>
+      </header>
+      <article v-for="account in criticalAccountRisks" :key="`risk-${account.id}`">
+        <div>
+          <strong>{{ platformForAccount(account)?.name || '媒体平台' }} · {{ account.account_name }}</strong>
+          <p>{{ account.risk_event?.label }}：{{ account.risk_event?.reason }}</p>
+          <small>下一步：{{ account.risk_event?.recommended_action }}</small>
+        </div>
+        <el-button
+          type="danger"
+          plain
+          :loading="resolvingRiskIds.has(account.id)"
+          @click="recoverAccount(account, platformForAccount(account))"
+        >
+          {{ riskActionCopy(account.risk_event?.category) }}
+        </el-button>
+      </article>
+    </section>
+
     <section class="safety-note" aria-label="账号检测说明">
       <div class="note-icon"><el-icon><Connection /></el-icon></div>
       <div>
@@ -77,6 +105,7 @@
             :checking-ids="checkingIds"
             :disconnecting-ids="disconnectingIds"
             :resolving-risk-ids="resolvingRiskIds"
+            :focused-account-id="focusedAccountId"
             @check="checkAccount"
             @login="openLogin"
             @reconnect="reconnectAccount"
@@ -103,6 +132,7 @@
             :checking-ids="checkingIds"
             :disconnecting-ids="disconnectingIds"
             :resolving-risk-ids="resolvingRiskIds"
+            :focused-account-id="focusedAccountId"
             @check="checkAccount"
             @login="openLogin"
             @reconnect="reconnectAccount"
@@ -248,7 +278,7 @@
 </template>
 
 <script setup>
-import { computed, defineComponent, h, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, defineComponent, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { CircleCheckFilled, Connection, Plus, Refresh, WarningFilled } from '@element-plus/icons-vue'
 import { ElButton, ElIcon, ElMessage, ElMessageBox } from 'element-plus'
@@ -282,6 +312,15 @@ const statusCopy = {
   session_expired: { label: '会话失效', note: '重新登录后才可继续' }
 }
 
+const DANGER_ACCOUNT_RISK_CATEGORIES = new Set([
+  'permanent_ban',
+  'verification_required',
+  'session_expired'
+])
+const isDangerAccountRisk = risk => Boolean(
+  risk?.frozen === true && DANGER_ACCOUNT_RISK_CATEGORIES.has(risk?.category)
+)
+
 const riskActionCopy = category => ({
   permanent_ban: '申诉通过后验证',
   temporary_restriction: '限制解除后验证',
@@ -299,7 +338,8 @@ const PlatformCard = defineComponent({
     platform: { type: Object, required: true },
     checkingIds: { type: Object, required: true },
     disconnectingIds: { type: Object, required: true },
-    resolvingRiskIds: { type: Object, required: true }
+    resolvingRiskIds: { type: Object, required: true },
+    focusedAccountId: { type: Number, default: null }
   },
   emits: ['check', 'login', 'reconnect', 'recover', 'disconnect'],
   setup(props, { emit }) {
@@ -353,11 +393,20 @@ const PlatformCard = defineComponent({
             const resolvingRisk = props.resolvingRiskIds.has(account.id)
             const risk = account.risk_event || null
             const frozen = Boolean(risk?.frozen)
+            const dangerRisk = isDangerAccountRisk(risk)
+            const focused = Number(account.id) === props.focusedAccountId
             const lifecycleBusy = checking || disconnecting || resolvingRisk
-            return h('section', { class: 'account-entry', key: account.id }, [
+            return h('section', {
+              id: `media-account-${account.id}`,
+              class: ['account-entry', { 'has-danger-risk': dangerRisk, 'is-focused': focused }],
+              'aria-current': focused ? 'true' : undefined,
+              key: account.id
+            }, [
               h('div', { class: 'account-identity' }, [
                 h('strong', `${account.account_name} · ID ${account.id}`),
-                h('span', { class: ['status-chip', account.status] }, copy.label),
+                h('span', {
+                  class: ['status-chip', account.status, { 'risk-danger': dangerRisk }]
+                }, copy.label),
                 h('p', copy.note),
                 h('time', `最后检查：${formatCheckedAt(account.last_checked_at)}`)
               ]),
@@ -391,7 +440,10 @@ const PlatformCard = defineComponent({
               ]),
               risk
                 ? h('aside', {
-                    class: ['account-risk-rail', `risk-${risk.severity || 'warning'}`],
+                    class: [
+                      'account-risk-rail',
+                      dangerRisk ? 'risk-danger' : `risk-${risk.severity || 'warning'}`
+                    ],
                     role: risk.frozen ? 'alert' : 'status'
                   }, [
                     h('div', { class: 'risk-rail-head' }, [
@@ -423,6 +475,7 @@ const loaded = ref(false)
 const loadError = ref(false)
 const capabilitiesLoadError = ref(false)
 const lastSyncedAt = ref(null)
+const focusedAccountId = ref(null)
 const checkingIds = ref(new Set())
 const disconnectingIds = ref(new Set())
 const resolvingRiskIds = ref(new Set())
@@ -452,6 +505,18 @@ const selectedPlatform = computed(() => overview.platforms.find(item => item.typ
 const hasLoginCapablePlatform = computed(() => (
   overview.platforms.some(item => item.login_available === true)
 ))
+const criticalAccountRisks = computed(() => overview.accounts.filter(account => (
+  account.risk_event?.frozen === true
+  && [
+    'permanent_ban',
+    'temporary_restriction',
+    'verification_required',
+    'session_expired'
+  ].includes(account.risk_event?.category)
+)))
+const platformForAccount = account => (
+  overview.platforms.find(item => item.type === account?.type) || null
+)
 const returnToPublishCenter = computed(() => route.query.return_to === '/publish-center')
 const loginDialogTitle = computed(() => `${loginForm.existingAccountId ? '重新登录' : '连接'}${selectedPlatform.value ? ` · ${selectedPlatform.value.name}` : '媒体账号'}`)
 const loginWindowName = computed(() => (
@@ -1128,8 +1193,48 @@ const resetLoginDialog = () => {
   loginForm.existingAccountId = null
 }
 
-onMounted(fetchOverview)
+let focusAccountRequestSerial = 0
+
+const focusExistingAccount = async (rawAccountId, { refresh = true } = {}) => {
+  const requestSerial = ++focusAccountRequestSerial
+  const value = Array.isArray(rawAccountId) ? rawAccountId[0] : rawAccountId
+  const accountId = Number(value)
+  if (!Number.isInteger(accountId) || accountId <= 0) {
+    focusedAccountId.value = null
+    return
+  }
+
+  focusedAccountId.value = accountId
+  if (refresh) await fetchOverview()
+  if (requestSerial !== focusAccountRequestSerial || focusedAccountId.value !== accountId) return
+
+  const account = overview.accounts.find(item => Number(item.id) === accountId)
+  await nextTick()
+  const accountElement = document.getElementById(`media-account-${accountId}`)
+  if (!account || !accountElement) {
+    focusedAccountId.value = null
+    ElMessage.warning(`未找到媒体账号 ID ${accountId}；该账号可能已解绑或不再存在`)
+    return
+  }
+
+  accountElement.scrollIntoView({
+    behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+    block: 'center'
+  })
+}
+
+onMounted(async () => {
+  await fetchOverview()
+  await focusExistingAccount(route.query.focus_account_id, { refresh: false })
+})
+
+watch(
+  () => route.query.focus_account_id,
+  value => { void focusExistingAccount(value) }
+)
+
 onBeforeUnmount(() => {
+  focusAccountRequestSerial += 1
   if (['connecting', 'opening', 'manual'].includes(loginStage.value)) {
     void accountApi.cancelMediaLogin(loginCancellationPayload()).catch(() => {})
   }
@@ -1187,6 +1292,44 @@ onBeforeUnmount(() => {
 .account-metrics strong { float: right; font: 800 36px/.9 "Bahnschrift SemiCondensed", sans-serif; }
 .account-metrics p { margin: 12px 0 0; font-weight: 700; }
 
+.critical-risk-overview {
+  margin: -8px 0 22px;
+  border: 1px solid #d77b72;
+  border-left: 6px solid #a52f27;
+  background: #fff1ef;
+  box-shadow: 0 9px 24px rgb(123 39 31 / 9%);
+}
+.critical-risk-overview > header { padding: 17px 20px; border-bottom: 1px solid #ecc0bc; }
+.critical-risk-overview > header span {
+  display: block;
+  margin-bottom: 5px;
+  color: #a52f27;
+  font: 800 10px "Cascadia Mono", monospace;
+  letter-spacing: .13em;
+}
+.critical-risk-overview > header strong { display: block; color: #732720; font-size: 18px; }
+.critical-risk-overview > header p { margin: 5px 0 0; color: #864c47; font-size: 12px; line-height: 1.6; }
+.critical-risk-overview > article {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 22px;
+  padding: 15px 20px;
+  border-bottom: 1px solid #efd0cd;
+}
+.critical-risk-overview > article:last-child { border-bottom: 0; }
+.critical-risk-overview > article > div { min-width: 0; }
+.critical-risk-overview article strong { display: block; color: #702c27; font-size: 13px; }
+.critical-risk-overview article p { margin: 5px 0 0; color: #8b443d; font-size: 12px; }
+.critical-risk-overview article small {
+  display: block;
+  margin-top: 5px;
+  color: #684743;
+  font-size: 11px;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
 .safety-note { display: flex; gap: 14px; align-items: flex-start; padding: 16px 18px; border-left: 3px solid var(--teal); background: #eaf4f2; }
 .note-icon { display: grid; place-items: center; width: 34px; height: 34px; flex: 0 0 auto; border: 1px solid #80bbb7; color: #087f81; }
 .safety-note strong { font-size: 13px; }
@@ -1217,16 +1360,19 @@ onBeforeUnmount(() => {
 :deep(.platform-runtime-note strong) { color: #735126; font-size: 10px; }
 :deep(.platform-runtime-note span) { color: #806d51; font-size: 10px; line-height: 1.5; }
 :deep(.account-stack) { padding: 0 18px; }
-:deep(.account-entry) { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px 16px; padding: 15px 0; border-bottom: 1px solid #e1e8e6; }
+:deep(.account-entry) { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px 16px; padding: 15px 0; scroll-margin-block: 140px; border-bottom: 1px solid #e1e8e6; }
+:deep(.account-entry.has-danger-risk) { padding: 15px 12px; background: #fff5f3; box-shadow: inset 4px 0 0 #a52f27; }
+:deep(.account-entry.is-focused) { outline: 3px solid #168f87; outline-offset: 2px; }
 :deep(.account-entry:last-child) { border-bottom: 0; }
 :deep(.account-identity strong) { margin-right: 8px; font-size: 13px; }
 :deep(.status-chip) { display: inline-flex; padding: 3px 6px; color: #637578; background: #e8eeec; font-size: 9px; font-weight: 700; }
 :deep(.status-chip.connected) { color: #08746f; background: #d9f2ee; }
 :deep(.status-chip.expired), :deep(.status-chip.missing_cookie) { color: #a06119; background: #f8ead7; }
-:deep(.status-chip.permanent_ban) { color: #fff; background: #9b3e36; }
-:deep(.status-chip.temporary_restriction),
+:deep(.status-chip.permanent_ban),
 :deep(.status-chip.verification_required),
-:deep(.status-chip.session_expired) { color: #7b4c16; background: #f7e6ca; }
+:deep(.status-chip.session_expired),
+:deep(.status-chip.risk-danger) { color: #fff; background: #9b3e36; }
+:deep(.status-chip.temporary_restriction) { color: #7b4c16; background: #f7e6ca; }
 :deep(.account-identity p) { margin: 7px 0 2px; color: #5e7378; font-size: 11px; }
 :deep(.account-identity time) { color: #839194; font: 9px "Cascadia Mono", monospace; }
 :deep(.account-actions) { display: flex; align-items: center; justify-content: flex-end; gap: 6px; flex: 0 0 auto; flex-wrap: wrap; max-width: 250px; }
@@ -1234,6 +1380,7 @@ onBeforeUnmount(() => {
 :deep(.account-risk-rail) { grid-column: 1 / -1; padding: 11px 13px; border-left: 3px solid #c68a36; background: #fff8ed; }
 :deep(.account-risk-rail.risk-critical) { border-left-color: #bd594f; background: #fff2f0; }
 :deep(.account-risk-rail.risk-blocked) { border-left-color: #c4742f; background: #fff6e9; }
+:deep(.account-risk-rail.risk-danger) { border-left-color: #a52f27; background: #fff1ef; }
 :deep(.risk-rail-head) { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 6px; }
 :deep(.risk-rail-head span) { color: #9a493f; font: 700 8px "Cascadia Mono", monospace; letter-spacing: .1em; }
 :deep(.risk-rail-head time) { color: #8e7c72; font: 9px "Cascadia Mono", monospace; }
@@ -1311,6 +1458,8 @@ onBeforeUnmount(() => {
   .account-metrics article { border-bottom: 1px solid var(--rule); }
   .account-metrics article:nth-child(2) { border-right: 0; }
   .account-metrics article:last-child { grid-column: 1 / -1; border-bottom: 0; }
+  .critical-risk-overview > article { align-items: stretch; flex-direction: column; gap: 12px; }
+  .critical-risk-overview > article .el-button { width: 100%; margin-left: 0; }
   .section-heading { align-items: flex-start; }
   .section-heading > small { display: none; }
   :deep(.account-entry) { align-items: flex-start; grid-template-columns: 1fr; }

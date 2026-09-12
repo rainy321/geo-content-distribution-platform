@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import test from 'node:test'
 
 import {
+  normalizeGenerationAgentPipeline,
   normalizeGenerationReceipt,
   normalizeGenerationSources,
   toSafeHttpUrl
@@ -173,6 +174,122 @@ test('generation receipt retains model role and deterministic diversity trace', 
   assert.equal(receipt.aiRole.role, 'writer')
   assert.equal(receipt.diversityProfile.version, 'content-diversity-v1')
   assert.equal(receipt.diversityProfile.seed_fingerprint, '123456789abc')
+})
+
+
+test('agent pipeline receipt reports only actual calls and independent model count', () => {
+  const pipeline = normalizeGenerationAgentPipeline({
+    engine: 'doubao',
+    engine_version: 'writer-model',
+    agent_pipeline: {
+      version: 'content-agent-pipeline-1.0.0',
+      selected_stage: 'reviewer',
+      model_independence: {
+        invoked_stage_count: 9,
+        distinct_model_count: 8,
+        multi_agent_executed: true,
+        multi_model_executed: true
+      },
+      stages: [
+        {
+          role: 'writer',
+          invoked: true,
+          completed: true,
+          provider: 'doubao',
+          model: 'writer-model'
+        },
+        {
+          role: 'reviewer',
+          invoked: true,
+          completed: true,
+          provider: 'deepseek',
+          model: 'review-model',
+          selected: 'reviewer',
+          diff: { changed: true, changed_fields: ['content'] }
+        },
+        {
+          role: 'evaluator',
+          invoked: true,
+          completed: true,
+          provider: 'qwen',
+          model: 'evaluate-model',
+          opinion: {
+            verdict: 'revise',
+            requires_human_review: true,
+            summary: '一项主张需要人工核验。'
+          },
+          external_verification: false
+        }
+      ]
+    }
+  }, { content: '已生成正文' })
+
+  assert.equal(pipeline.available, true)
+  assert.equal(pipeline.invokedStageCount, 3)
+  assert.equal(pipeline.distinctModelCount, 3)
+  assert.equal(pipeline.multiModelExecuted, true)
+  assert.equal(pipeline.stages[0].provider, 'doubao')
+  assert.equal(pipeline.stages[1].changed, true)
+  assert.equal(pipeline.stages[1].selected, true)
+  assert.equal(pipeline.stages[2].opinion.verdictLabel, '建议修改')
+  assert.equal(pipeline.stages[2].opinion.requiresHumanReview, true)
+})
+
+
+test('fallback and repeated evaluator models remain visibly not invoked and non-independent', () => {
+  const receipt = normalizeGenerationReceipt({
+    engine: 'doubao',
+    engine_version: 'same-model',
+    review: {
+      role: 'reviewer',
+      mode: 'writer_only',
+      fallback: true,
+      same_as_writer: true,
+      invoked: false,
+      completed: false
+    },
+    evaluation: {
+      role: 'evaluator',
+      mode: 'non_independent',
+      configured: true,
+      same_as_writer: true,
+      same_as_reviewer: true,
+      invoked: false,
+      completed: false,
+      opinion: null
+    }
+  }, {
+    summary: '摘要',
+    tags: ['GEO'],
+    content: '## FAQ\n问：如何核验？\n答：人工核验。',
+    sources: [{ title: '来源' }]
+  })
+  const [, reviewer, evaluator] = receipt.agentPipeline.stages
+
+  assert.equal(receipt.agentPipeline.invokedStageCount, 1)
+  assert.equal(receipt.agentPipeline.distinctModelCount, 1)
+  assert.equal(receipt.agentPipeline.multiModelExecuted, false)
+  assert.equal(reviewer.statusLabel, '未调用 · 非独立')
+  assert.equal(reviewer.invoked, false)
+  assert.equal(evaluator.statusLabel, '未调用 · 非独立')
+  assert.equal(evaluator.invoked, false)
+  assert.equal(evaluator.opinion.verdictLabel, '无结论')
+  assert.equal(evaluator.opinion.requiresHumanReview, null)
+})
+
+
+test('content creation renders the three-stage truth boundary without claiming web verification', () => {
+  const component = readFileSync(
+    new URL('../src/views/ContentCreation.vue', import.meta.url),
+    'utf8'
+  )
+
+  assert.match(component, /写稿、调优与评估/)
+  assert.match(component, /invokedStageCount/)
+  assert.match(component, /distinctModelCount/)
+  assert.match(component, /stage\.statusLabel/)
+  assert.match(component, /人工复核：/)
+  assert.match(component, /评估模型只审阅当前稿件与稿内声明来源，未联网核验/)
 })
 
 

@@ -28,7 +28,9 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                     filePath TEXT NOT NULL,
                     userName TEXT NOT NULL,
                     status INTEGER DEFAULT 0,
-                    last_checked_at DATETIME
+                    last_checked_at DATETIME,
+                    credential_epoch INTEGER NOT NULL DEFAULT 1
+                        CHECK (credential_epoch >= 1)
                 )
                 '''
             )
@@ -38,6 +40,11 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
             if "last_checked_at" not in user_info_columns:
                 cursor.execute(
                     "ALTER TABLE user_info ADD COLUMN last_checked_at DATETIME"
+                )
+            if "credential_epoch" not in user_info_columns:
+                cursor.execute(
+                    "ALTER TABLE user_info ADD COLUMN credential_epoch "
+                    "INTEGER NOT NULL DEFAULT 1 CHECK (credential_epoch >= 1)"
                 )
             cursor.execute(
                 '''
@@ -220,6 +227,7 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                     "visibility_sample" not in existing_ai_usage_sql
                     or "image_generate" not in existing_ai_usage_sql
                     or "connection_test" not in existing_ai_usage_sql
+                    or "'evaluate'" not in existing_ai_usage_sql
                 )
             )
             if migrate_ai_usage_operations:
@@ -240,7 +248,7 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                     article_id INTEGER,
                     operation TEXT NOT NULL
                         CHECK (operation IN (
-                            'generate', 'optimize', 'platform_adapt',
+                            'generate', 'optimize', 'evaluate', 'platform_adapt',
                             'visibility_sample', 'image_generate',
                             'connection_test'
                         )),

@@ -4,6 +4,7 @@ from typing import Any
 
 
 PUBLISH_OUTCOME_VERSION = "publish-outcome-1.0.0"
+PUBLICATION_EVIDENCE_VERSION = "publication-evidence-1.0.0"
 PUBLISH_OUTCOME_CATEGORIES = (
     "published",
     "platform_processing",
@@ -12,10 +13,29 @@ PUBLISH_OUTCOME_CATEGORIES = (
 )
 
 _CATEGORY_LABELS = {
-    "published": "已公开发布",
+    # A platform success receipt is not, by itself, proof that a logged-out
+    # visitor or crawler can fetch the work.  Public access is reported as a
+    # separate evidence dimension below.
+    "published": "平台已发布",
     "platform_processing": "平台处理中/审核中",
     "action_required": "需要人工处理",
     "failed": "明确失败",
+}
+
+_CREATOR_SIDE_EVIDENCE_MARKERS = (
+    "创作中心",
+    "创作者后台",
+    "内容管理",
+    "已发布列表",
+    "posted 接口",
+)
+
+_PUBLIC_ACCESS_LABELS = {
+    "verified_public": "匿名公开访问已核验",
+    "anonymous_unverified": "匿名访问未核验",
+    "no_public_url": "尚无作品链接",
+    "unavailable": "匿名访问不可用",
+    "not_applicable": "不适用",
 }
 
 _CONFIRMED_PLATFORM_PROCESSING_MARKERS = (
@@ -172,6 +192,10 @@ def classify_publish_outcome(
     can_execute_real: Any = False,
     account_id: Any = None,
     demo: Any = False,
+    public_access_status: Any = "",
+    public_access_checked_at: Any = "",
+    public_access_method: Any = "",
+    public_access_detail: Any = "",
 ) -> dict[str, Any]:
     """Map one persisted task to exactly one user-facing outcome category.
 
@@ -191,8 +215,40 @@ def classify_publish_outcome(
         message=normalized_message,
         reconciliation_required=needs_reconciliation,
     )
+    publication_evidence = classify_publication_evidence(
+        status=normalized_status,
+        message=normalized_message,
+        result_url=normalized_url,
+        demo=is_demo,
+        public_access_status=public_access_status,
+        public_access_checked_at=public_access_checked_at,
+        public_access_method=public_access_method,
+        public_access_detail=public_access_detail,
+    )
 
-    if normalized_status == "success":
+    creator_only_success = bool(
+        normalized_status == "success"
+        and publication_evidence["evidence_scope"] == "creator_backend"
+        and not publication_evidence["anonymous_access_verified"]
+    )
+
+    if creator_only_success:
+        # Backward-compatible correction for tasks persisted by older builds
+        # that promoted a creator-side list/API match directly to success.
+        # Do not mutate or replay the historical task; only present its true
+        # evidence strength conservatively.
+        category = "platform_processing"
+        reason = normalized_message or (
+            "平台创作者后台已出现该作品，但访客公开状态尚未核验。"
+        )
+        next_action = (
+            "打开平台作品链接并使用未登录环境核对，同时检查平台审核状态；"
+            "匿名可访问前不得计为 GEO 公网证据，也不要重复提交。"
+        )
+        action = "open_result" if normalized_url else "validate"
+        retry_allowed = False
+        validation_required = True
+    elif normalized_status == "success":
         category = "published"
         reason = normalized_message or (
             "演示流程已完成，未访问真实平台。"
@@ -203,9 +259,10 @@ def classify_publish_outcome(
             "演示结果无需平台核验。"
             if is_demo
             else (
-                "可打开公开链接复核内容；不要再次提交同一任务。"
+                "可打开平台作品链接复核；当前未完成匿名访问与 GEO 可抓取核验，"
+                "不要再次提交同一任务。"
                 if normalized_url
-                else "无需重试；如需留档，请在平台后台复核公开状态。"
+                else "无需重试；如需留档，请在平台后台复核作品状态。"
             )
         )
         action = "open_result" if normalized_url and not is_demo else "none"
@@ -281,6 +338,117 @@ def classify_publish_outcome(
         "auto_repair_strategy": str(automatic_repair["strategy"]),
         "auto_repair_summary": str(automatic_repair["summary"]),
         "auto_repair_max_attempts": int(automatic_repair["max_attempts"]),
+        "publication_evidence": publication_evidence,
+    }
+
+
+def classify_publication_evidence(
+    *,
+    status: Any,
+    message: Any = "",
+    result_url: Any = "",
+    demo: Any = False,
+    public_access_status: Any = "",
+    public_access_checked_at: Any = "",
+    public_access_method: Any = "",
+    public_access_detail: Any = "",
+) -> dict[str, Any]:
+    """Keep platform receipts, anonymous access and GEO crawl proof separate.
+
+    ``success`` means the platform workflow reported the work as published.  It
+    deliberately does not imply that an unauthenticated visitor can fetch the
+    URL.  Positive anonymous-access evidence must be supplied explicitly by a
+    dedicated checker; URL shape, creator pages and creator APIs never infer it.
+    Even verified anonymous access is not enough to claim search indexing or AI
+    retrieval, so crawlability remains an independent, conservative state.
+    """
+
+    normalized_status = str(status or "unknown").strip().lower()
+    normalized_message = str(message or "").strip()
+    normalized_url = str(result_url or "").strip()
+    is_demo = bool(demo)
+    creator_side = any(
+        marker in normalized_message for marker in _CREATOR_SIDE_EVIDENCE_MARKERS
+    )
+
+    if is_demo:
+        platform_state = "not_applicable"
+        evidence_scope = "demo"
+    elif normalized_status == "success":
+        platform_state = (
+            "creator_listed_pending_public_verification"
+            if creator_side
+            else "reported_published"
+        )
+        evidence_scope = "creator_backend" if creator_side else "platform_receipt"
+    elif creator_side:
+        platform_state = "creator_listed_pending_public_verification"
+        evidence_scope = "creator_backend"
+    elif normalized_status in {"processing", "need_action"}:
+        platform_state = "pending_or_unknown"
+        evidence_scope = "platform_workflow"
+    elif normalized_status == "failed":
+        platform_state = "failed"
+        evidence_scope = "platform_workflow"
+    else:
+        platform_state = "not_submitted"
+        evidence_scope = "local_task"
+
+    requested_public_state = str(public_access_status or "").strip().lower()
+    allowed_public_states = frozenset(
+        {"verified_public", "anonymous_unverified", "no_public_url", "unavailable"}
+    )
+    normalized_check_time = str(public_access_checked_at or "").strip()
+    normalized_check_method = str(public_access_method or "").strip()
+    explicit_public_check = bool(
+        normalized_url and normalized_check_time and normalized_check_method
+    )
+    if is_demo:
+        public_state = "not_applicable"
+    elif requested_public_state == "verified_public" and not explicit_public_check:
+        # Never allow a bare boolean/string supplied by UI or legacy code to
+        # manufacture public-access proof.  A successful check must include a
+        # timestamp and method from the independent verifier.
+        public_state = "anonymous_unverified" if normalized_url else "no_public_url"
+    elif requested_public_state in allowed_public_states:
+        public_state = requested_public_state
+    elif normalized_url:
+        public_state = "anonymous_unverified"
+    else:
+        public_state = "no_public_url"
+
+    anonymous_verified = public_state == "verified_public"
+    public_label = _PUBLIC_ACCESS_LABELS[public_state]
+    detail = str(public_access_detail or "").strip()
+    if not detail:
+        if public_state == "anonymous_unverified":
+            detail = (
+                "当前仅保存了平台作品链接；尚未通过无 Cookie、未登录访问核验。"
+            )
+        elif public_state == "no_public_url":
+            detail = "平台尚未提供可供访客核验的具体作品链接。"
+        elif public_state == "verified_public":
+            detail = "已由独立匿名访问检查明确确认；仍不等于已被搜索或 AI 索引。"
+        elif public_state == "unavailable":
+            detail = "独立匿名访问检查未能打开该作品；请核对审核与可见范围。"
+        else:
+            detail = "演示任务未访问真实平台。"
+
+    return {
+        "version": PUBLICATION_EVIDENCE_VERSION,
+        "platform_state": platform_state,
+        "evidence_scope": evidence_scope,
+        "result_url_present": bool(normalized_url),
+        "public_access_state": public_state,
+        "public_access_label": public_label,
+        "anonymous_access_verified": anonymous_verified,
+        "public_access_checked_at": normalized_check_time,
+        "public_access_method": normalized_check_method,
+        "public_access_detail": detail,
+        "geo_crawlability_state": "not_verified",
+        "geo_crawlable_verified": False,
+        "can_claim_publicly_accessible": anonymous_verified,
+        "can_claim_geo_crawlable": False,
     }
 
 
@@ -362,8 +530,10 @@ def _action_required_details(
 
 
 __all__ = [
+    "PUBLICATION_EVIDENCE_VERSION",
     "PUBLISH_OUTCOME_CATEGORIES",
     "PUBLISH_OUTCOME_VERSION",
+    "classify_publication_evidence",
     "classify_publish_outcome",
     "detect_safe_publish_repair",
 ]

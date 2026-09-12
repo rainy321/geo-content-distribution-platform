@@ -13,6 +13,8 @@ from services.geo_article_compiler_service import (
 )
 from services.project_service import ProjectNotFoundError, get_project
 from services.media_account_risk_service import (
+    ConcurrentMediaAccountCredentialUpdateError,
+    ConcurrentMediaAccountPublishJobUpdateError,
     classify_media_account_risk,
     record_publish_job_account_risk,
 )
@@ -90,6 +92,7 @@ def execute_publish_job(
         database_path,
         job_id,
         expected_state_version=expected_state_version,
+        include_account_credential_epoch=True,
     )
     try:
         article = get_article(database_path, job["article_id"])
@@ -188,7 +191,7 @@ def execute_publish_job(
         # Bind visible platform restrictions to the exact account selected by
         # this job. Unknown errors are ignored; classified blocks freeze only
         # that account's pending work and never rotate to another account.
-        _record_account_risk_best_effort(database_path, job_id, detail)
+        _record_account_risk_best_effort(database_path, job, detail)
         return transition_publish_job(
             database_path,
             job_id,
@@ -408,7 +411,7 @@ def _persist_result(
     if not result.success:
         _record_account_risk_best_effort(
             database_path,
-            job["id"],
+            job,
             result.message,
         )
 
@@ -434,13 +437,32 @@ def _persist_result(
 
 def _record_account_risk_best_effort(
     database_path: str | Path,
-    job_id: int,
+    job: Mapping[str, Any],
     detail: Any,
 ) -> None:
     """Persist account risk without masking the primary publish outcome."""
 
+    job_id = int(job["id"])
     try:
-        record_publish_job_account_risk(database_path, job_id, detail)
+        record_publish_job_account_risk(
+            database_path,
+            job_id,
+            detail,
+            expected_credential_epoch=job.get("_account_credential_epoch"),
+            expected_state_version=int(job["state_version"]),
+        )
+    except (
+        ConcurrentMediaAccountCredentialUpdateError,
+        ConcurrentMediaAccountPublishJobUpdateError,
+    ) as exc:
+        # Expected optimistic-lock loss: the following publish-job transition
+        # performs its own CAS and either preserves the newer attempt or closes
+        # the still-current one.  No risk row was written.
+        logger.debug(
+            "Discarded obsolete media-account risk for publish job %s: %s",
+            job_id,
+            exc,
+        )
     except Exception as exc:  # pragma: no cover - defensive storage boundary
         logger.warning(
             "Unable to persist media-account risk for publish job %s: %s",

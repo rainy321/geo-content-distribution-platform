@@ -531,7 +531,13 @@ class DesktopApiTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             paths = DesktopPaths.from_root(directory)
             scheduler = Mock(name="safe_scheduler")
-            with patch(
+            with patch.dict(
+                os.environ,
+                {
+                    "GEO_REAL_PUBLISHING_AUTHORIZED": "false",
+                    "GEO_PUBLISHING_RUNTIME_READY": "false",
+                },
+            ), patch(
                 "services.publish_scheduler_runtime.create_publish_scheduler",
                 return_value=scheduler,
             ) as create_scheduler:
@@ -544,6 +550,43 @@ class DesktopApiTests(unittest.TestCase):
             publisher_factory=None,
             allow_real=False,
             media_root=paths.media,
+            review_verifier=None,
+            review_interval_seconds=60,
+            review_limit=2,
+        )
+        scheduler.start.assert_called_once_with()
+
+    def test_authorized_desktop_scheduler_wires_read_only_review_verifier(self):
+        with tempfile.TemporaryDirectory() as directory:
+            paths = DesktopPaths.from_root(directory)
+            scheduler = Mock(name="review_scheduler")
+            verifier = Mock(name="read_only_verifier")
+            with patch.dict(
+                os.environ,
+                {
+                    "GEO_REAL_PUBLISHING_AUTHORIZED": "true",
+                    "GEO_PUBLISHING_RUNTIME_READY": "true",
+                },
+            ), patch(
+                "services.platform_review_verifier.create_platform_review_verifier",
+                return_value=verifier,
+            ) as create_verifier, patch(
+                "services.publish_scheduler_runtime.create_publish_scheduler",
+                return_value=scheduler,
+            ) as create_scheduler:
+                result = _start_publish_scheduler(paths)
+
+        self.assertIs(result, scheduler)
+        create_verifier.assert_called_once_with(paths.cookies)
+        create_scheduler.assert_called_once_with(
+            paths.database,
+            interval_seconds=15,
+            publisher_factory=None,
+            allow_real=False,
+            media_root=paths.media,
+            review_verifier=verifier,
+            review_interval_seconds=60,
+            review_limit=2,
         )
         scheduler.start.assert_called_once_with()
 

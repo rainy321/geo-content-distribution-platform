@@ -157,6 +157,7 @@ export const normalizeProjectCostSummary = response => {
 export const operationLabel = value => ({
   generate: '文章生成',
   optimize: 'GEO 调优',
+  evaluate: '独立 AI 评估',
   platform_adapt: '平台适配',
   visibility_sample: 'AI 可见度采样',
   image_generate: 'AI 生图',

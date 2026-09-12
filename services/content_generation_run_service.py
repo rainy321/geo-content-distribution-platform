@@ -538,6 +538,14 @@ def _bind_article_on_connection(
         article_id=article_id,
         connection=conn,
     )
+    attach_article_to_usage(
+        "",
+        operation="evaluate",
+        reference_type="generation_run",
+        reference_id=run_id,
+        article_id=article_id,
+        connection=conn,
+    )
 
 
 def _connect(database_path: str | Path) -> sqlite3.Connection:

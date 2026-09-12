@@ -1356,7 +1356,8 @@ async def zhihu_cookie_gen(
                             """
                             UPDATE user_info
                             SET filePath = ?, status = 1,
-                                last_checked_at = CURRENT_TIMESTAMP
+                                last_checked_at = CURRENT_TIMESTAMP,
+                                credential_epoch = credential_epoch + 1
                             WHERE id = ? AND type = ? AND userName = ?
                             """,
                             (new_cookie_path.name, existing_account_id, 9, id),

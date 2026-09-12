@@ -412,6 +412,15 @@ class MediaAccountDisconnectApiTests(unittest.TestCase):
             (DISCONNECTED_ACCOUNT_STATUS, "接口测试账号"),
         )
 
+    def test_disconnect_payload_is_not_subject_to_visibility_sample_count_rules(self):
+        response = self.client.post(
+            f"/api/media-accounts/{self.account_id}/disconnect",
+            json={"confirm_unbind": True, "sample_count": 999},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.get_json()["data"]["account_id"], self.account_id)
+
     def test_cookie_unlink_failure_returns_accepted_warning_then_refresh_cleans(self):
         with patch.object(Path, "unlink", side_effect=PermissionError("in use")):
             response = self.client.post(

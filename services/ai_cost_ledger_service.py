@@ -17,12 +17,13 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
-AI_COST_LEDGER_VERSION = "ai-cost-ledger-1.3.0"
+AI_COST_LEDGER_VERSION = "ai-cost-ledger-1.4.0"
 AI_PRICE_CATALOG_ENV = "AI_PRICE_CATALOG_JSON"
 AI_USAGE_OPERATIONS = frozenset(
     {
         "generate",
         "optimize",
+        "evaluate",
         "platform_adapt",
         "visibility_sample",
         "image_generate",
@@ -62,7 +63,7 @@ def record_ai_usage(
     normalized_operation = str(operation or "").strip().lower()
     if normalized_operation not in AI_USAGE_OPERATIONS:
         raise AIUsageLedgerError(
-            "operation 仅支持 generate、optimize、platform_adapt、visibility_sample、image_generate、connection_test；"
+            "operation 仅支持 generate、optimize、evaluate、platform_adapt、visibility_sample、image_generate、connection_test；"
             "平台发布本身不计 Token"
         )
     normalized_model = _bounded_text(model, "model", 200, fallback="unknown")

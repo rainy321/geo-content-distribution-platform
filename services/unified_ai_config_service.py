@@ -263,15 +263,31 @@ class UnifiedAIConfigStatus:
         }
         payload["roles"] = {item.role: item.public_dict() for item in self.roles}
         writer = payload["roles"].get("writer")
+        for role_id in OPTIONAL_AI_ROLE_IDS:
+            role = payload["roles"].get(role_id)
+            if writer and role:
+                resolver = (
+                    resolve_ai_image_generations_url
+                    if role_id == "image"
+                    else resolve_ai_chat_completions_url
+                )
+                role["same_as_writer"] = bool(
+                    role["effective_configured"]
+                    and writer["effective_configured"]
+                    and role["provider"] == writer["provider"]
+                    and resolver(role["base_url"]) == resolver(writer["base_url"])
+                    and role["model"] == writer["model"]
+                )
         reviewer = payload["roles"].get("reviewer")
-        if writer and reviewer:
-            reviewer["same_as_writer"] = bool(
-                reviewer["effective_configured"]
-                and writer["effective_configured"]
-                and reviewer["provider"] == writer["provider"]
-                and resolve_ai_chat_completions_url(reviewer["base_url"])
-                == resolve_ai_chat_completions_url(writer["base_url"])
-                and reviewer["model"] == writer["model"]
+        evaluator = payload["roles"].get("evaluator")
+        if reviewer and evaluator:
+            evaluator["same_as_reviewer"] = bool(
+                evaluator["effective_configured"]
+                and reviewer["effective_configured"]
+                and evaluator["provider"] == reviewer["provider"]
+                and resolve_ai_chat_completions_url(evaluator["base_url"])
+                == resolve_ai_chat_completions_url(reviewer["base_url"])
+                and evaluator["model"] == reviewer["model"]
             )
         return payload
 

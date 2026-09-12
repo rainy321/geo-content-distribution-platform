@@ -438,6 +438,43 @@
                 <dd>{{ displayMetric(generationReceipt.providerGeoScore) }}</dd>
               </div>
             </dl>
+            <section class="receipt-agent-pipeline" aria-label="文章多模型协作轨迹">
+              <header class="receipt-agent-heading">
+                <div>
+                  <span>AGENT TRACE / ACTUAL CALLS</span>
+                  <h4>写稿、调优与评估</h4>
+                </div>
+                <strong v-if="generationReceipt.agentPipeline.available">
+                  {{ generationReceipt.agentPipeline.invokedStageCount }} 次实际调用
+                  · {{ generationReceipt.agentPipeline.distinctModelCount }} 个不同模型
+                </strong>
+                <strong v-else>旧回执未记录阶段明细</strong>
+              </header>
+              <ol class="receipt-agent-stages">
+                <li
+                  v-for="stage in generationReceipt.agentPipeline.stages"
+                  :key="stage.role"
+                  :class="['receipt-agent-stage', stage.status]"
+                >
+                  <div class="agent-stage-topline">
+                    <span class="agent-stage-code">{{ stage.code }}</span>
+                    <span class="agent-stage-status">{{ stage.statusLabel }}</span>
+                  </div>
+                  <strong>{{ stage.label }}</strong>
+                  <small>{{ agentStageIdentity(stage) }}</small>
+                  <p>{{ agentStageDetail(stage) }}</p>
+                  <div v-if="stage.role === 'evaluator' && stage.opinion.verdict" class="agent-evaluation-result">
+                    <span>结论：{{ stage.opinion.verdictLabel }}</span>
+                    <span>
+                      人工复核：{{ stage.opinion.requiresHumanReview ? '需要' : '暂不需要' }}
+                    </span>
+                  </div>
+                </li>
+              </ol>
+              <p class="agent-evaluation-boundary">
+                评估模型只审阅当前稿件与稿内声明来源，未联网核验；其意见不等于事实证明、平台审核通过或 GEO 效果。
+              </p>
+            </section>
             <p v-if="generationReceipt.fallbackFrom || generationReceipt.fallbackReason" class="receipt-fallback-reason">
               <template v-if="generationReceipt.fallbackFrom">主引擎：{{ generationReceipt.fallbackFrom }}</template>
               <template v-if="generationReceipt.fallbackFrom && generationReceipt.fallbackReason"> · </template>
@@ -1175,6 +1212,40 @@ const markLengthContextStale = () => {
 const displayMetric = (value) => (
   value == null || value === '' ? '未提供' : String(value)
 )
+
+const agentStageIdentity = (stage) => {
+  const identity = [stage?.provider, stage?.model].filter(Boolean).join(' · ')
+  if (identity) return identity
+  if (stage?.nonIndependent) return '未产生独立模型回执'
+  if (stage?.invoked) return 'provider / model 未记录'
+  return '未产生模型调用回执'
+}
+
+const agentStageDetail = (stage) => {
+  if (!stage) return '阶段信息未记录。'
+  if (stage.role === 'writer') {
+    if (stage.completed) return '初稿已由该模型生成。'
+    if (stage.invoked) return '写稿调用已发起，但没有完整完成回执。'
+    return '旧运行未记录写稿阶段明细。'
+  }
+  if (stage.nonIndependent) {
+    return stage.role === 'reviewer'
+      ? '与写稿模型相同或回退到写稿，未发起第二次独立调用。'
+      : '与写稿或调优模型重复/回退，未发起独立评估调用。'
+  }
+  if (stage.role === 'reviewer' && stage.completed) {
+    if (stage.changed === false) return '已完成复核，候选稿未发生改动。'
+    if (stage.changed && stage.selected) return '已生成改稿，并由本地质量比较采用。'
+    if (stage.changed) return '已生成改稿，但本地质量比较保留了写稿初稿。'
+    return '已完成调优调用；旧回执未记录是否改稿。'
+  }
+  if (stage.role === 'evaluator' && stage.completed) {
+    return stage.opinion.summary || `已给出“${stage.opinion.verdictLabel}”意见。`
+  }
+  if (stage.invoked) return stage.message || '调用已发起，但没有完整完成回执。'
+  if (stage.recorded) return stage.message || '该阶段本次未调用。'
+  return '旧运行没有该阶段记录。'
+}
 
 const formatElapsed = (value) => {
   if (value == null || Number.isNaN(Number(value))) return '未提供'
@@ -3045,6 +3116,135 @@ onBeforeUnmount(() => {
   }
 }
 
+.receipt-agent-pipeline {
+  margin-top: 16px;
+  padding-top: 15px;
+  border-top: 1px solid var(--geo-line);
+}
+
+.receipt-agent-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 18px;
+
+  span {
+    color: var(--geo-muted);
+    font: 700 8px/1.2 "Cascadia Mono", monospace;
+    letter-spacing: .1em;
+  }
+
+  h4 { margin-top: 4px; font-size: 13px; }
+
+  > strong {
+    color: var(--geo-muted);
+    font-size: 10px;
+    font-weight: 650;
+    text-align: right;
+  }
+}
+
+.receipt-agent-stages {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  margin-top: 11px;
+  counter-reset: agent-stage;
+}
+
+.receipt-agent-stage {
+  position: relative;
+  min-width: 0;
+  padding: 12px 13px 11px;
+  border: 1px solid var(--geo-line);
+  border-top: 3px solid var(--geo-line-strong);
+  border-radius: 7px;
+  background: var(--geo-canvas);
+  counter-increment: agent-stage;
+
+  &.completed { border-top-color: var(--geo-success); background: #f7fbf8; }
+  &.incomplete { border-top-color: var(--geo-danger); background: #fff8f7; }
+  &.non-independent { border-top-color: var(--geo-warning); background: #fffaf0; }
+
+  > strong,
+  > small,
+  > p { display: block; }
+
+  > strong { margin-top: 10px; color: var(--geo-ink); font-size: 12px; }
+
+  > small {
+    overflow: hidden;
+    margin-top: 4px;
+    color: var(--geo-muted);
+    font: 600 9px/1.4 "Cascadia Mono", monospace;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  > p {
+    min-height: 34px;
+    margin-top: 8px;
+    color: var(--geo-ink-secondary);
+    font-size: 10px;
+    line-height: 1.65;
+  }
+}
+
+.agent-stage-topline {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.agent-stage-code {
+  color: var(--geo-muted);
+  font: 750 8px/1.2 "Cascadia Mono", monospace;
+  letter-spacing: .12em;
+
+  &::before {
+    margin-right: 5px;
+    content: "0" counter(agent-stage) " /";
+  }
+}
+
+.agent-stage-status {
+  color: var(--geo-muted);
+  font-size: 9px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.receipt-agent-stage.completed .agent-stage-status { color: var(--geo-success); }
+.receipt-agent-stage.incomplete .agent-stage-status { color: var(--geo-danger); }
+.receipt-agent-stage.non-independent .agent-stage-status { color: var(--geo-warning); }
+
+.agent-evaluation-result {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 9px;
+
+  span {
+    padding: 3px 6px;
+    border: 1px solid var(--geo-line);
+    border-radius: 999px;
+    color: var(--geo-ink);
+    background: #fff;
+    font-size: 9px;
+    font-weight: 700;
+  }
+}
+
+.agent-evaluation-boundary {
+  margin-top: 10px;
+  padding-left: 10px;
+  border-left: 2px solid var(--geo-warning);
+  color: var(--geo-muted);
+  font-size: 9px;
+  line-height: 1.6;
+}
+
 .receipt-trace dd {
   display: flex;
   align-items: center;
@@ -4105,6 +4305,15 @@ onBeforeUnmount(() => {
   .generation-notice { margin-right: 12px; margin-left: 12px; }
 
   .receipt-heading { flex-direction: column; }
+
+  .receipt-agent-heading {
+    align-items: flex-start;
+    flex-direction: column;
+
+    > strong { text-align: left; }
+  }
+
+  .receipt-agent-stages { grid-template-columns: 1fr; }
 
   .receipt-grid {
     grid-template-columns: repeat(2, minmax(0, 1fr));

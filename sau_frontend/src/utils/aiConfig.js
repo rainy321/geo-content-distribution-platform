@@ -150,7 +150,7 @@ export const UNIFIED_AI_PROVIDER_PRESETS = Object.freeze([
 export const AI_ROLE_DEFINITIONS = Object.freeze([
   Object.freeze({ id: 'writer', label: '写稿模型', code: 'WRITE', description: '生成文章与批量草稿' }),
   Object.freeze({ id: 'reviewer', label: '调优模型', code: 'REVIEW', description: '复核结构、证据和表达' }),
-  Object.freeze({ id: 'evaluator', label: '回测模型', code: 'EVAL', description: 'AI 可见度真实采样' }),
+  Object.freeze({ id: 'evaluator', label: '评估 / 回测模型', code: 'EVAL', description: '独立文章评估与 API 可见度采样' }),
   Object.freeze({ id: 'image', label: '生图模型', code: 'IMAGE', description: '生成文章封面并记录实际调用成本' })
 ])
 
@@ -182,7 +182,8 @@ export const normalizeUnifiedAIStatus = value => {
       apiKeyConfigured: Boolean(item.api_key_configured ?? source.api_key_configured),
       credentialStorage: String(item.credential_storage || source.credential_storage || ''),
       updatedAt: String(item.updated_at || ''),
-      sameAsWriter: Boolean(item.same_as_writer)
+      sameAsWriter: Boolean(item.same_as_writer),
+      sameAsReviewer: Boolean(item.same_as_reviewer)
     }]
   }))
   return {

@@ -13,6 +13,7 @@ from services.platform_capability_service import (
     PLATFORM_CAPABILITIES,
 )
 from services.media_account_risk_service import (
+    ConcurrentMediaAccountCredentialUpdateError,
     FROZEN_RISK_CATEGORIES,
     get_active_media_account_risk,
     get_active_media_account_risks,
@@ -75,7 +76,8 @@ def get_media_accounts_overview(
     with closing(_connect(database_path)) as conn:
         rows = conn.execute(
             """
-            SELECT id, type, filePath, userName, status, last_checked_at
+            SELECT id, type, filePath, userName, status, last_checked_at,
+                   credential_epoch
             FROM user_info
             WHERE status != ?
             ORDER BY type, id
@@ -87,6 +89,27 @@ def get_media_accounts_overview(
         database_path,
         [int(row["id"]) for row in rows],
     )
+    # Databases created before the durable risk ledger represented an expired
+    # login only as ``user_info.status = 0``.  Backfill that state centrally so
+    # every API/UI sees the same actionable session-expired warning instead of
+    # requiring a frontend guess.  The epoch CAS makes this safe if the user
+    # completes a new login while the overview is being assembled.
+    for row in rows:
+        account_id = int(row["id"])
+        if int(row["status"]) != 0 or account_id in active_risks:
+            continue
+        try:
+            risk = record_media_account_risk(
+                database_path,
+                account_id,
+                source="login_check",
+                error_text="登录会话已失效，需要重新登录",
+                expected_credential_epoch=int(row["credential_epoch"]),
+            )
+        except (ConcurrentMediaAccountCredentialUpdateError, LookupError):
+            continue
+        if risk is not None:
+            active_risks[account_id] = risk
     accounts = [
         _serialize_account(
             row,
@@ -160,17 +183,22 @@ async def check_media_account(
         raise MediaAccountRuntimeDisabledError(BILIBILI_RUNTIME_DISABLED_MESSAGE)
 
     timestamp = _normalize_checked_at(checked_at)
+    credential_epoch = int(row["credential_epoch"])
     cookie_path = cookie_dir / row["filePath"]
     if not cookie_path.is_file():
         connected = False
         message = "Cookie 文件不存在，请重新登录或上传 Cookie"
-        risk_event = record_media_account_risk(
-            database_path,
-            account_id,
-            source="login_check",
-            error_text="登录会话已失效：Cookie 文件不存在",
-            occurred_at=timestamp,
-        )
+        try:
+            risk_event = record_media_account_risk(
+                database_path,
+                account_id,
+                source="login_check",
+                error_text="登录会话已失效：Cookie 文件不存在",
+                occurred_at=timestamp,
+                expected_credential_epoch=credential_epoch,
+            )
+        except (ConcurrentMediaAccountCredentialUpdateError, LookupError):
+            return _stale_check_account_result(database_path, account_id, cookie_dir)
     else:
         try:
             result = checker(row["type"], row["filePath"])
@@ -186,13 +214,19 @@ async def check_media_account(
                 connected = bool(resolved_result)
                 result_detail = ""
         except Exception as exc:
-            risk_event = record_media_account_risk(
-                database_path,
-                account_id,
-                source="login_check",
-                error_text=str(exc),
-                occurred_at=timestamp,
-            )
+            try:
+                risk_event = record_media_account_risk(
+                    database_path,
+                    account_id,
+                    source="login_check",
+                    error_text=str(exc),
+                    occurred_at=timestamp,
+                    expected_credential_epoch=credential_epoch,
+                )
+            except (ConcurrentMediaAccountCredentialUpdateError, LookupError):
+                return _stale_check_account_result(
+                    database_path, account_id, cookie_dir
+                )
             if risk_event is not None:
                 error_type = (
                     MediaAccountFrozenError
@@ -205,45 +239,55 @@ async def check_media_account(
                 ) from exc
             raise MediaAccountCheckError("平台登录状态检测失败，请稍后重试") from exc
         message = "登录状态正常" if connected else "登录已失效，需要重新登录"
-        if connected:
-            resolve_recoverable_media_account_risks(
-                database_path,
-                account_id,
-                resolved_at=timestamp,
-            )
-            risk_event = None
-        else:
-            risk_event = record_media_account_risk(
-                database_path,
-                account_id,
-                source="login_check",
-                error_text=(
-                    "登录会话已失效，需要重新登录。"
-                    f"平台返回：{result_detail}"
-                    if result_detail
-                    else "登录会话已失效，需要重新登录"
-                ),
-                occurred_at=timestamp,
-            )
-            if risk_event is not None:
-                message = risk_event["reason"]
+        try:
+            if connected:
+                resolve_recoverable_media_account_risks(
+                    database_path,
+                    account_id,
+                    resolved_at=timestamp,
+                    expected_credential_epoch=credential_epoch,
+                )
+                risk_event = None
+            else:
+                risk_event = record_media_account_risk(
+                    database_path,
+                    account_id,
+                    source="login_check",
+                    error_text=(
+                        "登录会话已失效，需要重新登录。"
+                        f"平台返回：{result_detail}"
+                        if result_detail
+                        else "登录会话已失效，需要重新登录"
+                    ),
+                    occurred_at=timestamp,
+                    expected_credential_epoch=credential_epoch,
+                )
+                if risk_event is not None:
+                    message = risk_event["reason"]
+        except (ConcurrentMediaAccountCredentialUpdateError, LookupError):
+            return _stale_check_account_result(database_path, account_id, cookie_dir)
 
     with closing(_connect(database_path)) as conn:
         with conn:
-            conn.execute(
+            updated_cursor = conn.execute(
                 """
                 UPDATE user_info
                 SET status = ?, last_checked_at = ?
                 WHERE id = ? AND status != ?
+                  AND credential_epoch = ?
                 """,
                 (
                     int(connected),
                     _utc_sql(timestamp),
                     account_id,
                     DISCONNECTED_ACCOUNT_STATUS,
+                    credential_epoch,
                 ),
             )
             updated = _fetch_account(conn, account_id)
+
+    if updated_cursor.rowcount != 1:
+        return _stale_check_account_result(database_path, account_id, cookie_dir)
 
     if updated is None or updated["status"] == DISCONNECTED_ACCOUNT_STATUS:
         raise MediaAccountNotFoundError("媒体账号已在检测期间解绑")
@@ -559,12 +603,28 @@ def _serialize_account(
 def _fetch_account(conn: sqlite3.Connection, account_id: int):
     return conn.execute(
         """
-        SELECT id, type, filePath, userName, status, last_checked_at
+        SELECT id, type, filePath, userName, status, last_checked_at,
+               credential_epoch
         FROM user_info
         WHERE id = ?
         """,
         (account_id,),
     ).fetchone()
+
+
+def _stale_check_account_result(
+    database_path: str | Path,
+    account_id: int,
+    cookie_dir: Path,
+) -> dict[str, Any]:
+    with closing(_connect(database_path)) as conn:
+        current = _fetch_account(conn, account_id)
+    if current is None or current["status"] == DISCONNECTED_ACCOUNT_STATUS:
+        raise MediaAccountNotFoundError("媒体账号已在检测期间解绑")
+    risk = get_active_media_account_risk(database_path, account_id)
+    account = _serialize_account(current, cookie_dir, risk_event=risk)
+    account["check_message"] = "账号已重新登录，本次旧会话检测结果已丢弃"
+    return account
 
 
 def _normalize_cookie_filename(value: Any) -> str:

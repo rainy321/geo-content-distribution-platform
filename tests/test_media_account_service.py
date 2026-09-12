@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock
 
 from db.createTable import initialize_database
+from services.media_account_risk_service import get_active_media_account_risk
 from services.media_account_service import (
     MediaAccountCheckError,
     MediaAccountNotFoundError,
@@ -104,6 +105,59 @@ class MediaAccountServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(account["status"], "connected")
         self.assertEqual(account["last_checked_at"], "2026-08-31 14:30:00")
         self.assertEqual(account["check_message"], "登录状态正常")
+
+    async def test_old_async_checker_risk_is_discarded_after_relogin(self):
+        (self.cookies_dir / "old.json").write_text("{}", encoding="utf-8")
+        (self.cookies_dir / "fresh.json").write_text("{}", encoding="utf-8")
+        account_id = self._insert_account(file_path="old.json", status=1)
+
+        async def stale_checker(_platform_type, _filename):
+            with closing(sqlite3.connect(self.db_path)) as conn:
+                with conn:
+                    conn.execute(
+                        """
+                        UPDATE user_info
+                        SET filePath = 'fresh.json', status = 1,
+                            credential_epoch = credential_epoch + 1
+                        WHERE id = ?
+                        """,
+                        (account_id,),
+                    )
+            raise RuntimeError("旧页面提示账号已被永久封禁")
+
+        account = await check_media_account(
+            self.db_path,
+            account_id,
+            cookies_directory=self.cookies_dir,
+            checker=stale_checker,
+        )
+
+        self.assertEqual(account["status"], "connected")
+        self.assertIn("旧会话检测结果已丢弃", account["check_message"])
+        self.assertIsNone(get_active_media_account_risk(self.db_path, account_id))
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            file_path, status, epoch = conn.execute(
+                """
+                SELECT filePath, status, credential_epoch
+                FROM user_info WHERE id = ?
+                """,
+                (account_id,),
+            ).fetchone()
+        self.assertEqual((file_path, status, epoch), ("fresh.json", 1, 2))
+
+    async def test_overview_backfills_legacy_expired_status_as_session_risk(self):
+        (self.cookies_dir / "legacy.json").write_text("{}", encoding="utf-8")
+        account_id = self._insert_account(file_path="legacy.json", status=0)
+
+        overview = get_media_accounts_overview(
+            self.db_path,
+            cookies_directory=self.cookies_dir,
+        )
+
+        account = next(item for item in overview["accounts"] if item["id"] == account_id)
+        self.assertEqual(account["status"], "session_expired")
+        self.assertEqual(account["risk_event"]["category"], "session_expired")
+        self.assertEqual(overview["summary"]["needs_action"], 1)
 
     async def test_missing_cookie_is_actionable_without_calling_platform(self):
         account_id = self._insert_account(file_path="missing.json", status=1)
@@ -224,10 +278,14 @@ class MediaAccountSchemaMigrationTests(unittest.TestCase):
                     row[1] for row in conn.execute("PRAGMA table_info(user_info)")
                 }
                 row = conn.execute(
-                    "SELECT userName, status, last_checked_at FROM user_info"
+                    """
+                    SELECT userName, status, last_checked_at, credential_epoch
+                    FROM user_info
+                    """
                 ).fetchone()
             self.assertIn("last_checked_at", columns)
-            self.assertEqual(row, ("旧账号", 1, None))
+            self.assertIn("credential_epoch", columns)
+            self.assertEqual(row, ("旧账号", 1, None, 1))
 
 
 if __name__ == "__main__":

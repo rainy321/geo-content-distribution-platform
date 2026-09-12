@@ -58,13 +58,20 @@
           >
             <span>{{ role.code }}</span>
             <strong>{{ role.label }}</strong>
-            <small>{{ aiStatus.roles[role.id]?.configured ? '独立配置' : (role.id === 'writer' ? '等待配置' : '回退到写稿') }}</small>
+            <small>{{ roleConfigurationLabel(role.id) }}</small>
           </button>
         </nav>
 
         <div v-if="reviewerSimilarityRisk" class="role-risk" role="status">
           <strong>调优模型与写稿模型相同</strong>
           <span>该旧配置不会再执行第二次付费调用。请为 REVIEW 更换模型 ID、服务商或服务地址后重新保存。</span>
+        </div>
+        <div v-if="evaluatorSimilarityRisk" class="role-risk" role="status">
+          <strong>评估模型不是独立模型</strong>
+          <span>
+            EVAL 与{{ evaluatorSimilarityTargets }}相同，不会作为独立评估调用，也不计入多模型数量。
+            请更换模型 ID、服务商或服务地址后重新保存。
+          </span>
         </div>
         <div v-if="selectedRole === 'image'" class="role-runtime-note" role="note">
           <strong>生图连接已接入文章封面流程</strong>
@@ -395,6 +402,10 @@ const canReuseActiveCredential = computed(() => (
 const activeRoleStateLabel = computed(() => {
   if (!activeRoleStatus.value.effectiveConfigured) return '尚未配置'
   if (activeRoleStatus.value.fallback) return '回退到写稿模型'
+  if (
+    selectedRole.value !== 'writer'
+    && (activeRoleStatus.value.sameAsWriter || activeRoleStatus.value.sameAsReviewer)
+  ) return '已配置 · 非独立'
   return '独立配置已生效'
 })
 const activeCredentialLabel = computed(() => {
@@ -405,6 +416,24 @@ const activeCredentialLabel = computed(() => {
 const reviewerSimilarityRisk = computed(() => Boolean(
   aiStatus.roles?.reviewer?.sameAsWriter
 ))
+const evaluatorSimilarityRisk = computed(() => Boolean(
+  aiStatus.roles?.evaluator?.sameAsWriter
+  || aiStatus.roles?.evaluator?.sameAsReviewer
+))
+const evaluatorSimilarityTargets = computed(() => {
+  const targets = []
+  if (aiStatus.roles?.evaluator?.sameAsWriter) targets.push('写稿模型')
+  if (aiStatus.roles?.evaluator?.sameAsReviewer) targets.push('调优模型')
+  return targets.join('、') || '其他角色模型'
+})
+const roleConfigurationLabel = (roleId) => {
+  const status = aiStatus.roles?.[roleId]
+  if (!status?.configured) return roleId === 'writer' ? '等待配置' : '回退到写稿'
+  if (roleId !== 'writer' && (status.sameAsWriter || status.sameAsReviewer)) {
+    return '已配置 · 非独立'
+  }
+  return '独立配置'
+}
 const canClearActiveRole = computed(() => (
   selectedRole.value === 'writer'
     ? aiStatus.savedConfigured

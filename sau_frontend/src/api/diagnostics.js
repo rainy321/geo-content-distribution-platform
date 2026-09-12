@@ -36,6 +36,25 @@ export const diagnosticsApi = {
     })
   },
 
+  sampleVisibilityPanel(data, { requestId, idempotencyKey, ...config } = {}) {
+    return http.post('/api/geo/visibility/sample-panel', data, {
+      ...config,
+      headers: {
+        ...(config.headers || {}),
+        'X-Request-ID': requestId,
+        'Idempotency-Key': idempotencyKey
+      }
+    })
+  },
+
+  getVisibilityPanel(requestId, config = {}) {
+    return http.get(
+      `/api/geo/visibility/sample-panel/${encodeURIComponent(requestId)}`,
+      undefined,
+      config
+    )
+  },
+
   getVisibilitySample(requestId, config = {}) {
     return http.get(
       `/api/geo/visibility/sample/${encodeURIComponent(requestId)}`,

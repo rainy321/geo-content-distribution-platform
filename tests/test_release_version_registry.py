@@ -40,6 +40,9 @@ class ReleaseVersionRegistryTests(unittest.TestCase):
         self.assertIn("geo_blackbox_truth_matrix_version", registry["product_features"])
         self.assertIn("dongclaw_evaluation_report_version", registry["product_features"])
         self.assertIn("unified_ai_role_router_version", registry["product_features"])
+        self.assertIn("ai_agent_pipeline_version", registry["product_features"])
+        self.assertIn("visibility_panel_version", registry["product_features"])
+        self.assertIn("publish_review_monitor_version", registry["product_features"])
 
 
 if __name__ == "__main__":

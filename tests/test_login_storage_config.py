@@ -12,6 +12,7 @@ from db.createTable import initialize_database
 from myUtils.auth import check_cookie
 from myUtils.login import xiaohongshu_cookie_gen
 from sau_backend import app, run_async_function
+from services.media_account_risk_service import get_active_media_account_risk
 from services.media_account_service import (
     DISCONNECTED_ACCOUNT_STATUS,
     disconnect_media_account,
@@ -168,6 +169,7 @@ class LegacyStorageConfigTests(unittest.TestCase):
         listed = self.client.get("/getAccounts")
         self.assertEqual(listed.status_code, 200)
         self.assertEqual(listed.get_json()["data"][0][3], "isolated-account")
+        self.assertEqual(len(listed.get_json()["data"][0]), 6)
 
         updated = self.client.post(
             "/updateUserinfo",
@@ -185,11 +187,18 @@ class LegacyStorageConfigTests(unittest.TestCase):
             content_type="multipart/form-data",
         )
         self.assertEqual(uploaded.status_code, 200)
-        cookie_path = self.cookies_directory / "account.json"
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            stored_filename, credential_epoch = connection.execute(
+                "SELECT filePath, credential_epoch FROM user_info WHERE id = ?",
+                (self.account_id,),
+            ).fetchone()
+        self.assertNotEqual(stored_filename, "account.json")
+        self.assertEqual(credential_epoch, 2)
+        cookie_path = self.cookies_directory / stored_filename
         self.assertEqual(cookie_path.read_bytes(), b'{"cookies": []}')
 
         downloaded = self.client.get(
-            "/downloadCookie", query_string={"filePath": "account.json"}
+            "/downloadCookie", query_string={"filePath": stored_filename}
         )
         try:
             self.assertEqual(downloaded.status_code, 200)
@@ -209,6 +218,42 @@ class LegacyStorageConfigTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(count, 1)
 
+    def test_bulk_cookie_check_discards_old_result_after_credential_replacement(self):
+        fresh_cookie = self.cookies_directory / "fresh.json"
+        fresh_cookie.write_text("{}", encoding="utf-8")
+
+        async def replace_during_check(_account_type, _filename, **_kwargs):
+            with closing(sqlite3.connect(self.db_path)) as connection:
+                with connection:
+                    connection.execute(
+                        """
+                        UPDATE user_info
+                        SET filePath = ?, status = 1,
+                            credential_epoch = credential_epoch + 1
+                        WHERE id = ?
+                        """,
+                        (fresh_cookie.name, self.account_id),
+                    )
+            return False
+
+        with patch(
+            "myUtils.auth.check_cookie",
+            new=AsyncMock(side_effect=replace_during_check),
+        ):
+            response = self.client.get("/getValidAccounts")
+
+        self.assertEqual(response.status_code, 200)
+        with closing(sqlite3.connect(self.db_path)) as connection:
+            row = connection.execute(
+                """
+                SELECT filePath, status, credential_epoch
+                FROM user_info WHERE id = ?
+                """,
+                (self.account_id,),
+            ).fetchone()
+        self.assertEqual(row, (fresh_cookie.name, 1, 2))
+        self.assertIsNone(get_active_media_account_risk(self.db_path, self.account_id))
+
     def test_legacy_cookie_check_receives_runtime_cookie_root(self):
         with patch(
             "myUtils.auth.check_cookie",
@@ -217,6 +262,7 @@ class LegacyStorageConfigTests(unittest.TestCase):
             response = self.client.get("/getValidAccounts")
 
         self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(response.get_json()["data"][0]), 6)
         checker.assert_awaited_once_with(
             9,
             "account.json",

@@ -589,7 +589,8 @@ class ZhihuWebLoginTests(unittest.IsolatedAsyncioTestCase):
             with closing(sqlite3.connect(database_path)) as connection:
                 accounts = connection.execute(
                     """
-                    SELECT id, filePath, userName, status, last_checked_at
+                    SELECT id, filePath, userName, status, last_checked_at,
+                           credential_epoch
                     FROM user_info
                     """
                 ).fetchall()
@@ -598,6 +599,7 @@ class ZhihuWebLoginTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotEqual(accounts[0][1], old_cookie.name)
             self.assertEqual(accounts[0][2:4], ("知乎主号", 1))
             self.assertTrue(accounts[0][4])
+            self.assertEqual(accounts[0][5], 2)
             self.assertFalse(old_cookie.exists())
             self.assertTrue((cookies_directory / accounts[0][1]).is_file())
 

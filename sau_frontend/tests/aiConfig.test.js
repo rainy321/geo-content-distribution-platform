@@ -76,6 +76,38 @@ test('role status exposes explicit fallback and reviewer similarity risk', () =>
   assert.equal(status.roles.reviewer.sameAsWriter, true)
 })
 
+test('evaluator similarity metadata remains visible instead of implying an independent model', () => {
+  const status = normalizeUnifiedAIStatus({
+    data: {
+      configured: true,
+      provider: 'doubao',
+      base_url: 'https://ark.example.test/api/v3',
+      model: 'writer-model',
+      roles: {
+        evaluator: {
+          configured: true,
+          effective_configured: true,
+          provider: 'doubao',
+          base_url: 'https://ark.example.test/api/v3',
+          model: 'writer-model',
+          same_as_writer: true,
+          same_as_reviewer: true
+        }
+      }
+    }
+  })
+  const settingsSource = readFileSync(
+    new URL('../src/views/SystemSettings.vue', import.meta.url),
+    'utf8'
+  )
+
+  assert.equal(status.roles.evaluator.sameAsWriter, true)
+  assert.equal(status.roles.evaluator.sameAsReviewer, true)
+  assert.match(settingsSource, /评估模型不是独立模型/)
+  assert.match(settingsSource, /不会作为独立评估调用，也不计入多模型数量/)
+  assert.match(settingsSource, /已配置 · 非独立/)
+})
+
 test('optional role can reuse writer credential only on the same provider endpoint', () => {
   const writer = {
     provider: 'qwen',

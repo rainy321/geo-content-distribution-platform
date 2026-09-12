@@ -208,6 +208,35 @@ class AIVisibilitySamplingApiTests(unittest.TestCase):
         self.assertFalse(data["retry_policy"]["automatic_retry"])
         self.assertIn("不会重新调用模型", response.get_json()["msg"])
 
+    @patch("sau_backend.refresh_ai_visibility_sample_request_locally")
+    @patch("sau_backend.get_ai_visibility_sample_request")
+    def test_resume_endpoint_stops_expired_started_request(self, getter, refresher):
+        getter.return_value = {"project_id": self.project_id}
+        refresher.return_value = {
+            "project_id": self.project_id,
+            "request_id": "expired-single-request",
+            "idempotency_key": "expired-single-key",
+            "status": "started",
+            "in_progress": True,
+            "in_progress_expired": True,
+            "result": None,
+            "created_at": "2026-09-12T00:00:00Z",
+            "updated_at": "2026-09-12T00:00:00Z",
+        }
+
+        response = self.client.get(
+            "/api/geo/visibility/sample/expired-single-request"
+        )
+
+        self.assertEqual(response.status_code, 504)
+        self.assertEqual(response.headers["Idempotency-Replayed"], "true")
+        data = response.get_json()["data"]
+        self.assertEqual(data["status"], "need_action")
+        self.assertTrue(data["outcome_unknown"])
+        self.assertEqual(data["failure"]["code"], "provider_outcome_unknown")
+        self.assertFalse(data["retry_policy"]["automatic_retry"])
+        self.assertIn("不会自动重发", response.get_json()["msg"])
+
     def test_resume_endpoint_rejects_unknown_or_invalid_identity(self):
         missing = self.client.get(
             "/api/geo/visibility/sample/missing-request"
@@ -316,6 +345,120 @@ class AIVisibilitySamplingApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 401)
         self.assertTrue(response.get_json()["data"]["authentication_required"])
+
+    def test_panel_route_owns_its_sample_count_validation(self):
+        response = self.client.post(
+            "/api/geo/visibility/sample-panel",
+            json={
+                "project_id": self.project_id,
+                "prompt": "Which synthetic product is worth considering?",
+                "sample_count": 6,
+                "roles": ["writer"],
+                "persist": False,
+                "confirm_external_call": True,
+            },
+            headers=self.headers(
+                **{
+                    "X-Request-ID": "panel-invalid-count",
+                    "Idempotency-Key": "panel-invalid-count-key",
+                }
+            ),
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("sample_count", response.get_json()["msg"])
+
+    @patch("sau_backend.get_ai_visibility_panel_request")
+    def test_panel_resume_endpoint_is_read_only_and_restores_terminal_result(self, getter):
+        getter.return_value = {
+            "request_id": "panel-request-1",
+            "idempotency_key": "panel-key-1",
+            "in_progress": False,
+            "http_status": 207,
+            "manifest": {"frozen": True},
+            "targets": [],
+            "result": {
+                "status": "partial",
+                "need_action": True,
+                "request_id": "panel-request-1",
+                "idempotency_key": "panel-key-1",
+                "targets": [],
+            },
+            "created_at": "2026-09-12T00:00:00Z",
+            "updated_at": "2026-09-12T00:00:01Z",
+            "recovery_policy": {"read_only": True, "automatic_retry": False},
+        }
+
+        response = self.client.get(
+            "/api/geo/visibility/sample-panel/panel-request-1"
+        )
+
+        self.assertEqual(response.status_code, 207)
+        self.assertEqual(response.headers["Idempotency-Replayed"], "true")
+        self.assertEqual(response.get_json()["data"]["status"], "partial")
+        self.assertTrue(response.get_json()["data"]["replayed"])
+        getter.assert_called_once_with(self.database_path, "panel-request-1")
+
+    @patch("sau_backend.get_ai_visibility_panel_request")
+    def test_panel_resume_endpoint_reports_processing_without_posting(self, getter):
+        getter.return_value = {
+            "request_id": "panel-request-2",
+            "idempotency_key": "panel-key-2",
+            "in_progress": True,
+            "http_status": None,
+            "manifest": {"frozen": True},
+            "targets": [{"role": "writer", "execution_status": "in_progress"}],
+            "result": None,
+            "created_at": "2026-09-12T00:00:00Z",
+            "updated_at": "2026-09-12T00:00:00Z",
+            "recovery_policy": {"read_only": True, "automatic_retry": False},
+        }
+
+        response = self.client.get(
+            "/api/geo/visibility/sample-panel/panel-request-2"
+        )
+
+        self.assertEqual(response.status_code, 202)
+        data = response.get_json()["data"]
+        self.assertEqual(data["status"], "processing")
+        self.assertFalse(data["recovery_policy"]["automatic_retry"])
+
+    @patch("sau_backend.get_ai_visibility_panel_request")
+    def test_panel_resume_endpoint_stops_expired_parent(self, getter):
+        getter.return_value = {
+            "request_id": "panel-request-expired",
+            "idempotency_key": "panel-key-expired",
+            "in_progress": False,
+            "in_progress_expired": True,
+            "http_status": None,
+            "manifest": {"frozen": True},
+            "targets": [],
+            "result": {
+                "status": "need_action",
+                "need_action": True,
+                "outcome_unknown": True,
+                "failure": {
+                    "code": "panel_outcome_unknown",
+                    "automatic_retry": False,
+                },
+                "targets": [],
+            },
+            "created_at": "2026-09-12T00:00:00Z",
+            "updated_at": "2026-09-12T00:00:00Z",
+            "recovery_policy": {"read_only": True, "automatic_retry": False},
+        }
+
+        response = self.client.get(
+            "/api/geo/visibility/sample-panel/panel-request-expired"
+        )
+
+        self.assertEqual(response.status_code, 504)
+        self.assertEqual(response.headers["Idempotency-Replayed"], "true")
+        data = response.get_json()["data"]
+        self.assertEqual(data["status"], "need_action")
+        self.assertTrue(data["outcome_unknown"])
+        self.assertEqual(data["failure"]["code"], "panel_outcome_unknown")
+        self.assertIn("不会自动重试", response.get_json()["msg"])
 
 
 if __name__ == "__main__":

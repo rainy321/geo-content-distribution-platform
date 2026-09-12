@@ -9,11 +9,13 @@ engine. Every request is durably idempotent before the first provider call.
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import sqlite3
 from contextlib import closing
 from dataclasses import replace
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 from urllib.parse import urlsplit
@@ -30,18 +32,27 @@ from services.ai_service import (
     provider_label_for_settings,
     sample_ai_prompt_detailed,
 )
-from services.ai_visibility_run_service import save_ai_visibility_run
+from services.ai_visibility_run_service import (
+    get_ai_visibility_run,
+    save_ai_visibility_run,
+)
 from services.ai_visibility_service import (
     VisibilityAnalysisError,
     analyze_ai_visibility,
+    current_ai_visibility_algorithm_versions,
+    inspect_ai_visibility_analysis_freshness,
+    reanalyze_ai_visibility_locally,
 )
 
 
 VISIBILITY_SAMPLING_VERSION = "controlled-live-visibility-sampling-1.1.0"
+LOCAL_ANALYSIS_INPUT_SNAPSHOT_VERSION = "visibility-local-analysis-input-1.0.0"
+IN_PROGRESS_EXPIRY_SECONDS = 15 * 60
 VISIBILITY_SAMPLE_MAX_OUTPUT_TOKENS = 768
 MIN_SAMPLE_COUNT = 1
 MAX_SAMPLE_COUNT = 5
 MAX_PROMPT_LENGTH = 8_000
+_PANEL_RECORD_TYPE = "ai_visibility_model_panel"
 
 
 class VisibilitySamplingValidationError(ValueError):
@@ -70,12 +81,15 @@ class VisibilitySamplingRequestNotFoundError(LookupError):
 def get_ai_visibility_sample_request(
     database_path: str | Path,
     request_id: Any,
+    *,
+    current_time: datetime | None = None,
 ) -> dict[str, Any]:
     """Read one durable sampling request without invoking the AI provider.
 
     This is the safe resume seam used by the desktop UI after route changes or
-    window reloads.  A ``started`` row is reported as in progress; a completed
-    row returns the exact persisted response envelope.
+    window reloads.  A ``started`` row reports a read-only age/expiry signal;
+    no state is changed.  Panel records sharing the storage table are rejected
+    so the single-model endpoint can never deserialize a multi-model receipt.
     """
 
     normalized_request_id = _request_identifier(request_id, "X-Request-ID", 128)
@@ -86,7 +100,74 @@ def get_ai_visibility_sample_request(
         ).fetchone()
     if row is None:
         raise VisibilitySamplingRequestNotFoundError("可见度采样请求不存在")
-    return _serialize_request(row)
+    return _serialize_request(row, current_time=current_time)
+
+
+def refresh_ai_visibility_sample_request_locally(
+    database_path: str | Path,
+    request_id: Any,
+    *,
+    project: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return a parser-current view of a saved sampling receipt, if possible.
+
+    Only captured response text is reused.  This function has no sampler,
+    settings or HTTP client parameter, never records usage, and never changes
+    the persisted receipt.  If an older receipt omitted the exact request-level
+    alias/competitor inputs, its original analysis is retained and explicitly
+    marked stale instead of guessing.
+    """
+
+    record = get_ai_visibility_sample_request(database_path, request_id)
+    return _refresh_sample_record_locally(
+        database_path,
+        record=record,
+        project=project,
+        exact_overrides=None,
+    )
+
+
+def refresh_ai_visibility_run_locally(
+    database_path: str | Path,
+    run_id: int,
+    *,
+    project: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Return a locally refreshed history-run view without mutating history."""
+
+    saved = get_ai_visibility_run(database_path, run_id)
+    project_values = _local_project_values(project, expected_id=saved["project_id"])
+    coverage = saved.get("coverage_items")
+    if not isinstance(coverage, Mapping) or not {
+        "aliases",
+        "competitors",
+    }.issubset(coverage):
+        return _mark_run_refresh_unavailable(
+            saved,
+            reason="saved_analysis_inputs_incomplete",
+        )
+    try:
+        refreshed = _refresh_analysis_view(
+            previous_analysis=saved.get("result"),
+            project_values=project_values,
+            prompt=saved.get("prompt"),
+            responses=saved.get("input_samples"),
+            aliases=coverage.get("aliases"),
+            competitors=coverage.get("competitors"),
+            stored_local_analysis=None,
+            original_external_model_used=_analysis_used_external_model(
+                saved.get("result")
+            ),
+        )
+    except (VisibilityAnalysisError, VisibilitySamplingValidationError):
+        return _mark_run_refresh_unavailable(
+            saved,
+            reason="saved_analysis_data_invalid",
+        )
+    output = copy.deepcopy(saved)
+    output["result"] = refreshed["analysis"]
+    output["analysis_refresh"] = refreshed["refresh"]
+    return output
 
 
 def run_ai_visibility_sample(
@@ -136,11 +217,20 @@ def run_ai_visibility_sample(
         request_fingerprint=fingerprint,
     )
     if replayed:
+        refreshed_record = _refresh_sample_record_locally(
+            database_path,
+            record=request_record,
+            project=project,
+            exact_overrides={
+                "aliases": normalized["aliases"],
+                "competitors": normalized["competitors"],
+            },
+        )
         return {
-            "http_status": int(request_record["http_status"]),
-            "payload": request_record["result"],
-            "request_id": request_record["request_id"],
-            "idempotency_key": request_record["idempotency_key"],
+            "http_status": int(refreshed_record["http_status"]),
+            "payload": refreshed_record["result"],
+            "request_id": refreshed_record["request_id"],
+            "idempotency_key": refreshed_record["idempotency_key"],
             "replayed": True,
         }
 
@@ -188,7 +278,15 @@ def run_ai_visibility_sample(
             break
 
         analysis_inputs.append(
-            {"text": text, "provider": provider, "model": model}
+            {
+                "text": text,
+                "provider": provider,
+                "model": model,
+                "channel_type": "provider_api",
+                "entry_point": "openai_compatible_chat_completions",
+                "web_search_verified": False,
+                "consumer_surface_verified": False,
+            }
         )
         try:
             usage_record = usage_recorder(
@@ -244,6 +342,7 @@ def run_ai_visibility_sample(
                 project_id=normalized["project_id"],
                 project_name=normalized["project_name"],
                 project_product=normalized["project_product"],
+                project_keywords=normalized["project_keywords"],
                 project_website=normalized["project_website"],
                 stored_competitors=normalized["stored_competitors"],
                 prompt=normalized["prompt"],
@@ -258,6 +357,18 @@ def run_ai_visibility_sample(
                 "sampling_version": VISIBILITY_SAMPLING_VERSION,
                 "failed_or_unattempted_samples_in_metrics": False,
             }
+            local_analysis_fingerprint = _local_analysis_fingerprint(
+                project_values=_local_project_values(
+                    project, expected_id=normalized["project_id"]
+                ),
+                prompt=normalized["prompt"],
+                responses=analysis_inputs,
+                aliases=normalized["aliases"],
+                competitors=normalized["competitors"],
+            )
+            analysis["methodology"]["local_analysis_input_fingerprint"] = (
+                local_analysis_fingerprint
+            )
             if normalized["persist"]:
                 saved = save_ai_visibility_run(
                     database_path,
@@ -266,6 +377,9 @@ def run_ai_visibility_sample(
                     input_samples=analysis_inputs,
                     coverage_items={
                         "aliases": normalized["aliases"],
+                        "project_keyword_aliases": (
+                            analysis.get("project", {}).get("effective_brand_aliases", [])
+                        ),
                         "competitors": normalized["competitors"],
                         "sampling_request_id": request_record["id"],
                     },
@@ -301,6 +415,28 @@ def run_ai_visibility_sample(
         need_action = True
         message = "采样未完成，未自动重试；请人工核对后再决定是否使用新幂等键"
 
+    local_analysis = (
+        {
+            "input_fingerprint": local_analysis_fingerprint,
+            "input_snapshot_version": LOCAL_ANALYSIS_INPUT_SNAPSHOT_VERSION,
+            "algorithm_versions": current_ai_visibility_algorithm_versions(),
+        }
+        if analysis is not None
+        else None
+    )
+    current_versions = current_ai_visibility_algorithm_versions()
+    analysis_refresh = {
+        "status": "current" if analysis is not None else "not_available",
+        "reanalysis_required": analysis is None,
+        "performed": False,
+        "reason": None if analysis is not None else "analysis_not_available",
+        "provider_calls": 0,
+        "network_requests": 0,
+        "stale_components": [] if analysis is not None else list(current_versions),
+        "stored_versions": current_versions if analysis is not None else {},
+        "current_versions": current_versions,
+    }
+
     payload = {
         "status": status,
         "need_action": need_action,
@@ -321,6 +457,45 @@ def run_ai_visibility_sample(
         "captured_responses": analysis_inputs,
         "failure": failure,
         "analysis": analysis,
+        "local_analysis": local_analysis,
+        "local_analysis_input_snapshot": {
+            "version": LOCAL_ANALYSIS_INPUT_SNAPSHOT_VERSION,
+            "aliases": normalized["aliases"],
+            "competitors": normalized["competitors"],
+        },
+        "analysis_refresh": analysis_refresh,
+        "channel_type": "provider_api",
+        "entry_point": "openai_compatible_chat_completions",
+        "distinct_model_count": 1 if completed_count else 0,
+        "multi_model_executed": False,
+        "consumer_parity": {
+            "status": "unverified",
+            "claim_allowed": False,
+            "message": (
+                "本结果来自配置模型的 API，不代表豆包、元宝、千问等消费者网页"
+                "或手机 App 会返回相同答案。"
+            ),
+        },
+        "channel_coverage": [
+            {
+                "channel_type": "provider_api",
+                "status": "sampled" if completed_count else "not_completed",
+                "sampled_model_count": 1 if completed_count else 0,
+                "web_search_verified": False,
+            },
+            {
+                "channel_type": "consumer_web",
+                "status": "unverified",
+                "sampled_model_count": 0,
+                "web_search_verified": False,
+            },
+            {
+                "channel_type": "mobile_app",
+                "status": "unverified",
+                "sampled_model_count": 0,
+                "web_search_verified": False,
+            },
+        ],
         "data_disclosure": _data_disclosure(
             normalized["prompt"], normalized["sample_count"]
         ),
@@ -408,6 +583,7 @@ def _validate_request(
 
     project_name = str(project.get("name") or "").strip()
     project_product = str(project.get("product") or "").strip()
+    project_keywords = project.get("keywords") or []
     project_website = str(project.get("website") or "").strip()
     stored_competitors = project.get("competitors") or []
     # Run the deterministic parser against one local placeholder before any
@@ -418,6 +594,7 @@ def _validate_request(
             project_id=project_id,
             project_name=project_name,
             project_product=project_product,
+            project_keywords=project_keywords,
             project_website=project_website,
             stored_competitors=stored_competitors,
             prompt=normalized_prompt,
@@ -432,6 +609,7 @@ def _validate_request(
         "project_id": project_id,
         "project_name": project_name,
         "project_product": project_product,
+        "project_keywords": list(project_keywords),
         "project_website": project_website,
         "stored_competitors": list(stored_competitors),
         "prompt": normalized_prompt,
@@ -465,10 +643,318 @@ def _request_fingerprint(
         "model": settings.model,
         "sampling_version": VISIBILITY_SAMPLING_VERSION,
     }
+    # Keep the durable provider-effect identity compatible with receipts made
+    # before project keywords participated in local parsing.  Keywords never
+    # cross the provider boundary; their changing the external idempotency
+    # fingerprint would turn a safe replay into a conflict.  They are tracked
+    # separately by ``_local_analysis_fingerprint`` so the captured answer can
+    # be reparsed without another billable request.
     encoded = json.dumps(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _local_project_values(
+    project: Mapping[str, Any], *, expected_id: int
+) -> dict[str, Any]:
+    if not isinstance(project, Mapping):
+        raise VisibilitySamplingValidationError("品牌项目不存在")
+    raw_project_id = project.get("id")
+    if isinstance(raw_project_id, bool):
+        raise VisibilitySamplingValidationError("project_id 必须是正整数")
+    try:
+        project_id = int(raw_project_id)
+    except (TypeError, ValueError) as exc:
+        raise VisibilitySamplingValidationError("project_id 必须是正整数") from exc
+    if project_id != int(expected_id):
+        raise VisibilitySamplingValidationError("品牌项目与历史采样记录不匹配")
+    return {
+        "project_id": project_id,
+        "project_name": str(project.get("name") or "").strip(),
+        "project_product": str(project.get("product") or "").strip(),
+        "project_keywords": copy.deepcopy(project.get("keywords") or []),
+        "project_website": str(project.get("website") or "").strip(),
+        "stored_competitors": copy.deepcopy(project.get("competitors") or []),
+    }
+
+
+def _local_analysis_fingerprint(
+    *,
+    project_values: Mapping[str, Any],
+    prompt: Any,
+    responses: Any,
+    aliases: Any,
+    competitors: Any,
+) -> str:
+    payload = {
+        "snapshot_version": LOCAL_ANALYSIS_INPUT_SNAPSHOT_VERSION,
+        "project": dict(project_values),
+        "prompt": prompt,
+        "responses": responses,
+        "aliases": aliases,
+        "competitors": competitors,
+        "algorithm_versions": current_ai_visibility_algorithm_versions(),
+    }
+    try:
+        encoded = json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise VisibilitySamplingValidationError(
+            "本地可见度分析输入无法可靠序列化"
+        ) from exc
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _analysis_used_external_model(analysis: Any) -> bool:
+    if not isinstance(analysis, Mapping):
+        return False
+    methodology = analysis.get("methodology")
+    return bool(
+        isinstance(methodology, Mapping)
+        and methodology.get("external_model_used") is True
+    )
+
+
+def _refresh_analysis_view(
+    *,
+    previous_analysis: Any,
+    project_values: Mapping[str, Any],
+    prompt: Any,
+    responses: Any,
+    aliases: Any,
+    competitors: Any,
+    stored_local_analysis: Any,
+    original_external_model_used: bool,
+) -> dict[str, Any]:
+    previous = previous_analysis if isinstance(previous_analysis, Mapping) else {}
+    desired_fingerprint = _local_analysis_fingerprint(
+        project_values=project_values,
+        prompt=prompt,
+        responses=responses,
+        aliases=aliases,
+        competitors=competitors,
+    )
+    stored_fingerprint = (
+        stored_local_analysis.get("input_fingerprint")
+        if isinstance(stored_local_analysis, Mapping)
+        else None
+    )
+    freshness = inspect_ai_visibility_analysis_freshness(previous)
+    force = stored_fingerprint != desired_fingerprint
+    reason = None
+    if force and not freshness["reanalysis_required"]:
+        reason = (
+            "local_analysis_input_changed"
+            if stored_fingerprint
+            else "local_analysis_input_fingerprint_missing"
+        )
+    outcome = reanalyze_ai_visibility_locally(
+        previous_analysis=previous,
+        **dict(project_values),
+        prompt=prompt,
+        responses=responses,
+        aliases=aliases,
+        competitors=competitors,
+        force=force,
+        reason=reason,
+    )
+    analysis = outcome["analysis"]
+    refresh = outcome["refresh"]
+    if refresh["performed"] and original_external_model_used:
+        analysis["methodology"] = {
+            **analysis["methodology"],
+            "external_model_used": True,
+            "external_model_used_semantics": (
+                "The response text was captured from the original provider call; "
+                "this local refresh made zero provider or network requests."
+            ),
+        }
+    analysis["methodology"] = {
+        **analysis["methodology"],
+        "local_analysis_input_fingerprint": desired_fingerprint,
+    }
+    return {
+        "analysis": analysis,
+        "refresh": refresh,
+        "local_analysis": {
+            "input_fingerprint": desired_fingerprint,
+            "input_snapshot_version": LOCAL_ANALYSIS_INPUT_SNAPSHOT_VERSION,
+            "algorithm_versions": current_ai_visibility_algorithm_versions(),
+        },
+        "freshness_before_refresh": freshness,
+    }
+
+
+def _saved_analysis_overrides(
+    database_path: str | Path,
+    *,
+    record_data: Mapping[str, Any],
+    expected_project_id: int,
+) -> dict[str, Any] | None:
+    snapshot = record_data.get("local_analysis_input_snapshot")
+    if (
+        isinstance(snapshot, Mapping)
+        and snapshot.get("version") == LOCAL_ANALYSIS_INPUT_SNAPSHOT_VERSION
+        and {"aliases", "competitors"}.issubset(snapshot)
+    ):
+        return {
+            "aliases": copy.deepcopy(snapshot.get("aliases")),
+            "competitors": copy.deepcopy(snapshot.get("competitors")),
+        }
+
+    run_id = record_data.get("run_id")
+    if isinstance(run_id, bool) or not isinstance(run_id, int) or run_id <= 0:
+        return None
+    try:
+        saved_run = get_ai_visibility_run(
+            database_path,
+            run_id,
+            project_id=expected_project_id,
+        )
+    except (LookupError, RuntimeError, ValueError, sqlite3.Error):
+        return None
+    coverage = saved_run.get("coverage_items")
+    if not isinstance(coverage, Mapping) or not {
+        "aliases",
+        "competitors",
+    }.issubset(coverage):
+        return None
+    return {
+        "aliases": copy.deepcopy(coverage.get("aliases")),
+        "competitors": copy.deepcopy(coverage.get("competitors")),
+    }
+
+
+def _unavailable_refresh(previous_analysis: Any, *, reason: str) -> dict[str, Any]:
+    previous = previous_analysis if isinstance(previous_analysis, Mapping) else {}
+    freshness = inspect_ai_visibility_analysis_freshness(previous)
+    return {
+        **freshness,
+        "status": "stale_unresolved",
+        "reanalysis_required": True,
+        "performed": False,
+        "reason": reason,
+        "provider_calls": 0,
+        "network_requests": 0,
+    }
+
+
+def _mark_sample_refresh_unavailable(
+    record: Mapping[str, Any], *, reason: str
+) -> dict[str, Any]:
+    output = copy.deepcopy(dict(record))
+    result = output.get("result")
+    if not isinstance(result, dict):
+        output["analysis_refresh"] = _unavailable_refresh({}, reason=reason)
+        return output
+    data = result.get("data")
+    if not isinstance(data, dict):
+        output["analysis_refresh"] = _unavailable_refresh({}, reason=reason)
+        return output
+    refresh = _unavailable_refresh(data.get("analysis"), reason=reason)
+    data["analysis_refresh"] = refresh
+    result["data"] = data
+    output["result"] = result
+    output["analysis_refresh"] = refresh
+    return output
+
+
+def _mark_run_refresh_unavailable(
+    saved: Mapping[str, Any], *, reason: str
+) -> dict[str, Any]:
+    output = copy.deepcopy(dict(saved))
+    refresh = _unavailable_refresh(output.get("result"), reason=reason)
+    output["analysis_refresh"] = refresh
+    return output
+
+
+def _refresh_sample_record_locally(
+    database_path: str | Path,
+    *,
+    record: Mapping[str, Any],
+    project: Mapping[str, Any],
+    exact_overrides: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    result = record.get("result")
+    if not isinstance(result, Mapping):
+        return _mark_sample_refresh_unavailable(
+            record, reason="saved_sampling_result_incomplete"
+        )
+    data = result.get("data")
+    if not isinstance(data, Mapping):
+        return _mark_sample_refresh_unavailable(
+            record, reason="saved_sampling_result_incomplete"
+        )
+    responses = data.get("captured_responses")
+    if not isinstance(responses, list) or not responses:
+        existing_refresh = data.get("analysis_refresh")
+        if (
+            isinstance(existing_refresh, Mapping)
+            and existing_refresh.get("status") == "not_available"
+        ):
+            return copy.deepcopy(dict(record))
+        return _mark_sample_refresh_unavailable(
+            record, reason="captured_responses_unavailable"
+        )
+    project_values = _local_project_values(
+        project, expected_id=int(record["project_id"])
+    )
+    overrides = (
+        dict(exact_overrides)
+        if isinstance(exact_overrides, Mapping)
+        and {"aliases", "competitors"}.issubset(exact_overrides)
+        else _saved_analysis_overrides(
+            database_path,
+            record_data=data,
+            expected_project_id=project_values["project_id"],
+        )
+    )
+    if overrides is None:
+        return _mark_sample_refresh_unavailable(
+            record, reason="saved_analysis_inputs_incomplete"
+        )
+    previous_analysis = data.get("analysis")
+    saved_prompt = (
+        previous_analysis.get("prompt")
+        if isinstance(previous_analysis, Mapping)
+        else None
+    )
+    if not isinstance(saved_prompt, str) or not saved_prompt.strip():
+        return _mark_sample_refresh_unavailable(
+            record, reason="saved_prompt_unavailable"
+        )
+    try:
+        refreshed = _refresh_analysis_view(
+            previous_analysis=previous_analysis,
+            project_values=project_values,
+            prompt=saved_prompt,
+            responses=responses,
+            aliases=overrides.get("aliases"),
+            competitors=overrides.get("competitors"),
+            stored_local_analysis=data.get("local_analysis"),
+            original_external_model_used=True,
+        )
+    except (VisibilityAnalysisError, VisibilitySamplingValidationError):
+        return _mark_sample_refresh_unavailable(
+            record, reason="saved_analysis_data_invalid"
+        )
+
+    output = copy.deepcopy(dict(record))
+    output_result = copy.deepcopy(dict(result))
+    output_data = copy.deepcopy(dict(data))
+    output_data["analysis"] = refreshed["analysis"]
+    output_data["local_analysis"] = refreshed["local_analysis"]
+    output_data["analysis_refresh"] = refreshed["refresh"]
+    output_result["data"] = output_data
+    output["result"] = output_result
+    output["analysis_refresh"] = refreshed["refresh"]
+    return output
 
 
 def _begin_or_replay(
@@ -558,7 +1044,11 @@ def _finish_request(
         conn.commit()
 
 
-def _serialize_request(row: sqlite3.Row) -> dict[str, Any]:
+def _serialize_request(
+    row: sqlite3.Row,
+    *,
+    current_time: datetime | None = None,
+) -> dict[str, Any]:
     result = None
     if row["result_json"]:
         try:
@@ -567,19 +1057,58 @@ def _serialize_request(row: sqlite3.Row) -> dict[str, Any]:
             raise VisibilitySamplingConflictError("已保存的采样结果无法读取") from exc
         if not isinstance(decoded, dict):
             raise VisibilitySamplingConflictError("已保存的采样结果格式无效")
+        if decoded.get("record_type") == _PANEL_RECORD_TYPE:
+            raise VisibilitySamplingConflictError(
+                "该请求标识属于多模型采样，不能通过单模型采样接口读取"
+            )
         result = decoded
+    status = str(row["status"])
+    in_progress_age_seconds = None
+    in_progress_expired = False
+    if status == "started":
+        in_progress_age_seconds = _started_age_seconds(
+            row["created_at"], current_time=current_time
+        )
+        in_progress_expired = (
+            in_progress_age_seconds >= IN_PROGRESS_EXPIRY_SECONDS
+        )
     return {
         "id": int(row["id"]),
         "project_id": int(row["project_id"]),
         "request_id": row["request_id"],
         "idempotency_key": row["idempotency_key"],
         "request_fingerprint": row["request_fingerprint"],
-        "status": row["status"],
+        "status": status,
+        "in_progress": status == "started",
+        "in_progress_age_seconds": in_progress_age_seconds,
+        "in_progress_expired": in_progress_expired,
+        "in_progress_expiry_seconds": IN_PROGRESS_EXPIRY_SECONDS,
         "http_status": row["http_status"],
         "result": result,
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
     }
+
+
+def _started_age_seconds(
+    created_at: Any,
+    *,
+    current_time: datetime | None,
+) -> int:
+    if not isinstance(created_at, str):
+        raise VisibilitySamplingConflictError("采样请求创建时间格式无效")
+    try:
+        created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise VisibilitySamplingConflictError("采样请求创建时间格式无效") from exc
+    if created.tzinfo is None or created.utcoffset() is None:
+        raise VisibilitySamplingConflictError("采样请求创建时间必须使用 UTC 时区")
+    observed_at = current_time or datetime.now(timezone.utc)
+    if not isinstance(observed_at, datetime):
+        raise VisibilitySamplingValidationError("current_time 必须是 datetime")
+    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+        raise VisibilitySamplingValidationError("current_time 必须包含时区")
+    return max(0, int((observed_at.astimezone(timezone.utc) - created).total_seconds()))
 
 
 def _provider_failure(exc: AIServiceError, *, sample_index: int) -> dict[str, Any]:
@@ -688,6 +1217,8 @@ def _connect(database_path: str | Path) -> sqlite3.Connection:
 
 
 __all__ = [
+    "IN_PROGRESS_EXPIRY_SECONDS",
+    "LOCAL_ANALYSIS_INPUT_SNAPSHOT_VERSION",
     "MAX_SAMPLE_COUNT",
     "MIN_SAMPLE_COUNT",
     "VISIBILITY_SAMPLE_MAX_OUTPUT_TOKENS",
@@ -697,5 +1228,7 @@ __all__ = [
     "VisibilitySamplingRequestNotFoundError",
     "VisibilitySamplingValidationError",
     "get_ai_visibility_sample_request",
+    "refresh_ai_visibility_run_locally",
+    "refresh_ai_visibility_sample_request_locally",
     "run_ai_visibility_sample",
 ]

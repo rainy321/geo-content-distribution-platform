@@ -975,16 +975,31 @@ def run_native_ui_smoke(
 
 def _start_publish_scheduler(paths: DesktopPaths):
     from services.publish_scheduler_runtime import create_publish_scheduler
+    from services.platform_review_verifier import create_platform_review_verifier
 
     # Scheduled real publishing requires a separate two-phase authorization
     # protocol.  Until that exists, the desktop scheduler may promote due jobs
     # but must never load a real publisher or contact a platform.
+    # Review monitoring is a separate read-only path: it may inspect creator
+    # status pages in an authorized desktop build, but has no publisher or
+    # submit action available to it.
+    review_enabled = (
+        str(os.getenv("GEO_REAL_PUBLISHING_AUTHORIZED", "false")).lower() == "true"
+        and str(os.getenv("GEO_PUBLISHING_RUNTIME_READY", "false")).lower() == "true"
+    )
     scheduler = create_publish_scheduler(
         paths.database,
         interval_seconds=15,
         publisher_factory=None,
         allow_real=False,
         media_root=paths.media,
+        review_verifier=(
+            create_platform_review_verifier(paths.cookies)
+            if review_enabled
+            else None
+        ),
+        review_interval_seconds=60,
+        review_limit=2,
     )
     scheduler.start()
     return scheduler

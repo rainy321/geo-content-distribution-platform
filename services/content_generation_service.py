@@ -8,11 +8,20 @@ from pathlib import Path
 from typing import Any
 
 from services.ai_service import (
+    AIEvaluationResult,
     AIOptimizationResult,
     AIServiceError,
     AISettings,
+    evaluate_geo_content,
     optimize_geo_content,
     provider_label_for_settings,
+)
+from services.ai_agent_audit_service import (
+    AI_AGENT_PIPELINE_VERSION,
+    article_diff,
+    article_snapshot,
+    stage_run_id,
+    summarize_model_independence,
 )
 from services.content_engine_adapters import (
     ColleagueContentEngineAdapter,
@@ -78,6 +87,12 @@ class _AutomaticReviewOutcome:
     usage_records: tuple[Mapping[str, Any], ...] = ()
 
 
+@dataclass(frozen=True)
+class _AutomaticEvaluationOutcome:
+    metadata: Mapping[str, Any]
+    usage_records: tuple[Mapping[str, Any], ...] = ()
+
+
 class ContentGenerationService:
     """Route one request through a configured engine and persist its audit trail."""
 
@@ -90,6 +105,10 @@ class ContentGenerationService:
         reviewer_settings: AISettings | None = None,
         reviewer_role: Mapping[str, Any] | None = None,
         reviewer_optimizer: Callable[..., Mapping[str, Any] | AIOptimizationResult]
+        | None = None,
+        evaluator_settings: AISettings | None = None,
+        evaluator_role: Mapping[str, Any] | None = None,
+        evaluator: Callable[..., AIEvaluationResult | Mapping[str, Any]]
         | None = None,
     ) -> None:
         self.database_path = Path(database_path)
@@ -112,10 +131,22 @@ class ContentGenerationService:
             reviewer_settings if self.reviewer_role["configured"] else None
         )
         self.reviewer_optimizer = reviewer_optimizer or optimize_geo_content
+        self.evaluator_role = _normalize_evaluator_role(
+            evaluator_role,
+            configured=evaluator_settings is not None,
+        )
+        self.evaluator_settings = (
+            evaluator_settings if self.evaluator_role["independent"] else None
+        )
+        self.evaluator = evaluator or evaluate_geo_content
 
     @property
     def reviewer_enabled(self) -> bool:
         return self.reviewer_settings is not None
+
+    @property
+    def evaluator_enabled(self) -> bool:
+        return self.evaluator_settings is not None
 
     @classmethod
     def from_environment(
@@ -129,6 +160,10 @@ class ContentGenerationService:
         reviewer_settings: AISettings | None = None,
         reviewer_role: Mapping[str, Any] | None = None,
         reviewer_optimizer: Callable[..., Mapping[str, Any] | AIOptimizationResult]
+        | None = None,
+        evaluator_settings: AISettings | None = None,
+        evaluator_role: Mapping[str, Any] | None = None,
+        evaluator: Callable[..., AIEvaluationResult | Mapping[str, Any]]
         | None = None,
     ) -> "ContentGenerationService":
         # A request-scoped custom AI configuration is an explicit user choice.
@@ -145,6 +180,9 @@ class ContentGenerationService:
                 reviewer_settings=reviewer_settings,
                 reviewer_role=reviewer_role,
                 reviewer_optimizer=reviewer_optimizer,
+                evaluator_settings=evaluator_settings,
+                evaluator_role=evaluator_role,
+                evaluator=evaluator,
             )
 
         primary_name = str(os.getenv("CONTENT_ENGINE", "qwen")).strip().lower()
@@ -175,6 +213,9 @@ class ContentGenerationService:
             reviewer_settings=reviewer_settings,
             reviewer_role=reviewer_role,
             reviewer_optimizer=reviewer_optimizer,
+            evaluator_settings=evaluator_settings,
+            evaluator_role=evaluator_role,
+            evaluator=evaluator,
         )
 
     def generate(self, request: ContentGenerationRequest) -> dict[str, Any]:
@@ -352,6 +393,17 @@ class ContentGenerationService:
                 effective_length=effective_length,
                 length_source=str(length_context["source"]),
             )
+            writer_snapshot = article_snapshot(_public_article(result))
+            writer_stage = {
+                **dict(request.ai_role or {}),
+                "role": "writer",
+                "agent_run_id": stage_run_id(run.run_id, "writer"),
+                "invoked": True,
+                "completed": True,
+                "provider": result.engine,
+                "model": result.engine_version,
+                "provider_request_id": result.trace_id,
+            }
             review = self._automatically_review(
                 result,
                 score,
@@ -361,12 +413,41 @@ class ContentGenerationService:
                 effective_length=effective_length,
                 length_source=str(length_context["source"]),
             )
+            review_metadata = {
+                **dict(review.metadata),
+                "agent_run_id": stage_run_id(run.run_id, "reviewer"),
+            }
             result = replace(
                 review.result,
                 elapsed_ms=round((time.perf_counter() - started_at) * 1000),
             )
             score = review.score
             citeability = review.citeability
+            evaluation = self._automatically_evaluate(
+                result,
+                score,
+                citeability,
+            )
+            evaluation_metadata = {
+                **dict(evaluation.metadata),
+                "agent_run_id": stage_run_id(run.run_id, "evaluator"),
+            }
+            pipeline_stages = [writer_stage, review_metadata, evaluation_metadata]
+            final_snapshot = article_snapshot(_public_article(result))
+            pipeline_audit = {
+                "version": AI_AGENT_PIPELINE_VERSION,
+                "generation_run_id": run.run_id,
+                "stages": pipeline_stages,
+                "drafts": {
+                    "writer": writer_snapshot,
+                    "reviewer": review_metadata.get("candidate"),
+                    "selected": final_snapshot,
+                },
+                "review_diff": review_metadata.get("diff")
+                or article_diff(writer_snapshot, final_snapshot),
+                "selected_stage": str(review_metadata.get("selected") or "writer"),
+                "model_independence": summarize_model_independence(pipeline_stages),
+            }
             analysis = {
                 "dimensions": score["dimensions"],
                 "suggestions": score["suggestions"],
@@ -375,7 +456,8 @@ class ContentGenerationService:
                 "diversity_profile": dict(request.diversity_profile or {}),
                 "ai_role": dict(request.ai_role or {}),
                 "generation_length_context": dict(length_context),
-                "review": dict(review.metadata),
+                "review": review_metadata,
+                "evaluation": evaluation_metadata,
             }
             return mark_succeeded(
                 self.database_path,
@@ -383,8 +465,15 @@ class ContentGenerationService:
                 result,
                 local_score=score["score"],
                 local_analysis=analysis,
-                generation_metadata={"review": dict(review.metadata)},
-                additional_usage_records=review.usage_records,
+                generation_metadata={
+                    "review": review_metadata,
+                    "evaluation": evaluation_metadata,
+                    "agent_pipeline": pipeline_audit,
+                },
+                additional_usage_records=(
+                    *review.usage_records,
+                    *evaluation.usage_records,
+                ),
             )
         except Exception as exc:
             # The provider may already have accepted the request. Treat every
@@ -482,6 +571,12 @@ class ContentGenerationService:
                     "elapsed_ms": None,
                     "usage": None,
                     "usage_status": "not_invoked",
+                    "candidate": None,
+                    "diff": article_diff(
+                        _public_article(writer_result),
+                        _public_article(writer_result),
+                    ),
+                    "review_opinion": None,
                 },
             )
 
@@ -640,8 +735,186 @@ class ContentGenerationService:
                 "elapsed_ms": elapsed_ms,
                 "usage": dict(usage) if usage is not None else None,
                 "usage_status": "reported" if usage is not None else "unknown",
+                "candidate": article_snapshot(_public_article(reviewer_result)),
+                "diff": article_diff(
+                    _public_article(writer_result),
+                    _public_article(reviewer_result),
+                ),
+                "review_opinion": (
+                    dict(reviewed_article.get("review_notes") or {})
+                    if isinstance(reviewed_article.get("review_notes"), Mapping)
+                    else None
+                ),
             },
             usage_records=(usage_record,),
+        )
+
+    def _automatically_evaluate(
+        self,
+        result: ContentGenerationResult,
+        score: Mapping[str, Any],
+        citeability: Mapping[str, Any],
+    ) -> _AutomaticEvaluationOutcome:
+        if not self.evaluator_enabled:
+            non_independent = bool(
+                self.evaluator_role.get("configured")
+                and not self.evaluator_role.get("independent")
+            )
+            return _AutomaticEvaluationOutcome(
+                metadata={
+                    **self.evaluator_role,
+                    "mode": "non_independent" if non_independent else "not_invoked",
+                    "invoked": False,
+                    "completed": False,
+                    "provider": None,
+                    "model": None,
+                    "provider_request_id": "",
+                    "elapsed_ms": None,
+                    "usage": None,
+                    "usage_status": "not_invoked",
+                    "opinion": None,
+                    "message": (
+                        (
+                            "evaluator 与 writer 或 reviewer 使用同一 provider/model；"
+                            "未发起付费互审调用，也不计为独立模型。"
+                        )
+                        if non_independent
+                        else (
+                            "evaluator 未独立配置；未发起第三次模型调用，"
+                            "本地规则分不是独立 AI 事实核验。"
+                        )
+                    ),
+                    "fact_check_scope": "not_invoked",
+                    "external_verification": False,
+                }
+            )
+
+        settings = self.evaluator_settings
+        assert settings is not None
+        provider = provider_label_for_settings(settings)
+        model = settings.model
+        started_at = time.perf_counter()
+        try:
+            evaluated = self.evaluator(
+                article=_public_article(result),
+                score={
+                    **dict(score),
+                    "citeability": dict(citeability),
+                },
+                settings=settings,
+            )
+        except Exception:
+            return _AutomaticEvaluationOutcome(
+                metadata={
+                    **self.evaluator_role,
+                    "mode": "independent_opinion",
+                    "invoked": True,
+                    "completed": False,
+                    "provider": provider,
+                    "model": model,
+                    "provider_request_id": "",
+                    "elapsed_ms": _elapsed_ms(started_at),
+                    "usage": None,
+                    "usage_status": "unknown",
+                    "opinion": None,
+                    "message": (
+                        "evaluator 调用或响应校验失败；文章仍保留，"
+                        "但不能声称已经完成独立事实/合规评估。"
+                    ),
+                    "fact_check_scope": "not_completed",
+                    "external_verification": False,
+                },
+                usage_records=(
+                    _evaluation_usage_record(
+                        provider=provider,
+                        model=model,
+                        usage=None,
+                        outcome="failed",
+                    ),
+                ),
+            )
+
+        if isinstance(evaluated, AIEvaluationResult):
+            opinion = dict(evaluated.evaluation)
+            provider = str(evaluated.provider or provider).strip()
+            model = str(evaluated.model or model).strip()
+            provider_request_id = str(evaluated.provider_request_id or "").strip()
+            elapsed_ms = max(0, int(evaluated.elapsed_ms or 0))
+            usage = (
+                dict(evaluated.usage)
+                if isinstance(evaluated.usage, Mapping) and evaluated.usage
+                else None
+            )
+        elif isinstance(evaluated, Mapping):
+            opinion = dict(evaluated)
+            provider_request_id = ""
+            elapsed_ms = _elapsed_ms(started_at)
+            usage = None
+        else:
+            opinion = {}
+            provider_request_id = ""
+            elapsed_ms = _elapsed_ms(started_at)
+            usage = None
+
+        if not opinion:
+            return _AutomaticEvaluationOutcome(
+                metadata={
+                    **self.evaluator_role,
+                    "mode": "independent_opinion",
+                    "invoked": True,
+                    "completed": False,
+                    "provider": provider,
+                    "model": model,
+                    "provider_request_id": provider_request_id,
+                    "elapsed_ms": elapsed_ms,
+                    "usage": usage,
+                    "usage_status": "reported" if usage is not None else "unknown",
+                    "opinion": None,
+                    "message": "evaluator 未返回可用意见；不能声称评估通过。",
+                    "fact_check_scope": "not_completed",
+                    "external_verification": False,
+                },
+                usage_records=(
+                    _evaluation_usage_record(
+                        provider=provider,
+                        model=model,
+                        usage=usage,
+                        outcome="invalid_result",
+                    ),
+                ),
+            )
+
+        return _AutomaticEvaluationOutcome(
+            metadata={
+                **self.evaluator_role,
+                "mode": "independent_opinion",
+                "invoked": True,
+                "completed": True,
+                "provider": provider,
+                "model": model,
+                "provider_request_id": provider_request_id,
+                "elapsed_ms": elapsed_ms,
+                "usage": usage,
+                "usage_status": "reported" if usage is not None else "unknown",
+                "opinion": opinion,
+                "message": (
+                    "evaluator 已给出独立意见；该模型未联网核验，"
+                    "结论不是事实证明或平台合规保证。"
+                ),
+                "fact_check_scope": str(
+                    opinion.get("fact_check_scope")
+                    or "article_and_declared_sources_only_no_web"
+                ),
+                "external_verification": False,
+            },
+            usage_records=(
+                _evaluation_usage_record(
+                    provider=provider,
+                    model=model,
+                    usage=usage,
+                    outcome="succeeded",
+                ),
+            ),
         )
 
     def _review_failure(
@@ -689,6 +962,12 @@ class ContentGenerationService:
                 "elapsed_ms": elapsed_ms,
                 "usage": dict(usage) if usage is not None else None,
                 "usage_status": "reported" if usage is not None else "unknown",
+                "candidate": None,
+                "diff": article_diff(
+                    _public_article(writer_result),
+                    _public_article(writer_result),
+                ),
+                "review_opinion": None,
             },
             usage_records=(record,),
         )
@@ -885,6 +1164,42 @@ def _normalize_reviewer_role(
     }
 
 
+def _normalize_evaluator_role(
+    value: Mapping[str, Any] | None,
+    *,
+    configured: bool,
+) -> dict[str, Any]:
+    role = dict(value or {})
+    explicitly_configured = bool(
+        (configured if not role else bool(role.get("configured")))
+        and not bool(role.get("fallback"))
+    )
+    independent = bool(
+        configured
+        and explicitly_configured
+        and not bool(role.get("same_as_writer"))
+        and not bool(role.get("same_as_reviewer"))
+    )
+    return {
+        "role": "evaluator",
+        "configured": explicitly_configured,
+        "effective_configured": bool(role.get("effective_configured", configured)),
+        "fallback": not explicitly_configured,
+        "independent": independent,
+        "source_role": (
+            str(role.get("source_role") or "evaluator")
+            if explicitly_configured
+            else "writer"
+        ),
+        "same_as_writer": (
+            bool(role.get("same_as_writer", False))
+            if explicitly_configured
+            else True
+        ),
+        "same_as_reviewer": bool(role.get("same_as_reviewer", False)),
+    }
+
+
 def _public_article(result: ContentGenerationResult) -> dict[str, Any]:
     return {
         "title": result.title,
@@ -921,6 +1236,31 @@ def _review_usage_record(
             "usage_origin": (
                 "provider_response" if reported_usage else "not_reported"
             ),
+        },
+    }
+
+
+def _evaluation_usage_record(
+    *,
+    provider: str,
+    model: str,
+    usage: Mapping[str, Any] | None,
+    outcome: str,
+) -> dict[str, Any]:
+    reported_usage = isinstance(usage, Mapping) and bool(usage)
+    return {
+        "operation": "evaluate",
+        "provider": str(provider or "unknown"),
+        "model": str(model or "unknown"),
+        "usage": dict(usage) if reported_usage else None,
+        "usage_status": "reported" if reported_usage else "unknown",
+        "metadata": {
+            "role": "evaluator",
+            "outcome": outcome,
+            "usage_origin": (
+                "provider_response" if reported_usage else "not_reported"
+            ),
+            "external_verification": False,
         },
     }
 

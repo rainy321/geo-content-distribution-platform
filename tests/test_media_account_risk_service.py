@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 
 from db.createTable import initialize_database
 from services.media_account_risk_service import (
+    ConcurrentMediaAccountCredentialUpdateError,
     classify_media_account_risk,
     get_active_media_account_risk,
     record_media_account_risk,
@@ -65,9 +66,15 @@ class MediaAccountRiskServiceTests(unittest.IsolatedAsyncioTestCase):
     def test_classifies_all_supported_risks_with_deliberate_precedence(self):
         cases = {
             "账号已被永久封禁，无法进入创作者中心": "permanent_ban",
+            "平台提示永久封号": "permanent_ban",
+            "账号已被封禁，无法访问创作者中心": "permanent_ban",
+            "账号已被封禁": "temporary_restriction",
             "违规操作导致账号暂时受到限制": "temporary_restriction",
             "请接收短信验证码完成本人验证": "verification_required",
+            "需要验证": "verification_required",
+            "需验证后继续": "verification_required",
             "Cookie 已失效，请重新登录": "session_expired",
+            "会话失效": "session_expired",
             "cookie文件不存在，请先完成快手登录": "session_expired",
             "network down: connection failed": "network_error",
         }
@@ -77,6 +84,126 @@ class MediaAccountRiskServiceTests(unittest.IsolatedAsyncioTestCase):
                     classify_media_account_risk(text)["category"], expected
                 )
         self.assertIsNone(classify_media_account_risk("文章标题不能为空"))
+
+    def test_nearby_negation_does_not_create_or_freeze_a_risk(self):
+        safe_messages = (
+            "账号未被封禁，可以正常使用",
+            "账号没有被封禁",
+            "账号不需要验证，可继续使用",
+            "平台未要求接收短信验证码",
+            "登录状态未失效，不需要重新登录",
+            "网络没有异常，连接未失败",
+            "account is not banned and verification is not required",
+        )
+        for message in safe_messages:
+            with self.subTest(message=message):
+                self.assertIsNone(classify_media_account_risk(message))
+                self.assertIsNone(
+                    record_media_account_risk(
+                        self.db_path,
+                        self.account_id,
+                        source="login_check",
+                        error_text=message,
+                    )
+                )
+
+        self.assertIsNone(
+            get_active_media_account_risk(self.db_path, self.account_id)
+        )
+
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            account_status = conn.execute(
+                "SELECT status FROM user_info WHERE id = ?",
+                (self.account_id,),
+            ).fetchone()[0]
+            job_status = conn.execute(
+                "SELECT status FROM publish_jobs WHERE id = ?",
+                (self.job_id,),
+            ).fetchone()[0]
+            event_count = conn.execute(
+                "SELECT COUNT(*) FROM media_account_risk_events"
+            ).fetchone()[0]
+        self.assertEqual(account_status, 1)
+        self.assertEqual(job_status, "queued")
+        self.assertEqual(event_count, 0)
+
+    def test_double_negation_and_later_clause_preserve_real_risk(self):
+        cases = {
+            "并非无需验证，仍需要本人验证": "verification_required",
+            "账号并非未被永久封禁": "permanent_ban",
+            "申诉未通过，账号已被封禁": "temporary_restriction",
+            "账号未被封禁，但仍需要本人验证": "verification_required",
+            "账号不需要验证，但申诉未通过，账号已被封禁": (
+                "temporary_restriction"
+            ),
+        }
+        for message, expected in cases.items():
+            with self.subTest(message=message):
+                self.assertEqual(
+                    classify_media_account_risk(message)["category"],
+                    expected,
+                )
+
+    def test_obsolete_session_risk_cannot_freeze_relogged_account(self):
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                conn.execute(
+                    """
+                    UPDATE user_info
+                    SET filePath = 'fresh.json', status = 1,
+                        credential_epoch = credential_epoch + 1
+                    WHERE id = ?
+                    """,
+                    (self.account_id,),
+                )
+
+        with self.assertRaises(ConcurrentMediaAccountCredentialUpdateError):
+            record_media_account_risk(
+                self.db_path,
+                self.account_id,
+                source="login_check",
+                error_text="旧浏览器看到账号已被永久封禁",
+                expected_credential_epoch=1,
+            )
+
+        self.assertIsNone(get_active_media_account_risk(self.db_path, self.account_id))
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            status, epoch = conn.execute(
+                "SELECT status, credential_epoch FROM user_info WHERE id = ?",
+                (self.account_id,),
+            ).fetchone()
+            event_count = conn.execute(
+                "SELECT COUNT(*) FROM media_account_risk_events"
+            ).fetchone()[0]
+            job_status = conn.execute(
+                "SELECT status FROM publish_jobs WHERE id = ?", (self.job_id,)
+            ).fetchone()[0]
+        self.assertEqual((status, epoch), (1, 2))
+        self.assertEqual(event_count, 0)
+        self.assertEqual(job_status, "queued")
+
+    def test_active_risk_from_old_credential_epoch_is_hidden_after_relogin(self):
+        event = record_media_account_risk(
+            self.db_path,
+            self.account_id,
+            source="publish",
+            error_text="账号已被永久封禁",
+            expected_credential_epoch=1,
+        )
+        self.assertIsNotNone(event)
+        self.assertNotIn("credential_epoch", event)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                conn.execute(
+                    """
+                    UPDATE user_info
+                    SET status = 1, credential_epoch = credential_epoch + 1
+                    WHERE id = ?
+                    """,
+                    (self.account_id,),
+                )
+
+        self.assertIsNone(get_active_media_account_risk(self.db_path, self.account_id))
 
     def test_sanitizes_credential_material_before_persisting_evidence(self):
         sanitized = sanitize_risk_evidence(
@@ -132,6 +259,30 @@ class MediaAccountRiskServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 0)
         self.assertEqual(job[:3], ("need_action", 0, ""))
         self.assertIn("账号永久封禁", job[3])
+        self.assertEqual(event_count, 1)
+
+    def test_active_risk_deduplicates_dynamic_surrounding_evidence(self):
+        first = record_media_account_risk(
+            self.db_path,
+            self.account_id,
+            source="publish",
+            error_text="账号已被永久封禁，提示时间 09:30",
+            occurred_at="2026-09-10T09:30:00Z",
+        )
+        second = record_media_account_risk(
+            self.db_path,
+            self.account_id,
+            source="publish",
+            error_text="账号已被永久封禁，提示时间 09:35",
+            occurred_at="2026-09-10T09:35:00Z",
+        )
+
+        self.assertEqual(second["id"], first["id"])
+        self.assertIn("09:35", second["evidence"])
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            event_count = conn.execute(
+                "SELECT COUNT(*) FROM media_account_risk_events"
+            ).fetchone()[0]
         self.assertEqual(event_count, 1)
 
     def test_network_error_is_visible_but_does_not_freeze_account_or_job(self):

@@ -133,6 +133,49 @@ class AIVisibilityApiTests(unittest.TestCase):
         self.assertTrue(data["samples"][0]["brand_mentioned"])
         self.assertEqual(len(data["entities"]), 1)
 
+    def test_uses_only_brand_anchored_project_keywords_as_automatic_aliases(self):
+        with closing(sqlite3.connect(self.database_path)) as conn:
+            with conn:
+                conn.execute(
+                    """
+                    UPDATE projects
+                    SET name = ?, product = ?, keywords = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        "北京同于野科技有限公司",
+                        "懂AI 国内模型聚合与中转站",
+                        json.dumps(
+                            ["同于野", "同于野AI中转站", "AI API中转站"],
+                            ensure_ascii=False,
+                        ),
+                        self.project_id,
+                    ),
+                )
+
+        response = self.client.post(
+            "/api/geo/visibility/analyze",
+            json=self.payload(
+                responses=["同于野AI API中转站适合需要统一接口的开发者。"],
+            ),
+        )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()["data"]
+        self.assertEqual(data["summary"]["mention_rate"], 1.0)
+        self.assertEqual(
+            data["samples"][0]["matched_entity_terms"][0],
+            {
+                "match_type": "ALIAS",
+                "sources": ["project_keyword"],
+                "term": "同于野",
+            },
+        )
+        effective_aliases = {
+            item["term"] for item in data["project"]["effective_brand_aliases"]
+        }
+        self.assertNotIn("AI API中转站", effective_aliases)
+
     def test_persists_and_restores_local_history_only_when_requested(self):
         analyzed = self.client.post(
             "/api/geo/visibility/analyze",

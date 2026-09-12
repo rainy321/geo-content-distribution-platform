@@ -147,10 +147,20 @@ async def _reconcile_posted_note(page: Any, title: str) -> dict[str, Any]:
             if note_id:
                 public_url = f"https://www.xiaohongshu.com/explore/{note_id}"
                 return {
-                    "status": "success",
-                    "success": True,
+                    # The creator-side ``posted`` feed proves only that the
+                    # platform accepted/listed the note for this authenticated
+                    # creator.  A syntactically valid explore URL can still be
+                    # unavailable to logged-out visitors while moderation or
+                    # visibility checks are pending, so it must not be promoted
+                    # to public/GEO success here.
+                    "status": "processing",
+                    "success": False,
                     "url": public_url,
-                    "message": "小红书创作中心“已发布”列表与 posted 接口已核验",
+                    "message": (
+                        "小红书创作中心“已发布”列表与 posted 接口已核验，"
+                        "但这仅是创作者侧证据；平台处理中/审核终态、"
+                        "匿名访问和 GEO 可抓取性尚未核验，请勿重复提交"
+                    ),
                 }
 
         title_candidates = page.get_by_text(title, exact=True)

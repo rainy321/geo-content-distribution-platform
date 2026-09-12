@@ -7,7 +7,9 @@ import {
   VISIBILITY_SAMPLE_OUTPUT_TOKEN_LIMIT,
   applyVisibilityProviderPreset,
   buildManualSampleImport,
+  buildVisibilityPanelRequest,
   buildVisibilitySamplingRequest,
+  normalizeVisibilityPanelResponse,
   normalizeVisibilitySamplingResponse,
   validateVisibilitySamplingDraft
 } from '../src/utils/visibilitySampling.js'
@@ -114,6 +116,78 @@ test('sampling draft requires a configured unified engine but never requires its
   assert.deepEqual(ready, [])
 })
 
+test('multi-model panel requires two distinct configured API models', () => {
+  const missing = validateVisibilitySamplingDraft({
+    projectId: 1,
+    prompt: '有效问题',
+    sampleCount: 1,
+    useUnifiedEngine: true,
+    unifiedConfigured: true,
+    multiModel: true,
+    distinctConfiguredModelCount: 1,
+    confirmed: true
+  })
+  assert.deepEqual(missing, ['至少配置 2 个不同的 API 模型后才能运行多模型对照'])
+
+  const body = buildVisibilityPanelRequest({
+    projectId: 1,
+    prompt: '有效问题',
+    sampleCount: 2,
+    aliases: [],
+    competitors: [],
+    persist: true,
+    useUnifiedEngine: true,
+    unifiedConfigured: true,
+    distinctConfiguredModelCount: 2,
+    roles: ['writer', 'reviewer'],
+    confirmed: true
+  })
+  assert.deepEqual(body.roles, ['writer', 'reviewer'])
+  assert.equal(body.confirm_external_call, true)
+  assert.equal('ai_config' in body, false)
+})
+
+test('panel receipt never promotes provider API samples into consumer app verification', () => {
+  const receipt = normalizeVisibilityPanelResponse({
+    data: {
+      status: 'completed',
+      need_action: false,
+      distinct_model_count: 2,
+      multi_model_executed: true,
+      comparison_eligible: true,
+      targets: [{
+        role: 'writer',
+        execution_status: 'executed',
+        status: 'completed',
+        provider: 'qwen',
+        model: 'writer-model',
+        completed_sample_count: 1,
+        requested_sample_count: 1,
+        channel_type: 'provider_api',
+        web_search_verified: false,
+        consumer_surface_verified: false
+      }],
+      channel_coverage: [
+        { channel_type: 'provider_api', status: 'sampled', sampled_model_count: 2, web_search_verified: false },
+        { channel_type: 'consumer_web', status: 'unverified', sampled_model_count: 0, web_search_verified: false },
+        { channel_type: 'mobile_app', status: 'unverified', sampled_model_count: 0, web_search_verified: false }
+      ],
+      consumer_parity: { status: 'unverified', claim_allowed: false },
+      claim_boundary: 'API only'
+    }
+  })
+
+  assert.equal(receipt.distinctModelCount, 2)
+  assert.equal(receipt.multiModelExecuted, true)
+  assert.equal(receipt.targets[0].channelType, 'provider_api')
+  assert.equal(receipt.targets[0].webSearchVerified, false)
+  assert.deepEqual(
+    receipt.channelCoverage.filter(item => item.channelType !== 'provider_api').map(item => item.status),
+    ['unverified', 'unverified']
+  )
+  assert.equal(receipt.consumerParity.claim_allowed, false)
+})
+
 test('partial result keeps completed evidence, honest unknown cost and failure action', () => {
   const result = normalizeVisibilitySamplingResponse({
     code: 207,
@@ -175,6 +249,7 @@ test('EXE visibility view defaults to the unified engine and keeps explicit-call
   const viewSource = readFileSync(new URL('../src/views/AiVisibility.vue', import.meta.url), 'utf8')
 
   assert.match(apiSource, /\/api\/geo\/visibility\/sample/)
+  assert.match(apiSource, /\/api\/geo\/visibility\/sample-panel/)
   assert.match(apiSource, /getVisibilitySample/)
   assert.match(apiSource, /Idempotency-Key/)
   assert.match(viewSource, /仅发送下面这一段问题/)
@@ -182,6 +257,9 @@ test('EXE visibility view defaults to the unified engine and keeps explicit-call
   assert.match(viewSource, /使用已保存的统一引擎/)
   assert.match(viewSource, /高级：仅本次覆盖/)
   assert.match(viewSource, /不会后台自动回测/)
+  assert.match(viewSource, /CONTROLLED API SAMPLE/)
+  assert.match(viewSource, /channel_type/)
+  assert.match(viewSource, /消费者网页 \/ App/)
   assert.match(viewSource, /撤销导入/)
   assert.match(viewSource, /不会自动重试/)
   assert.match(viewSource, /保留原请求身份并继续查询/)

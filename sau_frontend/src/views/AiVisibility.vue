@@ -187,18 +187,18 @@
           <section class="live-sampling-panel" aria-labelledby="live-sampling-title">
             <header class="sampling-heading">
               <div>
-                <span>CONTROLLED LIVE SAMPLE / UNIFIED ENGINE</span>
-                <h3 id="live-sampling-title">从真实 AI 取得回答，再在本机量化</h3>
-                <p>默认使用系统设置里保存的统一引擎；每次 1–5 条，只在你确认当前 Prompt 后调用，不会后台自动回测。</p>
+                <span>CONTROLLED API SAMPLE / MODEL PANEL</span>
+                <h3 id="live-sampling-title">从已配置 API 模型取得回答，再在本机量化</h3>
+                <p>这里只调用 OpenAI-compatible API，不等同于豆包、元宝、千问等网页或手机 App；消费者入口必须另行实测，不会后台自动回测。</p>
               </div>
-              <span class="session-badge">ONE ENGINE</span>
+              <span class="session-badge">{{ sampling.multiModel ? 'MODEL PANEL' : 'API MODEL' }}</span>
             </header>
 
             <section :class="['sampling-engine-bus', { ready: unifiedAIStatus.configured }]" aria-live="polite">
               <div class="engine-pulse" aria-hidden="true"><i /></div>
               <div>
                 <span>UNIFIED AI BUS</span>
-                <strong>{{ unifiedAIStatusLoading ? '正在读取统一引擎…' : (unifiedAIStatus.configured ? samplingEngineLabel : '统一引擎尚未配置') }}</strong>
+                <strong>{{ unifiedAIStatusLoading ? '正在读取 API 模型…' : (unifiedAIStatus.configured ? samplingEngineLabel : 'API 模型尚未配置') }}</strong>
                 <small v-if="unifiedAIStatusError">读取失败：{{ unifiedAIStatusError }}</small>
                 <small v-else>{{ unifiedAIStatus.configured ? `${samplingEngineModel} · ${samplingEngineBaseUrl}` : '保存一次后，写稿、调优和回测共用，不必重复填写 Key。' }}</small>
               </div>
@@ -211,10 +211,21 @@
               </button>
             </section>
 
+            <dl class="sampling-truth-grid" aria-label="采样真实性边界">
+              <div><dt>channel_type</dt><dd>provider_api</dd></div>
+              <div><dt>独立模型</dt><dd>{{ configuredDistinctModelCount }} 个已配置</dd></div>
+              <div><dt>联网检索</dt><dd>未验证</dd></div>
+              <div><dt>消费者网页 / App</dt><dd>未验证</dd></div>
+            </dl>
+
             <div class="sampling-mode-row">
               <label>
                 <input v-model="sampling.useUnifiedEngine" type="checkbox" @change="handleSamplingModeChange" />
                 <span>使用已保存的统一引擎</span>
+              </label>
+              <label>
+                <input v-model="sampling.multiModel" type="checkbox" @change="handleMultiModelChange" />
+                <span>并行对照独立模型（{{ configuredDistinctModelCount }} 个）</span>
               </label>
               <button
                 type="button"
@@ -261,7 +272,7 @@
             <label class="sample-count-field">
               <span>样本数</span>
               <el-input-number v-model="sampling.sampleCount" :min="1" :max="5" controls-position="right" />
-              <small>按顺序执行，不并发突发。</small>
+              <small>{{ sampling.multiModel ? '不同模型并行；同一模型内仍按顺序采样。' : '按顺序执行，不并发突发。' }}</small>
             </label>
 
             <div class="dispatch-slip">
@@ -273,9 +284,9 @@
                     <h4>仅发送下面这一段问题</h4>
                   </div>
                   <dl>
-                    <div><dt>服务</dt><dd>{{ samplingEngineLabel }}</dd></div>
-                    <div><dt>地址</dt><dd>{{ samplingEngineBaseUrl || '未填写' }}</dd></div>
-                    <div><dt>模型</dt><dd>{{ samplingEngineModel || '未填写' }}</dd></div>
+                    <div><dt>服务</dt><dd>{{ sampling.multiModel ? `${configuredDistinctModelCount} 个独立 API 模型` : samplingEngineLabel }}</dd></div>
+                    <div><dt>地址</dt><dd>{{ sampling.multiModel ? '分别使用各角色安全配置' : (samplingEngineBaseUrl || '未填写') }}</dd></div>
+                    <div><dt>模型</dt><dd>{{ sampling.multiModel ? configuredModelLabels.join('、') : (samplingEngineModel || '未填写') }}</dd></div>
                   </dl>
                 </div>
                 <pre>{{ samplingPromptPreview || '请先填写上方“监测问题”。' }}</pre>
@@ -288,7 +299,7 @@
                 </div>
                 <div class="dispatch-confirm">
                   <el-checkbox v-model="sampling.confirmed">
-                    我已核对 Prompt 与统一引擎，同意本次 {{ sampling.sampleCount }} 次顺序调用
+                    我已核对 Prompt 与 API 模型，同意本次最多 {{ sampling.sampleCount * (sampling.multiModel ? configuredDistinctModelCount : 1) }} 次调用
                   </el-checkbox>
                   <el-button
                     type="primary"
@@ -296,7 +307,7 @@
                     :disabled="!canStartSampling"
                     @click="startLiveSampling"
                   >
-                    {{ samplingLoading ? '正在顺序采样' : '确认并开始真实采样' }}
+                    {{ samplingLoading ? '正在采样' : (sampling.multiModel ? '确认并开始多模型 API 对照' : '确认并开始 API 采样') }}
                     <el-icon v-if="!samplingLoading"><ArrowRight /></el-icon>
                   </el-button>
                 </div>
@@ -370,6 +381,7 @@
               </div>
 
               <div v-if="liveSamplingReceipt" class="receipt-boundary">
+                <p><strong>入口类型：</strong>{{ liveSamplingReceipt.channelType }}；独立模型 {{ liveSamplingReceipt.distinctModelCount }} 个；联网检索 {{ liveSamplingReceipt.grounding.web_search_verified ? '已验证' : '未验证' }}。</p>
                 <p><strong>发送凭据：</strong>{{ liveSamplingReceipt.disclosure.sentToProvider.join('、') || '后端未返回' }} · prompt SHA-256 {{ shortHash(liveSamplingReceipt.disclosure.promptSha256) }}</p>
                 <p><strong>计价口径：</strong>不硬编码易变的模型价格；未配置单价或供应商未回传用量时记为“未知”，绝不显示成 0 成本。</p>
                 <p><strong>不可比性：</strong>不同模型、模型版本、prompt、样本数或采样时间的结果不能直接归因比较；模型回答没有联网核验保证。</p>
@@ -389,6 +401,28 @@
                 <el-button v-if="manualImportSnapshot" @click="rollbackManualImport">撤销导入</el-button>
                 <small>导入只修改本页文本，可随时撤销；不会再次调用模型。</small>
               </footer>
+            </article>
+
+            <article v-if="visibilityPanelReceipt" class="sampling-receipt" :class="`status-${visibilityPanelReceipt.status}`" aria-live="polite">
+              <header>
+                <div><span>API MODEL PANEL RECEIPT</span><h4>多模型 API 对照</h4></div>
+                <strong>{{ visibilityPanelReceipt.distinctModelCount }} 个独立模型</strong>
+              </header>
+              <div class="execution-receipts">
+                <article v-for="target in visibilityPanelReceipt.targets" :key="target.role">
+                  <span>{{ target.role.toUpperCase() }}</span>
+                  <div>
+                    <strong>{{ target.provider || '未配置' }} · {{ target.model || '未配置' }}</strong>
+                    <small>{{ target.executionStatus }} · {{ target.completedSampleCount }} / {{ target.requestedSampleCount }} 条</small>
+                  </div>
+                  <b>{{ target.skipReason || target.failure?.message || target.status }}</b>
+                </article>
+              </div>
+              <div class="receipt-boundary">
+                <p><strong>channel_type：</strong>provider_api；多模型实际执行：{{ visibilityPanelReceipt.multiModelExecuted ? '是' : '否' }}。</p>
+                <p><strong>联网检索：</strong>未验证。<strong>消费者网页：</strong>未验证。<strong>手机 App：</strong>未验证。</p>
+                <p><strong>真实性边界：</strong>{{ visibilityPanelReceipt.claimBoundary }}</p>
+              </div>
             </article>
           </section>
 
@@ -1073,7 +1107,9 @@ import {
   VISIBILITY_SAMPLE_OUTPUT_TOKEN_LIMIT,
   applyVisibilityProviderPreset,
   buildManualSampleImport,
+  buildVisibilityPanelRequest,
   buildVisibilitySamplingRequest,
+  normalizeVisibilityPanelResponse,
   normalizeVisibilitySamplingResponse,
   samplingStatusLabel,
   validateVisibilitySamplingDraft,
@@ -1107,6 +1143,7 @@ const samplingLoading = ref(false)
 const samplingRecoveryLoading = ref(false)
 const samplingError = ref('')
 const liveSamplingReceipt = ref(null)
+const visibilityPanelReceipt = ref(null)
 const samplingResumeMessage = ref('')
 const manualImportSnapshot = ref(null)
 const samplingOverrideExpanded = ref(false)
@@ -1124,6 +1161,7 @@ let commercialRequestSequence = 0
 let samplingResumeTimer = null
 const SAMPLING_SESSION_KEY = 'geo.ai-visibility.pending-sample.v1'
 const SAMPLING_RESUME_POLL_MS = 2000
+const SAMPLING_RESUME_MAX_MS = 20 * 60 * 1000
 
 const form = reactive({
   projectId: '',
@@ -1139,6 +1177,7 @@ const form = reactive({
 const providerPresets = VISIBILITY_PROVIDER_PRESETS
 const sampling = reactive({
   useUnifiedEngine: true,
+  multiModel: false,
   providerId: 'qwen',
   baseUrl: visibilityProviderPreset('qwen').baseUrl,
   model: visibilityProviderPreset('qwen').model,
@@ -1159,16 +1198,39 @@ const selectedProject = computed(() => (
   projects.value.find(project => String(project.id) === String(form.projectId)) || null
 ))
 const activeProviderPreset = computed(() => visibilityProviderPreset(sampling.providerId))
+const configuredModelRoles = computed(() => {
+  const seen = new Set()
+  return ['writer', 'reviewer', 'evaluator'].flatMap(roleId => {
+    const role = unifiedAIStatus.roles?.[roleId]
+    const eligible = roleId === 'writer'
+      ? role?.effectiveConfigured
+      : role?.configured && !role?.fallback
+    if (!eligible || !role?.model) return []
+    const identity = [role.provider, role.baseUrl, role.model].map(String).join('|').toLowerCase()
+    if (seen.has(identity)) return []
+    seen.add(identity)
+    return [{ ...role, roleId }]
+  })
+})
+const configuredDistinctModelCount = computed(() => configuredModelRoles.value.length)
+const configuredModelLabels = computed(() => configuredModelRoles.value.map(role => (
+  `${role.providerLabel || role.provider || role.roleId} / ${role.model}`
+)))
+const unifiedSamplingRole = computed(() => {
+  const evaluator = unifiedAIStatus.roles?.evaluator
+  if (evaluator?.configured && !evaluator?.fallback) return evaluator
+  return unifiedAIStatus.roles?.writer || {}
+})
 const samplingEngineLabel = computed(() => (
   sampling.useUnifiedEngine
-    ? (unifiedAIStatus.providerLabel || '统一 AI 引擎')
+    ? `${unifiedSamplingRole.value.providerLabel || unifiedAIStatus.providerLabel || '统一 AI 引擎'}${unifiedSamplingRole.value.id === 'evaluator' ? '（评估角色）' : '（写稿回退，非独立）'}`
     : activeProviderPreset.value.label
 ))
 const samplingEngineBaseUrl = computed(() => (
-  sampling.useUnifiedEngine ? (unifiedAIStatus.baseUrl || '由运行环境安全提供') : sampling.baseUrl
+  sampling.useUnifiedEngine ? (unifiedSamplingRole.value.baseUrl || unifiedAIStatus.baseUrl || '由运行环境安全提供') : sampling.baseUrl
 ))
 const samplingEngineModel = computed(() => (
-  sampling.useUnifiedEngine ? (unifiedAIStatus.model || '由运行环境提供') : sampling.model
+  sampling.useUnifiedEngine ? (unifiedSamplingRole.value.model || unifiedAIStatus.model || '由运行环境提供') : sampling.model
 ))
 const samplingPromptPreview = computed(() => form.prompt.trim())
 const samplingDraft = computed(() => ({
@@ -1183,7 +1245,10 @@ const samplingDraft = computed(() => ({
   unifiedConfigured: unifiedAIStatus.configured,
   baseUrl: sampling.baseUrl,
   model: sampling.model,
-  apiKey: sampling.apiKey
+  apiKey: sampling.apiKey,
+  multiModel: sampling.multiModel,
+  distinctConfiguredModelCount: configuredDistinctModelCount.value,
+  roles: ['writer', 'reviewer', 'evaluator']
 }))
 const samplingIssues = computed(() => validateVisibilitySamplingDraft(samplingDraft.value))
 const canStartSampling = computed(() => !samplingLoading.value && samplingIssues.value.length === 0)
@@ -1427,7 +1492,19 @@ const selectSamplingProvider = providerId => {
 
 const handleSamplingModeChange = () => {
   sampling.confirmed = false
-  if (!sampling.useUnifiedEngine) samplingOverrideExpanded.value = true
+  if (!sampling.useUnifiedEngine) {
+    sampling.multiModel = false
+    samplingOverrideExpanded.value = true
+  }
+}
+
+const handleMultiModelChange = () => {
+  sampling.confirmed = false
+  visibilityPanelReceipt.value = null
+  if (sampling.multiModel) {
+    sampling.useUnifiedEngine = true
+    samplingOverrideExpanded.value = false
+  }
 }
 
 const createSamplingIdentity = () => {
@@ -1445,15 +1522,19 @@ const readPendingSamplingSession = () => {
     if (!raw) return null
     const parsed = JSON.parse(raw)
     if (!parsed || typeof parsed !== 'object' || !String(parsed.requestId || '').trim()) return null
+    if (!Number.isFinite(Date.parse(parsed.startedAt))) {
+      parsed.startedAt = new Date().toISOString()
+    }
     return parsed
   } catch {
     return null
   }
 }
 
-const savePendingSamplingSession = (identity, payload) => {
+const savePendingSamplingSession = (identity, payload, { mode = 'single' } = {}) => {
   try {
     window.sessionStorage?.setItem(SAMPLING_SESSION_KEY, JSON.stringify({
+      mode,
       requestId: identity.requestId,
       idempotencyKey: identity.idempotencyKey,
       projectId: payload.project_id,
@@ -1492,13 +1573,29 @@ const restoreSamplingForm = pending => {
     : sampling.sampleCount
   form.persist = pending.persist !== false
   sampling.useUnifiedEngine = pending.useUnifiedEngine !== false
+  sampling.multiModel = pending.mode === 'panel'
 }
 
 const scheduleSamplingResumePoll = pending => {
   if (samplingResumeTimer) window.clearTimeout(samplingResumeTimer)
+  if (stopExpiredSamplingRecovery(pending)) return
   samplingResumeTimer = window.setTimeout(() => {
-    void pollPendingSampling(pending)
+    if (pending?.mode === 'panel') void pollPendingPanel(pending)
+    else void pollPendingSampling(pending)
   }, SAMPLING_RESUME_POLL_MS)
+}
+
+const stopExpiredSamplingRecovery = pending => {
+  const startedAt = Date.parse(pending?.startedAt)
+  if (!Number.isFinite(startedAt) || Date.now() - startedAt < SAMPLING_RESUME_MAX_MS) {
+    return false
+  }
+  if (samplingResumeTimer) window.clearTimeout(samplingResumeTimer)
+  samplingResumeTimer = null
+  samplingLoading.value = false
+  samplingResumeMessage.value = ''
+  samplingError.value = `原请求 ${String(pending?.requestId || '')} 已超过 20 分钟；已停止自动查询并保留请求身份。请先核对供应商账单和本机状态，系统不会自动重发。`
+  return true
 }
 
 const finishRestoredSampling = async responseData => {
@@ -1516,6 +1613,7 @@ const finishRestoredSampling = async responseData => {
 
 const pollPendingSampling = async pending => {
   if (!pending?.requestId) return
+  if (stopExpiredSamplingRecovery(pending)) return
   samplingLoading.value = true
   samplingResumeMessage.value = '正在恢复原采样进度；切换页面不会重新调用模型。'
   try {
@@ -1546,11 +1644,59 @@ const pollPendingSampling = async pending => {
   }
 }
 
+const finishRestoredPanel = responseData => {
+  const receipt = normalizeVisibilityPanelResponse(responseData)
+  clearPendingSamplingSession()
+  samplingLoading.value = false
+  samplingError.value = ''
+  visibilityPanelReceipt.value = receipt
+  const count = receipt.distinctModelCount
+  if (receipt.multiModelExecuted && receipt.status === 'completed') {
+    ElMessage.success(`已恢复多模型 API 对照：${count} 个独立模型完整返回。`)
+  } else {
+    ElMessage.warning('已恢复原多模型结果；样本未全部完成，系统没有重复调用模型。')
+  }
+}
+
+const pollPendingPanel = async pending => {
+  if (!pending?.requestId) return
+  if (stopExpiredSamplingRecovery(pending)) return
+  samplingLoading.value = true
+  samplingResumeMessage.value = '正在恢复原多模型面板；只读查询不会新增模型调用。'
+  try {
+    const response = await diagnosticsApi.getVisibilityPanel(pending.requestId, {
+      suppressGlobalError: true
+    })
+    const status = String(response.data?.status || response.data?.data?.status || '')
+    if (status === 'processing') {
+      scheduleSamplingResumePoll(pending)
+      return
+    }
+    finishRestoredPanel(response.data)
+  } catch (error) {
+    const responseData = error?.response?.data
+    const terminalStatus = String(responseData?.data?.status || '')
+    if (['completed', 'partial', 'need_action'].includes(terminalStatus)) {
+      finishRestoredPanel(responseData)
+      return
+    }
+    if (error?.response?.status === 404) {
+      clearPendingSamplingSession()
+      samplingLoading.value = false
+      samplingError.value = '原多模型面板不存在，未自动重发；请确认桌面数据目录是否已切换。'
+      return
+    }
+    samplingResumeMessage.value = '暂时无法读取原多模型面板；将继续只读查询，不会自动重发。'
+    scheduleSamplingResumePoll(pending)
+  }
+}
+
 const restorePendingSampling = () => {
   const pending = readPendingSamplingSession()
   if (!pending) return
   restoreSamplingForm(pending)
-  void pollPendingSampling(pending)
+  if (pending.mode === 'panel') void pollPendingPanel(pending)
+  else void pollPendingSampling(pending)
 }
 
 const shortHash = value => {
@@ -1654,20 +1800,50 @@ const startLiveSampling = async () => {
     return
   }
 
-  const payload = buildVisibilitySamplingRequest(samplingDraft.value)
+  const multiModel = sampling.multiModel === true
+  const payload = multiModel
+    ? buildVisibilityPanelRequest(samplingDraft.value)
+    : buildVisibilitySamplingRequest(samplingDraft.value)
   const identity = createSamplingIdentity()
-  savePendingSamplingSession(identity, payload)
+  savePendingSamplingSession(identity, payload, {
+    mode: multiModel ? 'panel' : 'single'
+  })
   samplingLoading.value = true
-  samplingResumeMessage.value = '采样已登记到本机；离开本页后返回仍会恢复进度，不会重复计费。'
+  samplingResumeMessage.value = multiModel
+    ? '多模型面板为每个 API 模型建立独立幂等请求；任一失败不会重发其他模型。'
+    : '采样已登记到本机；离开本页后返回仍会恢复进度，不会重复计费。'
   samplingError.value = ''
   liveSamplingReceipt.value = null
+  visibilityPanelReceipt.value = null
   result.value = null
   sampling.confirmed = false
   try {
-    const response = await diagnosticsApi.sampleVisibility(payload, {
-      ...identity,
-      suppressGlobalError: true
-    })
+    const response = multiModel
+      ? await diagnosticsApi.sampleVisibilityPanel(payload, {
+          ...identity,
+          suppressGlobalError: true
+        })
+      : await diagnosticsApi.sampleVisibility(payload, {
+          ...identity,
+          suppressGlobalError: true
+        })
+    if (multiModel) {
+      const responseStatus = String(response.data?.status || response.data?.data?.status || '')
+      if (responseStatus === 'processing') {
+        samplingResumeMessage.value = '多模型面板仍在原进程中；将继续只读恢复，不会重复调用。'
+        scheduleSamplingResumePoll(readPendingSamplingSession())
+        return
+      }
+      clearPendingSamplingSession()
+      visibilityPanelReceipt.value = normalizeVisibilityPanelResponse(response)
+      const count = visibilityPanelReceipt.value.distinctModelCount
+      if (visibilityPanelReceipt.value.multiModelExecuted) {
+        ElMessage.success(`多模型 API 对照完成：实际取得 ${count} 个独立模型的样本。`)
+      } else {
+        ElMessage.warning('没有取得至少两个不同 API 模型的样本，不能称为多模型对照。')
+      }
+      return
+    }
     const receipt = normalizeVisibilitySamplingResponse(response)
     clearPendingSamplingSession()
     await applyLiveSamplingOutcome(receipt)
@@ -1678,11 +1854,23 @@ const startLiveSampling = async () => {
     }
   } catch (error) {
     const responseData = error?.response?.data
-    if (responseData?.data && typeof responseData.data === 'object') {
+    if (multiModel && responseData?.data && typeof responseData.data === 'object') {
+      const status = String(responseData.data.status || '')
+      if (status === 'processing') {
+        samplingResumeMessage.value = '多模型面板仍在原进程中；将继续只读恢复，不会重复调用。'
+        scheduleSamplingResumePoll(readPendingSamplingSession())
+      } else {
+        clearPendingSamplingSession()
+        visibilityPanelReceipt.value = normalizeVisibilityPanelResponse(responseData)
+      }
+    } else if (!multiModel && responseData?.data && typeof responseData.data === 'object') {
       clearPendingSamplingSession()
       await applyLiveSamplingOutcome(normalizeVisibilitySamplingResponse(responseData))
-    } else {
+    } else if (!multiModel) {
       samplingResumeMessage.value = '请求连接中断；保留原请求身份并继续查询，不会自动重发。'
+      scheduleSamplingResumePoll(readPendingSamplingSession())
+    } else {
+      samplingResumeMessage.value = '多模型 API 对照连接中断；保留原请求身份并继续只读恢复。'
       scheduleSamplingResumePoll(readPendingSamplingSession())
     }
     samplingError.value = readableError(error)
@@ -2258,6 +2446,17 @@ onBeforeUnmount(() => {
   > button { padding: 8px 11px; border: 1px solid #bfc0bd; border-radius: 5px; color: var(--ink); background: #fff; font-size: 9px; font-weight: 700; cursor: pointer; }
   > button:hover { border-color: var(--ink); }
   > button:focus-visible { outline: 2px solid var(--ink); outline-offset: 2px; }
+}
+.sampling-truth-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 10px 0 0;
+  border: 1px solid #d8d9d6;
+  background: #fff;
+  > div { padding: 9px 11px; border-right: 1px solid #e2e3df; }
+  > div:last-child { border-right: 0; }
+  dt { color: #77797d; font: 700 8px/1 "Cascadia Mono", monospace; }
+  dd { margin: 5px 0 0; color: var(--ink); font-size: 9px; font-weight: 700; }
 }
 .sampling-mode-row {
   display: flex;
@@ -2985,6 +3184,8 @@ onBeforeUnmount(() => {
   .sampling-heading, .dispatch-confirm, .privacy-boundary, .sampling-mode-row { align-items: flex-start; flex-direction: column; }
   .sampling-engine-bus { grid-template-columns: 1fr; }
   .sampling-engine-bus dl { grid-template-columns: 1fr 1fr; }
+  .sampling-truth-grid { grid-template-columns: 1fr 1fr; }
+  .sampling-truth-grid > div:nth-child(2) { border-right: 0; }
   .provider-switch, .sampling-config-grid { grid-template-columns: 1fr; }
   .sample-count-field { grid-template-columns: auto 1fr; }
   .sample-count-field > small { grid-column: 1 / -1; }

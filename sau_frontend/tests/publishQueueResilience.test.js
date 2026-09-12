@@ -18,16 +18,22 @@ test('newer job refreshes win and execute responses update the visible row immed
 })
 
 
-test('job polling runs only for active jobs, is serial and has a hard bound', () => {
+test('job polling tracks active submissions and durable review monitors without overlapping requests', () => {
   assert.match(source, /const ACTIVE_JOB_STATUSES = new Set\(\['queued', 'processing'\]\)/)
-  assert.match(source, /activeJobCount\.value === 0/)
+  assert.match(source, /const REVIEWING_JOB_STATES = new Set\(\['watching', 'checking'\]\)/)
+  assert.match(source, /const pollableJobCount = computed\(\(\) => activeJobCount\.value \+ reviewingJobCount\.value\)/)
+  assert.match(source, /pollableJobCount\.value === 0/)
   assert.match(source, /if \(pollTimer \|\| pollRequestInFlight\) return/)
   assert.match(source, /pollAttempts >= JOB_POLL_MAX_ATTEMPTS/)
+  assert.match(source, /JOB_REVIEW_POLL_INTERVAL_MS = 30_000/)
+  assert.match(source, /平台审核结果仍会继续同步/)
+  assert.match(source, /平台审核结果将继续低频重试/)
   assert.match(source, /JOB_POLL_MAX_CONSECUTIVE_FAILURES = 3/)
   assert.match(source, /任务状态连续 3 次同步失败，已暂停自动刷新/)
   assert.match(source, /await fetchJobs\(true\)/)
   assert.match(source, /scheduleJobPoll\(\)/)
   assert.match(source, /stopJobPoll\(\{ resetWindow: true \}\)/)
+  assert.match(source, /watch\(\[activeJobCount, reviewingJobCount\]/)
   assert.match(source, /jobsRequestSerial \+= 1/)
   assert.match(source, /stopJobPoll\(\)/)
   assert.doesNotMatch(source, /window\.setInterval/)

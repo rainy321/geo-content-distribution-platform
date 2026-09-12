@@ -9,7 +9,15 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-MEDIA_ACCOUNT_RISK_VERSION = "media-account-risk-1.0.0"
+MEDIA_ACCOUNT_RISK_VERSION = "media-account-risk-1.1.0"
+
+
+class ConcurrentMediaAccountCredentialUpdateError(RuntimeError):
+    """Raised when risk evidence belongs to an obsolete login session."""
+
+
+class ConcurrentMediaAccountPublishJobUpdateError(RuntimeError):
+    """Raised when risk evidence belongs to an obsolete publish-job version."""
 
 RISK_CATEGORIES = (
     "permanent_ban",
@@ -82,9 +90,9 @@ _RISK_PATTERNS = (
     (
         "permanent_ban",
         re.compile(
-            r"永久(?:封禁|冻结|停用)|账号(?:已|被)?(?:永久)?封禁|账号已被封|"
-            r"(?:账号|账户)(?:已|被)?.{0,4}封号|已被封号|"
-            r"permanent(?:ly)?\s+(?:banned|suspended)|account\s+(?:is\s+)?banned",
+            r"永久(?:封禁|封号|冻结|停用)|"
+            r"(?:账号|账户)(?:已|被)?.{0,6}永久(?:封禁|封号|冻结|停用)|"
+            r"permanent(?:ly)?\s+(?:banned|suspended)",
             re.IGNORECASE,
         ),
     ),
@@ -93,7 +101,9 @@ _RISK_PATTERNS = (
         re.compile(
             r"临时(?:封禁|冻结|限制)|暂时(?:封禁|冻结|限制|无法使用)|"
             r"操作(?:过于)?频繁|账号(?:当前)?受限|违规操作.*限制|"
-            r"temporar(?:y|ily)\s+(?:restricted|suspended)|too\s+many\s+(?:requests|operations)",
+            r"(?:账号|账户)(?:已|被)?.{0,4}(?:封禁|封号)|已被封号|"
+            r"temporar(?:y|ily)\s+(?:restricted|suspended)|"
+            r"account\s+(?:is\s+)?banned|too\s+many\s+(?:requests|operations)",
             re.IGNORECASE,
         ),
     ),
@@ -101,7 +111,7 @@ _RISK_PATTERNS = (
         "verification_required",
         re.compile(
             r"短信(?:验证|验证码)|扫码验证|滑块(?:验证)?|人机验证|安全验证|"
-            r"身份验证|本人验证|请完成验证|接收短信验证码|captcha|"
+            r"身份验证|本人验证|请完成验证|(?:需要|需)(?:完成)?验证|接收短信验证码|captcha|"
             r"verify\s+(?:your\s+)?(?:identity|account)|verification\s+required",
             re.IGNORECASE,
         ),
@@ -109,7 +119,7 @@ _RISK_PATTERNS = (
     (
         "session_expired",
         re.compile(
-            r"登录(?:状态|会话)?(?:已)?(?:失效|过期|无效)|(?:请|需要)重新登录|"
+            r"登录(?:状态|会话)?(?:已)?(?:失效|过期|无效)|会话(?:已)?失效|(?:请|需要)重新登录|"
             r"尚未登录|未登录|cookie.*?(?:不存在|缺失|无效|失效|过期)|"
             r"session\s*(?:has\s*)?expired|not\s+logged\s+in|unauthori[sz]ed",
             re.IGNORECASE,
@@ -124,6 +134,131 @@ _RISK_PATTERNS = (
             r"err_(?:network|connection)",
             re.IGNORECASE,
         ),
+    ),
+)
+
+# Some creator consoles omit the word "permanent" from their terminal lockout
+# page.  A bare "account banned" remains conservatively temporary, but the
+# combination of a ban plus loss of access to the creator console is strong
+# enough to stop the account as a permanent ban.  Keep this separate from the
+# broad patterns so ordinary article copy and generic temporary notices do not
+# receive the stronger classification.
+_TERMINAL_CREATOR_CONSOLE_BAN_PATTERN = re.compile(
+    r"(?=.*(?:账号|账户)(?:已|被)?.{0,6}(?:封禁|封号))"
+    r"(?:(?=.*无法访问.{0,12}(?:创作者|作者)中心)|"
+    r"(?=.*违规操作.{0,20}(?:受到)?限制))",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# Risk messages are copied from creator consoles, where a positive keyword may
+# occur inside an explicitly safe statement (for example, "账号未被封禁").
+# Mask only tightly-bound negated phrases before classification.  Keeping the
+# match local is important: a negation in an earlier clause such as
+# "申诉未通过，账号已被封禁" must not cancel the later, real risk.
+#
+# Double negatives are first rewritten to their positive meaning so the mask
+# below cannot turn "并非无需验证" into a safe result.
+_RISK_DOUBLE_NEGATION_REWRITES = (
+    (
+        re.compile(
+            r"(?:并非|不是|并不是|不能|不可)(?:完全)?"
+            r"(?:不需要|不需|无需|无须|不用|不必|不)"
+            r"(?:再|完成|进行|接受|接收|做)?"
+            r"(?:本人|身份|短信|扫码|滑块|安全|人机|账号|账户)?"
+            r"(?:验证|验证码)",
+            re.IGNORECASE,
+        ),
+        "需要验证",
+    ),
+    (
+        re.compile(
+            r"(?:并非|不是|并不是)(?:完全)?"
+            r"(?:没有|没|未|不会)(?:曾经|已经|再|可能)?"
+            r"(?:被|受到|遭到|处于)?永久"
+            r"(?:封禁|封号|冻结|停用|限制|受限)",
+            re.IGNORECASE,
+        ),
+        "账号已被永久封禁",
+    ),
+    (
+        re.compile(
+            r"(?:并非|不是|并不是)(?:完全)?"
+            r"(?:没有|没|未|不会)(?:曾经|已经|再|可能)?"
+            r"(?:被|受到|遭到|处于)?"
+            r"(?:封禁|封号|冻结|停用|限制|受限)",
+            re.IGNORECASE,
+        ),
+        "账号已被封禁",
+    ),
+)
+
+_NEGATED_RISK_PHRASE_PATTERNS = (
+    # Ban/restriction negation: 未被封禁、没有受到限制、并非受限。
+    re.compile(
+        r"(?:(?:账号|账户)(?:当前|现在)?(?:也)?)?"
+        r"(?:并未|未曾|未|并没有|没有|没|并不会|不会|不曾)"
+        r"(?:已经|曾经|再|可能)?(?:被|受到|遭到|处于)?"
+        r"(?:永久)?(?:封禁|封号|冻结|停用|限制|受限)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:(?:账号|账户)(?:当前|现在)?(?:也)?)?"
+        r"(?:并非|不是|并不是)(?:被|受到|遭到|处于)?"
+        r"(?:永久)?(?:封禁|封号|冻结|停用|限制|受限)",
+        re.IGNORECASE,
+    ),
+    # Verification negation: 不需要验证、无需本人验证、未要求扫码验证。
+    re.compile(
+        r"(?:(?:账号|账户)(?:当前|现在)?(?:也)?)?"
+        r"(?:(?:并不|不)(?:再)?(?:需要|需|用|必)|"
+        r"(?:无需|无须|不用|不必|不需)|"
+        r"(?:并未|未|并没有|没有|没)(?:被)?(?:要求|提示))"
+        r"(?:再|完成|进行|接受|接收|做)?"
+        r"(?:本人|身份|短信|扫码|滑块|安全|人机|账号|账户)?"
+        r"(?:验证|验证码)",
+        re.IGNORECASE,
+    ),
+    # A successful session statement must not be confused with an expiry.
+    re.compile(
+        r"(?:登录(?:状态|会话)?|会话|cookie)(?:当前|现在)?"
+        r"(?:并未|未曾|未|并没有|没有|没|并不会|不会|不曾)"
+        r"(?:已经|再)?(?:失效|过期|无效|缺失|不存在)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:并不|不)(?:再)?(?:需要|需)重新登录|"
+        r"(?:无需|无须|不用|不必|不需)(?:再)?重新登录",
+        re.IGNORECASE,
+    ),
+    # Network health statements occasionally appear next to account status.
+    re.compile(
+        r"(?:网络|连接|请求|dns)(?:当前|现在)?"
+        r"(?:并未|未|并没有|没有|没|并无|无)"
+        r"(?:出现|发生)?(?:异常|错误|不可用|中断|超时|失败)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"(?:并非|不是|并不是)(?:无法访问|网络异常|连接失败|请求超时)",
+        re.IGNORECASE,
+    ),
+    # Equivalent English console wording supported by the classifier.
+    re.compile(
+        r"account\s+(?:is\s+)?not\s+(?:permanent(?:ly)?\s+)?"
+        r"(?:banned|suspended|restricted)|"
+        r"not\s+permanent(?:ly)?\s+(?:banned|suspended)",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"verification\s+(?:is\s+)?not\s+required|"
+        r"no\s+verification\s+required|"
+        r"do(?:es)?\s+not\s+require\s+verification",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"session\s+(?:has\s+)?not\s+expired|"
+        r"network\s+(?:is\s+)?not\s+(?:down|unavailable)|"
+        r"connection\s+(?:has\s+)?not\s+(?:failed|closed|reset)",
+        re.IGNORECASE,
     ),
 )
 
@@ -151,13 +286,35 @@ def classify_media_account_risk(error_text: Any) -> dict[str, Any] | None:
     raw_text = str(error_text or "").strip()
     if not raw_text:
         return None
+    detection_text = _prepare_risk_detection_text(raw_text)
+    if _TERMINAL_CREATOR_CONSOLE_BAN_PATTERN.search(detection_text):
+        return _build_risk_payload(
+            "permanent_ban",
+            evidence=sanitize_risk_evidence(raw_text),
+        )
     for category, pattern in _RISK_PATTERNS:
-        if pattern.search(raw_text):
+        if pattern.search(detection_text):
             return _build_risk_payload(
                 category,
                 evidence=sanitize_risk_evidence(raw_text),
             )
     return None
+
+
+def _prepare_risk_detection_text(raw_text: str) -> str:
+    """Preserve positive risks while masking only nearby explicit negations."""
+
+    detection_text = raw_text
+    for pattern, replacement in _RISK_DOUBLE_NEGATION_REWRITES:
+        detection_text = pattern.sub(replacement, detection_text)
+    for pattern in _NEGATED_RISK_PHRASE_PATTERNS:
+        # Spaces preserve clause boundaries and prevent two surrounding tokens
+        # from being accidentally joined into a new risk phrase.
+        detection_text = pattern.sub(
+            lambda match: " " * len(match.group(0)),
+            detection_text,
+        )
+    return detection_text
 
 
 def sanitize_risk_evidence(value: Any, *, limit: int = 500) -> str:
@@ -180,6 +337,9 @@ def record_media_account_risk(
     source: str,
     error_text: Any,
     occurred_at: datetime | str | None = None,
+    expected_credential_epoch: int | None = None,
+    expected_publish_job_id: int | None = None,
+    expected_publish_job_state_version: int | None = None,
 ) -> dict[str, Any] | None:
     """Persist one classified risk and fail closed for account-level blockers.
 
@@ -190,6 +350,26 @@ def record_media_account_risk(
     """
 
     normalized_account_id = _normalize_account_id(account_id)
+    normalized_expected_epoch = _normalize_credential_epoch(
+        expected_credential_epoch
+    )
+    normalized_expected_job_id = (
+        _normalize_positive_id(
+            expected_publish_job_id,
+            field="expected_publish_job_id",
+        )
+        if expected_publish_job_id is not None
+        else None
+    )
+    normalized_expected_job_version = _normalize_job_state_version(
+        expected_publish_job_state_version
+    )
+    if (normalized_expected_job_id is None) != (
+        normalized_expected_job_version is None
+    ):
+        raise ValueError(
+            "expected_publish_job_id 与 expected_publish_job_state_version 必须同时提供"
+        )
     normalized_source = str(source or "").strip().lower()
     if normalized_source not in RISK_SOURCES:
         raise ValueError("不支持的账号风险来源")
@@ -197,53 +377,135 @@ def record_media_account_risk(
     if risk is None:
         return None
     timestamp = _normalize_timestamp(occurred_at)
-    fingerprint = hashlib.sha256(
-        (
-            f"{normalized_account_id}\0{normalized_source}\0{risk['category']}\0"
-            f"{risk['evidence']}"
-        ).encode("utf-8")
-    ).hexdigest()
-
     with closing(_connect(database_path)) as conn:
         conn.execute("BEGIN IMMEDIATE")
         try:
             _ensure_schema(conn)
             account = conn.execute(
-                "SELECT id, status FROM user_info WHERE id = ?",
+                """
+                SELECT id, status, credential_epoch
+                FROM user_info WHERE id = ?
+                """,
                 (normalized_account_id,),
             ).fetchone()
             if account is None or int(account["status"]) == -2:
                 raise LookupError("媒体账号不存在或已解绑")
-            conn.execute(
+            current_credential_epoch = int(account["credential_epoch"])
+            if (
+                normalized_expected_epoch is not None
+                and normalized_expected_epoch != current_credential_epoch
+            ):
+                # This check and every write below share one IMMEDIATE
+                # transaction.  A successful re-login therefore either wins
+                # before this check (old evidence is discarded) or after this
+                # transaction; an obsolete browser can never freeze the new
+                # credential generation.
+                raise ConcurrentMediaAccountCredentialUpdateError(
+                    "账号登录会话已更新，旧会话风险结果已丢弃"
+                )
+            if normalized_expected_job_id is not None:
+                if not _table_exists(conn, "publish_jobs"):
+                    raise ConcurrentMediaAccountPublishJobUpdateError(
+                        "发布任务已变化，旧任务风险结果已丢弃"
+                    )
+                publish_job = conn.execute(
+                    """
+                    SELECT account_id, state_version
+                    FROM publish_jobs
+                    WHERE id = ?
+                    """,
+                    (normalized_expected_job_id,),
+                ).fetchone()
+                if (
+                    publish_job is None
+                    or publish_job["account_id"] is None
+                    or int(publish_job["account_id"]) != normalized_account_id
+                    or int(publish_job["state_version"])
+                    != normalized_expected_job_version
+                ):
+                    # The job-version and credential-generation comparisons
+                    # run under the same IMMEDIATE transaction as every risk,
+                    # account and queued-job write below.  A verifier result
+                    # can therefore never freeze the current account after
+                    # the claimed publish attempt has been replaced.
+                    raise ConcurrentMediaAccountPublishJobUpdateError(
+                        "发布任务已变化，旧任务风险结果已丢弃"
+                    )
+            fingerprint = hashlib.sha256(
+                (
+                    f"{normalized_account_id}\0{current_credential_epoch}\0"
+                    f"{normalized_source}\0{risk['category']}\0{risk['evidence']}"
+                ).encode("utf-8")
+            ).hexdigest()
+            active_event = conn.execute(
                 """
-                INSERT INTO media_account_risk_events (
-                    account_id, category, source, reason, evidence,
-                    occurred_at, active, event_fingerprint
-                ) VALUES (?, ?, ?, ?, ?, ?, 1, ?)
-                ON CONFLICT(event_fingerprint) DO UPDATE SET
-                    reason = excluded.reason,
-                    evidence = excluded.evidence,
-                    occurred_at = excluded.occurred_at,
-                    active = 1,
-                    resolved_at = NULL
+                SELECT * FROM media_account_risk_events
+                WHERE account_id = ? AND credential_epoch = ?
+                  AND source = ? AND category = ? AND active = 1
+                ORDER BY occurred_at DESC, id DESC
+                LIMIT 1
                 """,
                 (
                     normalized_account_id,
-                    risk["category"],
+                    current_credential_epoch,
                     normalized_source,
-                    risk["reason"],
-                    risk["evidence"],
-                    timestamp,
-                    fingerprint,
+                    risk["category"],
                 ),
-            )
-            event_row = conn.execute(
-                """
-                SELECT * FROM media_account_risk_events
-                WHERE event_fingerprint = ?
-                """,
-                (fingerprint,),
             ).fetchone()
+            if active_event is not None:
+                # Repeated monitors often render the same warning with a live
+                # timestamp or slightly different surrounding copy.  Keep one
+                # active incident per account/source/category and refresh its
+                # evidence instead of flooding the UI with near-duplicates.
+                conn.execute(
+                    """
+                    UPDATE media_account_risk_events
+                    SET reason = ?, evidence = ?, occurred_at = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        risk["reason"],
+                        risk["evidence"],
+                        timestamp,
+                        int(active_event["id"]),
+                    ),
+                )
+                event_row = conn.execute(
+                    "SELECT * FROM media_account_risk_events WHERE id = ?",
+                    (int(active_event["id"]),),
+                ).fetchone()
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO media_account_risk_events (
+                        account_id, credential_epoch, category, source, reason, evidence,
+                        occurred_at, active, event_fingerprint
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)
+                    ON CONFLICT(event_fingerprint) DO UPDATE SET
+                        reason = excluded.reason,
+                        evidence = excluded.evidence,
+                        occurred_at = excluded.occurred_at,
+                        active = 1,
+                        resolved_at = NULL
+                    """,
+                    (
+                        normalized_account_id,
+                        current_credential_epoch,
+                        risk["category"],
+                        normalized_source,
+                        risk["reason"],
+                        risk["evidence"],
+                        timestamp,
+                        fingerprint,
+                    ),
+                )
+                event_row = conn.execute(
+                    """
+                    SELECT * FROM media_account_risk_events
+                    WHERE event_fingerprint = ?
+                    """,
+                    (fingerprint,),
+                ).fetchone()
             stopped_jobs = 0
             if risk["frozen"]:
                 conn.execute(
@@ -286,6 +548,8 @@ def record_publish_job_account_risk(
     error_text: Any,
     *,
     occurred_at: datetime | str | None = None,
+    expected_credential_epoch: int | None = None,
+    expected_state_version: int | None = None,
 ) -> dict[str, Any] | None:
     """Classify one publisher failure against its explicitly bound account.
 
@@ -312,6 +576,11 @@ def record_publish_job_account_risk(
         source="publish",
         error_text=error_text,
         occurred_at=occurred_at,
+        expected_credential_epoch=expected_credential_epoch,
+        expected_publish_job_id=(
+            normalized_job_id if expected_state_version is not None else None
+        ),
+        expected_publish_job_state_version=expected_state_version,
     )
 
 
@@ -330,25 +599,30 @@ def get_active_media_account_risks(
         with conn:
             _ensure_schema(conn)
         parameters: list[Any] = []
-        where = "WHERE active = 1"
+        where = (
+            "WHERE r.active = 1 "
+            "AND r.credential_epoch = u.credential_epoch"
+        )
         if normalized_ids is not None:
             placeholders = ", ".join("?" for _ in normalized_ids)
-            where += f" AND account_id IN ({placeholders})"
+            where += f" AND r.account_id IN ({placeholders})"
             parameters.extend(normalized_ids)
         rows = conn.execute(
             f"""
-            SELECT * FROM media_account_risk_events
+            SELECT r.*
+            FROM media_account_risk_events AS r
+            JOIN user_info AS u ON u.id = r.account_id
             {where}
-            ORDER BY account_id,
-                CASE category
+            ORDER BY r.account_id,
+                CASE r.category
                     WHEN 'permanent_ban' THEN 1
                     WHEN 'temporary_restriction' THEN 2
                     WHEN 'verification_required' THEN 3
                     WHEN 'session_expired' THEN 4
                     ELSE 5
                 END,
-                occurred_at DESC,
-                id DESC
+                r.occurred_at DESC,
+                r.id DESC
             """,
             parameters,
         ).fetchall()
@@ -422,23 +696,50 @@ def resolve_recoverable_media_account_risks(
     account_id: int,
     *,
     resolved_at: datetime | str | None = None,
+    expected_credential_epoch: int | None = None,
 ) -> int:
     """Resolve risks that a successful explicit login check can disprove."""
 
     normalized_account_id = _normalize_account_id(account_id)
+    normalized_expected_epoch = _normalize_credential_epoch(
+        expected_credential_epoch
+    )
     timestamp = _normalize_timestamp(resolved_at)
     with closing(_connect(database_path)) as conn:
-        with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
             _ensure_schema(conn)
+            account = conn.execute(
+                """
+                SELECT credential_epoch FROM user_info
+                WHERE id = ? AND status != -2
+                """,
+                (normalized_account_id,),
+            ).fetchone()
+            if account is None:
+                raise LookupError("媒体账号不存在或已解绑")
+            current_epoch = int(account["credential_epoch"])
+            if (
+                normalized_expected_epoch is not None
+                and normalized_expected_epoch != current_epoch
+            ):
+                raise ConcurrentMediaAccountCredentialUpdateError(
+                    "账号登录会话已更新，旧会话检测结果已丢弃"
+                )
             result = conn.execute(
                 """
                 UPDATE media_account_risk_events
                 SET active = 0, resolved_at = ?
                 WHERE account_id = ? AND active = 1
+                  AND credential_epoch = ?
                   AND category != 'permanent_ban'
                 """,
-                (timestamp, normalized_account_id),
+                (timestamp, normalized_account_id, current_epoch),
             )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
     return int(result.rowcount)
 
 
@@ -472,11 +773,21 @@ def _serialize_event(row: sqlite3.Row) -> dict[str, Any]:
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
+    account_columns = {
+        str(row[1]) for row in conn.execute("PRAGMA table_info(user_info)")
+    }
+    if account_columns and "credential_epoch" not in account_columns:
+        conn.execute(
+            "ALTER TABLE user_info ADD COLUMN credential_epoch "
+            "INTEGER NOT NULL DEFAULT 1 CHECK (credential_epoch >= 1)"
+        )
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS media_account_risk_events (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             account_id INTEGER NOT NULL,
+            credential_epoch INTEGER NOT NULL DEFAULT 1
+                CHECK (credential_epoch >= 1),
             category TEXT NOT NULL CHECK (category IN (
                 'permanent_ban', 'temporary_restriction',
                 'verification_required', 'session_expired', 'network_error'
@@ -494,12 +805,27 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
         )
         """
     )
+    risk_columns = {
+        str(row[1])
+        for row in conn.execute("PRAGMA table_info(media_account_risk_events)")
+    }
+    if "credential_epoch" not in risk_columns:
+        conn.execute(
+            "ALTER TABLE media_account_risk_events ADD COLUMN credential_epoch "
+            "INTEGER NOT NULL DEFAULT 1 CHECK (credential_epoch >= 1)"
+        )
     conn.execute(
         """
         CREATE INDEX IF NOT EXISTS idx_media_account_risk_active
         ON media_account_risk_events(account_id, active, occurred_at DESC)
         """
     )
+
+
+def ensure_media_account_risk_schema(conn: sqlite3.Connection) -> None:
+    """Ensure the risk ledger on an existing caller-owned transaction."""
+
+    _ensure_schema(conn)
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
@@ -511,6 +837,28 @@ def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
 
 def _normalize_account_id(value: Any) -> int:
     return _normalize_positive_id(value, field="account_id")
+
+
+def _normalize_credential_epoch(value: Any) -> int | None:
+    if value is None:
+        return None
+    return _normalize_positive_id(value, field="expected_credential_epoch")
+
+
+def _normalize_job_state_version(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError("expected_publish_job_state_version 必须是非负整数")
+    try:
+        normalized = int(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "expected_publish_job_state_version 必须是非负整数"
+        ) from exc
+    if normalized < 0:
+        raise ValueError("expected_publish_job_state_version 必须是非负整数")
+    return normalized
 
 
 def _normalize_positive_id(value: Any, *, field: str) -> int:

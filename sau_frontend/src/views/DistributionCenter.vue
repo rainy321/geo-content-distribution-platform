@@ -6,10 +6,10 @@
         <h1>发布中心</h1>
         <p>从就绪稿件创建独立渠道任务。每个平台单独记录进度，失败不会拖住其他渠道。</p>
       </div>
-      <div class="live-indicator" :class="{ active: activeJobCount > 0 }">
+      <div class="live-indicator" :class="{ active: activeJobCount > 0 || reviewingJobCount > 0 }">
         <span class="pulse" aria-hidden="true" />
         <div>
-          <strong>{{ activeJobCount ? `${activeJobCount} 个任务处理中` : '任务轨迹已同步' }}</strong>
+          <strong>{{ liveJobStatusLabel }}</strong>
           <small>{{ lastSyncedLabel }}</small>
         </div>
       </div>
@@ -78,6 +78,27 @@
       >
         {{ dispatchBlockers[0].message }}<span v-if="dispatchBlockers.length > 1">，另有 {{ dispatchBlockers.length - 1 }} 项</span> ↘
       </button>
+    </section>
+
+    <section
+      v-if="activePublishRisks.length"
+      class="publish-risk-overview"
+      role="alert"
+      aria-label="发布账号风险"
+    >
+      <div>
+        <span>ACCOUNT SAFETY / {{ activePublishRisks.length }}</span>
+        <strong>当前任务中有账号已被安全冻结</strong>
+        <p>软件不会再后台打开这些账号，也不会自动换号或重新提交。请先按平台提示完成申诉、验证或重新登录。</p>
+      </div>
+      <ul>
+        <li v-for="item in activePublishRisks" :key="item.key">
+          <b>{{ platformName(item.platform) }} · {{ item.accountName }}</b>
+          <span>{{ item.risk.label }}：{{ item.risk.reason }}</span>
+          <small>下一步：{{ item.risk.recommended_action }}</small>
+        </li>
+      </ul>
+      <el-button type="danger" plain @click="router.push('/account-management')">前往媒体账号处理</el-button>
     </section>
 
     <section v-if="interruptedBatchCount" class="publish-mode-banner recovery" role="alert">
@@ -687,7 +708,13 @@
       </div>
 
       <div v-else class="job-list">
-        <article v-for="job in jobs" :key="job.job_id" class="job-row">
+        <article
+          v-for="job in jobs"
+          :id="`publish-job-${job.job_id}`"
+          :key="job.job_id"
+          :class="['job-row', { 'is-focused': Number(job.job_id) === focusedJobId }]"
+          :aria-current="Number(job.job_id) === focusedJobId ? 'true' : undefined"
+        >
           <div :class="['status-signal', job.status, jobOutcome(job).category]">
             <span />
             <small>{{ job.demo ? `演示 / ${statusLabel(job.status)}` : jobOutcome(job).label }}</small>
@@ -702,6 +729,10 @@
             <small v-if="job.auto_execute" class="schedule-mark">AUTO@TIME / 已授权</small>
             <small v-if="job.account_name" class="account-mark">账号 / {{ job.account_name }}</small>
             <small v-else-if="!job.demo" class="account-mark missing">未绑定账号 / 禁止执行</small>
+            <small
+              v-if="job.status === 'success' && !jobOutcome(job).publication_evidence?.anonymous_access_verified"
+              class="public-access-mark"
+            >匿名访问未核验</small>
           </div>
 
           <div class="job-article">
@@ -796,9 +827,55 @@
             >
               确认真实发布
             </el-button>
-            <el-button v-if="hasSafeResultUrl(job)" text :icon="Link" @click="openResult(job)">查看结果</el-button>
+            <el-button v-if="hasSafeResultUrl(job)" text :icon="Link" @click="openResult(job)">打开平台链接</el-button>
             <span v-if="!job.url && !['failed', 'need_action', 'processing', 'queued'].includes(job.status)" class="no-action">无需操作</span>
           </div>
+
+          <aside
+            v-if="job.account_risk?.frozen"
+            class="job-monitor-rail is-risk"
+            role="alert"
+          >
+            <div>
+              <span>ACCOUNT RISK / {{ String(job.account_risk.category || 'UNKNOWN').toUpperCase() }}</span>
+              <strong>{{ job.account_risk.label }} · 已停止后台访问</strong>
+              <p>{{ job.account_risk.reason }} 下一步：{{ job.account_risk.recommended_action }}</p>
+            </div>
+            <el-button type="danger" plain size="small" @click="router.push('/account-management')">
+              前往账号处理
+            </el-button>
+          </aside>
+          <aside
+            v-else-if="job.review_monitor"
+            :class="['job-monitor-rail', `is-${job.review_monitor.state}`]"
+            :role="['action_required', 'exhausted', 'paused', 'rejected'].includes(job.review_monitor.state) ? 'alert' : 'status'"
+          >
+            <div>
+              <span>READ-ONLY REVIEW / {{ String(job.review_monitor.state || 'UNKNOWN').toUpperCase() }}</span>
+              <strong>{{ reviewMonitorTitle(job.review_monitor) }}</strong>
+              <p>{{ reviewMonitorDetail(job.review_monitor) }}</p>
+            </div>
+            <el-button
+              v-if="canRearmReviewMonitor(job)"
+              type="warning"
+              plain
+              size="small"
+              :loading="busyJobIds.has(job.job_id)"
+              @click="rearmJobReviewMonitor(job)"
+            >
+              恢复只读监测
+            </el-button>
+            <el-button
+              v-if="job.review_monitor.state === 'published' && hasSafeResultUrl(job)"
+              type="primary"
+              plain
+              size="small"
+              :icon="Link"
+              @click="openResult(job)"
+            >
+              打开平台作品
+            </el-button>
+          </aside>
         </article>
       </div>
 
@@ -913,7 +990,7 @@
 </template>
 
 <script setup>
-import { computed, h, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { computed, h, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Link, Lock, MagicStick, Picture, Promotion, Refresh, Upload, VideoCamera } from '@element-plus/icons-vue'
@@ -1016,6 +1093,7 @@ const jobsLoading = ref(false)
 const jobsRefreshing = ref(false)
 const jobsLoadError = ref(false)
 const lastSyncedAt = ref(null)
+const focusedJobId = ref(null)
 const busyJobIds = ref(new Set())
 const selectedJobIds = ref(new Set())
 const batchExecuting = ref(false)
@@ -1043,7 +1121,9 @@ let pollFailureNotified = false
 let jobsRequestSerial = 0
 
 const ACTIVE_JOB_STATUSES = new Set(['queued', 'processing'])
+const REVIEWING_JOB_STATES = new Set(['watching', 'checking'])
 const JOB_POLL_INTERVAL_MS = 5000
+const JOB_REVIEW_POLL_INTERVAL_MS = 30_000
 const JOB_POLL_MAX_ATTEMPTS = 120
 const JOB_POLL_MAX_CONSECUTIVE_FAILURES = 3
 const MAX_BATCH_ARTICLES = 20
@@ -1258,6 +1338,33 @@ const dispatchButtonLabel = computed(() => {
 const activeJobCount = computed(() => (
   jobs.value.filter(job => ACTIVE_JOB_STATUSES.has(job.status)).length
 ))
+const reviewingJobCount = computed(() => (
+  jobs.value.filter(job => REVIEWING_JOB_STATES.has(job.review_monitor?.state)).length
+))
+const pollableJobCount = computed(() => activeJobCount.value + reviewingJobCount.value)
+const liveJobStatusLabel = computed(() => {
+  if (activeJobCount.value) return `${activeJobCount.value} 个任务处理中`
+  if (reviewingJobCount.value) return `${reviewingJobCount.value} 个平台结果后台监测中`
+  return '任务轨迹已同步'
+})
+
+const activePublishRisks = computed(() => {
+  const unique = new Map()
+  for (const job of jobs.value) {
+    const risk = job.account_risk
+    if (!risk?.frozen) continue
+    const key = risk.id || `${job.account_id}:${risk.category}`
+    if (!unique.has(key)) {
+      unique.set(key, {
+        key,
+        platform: job.platform,
+        accountName: job.account_name || `账号 ID ${job.account_id}`,
+        risk
+      })
+    }
+  }
+  return [...unique.values()]
+})
 
 const hasJobFilters = computed(() => Boolean(jobFilters.platform || jobFilters.status))
 
@@ -1746,7 +1853,22 @@ const fetchJobs = async (pageOrSilent = false) => {
   try {
     const response = await publishApi.getJobs(params)
     if (requestSerial !== jobsRequestSerial || pollingStopped) return null
-    jobs.value = response.data?.items || []
+    const listedJobs = response.data?.items || []
+    const focusId = focusedJobId.value
+    let focusedSnapshot = null
+    if (focusId && !listedJobs.some(job => Number(job.job_id) === focusId)) {
+      try {
+        const focusedResponse = await publishApi.getJob(focusId)
+        if (requestSerial !== jobsRequestSerial || pollingStopped) return null
+        focusedSnapshot = focusedResponse.data || null
+      } catch (focusError) {
+        console.warn('读取定位任务失败:', focusError)
+        focusedSnapshot = jobs.value.find(job => Number(job.job_id) === focusId) || null
+      }
+    }
+    jobs.value = focusedSnapshot
+      ? [{ ...focusedSnapshot, job_id: focusId }, ...listedJobs]
+      : listedJobs
     Object.assign(jobPagination, response.data?.pagination || {})
     lastSyncedAt.value = new Date()
     syncInterruptedBatchCount()
@@ -1765,6 +1887,50 @@ const fetchJobs = async (pageOrSilent = false) => {
   }
 }
 
+const reviewMonitorTitle = monitor => ({
+  watching: '平台已受理，后台只读监测中',
+  checking: '正在读取平台审核状态',
+  published: '平台创作者侧已通过，作品链接已返回',
+  rejected: '平台明确未通过',
+  action_required: '账号需要人工处理',
+  exhausted: '自动核验已到安全上限',
+  paused: '自动核验已暂停'
+}[monitor?.state] || '平台状态尚未核实')
+
+const reviewMonitorDetail = monitor => {
+  if (!monitor) return ''
+  const attempts = `已核验 ${monitor.attempt_count || 0}/${monitor.max_attempts || 0} 次`
+  const message = String(monitor.last_message || '').trim()
+  if (['watching', 'checking'].includes(monitor.state)) {
+    const next = monitor.next_check_at ? `；下次 ${formatDate(monitor.next_check_at, false)}` : ''
+    return `${message || '等待平台状态变化，不会自动重新提交。'}（${attempts}${next}）`
+  }
+  return message || `${attempts}；没有触发重新发布。`
+}
+
+const canRearmReviewMonitor = job => Boolean(
+  job?.review_monitor?.state === 'exhausted'
+  && job?.reconciliation_required
+  && !job?.account_risk?.frozen
+)
+
+const rearmJobReviewMonitor = async job => {
+  if (!canRearmReviewMonitor(job) || busyJobIds.value.has(job.job_id)) return
+  busyJobIds.value = new Set([...busyJobIds.value, job.job_id])
+  try {
+    await publishApi.rearmReviewMonitor(job.job_id)
+    ElMessage.success('已恢复有上限的只读核验；不会重新提交文章')
+    await fetchJobs(true)
+  } catch (error) {
+    ElMessage.error(error?.response?.data?.msg || '只读核验未能恢复，请先检查账号风险')
+    await fetchJobs(true)
+  } finally {
+    const next = new Set(busyJobIds.value)
+    next.delete(job.job_id)
+    busyJobIds.value = next
+  }
+}
+
 const applyJobSnapshot = snapshot => {
   const jobId = Number(snapshot?.job_id ?? snapshot?.id)
   if (!Number.isInteger(jobId) || jobId <= 0) return false
@@ -1777,7 +1943,11 @@ const applyJobSnapshot = snapshot => {
     jobIndex === index ? { ...job, ...snapshot, job_id: jobId } : job
   ))
   lastSyncedAt.value = new Date()
-  if (ACTIVE_JOB_STATUSES.has(snapshot.status)) {
+  const updatedJob = jobs.value[index]
+  if (
+    ACTIVE_JOB_STATUSES.has(updatedJob?.status)
+    || REVIEWING_JOB_STATES.has(updatedJob?.review_monitor?.state)
+  ) {
     scheduleJobPoll({ resetWindow: true })
   }
   return true
@@ -3108,22 +3278,39 @@ const stopJobPoll = ({ resetWindow = false } = {}) => {
 
 const scheduleJobPoll = ({ resetWindow = false } = {}) => {
   if (resetWindow) resetJobPollWindow()
-  if (pollingStopped || activeJobCount.value === 0) {
-    stopJobPoll({ resetWindow: activeJobCount.value === 0 })
+  if (pollingStopped || pollableJobCount.value === 0) {
+    stopJobPoll({ resetWindow: pollableJobCount.value === 0 })
     return
   }
   if (pollTimer || pollRequestInFlight) return
-  if (pollAttempts >= JOB_POLL_MAX_ATTEMPTS) {
+  const activePollingAtLimit = (
+    activeJobCount.value > 0
+    && pollAttempts >= JOB_POLL_MAX_ATTEMPTS
+  )
+  if (activePollingAtLimit) {
     if (!pollLimitNotified) {
       pollLimitNotified = true
-      ElMessage.warning('任务长时间没有终态，已暂停自动刷新；请核对平台后台后手动刷新，避免无限轮询。')
+      ElMessage.warning(
+        reviewingJobCount.value > 0
+          ? '发布任务长时间没有终态，已降频刷新；平台审核结果仍会继续同步。'
+          : '任务长时间没有终态，已暂停自动刷新；请核对平台后台后手动刷新，避免无限轮询。'
+      )
     }
-    return
+    if (reviewingJobCount.value === 0) return
   }
+  const degradedReviewPolling = (
+    reviewingJobCount.value > 0
+    && consecutivePollFailures >= JOB_POLL_MAX_CONSECUTIVE_FAILURES
+  )
+  const intervalMs = activeJobCount.value > 0 && !activePollingAtLimit && !degradedReviewPolling
+    ? JOB_POLL_INTERVAL_MS
+    : JOB_REVIEW_POLL_INTERVAL_MS
   pollTimer = window.setTimeout(async () => {
     pollTimer = null
-    if (pollingStopped || activeJobCount.value === 0) return
-    pollAttempts += 1
+    if (pollingStopped || pollableJobCount.value === 0) return
+    if (activeJobCount.value > 0 && pollAttempts < JOB_POLL_MAX_ATTEMPTS) {
+      pollAttempts += 1
+    }
     pollRequestInFlight = true
     try {
       const refreshed = await fetchJobs(true)
@@ -3134,19 +3321,58 @@ const scheduleJobPoll = ({ resetWindow = false } = {}) => {
       if (consecutivePollFailures >= JOB_POLL_MAX_CONSECUTIVE_FAILURES) {
         if (!pollFailureNotified) {
           pollFailureNotified = true
-          ElMessage.warning('任务状态连续 3 次同步失败，已暂停自动刷新；请检查本机服务后手动刷新。')
+          ElMessage.warning(
+            reviewingJobCount.value > 0
+              ? '任务状态连续 3 次同步失败，平台审核结果将继续低频重试；请检查本机服务。'
+              : '任务状态连续 3 次同步失败，已暂停自动刷新；请检查本机服务后手动刷新。'
+          )
         }
+        if (reviewingJobCount.value > 0) scheduleJobPoll()
       } else {
         scheduleJobPoll()
       }
     }
-  }, JOB_POLL_INTERVAL_MS)
+  }, intervalMs)
+}
+
+let focusRequestSerial = 0
+
+const focusExistingJob = async rawJobId => {
+  const requestSerial = ++focusRequestSerial
+  const value = Array.isArray(rawJobId) ? rawJobId[0] : rawJobId
+  const jobId = Number(value)
+  if (!Number.isInteger(jobId) || jobId <= 0) {
+    focusedJobId.value = null
+    return
+  }
+
+  focusedJobId.value = jobId
+  jobFilters.platform = ''
+  jobFilters.status = ''
+  jobPagination.page = 1
+  await fetchJobs(true)
+  if (requestSerial !== focusRequestSerial || focusedJobId.value !== jobId) return
+
+  const focusedJob = jobs.value.find(job => Number(job.job_id) === jobId)
+  if (!focusedJob) {
+    ElMessage.warning(`未找到发布任务 JOB-${String(jobId).padStart(5, '0')}`)
+    return
+  }
+
+  scheduleJobPoll({ resetWindow: true })
+  await nextTick()
+  if (requestSerial !== focusRequestSerial || focusedJobId.value !== jobId) return
+  document.getElementById(`publish-job-${jobId}`)?.scrollIntoView({
+    behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth',
+    block: 'center'
+  })
 }
 
 onMounted(async () => {
   pollingStopped = false
   await Promise.allSettled([fetchPlatforms(), fetchArticles(), fetchJobs()])
   if (accountBindingRequired.value) await fetchAccounts()
+  await focusExistingJob(route.query.focus_job_id)
   const requestedJobId = Number(route.query.job_id)
   if (Number.isInteger(requestedJobId) && requestedJobId > 0) {
     try {
@@ -3175,13 +3401,24 @@ onMounted(async () => {
   scheduleJobPoll()
 })
 
-watch(activeJobCount, (count, previousCount) => {
+watch([activeJobCount, reviewingJobCount], ([activeCount, reviewCount], [previousActive, previousReview]) => {
+  const count = activeCount + reviewCount
+  const previousCount = previousActive + previousReview
   if (count === 0) {
     stopJobPoll({ resetWindow: true })
     return
   }
-  scheduleJobPoll({ resetWindow: previousCount === 0 || count > previousCount })
+  scheduleJobPoll({
+    resetWindow: previousCount === 0
+      || activeCount > previousActive
+      || reviewCount > previousReview
+  })
 })
+
+watch(
+  () => route.query.focus_job_id,
+  value => { void focusExistingJob(value) }
+)
 
 watch(selectedArticleIds, values => {
   const normalized = [...new Set((values || []).map(Number).filter(Number.isInteger))]
@@ -3335,6 +3572,35 @@ onBeforeUnmount(() => {
 
 .command-blocker-copy:hover,
 .command-blocker-copy:focus-visible { border-color: #c15454; outline: 2px solid rgba(193, 84, 84, 0.18); }
+
+.publish-risk-overview {
+  display: grid;
+  grid-template-columns: minmax(260px, 0.8fr) minmax(360px, 1.4fr) auto;
+  gap: 18px;
+  align-items: center;
+  margin: 0 0 18px;
+  padding: 16px 18px;
+  border: 1px solid #d57970;
+  border-left: 6px solid #a52f27;
+  background: #fff1ef;
+  box-shadow: 0 8px 24px rgba(125, 39, 31, 0.09);
+
+  > div > span {
+    display: block;
+    margin-bottom: 5px;
+    color: #a52f27;
+    font: 800 9px/1.2 "Cascadia Mono", monospace;
+    letter-spacing: .12em;
+  }
+  > div > strong { color: #702720; font-size: 15px; }
+  > div > p { margin: 5px 0 0; color: #824841; font-size: 11px; line-height: 1.55; }
+  ul { max-height: 136px; margin: 0; padding: 0; overflow: auto; list-style: none; }
+  li { display: grid; gap: 3px; padding: 8px 10px; border-bottom: 1px solid #edc4c0; }
+  li:last-child { border-bottom: 0; }
+  li b { color: #6c2e28; font-size: 11px; }
+  li span { color: #8a443d; font-size: 10px; }
+  li small { color: #674a46; font-size: 9px; line-height: 1.5; }
+}
 
 .publish-mode-banner {
   display: grid;
@@ -4253,12 +4519,18 @@ onBeforeUnmount(() => {
 .job-list { padding: 0 26px; }
 
 .job-row {
+  scroll-margin-block: 140px;
   display: grid;
   grid-template-columns: 88px 142px minmax(160px, 1.15fr) minmax(190px, 1.4fr) 118px minmax(110px, auto);
   gap: 16px;
   align-items: center;
   min-height: 98px;
   border-bottom: 1px solid #e5ebe9;
+
+  &.is-focused {
+    background: #edf8f6;
+    box-shadow: inset 5px 0 0 #168f87, 0 0 0 2px rgba(22, 143, 135, 0.2);
+  }
 }
 
 .status-signal {
@@ -4343,6 +4615,12 @@ onBeforeUnmount(() => {
   &.need_action > span, &.scheduled > span { background: var(--amber); }
 }
 
+.public-access-mark {
+  align-self: flex-start;
+  color: #985b16 !important;
+  font-weight: 700;
+}
+
 .job-next-step {
   display: block;
   margin-top: 7px;
@@ -4367,6 +4645,50 @@ onBeforeUnmount(() => {
   :deep(.el-checkbox) { margin-right: 2px; }
   :deep(.el-checkbox__label) { padding-left: 4px; font-size: 10px; }
   .no-action { color: #9aa8a6; font-size: 10px; }
+}
+
+.job-monitor-rail {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin: -2px 0 14px;
+  padding: 11px 13px;
+  border-left: 4px solid #4a9ed0;
+  background: #eef7fb;
+
+  > div { min-width: 0; }
+  > div > span {
+    display: block;
+    color: #337895;
+    font: 800 8px/1.2 "Cascadia Mono", monospace;
+    letter-spacing: .11em;
+  }
+  > div > strong { display: block; margin-top: 4px; color: #294e5e; font-size: 11px; }
+  > div > p { margin: 4px 0 0; color: #56717c; font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+  &.is-published { border-left-color: var(--signal); background: #eaf7f4; }
+  &.is-published > div > span,
+  &.is-published > div > strong { color: #23766f; }
+  &.is-rejected,
+  &.is-risk,
+  &.is-action_required { border-left-color: #a52f27; background: #fff1ef; }
+  &.is-rejected > div > span,
+  &.is-risk > div > span,
+  &.is-action_required > div > span,
+  &.is-rejected > div > strong,
+  &.is-risk > div > strong,
+  &.is-action_required > div > strong { color: #8f3029; }
+  &.is-rejected > div > p,
+  &.is-risk > div > p,
+  &.is-action_required > div > p { color: #7a4641; }
+  &.is-exhausted,
+  &.is-paused { border-left-color: var(--amber); background: #fff8ed; }
+  &.is-exhausted > div > span,
+  &.is-paused > div > span,
+  &.is-exhausted > div > strong,
+  &.is-paused > div > strong { color: #8a5a20; }
+  :deep(.el-button) { flex: 0 0 auto; margin-left: 0; }
 }
 
 .reconciliation-form {
@@ -4474,6 +4796,8 @@ onBeforeUnmount(() => {
   .page-heading, .board-toolbar { align-items: flex-start; flex-direction: column; }
   .job-filters { width: 100%; flex-wrap: wrap; }
   .job-filters :deep(.el-select) { flex: 1; min-width: 150px; }
+  .publish-risk-overview { grid-template-columns: 1fr; align-items: stretch; }
+  .publish-risk-overview > .el-button { width: 100%; margin-left: 0; }
 }
 
 @media (max-width: 680px) {
@@ -4508,6 +4832,8 @@ onBeforeUnmount(() => {
   .job-row { grid-template-columns: 76px 1fr; gap: 12px; padding: 18px 0; }
   .job-article, .job-progress, .job-time, .job-actions { grid-column: 1 / -1; }
   .job-actions { justify-content: flex-start; grid-row: auto; }
+  .job-monitor-rail { align-items: stretch; flex-direction: column; gap: 10px; }
+  .job-monitor-rail :deep(.el-button) { width: 100%; }
   .board-state { align-items: flex-start; flex-direction: column; }
 }
 </style>

@@ -38,6 +38,34 @@ class PublishSchedulerRuntimeTests(unittest.TestCase):
         self.assertTrue(kwargs["allow_real"])
         self.assertEqual(kwargs["media_root"], "videoFile")
 
+    def test_adds_separate_bounded_read_only_review_monitor(self):
+        verifier = object()
+        scheduler = create_publish_scheduler(
+            "database.db",
+            review_verifier=verifier,
+            review_interval_seconds=60,
+            review_limit=2,
+        )
+
+        jobs = {job.id: job for job in scheduler.get_jobs()}
+        self.assertEqual(
+            set(jobs),
+            {"publish-jobs-due-tick", "publish-review-monitor-tick"},
+        )
+        review = jobs["publish-review-monitor-tick"]
+        self.assertIs(review.kwargs["verifier"], verifier)
+        self.assertEqual(review.kwargs["limit"], 2)
+        self.assertEqual(review.max_instances, 1)
+        self.assertTrue(review.coalesce)
+
+    def test_rejects_high_frequency_review_monitoring(self):
+        with self.assertRaisesRegex(ValueError, "30 秒"):
+            create_publish_scheduler(
+                "database.db",
+                review_verifier=object(),
+                review_interval_seconds=10,
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -7,7 +7,10 @@ from services.ai_visibility_service import (
     VisibilityAnalysisError,
     analyze_ai_visibility,
     classify_citation_source,
+    current_ai_visibility_algorithm_versions,
+    inspect_ai_visibility_analysis_freshness,
     normalize_citation_url,
+    reanalyze_ai_visibility_locally,
 )
 
 
@@ -93,9 +96,9 @@ class AIVisibilityServiceTests(unittest.TestCase):
         self.assertTrue(with_context["samples"][0]["brand_mentioned"])
 
         ambiguous = self.analyze(
-            ["The product Common is recommended."],
-            aliases=["Common"],
-            competitors=[{"name": "Rival", "aliases": ["Common"]}],
+            ["The product SharedMark is recommended."],
+            aliases=["SharedMark"],
+            competitors=[{"name": "Rival", "aliases": ["SharedMark"]}],
         )
         ambiguous_mentions = ambiguous["samples"][0]["mentions"]
         self.assertEqual(len(ambiguous_mentions), 2)
@@ -110,6 +113,276 @@ class AIVisibilityServiceTests(unittest.TestCase):
         )
         self.assertEqual(fuzzy["samples"][0]["mentions"][0]["match_type"], "FUZZY")
         self.assertTrue(fuzzy["samples"][0]["mentions"][0]["needs_review"])
+
+    def test_project_keywords_admit_only_brand_anchored_aliases_and_keep_evidence(self):
+        arguments = {
+            "project_name": "北京同于野科技有限公司",
+            "project_product": "懂AI 国内模型聚合与中转站",
+            "project_keywords": [
+                "同于野",
+                "同于野科技",
+                "北京同于野科技有限公司",
+                "同于野AI中转站",
+                "AI API中转站",
+                "AI模型接口",
+                "API中转服务",
+                "大模型API接入",
+            ],
+            "stored_competitors": [],
+        }
+        matched = self.analyze(
+            ["同于野AI API中转站主要面向需要统一模型接口的开发者。"],
+            **arguments,
+        )
+
+        sample = matched["samples"][0]
+        self.assertTrue(sample["brand_mentioned"])
+        self.assertEqual(sample["matched_aliases"], ["同于野"])
+        self.assertEqual(
+            sample["matched_entity_terms"],
+            [
+                {
+                    "match_type": "ALIAS",
+                    "sources": ["project_keyword"],
+                    "term": "同于野",
+                }
+            ],
+        )
+        self.assertEqual(sample["evidence"][0]["canonical_entity"], arguments["project_name"])
+        self.assertEqual(sample["evidence"][0]["matched_term"], "同于野")
+        self.assertEqual(sample["evidence"][0]["matched_term_sources"], ["project_keyword"])
+
+        aliases = {
+            item["term"]: item["sources"]
+            for item in matched["project"]["effective_brand_aliases"]
+        }
+        self.assertEqual(aliases["同于野"], ["project_keyword"])
+        self.assertEqual(aliases["同于野AI中转站"], ["project_keyword"])
+        self.assertNotIn("AI API中转站", aliases)
+        self.assertNotIn("AI模型接口", aliases)
+        self.assertNotIn("API中转服务", aliases)
+        self.assertNotIn("大模型API接入", aliases)
+
+        generic_only = self.analyze(
+            ["AI API中转站是一类常见服务。"],
+            **arguments,
+        )
+        self.assertFalse(generic_only["samples"][0]["brand_mentioned"])
+
+        embedded_cjk = self.analyze(
+            ["这是不同于野外工具的另一种品牌方案。"],
+            **arguments,
+        )
+        self.assertFalse(embedded_cjk["samples"][0]["brand_mentioned"])
+
+        legal_name_in_chinese_prose = self.analyze(
+            ["北京同于野科技有限公司提供AI服务。"],
+            **arguments,
+        )
+        self.assertTrue(
+            legal_name_in_chinese_prose["samples"][0]["brand_mentioned"]
+        )
+        self.assertEqual(
+            legal_name_in_chinese_prose["samples"][0]["mentions"][0]["match_type"],
+            "EXACT",
+        )
+
+        short_alias_in_chinese_prose = self.analyze(
+            ["同于野是一个品牌。"],
+            **arguments,
+        )
+        self.assertTrue(
+            short_alias_in_chinese_prose["samples"][0]["brand_mentioned"]
+        )
+        self.assertEqual(
+            short_alias_in_chinese_prose["samples"][0]["matched_aliases"],
+            ["同于野"],
+        )
+
+    def test_request_aliases_reject_generic_category_terms_but_keep_real_aliases(self):
+        arguments = {
+            "project_name": "北京同于野科技有限公司",
+            "project_product": "懂AI 国内模型聚合与中转站",
+            "project_keywords": [],
+            "stored_competitors": [],
+        }
+
+        generic = self.analyze(
+            [
+                "企业知识库、知识库、云服务、人工智能、开发平台、模型服务、"
+                "AI API 中转站和业务协同门户都是常见的产品类别。"
+            ],
+            aliases=[
+                "企业知识库",
+                "知识库",
+                "云服务",
+                "人工智能",
+                "开发平台",
+                "模型服务",
+                "AI API 中转站",
+                # This phrase is intentionally absent from the category
+                # fragment table: unanchored CJK prose must still be rejected.
+                "业务协同门户",
+            ],
+            **arguments,
+        )
+        self.assertFalse(generic["samples"][0]["brand_mentioned"])
+        effective_generic_aliases = {
+            item["term"]
+            for item in generic["project"]["effective_brand_aliases"]
+        }
+        self.assertTrue(
+            {
+                "企业知识库",
+                "知识库",
+                "云服务",
+                "人工智能",
+                "开发平台",
+                "模型服务",
+                "AI API 中转站",
+                "业务协同门户",
+            }.isdisjoint(effective_generic_aliases)
+        )
+        self.assertIn(
+            "已忽略 8 个缺少可辨识品牌锚点的显式别名。",
+            generic["warnings"],
+        )
+        self.assertIn(arguments["project_product"], effective_generic_aliases)
+
+        chinese_alias = self.analyze(
+            ["同于野AI 中转站面向需要统一接口的开发者。"],
+            aliases=["同于野"],
+            **arguments,
+        )
+        self.assertTrue(chinese_alias["samples"][0]["brand_mentioned"])
+        self.assertEqual(chinese_alias["samples"][0]["matched_aliases"], ["同于野"])
+
+        english_alias = self.analyze(
+            ["DongClaw is a product option for model API routing."],
+            aliases=["DongClaw"],
+            **arguments,
+        )
+        self.assertTrue(english_alias["samples"][0]["brand_mentioned"])
+        self.assertEqual(
+            english_alias["samples"][0]["matched_aliases"], ["DongClaw"]
+        )
+
+        uppercase_alias = self.analyze(
+            ["ACME is another independently configured trade name."],
+            aliases=["ACME"],
+            **arguments,
+        )
+        self.assertTrue(uppercase_alias["samples"][0]["brand_mentioned"])
+
+    def test_generic_project_product_is_not_automatically_a_brand_alias(self):
+        result = self.analyze(
+            ["企业知识库和超级企业知识库平台都可以集中管理内部文档。"],
+            project_name="北京同于野科技有限公司",
+            project_product="企业知识库",
+            project_keywords=[],
+            aliases=["超级企业知识库平台"],
+            stored_competitors=[],
+        )
+
+        self.assertFalse(result["samples"][0]["brand_mentioned"])
+        self.assertEqual(result["project"]["effective_brand_aliases"], [])
+        self.assertIn("项目产品仅包含通用品类词，不作为品牌命中别名。", result["warnings"])
+        self.assertIn(
+            "已忽略 1 个缺少可辨识品牌锚点的显式别名。",
+            result["warnings"],
+        )
+
+    def test_saved_analysis_freshness_is_version_aware(self):
+        current = self.analyze(["Acme Cloud is recommended."])
+        fresh = inspect_ai_visibility_analysis_freshness(current)
+
+        self.assertEqual(fresh["status"], "current")
+        self.assertFalse(fresh["reanalysis_required"])
+        self.assertEqual(fresh["stale_components"], [])
+        self.assertEqual(
+            fresh["current_versions"], current_ai_visibility_algorithm_versions()
+        )
+
+        historical = dict(current)
+        historical["algorithm_versions"] = {
+            **current["algorithm_versions"],
+            "mention": "mention-python-port-1.1.0",
+        }
+        stale = inspect_ai_visibility_analysis_freshness(historical)
+        self.assertEqual(stale["status"], "stale")
+        self.assertTrue(stale["reanalysis_required"])
+        self.assertEqual(stale["stale_components"], ["mention"])
+
+        pre_cjk_boundary_result = dict(current)
+        pre_cjk_boundary_result["algorithm_versions"] = {
+            **current["algorithm_versions"],
+            "integration": "ai-visibility-python-port-1.4.0",
+            "mention": "mention-python-port-1.4.0",
+        }
+        pre_cjk_boundary_stale = inspect_ai_visibility_analysis_freshness(
+            pre_cjk_boundary_result
+        )
+        self.assertEqual(
+            pre_cjk_boundary_stale["stale_components"],
+            ["integration", "mention"],
+        )
+
+        unversioned = inspect_ai_visibility_analysis_freshness({"summary": {}})
+        self.assertEqual(unversioned["status"], "unversioned")
+        self.assertTrue(unversioned["reanalysis_required"])
+
+    def test_local_reanalysis_updates_old_parser_result_without_external_call(self):
+        old = self.analyze(
+            ["同于野AI API中转站面向开发者。"],
+            project_name="北京同于野科技有限公司",
+            project_product="懂AI 国内模型聚合与中转站",
+            project_keywords=[],
+            stored_competitors=[],
+        )
+        self.assertFalse(old["samples"][0]["brand_mentioned"])
+        old["algorithm_versions"] = {
+            **old["algorithm_versions"],
+            "mention": "mention-python-port-1.1.0",
+        }
+
+        outcome = reanalyze_ai_visibility_locally(
+            previous_analysis=old,
+            project_id=7,
+            project_name="北京同于野科技有限公司",
+            project_product="懂AI 国内模型聚合与中转站",
+            project_keywords=["同于野"],
+            project_website="https://tongyuye.com",
+            stored_competitors=[],
+            prompt="适合开发者的 AI API 中转站有哪些？",
+            responses=["同于野AI API中转站面向开发者。"],
+        )
+
+        self.assertEqual(outcome["refresh"]["status"], "refreshed")
+        self.assertTrue(outcome["refresh"]["performed"])
+        self.assertEqual(outcome["refresh"]["provider_calls"], 0)
+        self.assertEqual(outcome["refresh"]["network_requests"], 0)
+        self.assertTrue(outcome["analysis"]["samples"][0]["brand_mentioned"])
+        provenance = outcome["analysis"]["methodology"]["local_reanalysis"]
+        self.assertEqual(provenance["previous_algorithm_versions"]["mention"], "mention-python-port-1.1.0")
+        self.assertEqual(provenance["provider_calls"], 0)
+
+    def test_current_analysis_is_returned_without_reanalysis_unless_forced(self):
+        current = self.analyze(["Acme Cloud is recommended."])
+        outcome = reanalyze_ai_visibility_locally(
+            previous_analysis=current,
+            project_id=7,
+            project_name="Acme Cloud",
+            project_product="Acme",
+            project_website="https://www.acme.com",
+            stored_competitors=["RivalOS"],
+            prompt="What are the best enterprise automation platforms?",
+            responses=["This input must not be parsed on the current fast path."],
+        )
+
+        self.assertEqual(outcome["refresh"]["status"], "current")
+        self.assertFalse(outcome["refresh"]["performed"])
+        self.assertEqual(outcome["analysis"], current)
+        self.assertIsNot(outcome["analysis"], current)
 
     def test_duplicate_numbering_does_not_create_a_structured_rank(self):
         result = self.analyze(["Options:\n1. Acme Cloud\n1. RivalOS"])
@@ -326,7 +599,7 @@ class AIVisibilityServiceTests(unittest.TestCase):
         )
         self.assertEqual(
             result["algorithm_versions"]["mention"],
-            "mention-python-port-1.1.0",
+            "mention-python-port-1.5.0",
         )
 
     def test_explicit_empty_competitors_disables_stored_comparison(self):

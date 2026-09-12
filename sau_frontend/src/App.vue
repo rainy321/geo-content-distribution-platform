@@ -118,6 +118,50 @@
           </div>
         </el-header>
         <el-main>
+          <section
+            v-if="publishingWorkspaceVisible && reviewAlerts.length"
+            class="global-review-alerts"
+            aria-label="平台状态提醒"
+          >
+            <div class="review-alert-heading">
+              <div>
+                <small>PLATFORM MONITOR / {{ reviewAlerts.length }} UNREAD</small>
+                <strong>平台状态有新结果</strong>
+              </div>
+              <button type="button" @click="openAlertDestination(reviewAlerts[0])">
+                查看详情
+              </button>
+            </div>
+            <article
+              v-for="alert in reviewAlerts.slice(0, 3)"
+              :key="alert.id"
+              :class="['global-review-alert', `severity-${alert.severity || 'warning'}`]"
+              :role="alert.severity === 'critical' || alert.severity === 'error' ? 'alert' : 'status'"
+            >
+              <span class="review-alert-mark">{{ alert.category === 'published' ? '✓' : '!' }}</span>
+              <div>
+                <strong>{{ alert.title }}</strong>
+                <p>{{ alert.message }}</p>
+              </div>
+              <div class="review-alert-actions">
+                <a
+                  v-if="safeAlertResultUrl(alert)"
+                  :href="safeAlertResultUrl(alert)"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >打开平台作品链接</a>
+                <button type="button" @click="openAlertDestination(alert)">
+                  {{ alert.category === 'account_risk' ? '处理账号' : '查看任务' }}
+                </button>
+                <button type="button" class="acknowledge" @click="acknowledgeReviewAlert(alert)">
+                  我知道了
+                </button>
+              </div>
+            </article>
+            <p v-if="reviewAlerts.length > 3" class="review-alert-more">
+              另有 {{ reviewAlerts.length - 3 }} 条未读提醒，可进入发布中心查看。
+            </p>
+          </section>
           <router-view v-slot="{ Component }">
             <KeepAlive include="AiVisibility,ContentCreation">
               <component :is="Component" />
@@ -181,6 +225,7 @@ import { ElMessage } from 'element-plus'
 import AccessGate from '@/components/AccessGate.vue'
 import DesktopStatusBar from '@/components/DesktopStatusBar.vue'
 import { authApi } from '@/api/auth'
+import { publishApi } from '@/api/publish'
 import {
   HomeFilled, User, DataAnalysis,
   Fold, Picture, Upload, CollectionTag, MagicStick, DocumentCopy, Aim, Setting,
@@ -217,6 +262,9 @@ const desktopRealPublishingAuthorized = ref(false)
 const publishingWorkspaceVisible = computed(() => (
   !desktopMode.value || desktopRealPublishingAuthorized.value
 ))
+const reviewAlerts = ref([])
+let reviewAlertTimer = null
+const notifiedReviewAlertIds = new Set()
 
 // 当前激活的菜单项
 const activeMenu = computed(() => {
@@ -269,6 +317,7 @@ const loadAuthStatus = async () => {
     authState.error = error?.response?.data?.msg || error?.message || '检查后端服务后重试'
   } finally {
     authState.loading = false
+    if (!authState.required || authState.authenticated) startReviewAlertPolling()
   }
 }
 
@@ -277,12 +326,15 @@ const handleAuthenticated = () => {
   authState.authenticated = true
   authState.setupRequired = false
   authState.error = ''
+  startReviewAlertPolling()
 }
 
 const handleAuthRequired = () => {
   authState.loading = false
   authState.required = true
   authState.authenticated = false
+  stopReviewAlertPolling()
+  reviewAlerts.value = []
 }
 
 const enforcePublishingRouteBoundary = () => {
@@ -324,8 +376,93 @@ const handleOperatorCommand = async (command) => {
     await authApi.logout()
     authState.authenticated = false
     authState.setupRequired = false
+    stopReviewAlertPolling()
+    reviewAlerts.value = []
   } catch (error) {
     ElMessage.error(error?.response?.data?.msg || error?.message || '退出失败')
+  }
+}
+
+const safeAlertResultUrl = alert => {
+  const value = String(alert?.result_url || '').trim()
+  if (!value) return ''
+  try {
+    const parsed = new URL(value)
+    return parsed.protocol === 'https:' ? parsed.toString() : ''
+  } catch {
+    return ''
+  }
+}
+
+const openAlertDestination = alert => {
+  if (alert?.category === 'account_risk') {
+    router.push({
+      path: '/account-management',
+      query: alert.account_id ? { focus_account_id: String(alert.account_id) } : {}
+    })
+    return
+  }
+  router.push({
+    path: '/publish-center',
+    query: alert?.publish_job_id ? { focus_job_id: String(alert.publish_job_id) } : {}
+  })
+}
+
+const fetchReviewAlerts = async () => {
+  if (
+    authState.loading
+    || (authState.required && !authState.authenticated)
+    || !publishingWorkspaceVisible.value
+  ) return
+  try {
+    const response = await publishApi.getReviewMonitor({
+      unread_only: true,
+      alert_limit: 10
+    })
+    const nextAlerts = Array.isArray(response.data?.alerts) ? response.data.alerts : []
+    reviewAlerts.value = nextAlerts
+    nextAlerts.slice(0, 3).forEach(alert => {
+      if (notifiedReviewAlertIds.has(alert.id)) return
+      notifiedReviewAlertIds.add(alert.id)
+      const options = {
+        message: alert.title || '平台状态有变化',
+        duration: 8000,
+        showClose: true
+      }
+      if (alert.severity === 'critical' || alert.severity === 'error') {
+        ElMessage.error(options)
+      } else if (alert.category === 'published') {
+        ElMessage.success(options)
+      } else {
+        ElMessage.warning(options)
+      }
+    })
+  } catch (error) {
+    // This background read must never interrupt the current workspace flow.
+    console.error('平台状态提醒同步失败:', error)
+  }
+}
+
+const stopReviewAlertPolling = () => {
+  if (reviewAlertTimer) window.clearInterval(reviewAlertTimer)
+  reviewAlertTimer = null
+}
+
+const startReviewAlertPolling = () => {
+  stopReviewAlertPolling()
+  void fetchReviewAlerts()
+  reviewAlertTimer = window.setInterval(fetchReviewAlerts, 30_000)
+}
+
+const acknowledgeReviewAlert = async alert => {
+  if (!alert?.id) return
+  const previous = reviewAlerts.value
+  reviewAlerts.value = previous.filter(item => item.id !== alert.id)
+  try {
+    await publishApi.acknowledgeReviewAlert(alert.id)
+  } catch (error) {
+    reviewAlerts.value = previous
+    ElMessage.error(error?.response?.data?.msg || '提醒确认未保存，请稍后重试')
   }
 }
 
@@ -357,6 +494,7 @@ onMounted(() => {
 })
 
 onBeforeUnmount(() => {
+  stopReviewAlertPolling()
   window.removeEventListener('geo-auth-required', handleAuthRequired)
   smallScreenQuery?.removeEventListener('change', syncSmallScreen)
 })
@@ -635,6 +773,103 @@ onBeforeUnmount(() => {
 .password-dialog-hint { color: var(--geo-muted); }
 .password-dialog-error { margin-top: 9px; color: #b42318; }
 
+.global-review-alerts {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  display: grid;
+  gap: 8px;
+  padding: 12px 18px;
+  border-bottom: 1px solid #f1b7ad;
+  background: #fff8f6;
+  box-shadow: 0 5px 18px rgba(72, 24, 17, 0.1);
+}
+
+.review-alert-heading,
+.global-review-alert,
+.review-alert-actions {
+  display: flex;
+  align-items: center;
+}
+
+.review-alert-heading {
+  justify-content: space-between;
+  gap: 16px;
+
+  div {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+  }
+
+  small {
+    color: #9f2d20;
+    font: 700 9px/1 "Cascadia Mono", monospace;
+    letter-spacing: 0.12em;
+  }
+
+  strong { color: #7a2018; font-size: 14px; }
+  button { color: #7a2018; font-size: 12px; text-decoration: underline; }
+}
+
+.global-review-alert {
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid #e4c36a;
+  border-left: 4px solid #b78213;
+  background: #fffdf3;
+
+  &.severity-critical,
+  &.severity-error {
+    border-color: #efaaa1;
+    border-left-color: #c92f23;
+    background: #fff1ef;
+  }
+
+  &.severity-success {
+    border-color: #99d2c1;
+    border-left-color: #188663;
+    background: #f2fbf8;
+  }
+
+  > div:not(.review-alert-actions) { min-width: 0; flex: 1; }
+  strong { color: var(--geo-ink); font-size: 13px; }
+  p { margin: 3px 0 0; color: #5e5552; font-size: 12px; line-height: 1.45; }
+}
+
+.review-alert-mark {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  place-items: center;
+  border-radius: 50%;
+  background: #9f2d20;
+  color: #fff;
+  font-weight: 800;
+}
+
+.severity-success .review-alert-mark { background: #188663; }
+
+.review-alert-actions {
+  flex: 0 0 auto;
+  gap: 8px;
+
+  a,
+  button {
+    padding: 5px 8px;
+    border: 1px solid #b9a9a5;
+    background: #fff;
+    color: var(--geo-ink);
+    font-size: 11px;
+    text-decoration: none;
+  }
+
+  .acknowledge { border-color: transparent; background: transparent; color: #766a66; }
+}
+
+.review-alert-more { margin: 0; color: #75645f; font-size: 11px; }
+
 .el-main {
   width: 100%;
   min-width: 0;
@@ -662,6 +897,9 @@ onBeforeUnmount(() => {
   .el-main {
     padding: 0;
   }
+
+  .global-review-alert { align-items: flex-start; flex-wrap: wrap; }
+  .review-alert-actions { width: 100%; padding-left: 36px; flex-wrap: wrap; }
 
   .el-aside + .el-container {
     width: calc(100vw - 68px);

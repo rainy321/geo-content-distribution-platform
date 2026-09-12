@@ -6,11 +6,40 @@ export const PUBLISH_OUTCOME_CATEGORIES = Object.freeze([
 ])
 
 export const PUBLISH_OUTCOME_LABELS = Object.freeze({
-  published: '已公开发布',
+  published: '平台已发布',
   platform_processing: '平台处理中/审核中',
   action_required: '需要人工处理',
   failed: '明确失败'
 })
+
+const fallbackPublicationEvidence = source => {
+  const url = String(source?.url || source?.result_url || '').trim()
+  const demo = source?.demo === true
+  const state = demo
+    ? 'not_applicable'
+    : url
+      ? 'anonymous_unverified'
+      : 'no_public_url'
+  return {
+    version: 'publication-evidence-1.0.0',
+    platform_state: String(source?.status || 'unknown') === 'success'
+      ? 'reported_published'
+      : 'pending_or_unknown',
+    evidence_scope: demo ? 'demo' : 'local_task',
+    result_url_present: Boolean(url),
+    public_access_state: state,
+    public_access_label: demo
+      ? '不适用'
+      : url
+        ? '匿名访问未核验'
+        : '尚无作品链接',
+    anonymous_access_verified: false,
+    geo_crawlability_state: 'not_verified',
+    geo_crawlable_verified: false,
+    can_claim_publicly_accessible: false,
+    can_claim_geo_crawlable: false
+  }
+}
 
 const validCategory = value => PUBLISH_OUTCOME_CATEGORIES.includes(String(value || ''))
 
@@ -40,6 +69,14 @@ const ambiguousSubmissionMarkers = [
   '请求异常'
 ]
 
+const creatorSideEvidenceMarkers = [
+  '创作中心',
+  '创作者后台',
+  '内容管理',
+  '已发布列表',
+  'posted 接口'
+]
+
 const hasConfirmedProcessingEvidence = source => {
   const message = String(source?.message || '').trim()
   if (!message || ambiguousSubmissionMarkers.some(marker => message.includes(marker))) return false
@@ -48,7 +85,11 @@ const hasConfirmedProcessingEvidence = source => {
 
 const fallbackCategory = source => {
   const status = String(source?.status || source?.source_status || '').toLowerCase()
-  if (status === 'success') return 'published'
+  const message = String(source?.message || '')
+  const hasCreatorOnlyEvidence = creatorSideEvidenceMarkers.some(marker => message.includes(marker))
+  if (status === 'success') {
+    return hasCreatorOnlyEvidence ? 'platform_processing' : 'published'
+  }
   if (source?.reconciliation_required === true) {
     return hasConfirmedProcessingEvidence(source) ? 'platform_processing' : 'action_required'
   }
@@ -128,6 +169,12 @@ export const normalizePublishOutcome = (source = {}, overrides = {}) => {
   const automaticRetryAllowed = typeof overrides.automaticRetryAllowed === 'boolean'
     ? overrides.automaticRetryAllowed
     : backend.automatic_retry_allowed === true
+  const publicationEvidence = (
+    backend.publication_evidence
+    && typeof backend.publication_evidence === 'object'
+  )
+    ? backend.publication_evidence
+    : fallbackPublicationEvidence(source)
   return {
     job_id: Number(source?.job_id ?? overrides.jobId ?? 0) || 0,
     platform: String(source?.platform ?? overrides.platform ?? ''),
@@ -153,7 +200,8 @@ export const normalizePublishOutcome = (source = {}, overrides = {}) => {
     ) || 0,
     auto_repair_attempted: Boolean(overrides.autoRepairAttempted),
     auto_repair_note: String(overrides.autoRepairNote || '').trim(),
-    transport_note: String(overrides.transportNote || '').trim()
+    transport_note: String(overrides.transportNote || '').trim(),
+    publication_evidence: publicationEvidence
   }
 }
 

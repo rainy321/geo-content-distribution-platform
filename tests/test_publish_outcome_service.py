@@ -3,6 +3,7 @@ import unittest
 from services.publish_outcome_service import (
     PUBLISH_OUTCOME_CATEGORIES,
     classify_publish_outcome,
+    classify_publication_evidence,
     detect_safe_publish_repair,
 )
 
@@ -144,6 +145,74 @@ class PublishOutcomeServiceTests(unittest.TestCase):
         self.assertFalse(ambiguous["automatic_retry_allowed"])
         self.assertFalse(verification["eligible"])
         self.assertIn("账号或本人验证", verification["summary"])
+
+    def test_success_url_is_not_misreported_as_anonymous_or_geo_verified(self):
+        outcome = classify_publish_outcome(
+            status="success",
+            message="平台返回作品链接",
+            result_url="https://example.com/item/123",
+        )
+
+        evidence = outcome["publication_evidence"]
+        self.assertEqual(outcome["label"], "平台已发布")
+        self.assertEqual(evidence["platform_state"], "reported_published")
+        self.assertEqual(evidence["public_access_state"], "anonymous_unverified")
+        self.assertFalse(evidence["anonymous_access_verified"])
+        self.assertFalse(evidence["geo_crawlable_verified"])
+        self.assertFalse(evidence["can_claim_publicly_accessible"])
+        self.assertFalse(evidence["can_claim_geo_crawlable"])
+
+    def test_creator_posted_evidence_is_separate_from_public_access(self):
+        evidence = classify_publication_evidence(
+            status="processing",
+            message="小红书创作中心已发布列表与 posted 接口已核验",
+            result_url="https://www.xiaohongshu.com/explore/6aa4f050000000001001f871",
+        )
+
+        self.assertEqual(
+            evidence["platform_state"],
+            "creator_listed_pending_public_verification",
+        )
+        self.assertEqual(evidence["evidence_scope"], "creator_backend")
+        self.assertEqual(evidence["public_access_state"], "anonymous_unverified")
+        self.assertFalse(evidence["anonymous_access_verified"])
+
+    def test_legacy_creator_side_success_is_presented_as_pending_public_check(self):
+        outcome = classify_publish_outcome(
+            status="success",
+            message="小红书创作中心“已发布”列表与 posted 接口已核验",
+            result_url="https://www.xiaohongshu.com/explore/6aa4f050000000001001f871",
+        )
+
+        self.assertEqual(outcome["category"], "platform_processing")
+        self.assertEqual(
+            outcome["publication_evidence"]["platform_state"],
+            "creator_listed_pending_public_verification",
+        )
+        self.assertEqual(outcome["action"], "open_result")
+        self.assertFalse(outcome["retry_allowed"])
+        self.assertTrue(outcome["validation_required"])
+        self.assertIn("不得计为 GEO 公网证据", outcome["next_action"])
+
+    def test_only_explicit_anonymous_check_can_mark_public_access_verified(self):
+        unproven = classify_publication_evidence(
+            status="success",
+            result_url="https://example.com/item/123",
+            public_access_status="verified_public",
+        )
+        evidence = classify_publication_evidence(
+            status="success",
+            result_url="https://example.com/item/123",
+            public_access_status="verified_public",
+            public_access_method="anonymous_http_and_render",
+            public_access_checked_at="2026-09-12T07:00:00Z",
+        )
+
+        self.assertEqual(unproven["public_access_state"], "anonymous_unverified")
+        self.assertFalse(unproven["anonymous_access_verified"])
+        self.assertTrue(evidence["anonymous_access_verified"])
+        self.assertTrue(evidence["can_claim_publicly_accessible"])
+        self.assertFalse(evidence["can_claim_geo_crawlable"])
 
 
 if __name__ == "__main__":
