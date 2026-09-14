@@ -53,7 +53,7 @@
 - **统一 CLI**：`sau <platform> <action>`，便于脚本化与 Agent 调用
 - **可扩展 uploader**：每个平台独立模块，便于二开接入新平台
 - **GEO 内容工作流**：品牌底稿 → AI 生成 → GEO 评分/优化 → 内容库 → 多渠道分发
-- **内容生产提效**：内置/自定义内容模板、最多 5 个主题批量生成、Excel/CSV 批量导入
+- **内容生产提效**：内置/自定义内容模板、最多 20 个主题批量生成、Excel/CSV 批量导入
 - **图片工作流**：从素材库智能推荐封面，或自动生成 1200×628 中性 GEO 封面并关联稿件
 - **统一桌面分发**：10 个渠道共用同一发布清单；图文渠道校验图片，视频渠道校验视频
 - **可追踪发布任务**：`queued / processing / success / failed / need_action / scheduled`
@@ -185,7 +185,7 @@ Demo Mode 首次连接到**完全空的数据库**时，会在一个事务内准
 | 方法 | 路径 | 说明 |
 | --- | --- | --- |
 | `POST` | `/api/articles/generate` | 通过 OpenAI-compatible API 生成 GEO 稿件 |
-| `POST` | `/api/articles/generate-batch` | 最多按 5 个主题生成并保存独立草稿 |
+| `POST` | `/api/articles/generate-batch` | 最多按 20 个主题生成并保存独立草稿 |
 | `GET/POST` | `/api/content-templates` | 查询或创建内容模板 |
 | `PUT/DELETE` | `/api/content-templates/:id` | 更新或删除自定义内容模板 |
 | `GET` | `/api/articles/import-template.xlsx` | 下载标准文章导入模板 |
@@ -258,7 +258,7 @@ python examples/upload_article_to_baijiahao.py
 
 Windows 桌面版已把模板、批量文章、Excel/CSV 导入、自动配图和 10 个渠道接进同一条内容分发链路：
 
-1. 在「AI 内容创作」选择内置或自定义模板，也可一次生成最多 5 个主题草稿。
+1. 在「AI 内容创作」选择内置或自定义模板，也可一次生成最多 20 个主题草稿。
 2. 在「内容库」下载标准 Excel 模板并批量导入文章。
 3. 在「发布中心」选择稿件与渠道；百家号、小红书、抖音、快手需要图片，Bilibili、视频号、TikTok 需要视频。
 4. 图片可从素材库智能推荐，也可让系统生成中性 GEO 封面；视频从素材库上传选择。
@@ -347,6 +347,7 @@ cd sau_frontend && npm run build
 
 | 文档 | 内容 |
 | --- | --- |
+| [docs/AI开发与系统详细说明.md](./docs/AI开发与系统详细说明.md) | AI 架构、模型角色、GEO 算法、可见度、发布状态机、安全边界与扩展开发总说明 |
 | [docs/install.md](./docs/install.md) | 安装与环境 |
 | [docs/update.md](./docs/update.md) | 更新说明 |
 | [docs/CLI.md](./docs/CLI.md) | `sau` CLI |
