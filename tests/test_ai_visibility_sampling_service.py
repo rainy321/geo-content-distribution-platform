@@ -17,7 +17,9 @@ from services.ai_service import (
 from services.ai_visibility_sampling_service import (
     IN_PROGRESS_EXPIRY_SECONDS,
     VISIBILITY_SAMPLE_MAX_OUTPUT_TOKENS,
+    VISIBILITY_SAMPLE_REASONING_MAX_OUTPUT_TOKENS,
     VISIBILITY_SAMPLE_MAX_TIMEOUT_SECONDS,
+    VISIBILITY_SAMPLING_VERSION,
     VisibilitySamplingConflictError,
     VisibilitySamplingInProgressError,
     VisibilitySamplingValidationError,
@@ -255,6 +257,13 @@ class AIVisibilitySamplingServiceTests(unittest.TestCase):
             VISIBILITY_SAMPLE_MAX_OUTPUT_TOKENS,
         )
         self.assertEqual(
+            data["request_policy"]["output_budget_profile"], "standard"
+        )
+        self.assertEqual(
+            data["request_policy"]["output_budget_ceiling_tokens"],
+            VISIBILITY_SAMPLE_MAX_OUTPUT_TOKENS,
+        )
+        self.assertEqual(
             data["request_policy"]["execution"],
             "sequential_stop_on_first_failure",
         )
@@ -318,6 +327,101 @@ class AIVisibilitySamplingServiceTests(unittest.TestCase):
         self.assertEqual(request_row[0], "completed")
         self.assertIn('"status":"completed"', request_row[1])
         self.assertEqual(history_count, 1)
+
+    def test_custom_deepseek_and_glm_models_receive_extended_sampling_budget(self):
+        for index, model in enumerate(("DeepSeek-v4", "custom/GLM-5.2"), start=1):
+            with self.subTest(model=model):
+                observed = []
+                settings = AISettings(
+                    provider="custom",
+                    base_url="https://gateway.example.test/v1",
+                    api_key="custom-secret",
+                    model=model,
+                )
+
+                def sampler(**kwargs):
+                    observed.append(kwargs["settings"].max_tokens)
+                    return AICompletionResult(
+                        content="DongClaw 小龙虾值得考虑。",
+                        model=model,
+                        provider_request_id=f"provider-{index}",
+                        elapsed_ms=1,
+                        usage={"output_tokens": 12},
+                    )
+
+                result = self.run_sample(
+                    sampler,
+                    settings=settings,
+                    sample_count=1,
+                    persist=False,
+                    request_id=f"extended-budget-request-{index}",
+                    idempotency_key=f"extended-budget-key-{index}",
+                )
+
+                data = result["payload"]["data"]
+                self.assertEqual(
+                    observed, [VISIBILITY_SAMPLE_REASONING_MAX_OUTPUT_TOKENS]
+                )
+                self.assertEqual(data["sampling_version"], VISIBILITY_SAMPLING_VERSION)
+                self.assertEqual(
+                    data["contract_preflight"]["output_budget_profile"],
+                    "reasoning_model_extended",
+                )
+                self.assertEqual(
+                    data["contract_preflight"]["output_budget_ceiling_tokens"],
+                    VISIBILITY_SAMPLE_REASONING_MAX_OUTPUT_TOKENS,
+                )
+                self.assertEqual(
+                    data["request_policy"]["max_output_tokens"],
+                    VISIBILITY_SAMPLE_REASONING_MAX_OUTPUT_TOKENS,
+                )
+                self.assertEqual(
+                    data["request_policy"]["output_budget_mode"],
+                    "model_adaptive",
+                )
+                self.assertFalse(data["retry_policy"]["automatic_retry"])
+
+    def test_configured_limit_below_reasoning_budget_is_preserved(self):
+        observed = []
+        settings = AISettings(
+            provider="custom",
+            base_url="https://gateway.example.test/v1",
+            api_key="custom-secret",
+            model="DeepSeek-v4",
+            max_tokens=512,
+        )
+
+        def sampler(**kwargs):
+            observed.append(kwargs["settings"].max_tokens)
+            return AICompletionResult(
+                content="DongClaw 小龙虾值得考虑。",
+                model="DeepSeek-v4",
+                provider_request_id="provider-low-limit",
+                elapsed_ms=1,
+                usage={"output_tokens": 12},
+            )
+
+        result = self.run_sample(
+            sampler,
+            settings=settings,
+            sample_count=1,
+            persist=False,
+            request_id="low-budget-request",
+            idempotency_key="low-budget-key",
+        )
+
+        data = result["payload"]["data"]
+        self.assertEqual(observed, [512])
+        self.assertEqual(data["request_policy"]["max_output_tokens"], 512)
+        self.assertEqual(
+            data["request_policy"]["configured_max_output_tokens"], 512
+        )
+        self.assertEqual(
+            data["request_policy"]["output_budget_ceiling_tokens"],
+            VISIBILITY_SAMPLE_REASONING_MAX_OUTPUT_TOKENS,
+        )
+        self.assertFalse(data["contract_preflight"]["max_output_tokens_capped"])
+        self.assertFalse(data["retry_policy"]["automatic_retry"])
 
     def test_same_idempotency_key_replays_without_model_or_cost_call(self):
         calls = []

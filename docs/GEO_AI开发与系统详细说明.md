@@ -2,7 +2,7 @@
 
 > - 文档状态：当前实现说明
 > - 适用产品：GEO 智能内容分发平台 Windows 桌面版
-> - 产品版本：`1.2.7`
+> - 产品版本：`1.2.8`
 > - 基线提交：以发布目录 manifest 的 `source.commit` 为准
 > - 更新时间：2026-09-16
 > - 面向读者：产品开发、算法开发、测试、交付、运营和后续接手的 AI Agent
@@ -204,7 +204,7 @@ HTTP 404 通常表示 Base URL 路径或模型/接入点 ID 不匹配，不是�
 | WRITE | 0.7 | 默认 4096 Token | 保留内容变化度 |
 | REVIEW | 0.45 | 默认 4096 Token | 降低无关改写 |
 | EVAL | 0.1 | 默认 4096 Token | 优先稳定判断 |
-| AI 可见度采样 | 0.2 | 最高 768 Token | 只发送问题，不增加业务 system prompt |
+| AI 可见度采样 | 0.2 | 普通模型 768 Token；DeepSeek / GLM 2048 Token | 只发送问题，不增加业务 system prompt；配置值更低时取更低值 |
 
 默认网络超时为 120 秒。Qwen 兼容模式会在适用请求中关闭长思考，以降低连接测试或普通写稿因推理过长而超时的风险。服务端禁止 HTTP 自动重定向，避免密钥被转发到未确认主机；provider 返回的错误正文不会原样展示给前端，防止供应商回显提示词或敏感字段。
 
@@ -531,6 +531,10 @@ Content-Type: application/json
 调用：`POST /api/geo/visibility/sample-panel`，并通过 `GET /api/geo/visibility/sample-panel/{request_id}` 恢复。
 
 面板可以选择 `writer`、`reviewer` 和 `evaluator` 中实际独立的模型，最多 3 个。不同模型之间可以并行形成对照，但同一模型内部仍顺序采样 1–5 次。独立性依据 provider、归一化 endpoint 和 model，而不是角色名称。面板只有在至少两个规范化后不同的模型存在、且本次所有可执行模型都完成时才是 `completed`；三个模型中两个成功、一个失败时仍是 `partial`，不能称为完整多模型对照。
+
+`1.2.8` 起，界面按独立模型数计算达到 5 条有效回答所需的最低每模型采样数：3 个独立模型时最低为 2，2 个独立模型时最低为 3。这是“所有调用均成功时最多可得样本”的调用前规划，不是对供应商成功率的承诺。操作员可主动降低样本数做低成本方向性检查，但界面会在调用前标明该配置无法达到量化门槛。
+
+只有当实际有效回答不少于 5 条、至少 2 个独立模型完整返回、且对照口径合格时，才能生成 API 渠道聚合指标。聚合过程只复用已取得的回答和本地确定性解析器，不额外调用模型。
 
 多模型结果应展示：
 
@@ -1097,8 +1101,8 @@ pwsh -NoProfile -File .\scripts\package_source.ps1
 
 | 产物 | 相对路径或文件名 | SHA-256 / 状态 |
 | --- | --- | --- |
-| 内部源码包 | `release/source/GEO-Content-Platform-Source-Internal-1.2.7-<UTC时间>-<提交短SHA>/...zip` | 以同目录 `.sha256.txt` 和 `SOURCE-PACKAGE-RECEIPT.json` 为准 |
-| Windows x64 ZIP | `release/windows/GEO-Content-Platform-1.2.7-authorized-real-<UTC时间>-<提交短SHA>/...windows-x64.zip` | 以同目录 manifest 与 SHA-256 清单为准 |
+| 内部源码包 | `release/source/GEO-Content-Platform-Source-Internal-1.2.8-<UTC时间>-<提交短SHA>/...zip` | 以同目录 `.sha256.txt` 和 `SOURCE-PACKAGE-RECEIPT.json` 为准 |
+| Windows x64 ZIP | `release/windows/GEO-Content-Platform-1.2.8-authorized-real-<UTC时间>-<提交短SHA>/...windows-x64.zip` | 以同目录 manifest 与 SHA-256 清单为准 |
 | Windows EXE | 同一 Windows 目录下的 `GEO-Content-Platform.exe` | 以同目录 `GEO-Content-Platform.manifest.json` 为准 |
 | 代码签名 | 当前 EXE | `NotSigned` |
 
@@ -1180,9 +1184,9 @@ pwsh -NoProfile -File .\scripts\package_source.ps1
 | 显式 URL 引用解析 | `citation-inline-url-python-port-1.1.0` / `explicit-response-url-1.0.0` |
 | 公共后缀与来源分类 | `public-suffix-curated-python-1.1.0` / `source-classifier-python-1.1.0` |
 | 情感、指标与建议 | `sentiment-python-port-1.1.0` / `metrics-ad-hoc-python-1.1.0` / `recommendations-ad-hoc-python-1.1.0` |
-| 可见度 API 采样 | `controlled-live-visibility-sampling-1.1.0` |
+| 可见度 API 采样 | `controlled-live-visibility-sampling-1.3.0` |
 | 本机可见度输入快照 | `visibility-local-analysis-input-1.0.0` |
-| 多模型可见度面板 | `api-model-visibility-panel-1.1.0` |
+| 多模型可见度面板 | `api-model-visibility-panel-1.2.0` |
 | 黑盒实验面板 | `geo-blackbox-panel-1.0.0` |
 | 黑盒真实性矩阵 | `geo-blackbox-truth-matrix-1.0.0` |
 | GEO 商业诊断 | `geo-commercial-diagnostic-1.3.0` |
@@ -1202,7 +1206,7 @@ pwsh -NoProfile -File .\scripts\package_source.ps1
 
 ### 21.1 当前已知实现差异
 
-以下是当前 `1.2.7` 源码中已经确认、但尚未在本文档任务中修改的工程问题：
+以下是当前 `1.2.8` 源码中已经确认、但尚未在本文档任务中修改的工程问题：
 
 1. **可见度 prompt 上限不一致**：单模型采样和多模型面板允许 8,000 字符，本机分析器只接受 4,000 字符。4,001–8,000 字符可能在 provider 调用完成后才在本机分析阶段失败。应在联网前统一限制为 4,000，或同步升级分析器并补齐测试。
 2. **临时采样密钥清理文案与 `KeepAlive` 行为不完全一致**：当前页面临时 API Key 在组件卸载时清理，但普通侧栏切换可能只触发停用而不卸载。应在 `onDeactivated` 清理，或把 UI 文案改为“窗口关闭/组件销毁时清除”。

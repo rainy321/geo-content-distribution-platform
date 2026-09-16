@@ -1,3 +1,5 @@
+import { resolveUnifiedAIChatEndpoint } from './aiConfig.js'
+
 const asArray = value => (Array.isArray(value) ? value : [])
 
 const numberOrNull = value => {
@@ -24,9 +26,151 @@ const measurementReasonText = value => {
   return String(value.message || value.reason || value.detail || '').trim()
 }
 
+const normalizeApiChannelAnalysis = value => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const source = value
+  const status = source.status === 'available' ? 'available' : 'unavailable'
+  const summarySource = status === 'available'
+    && source.summary
+    && typeof source.summary === 'object'
+    && !Array.isArray(source.summary)
+    ? source.summary
+    : {}
+  const confidenceSource = summarySource.confidence
+    && typeof summarySource.confidence === 'object'
+    && !Array.isArray(summarySource.confidence)
+    ? summarySource.confidence
+    : {}
+
+  return {
+    status,
+    channelType: String(source.channel_type || 'provider_api'),
+    metricScope: String(source.metric_scope || ''),
+    consumerSurfaceVerified: source.consumer_surface_verified === true,
+    consumerGeoClaimAllowed: source.consumer_geo_claim_allowed === true,
+    singleCompositeScoreProduced: source.single_composite_score_produced === true,
+    sourceModelCount: Math.max(0, numberOrNull(source.source_model_count) ?? 0),
+    summary: {
+      sampleCount: numberOrNull(summarySource.sample_count),
+      mentionRate: normalizedPercent(summarySource.mention_rate),
+      shareOfVoice: normalizedPercent(summarySource.share_of_voice),
+      averageRank: numberOrNull(summarySource.average_rank),
+      citationRate: normalizedPercent(summarySource.citation_rate),
+      sentimentScore: numberOrNull(summarySource.sentiment_score),
+      confidence: {
+        label: String(confidenceSource.label || ''),
+        reason: String(confidenceSource.reason || '')
+      }
+    }
+  }
+}
+
+const normalizeApiChannelAnalysisUnavailableReason = value => {
+  if (typeof value === 'string') {
+    const message = value.trim()
+    return message
+      ? {
+          code: 'api_channel_analysis_unavailable',
+          message,
+          measurementQualityStatus: '',
+          channelType: 'provider_api',
+          externalCallAttempted: false,
+          consumerSurfaceVerified: false,
+          errorType: ''
+        }
+      : null
+  }
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  return {
+    code: String(value.code || 'api_channel_analysis_unavailable'),
+    message: String(value.message || value.reason || 'API 渠道聚合指标暂不可用。'),
+    measurementQualityStatus: String(
+      value.measurement_quality_status || value.measurementQualityStatus || ''
+    ),
+    channelType: String(value.channel_type || value.channelType || 'provider_api'),
+    externalCallAttempted: value.external_call_attempted === true || value.externalCallAttempted === true,
+    consumerSurfaceVerified: value.consumer_surface_verified === true || value.consumerSurfaceVerified === true,
+    errorType: String(value.error_type || value.errorType || '')
+  }
+}
+
 // Keep this display contract aligned with the backend sampling policy.  The
 // authoritative value is still returned on every new sampling receipt.
 export const VISIBILITY_SAMPLE_OUTPUT_TOKEN_LIMIT = 768
+export const VISIBILITY_SAMPLE_REASONING_OUTPUT_TOKEN_LIMIT = 2048
+export const VISIBILITY_MINIMUM_QUANTITATIVE_RESPONSES = 5
+
+const boundedSampleCount = value => {
+  const normalized = Number(value)
+  if (!Number.isInteger(normalized)) return 1
+  return Math.min(5, Math.max(1, normalized))
+}
+
+const normalizedDistinctModelCount = value => {
+  const normalized = Number(value)
+  if (!Number.isFinite(normalized)) return 0
+  return Math.max(0, Math.floor(normalized))
+}
+
+export const visibilityQuantitativeSamplingPlan = ({
+  sampleCount,
+  multiModel,
+  distinctConfiguredModelCount
+} = {}) => {
+  const configuredDistinctModelCount = normalizedDistinctModelCount(distinctConfiguredModelCount)
+  const effectiveModelCount = multiModel === true ? configuredDistinctModelCount : 1
+  const minimumPerRole = Math.min(5, Math.max(
+    1,
+    Math.ceil(VISIBILITY_MINIMUM_QUANTITATIVE_RESPONSES / Math.max(1, configuredDistinctModelCount))
+  ))
+  const normalizedSampleCount = boundedSampleCount(sampleCount)
+  const maximumEffectiveResponseCount = normalizedSampleCount * effectiveModelCount
+  const quantitativeThresholdMet = multiModel === true
+    && effectiveModelCount >= 2
+    && maximumEffectiveResponseCount >= VISIBILITY_MINIMUM_QUANTITATIVE_RESPONSES
+
+  return {
+    configuredDistinctModelCount,
+    effectiveModelCount,
+    sampleCount: normalizedSampleCount,
+    minimumPerRole,
+    maximumEffectiveResponseCount,
+    minimumQuantitativeResponses: VISIBILITY_MINIMUM_QUANTITATIVE_RESPONSES,
+    quantitativeThresholdMet,
+    directionalOnly: multiModel === true && !quantitativeThresholdMet
+  }
+}
+
+export const reconcileVisibilitySampleCount = ({
+  sampleCount,
+  multiModel,
+  distinctConfiguredModelCount,
+  userSelected = false
+} = {}) => {
+  const plan = visibilityQuantitativeSamplingPlan({
+    sampleCount,
+    multiModel,
+    distinctConfiguredModelCount
+  })
+  // Once the operator deliberately chooses a value, including a cheaper value
+  // below the quantitative threshold, preserve that decision. Automatic mode
+  // tracks the current distinct-model count and uses the smallest viable value.
+  if (multiModel === true && userSelected !== true) return plan.minimumPerRole
+  return plan.sampleCount
+}
+
+export const visibilityConfiguredModelIdentity = value => {
+  const role = value && typeof value === 'object' ? value : {}
+  const provider = String(role.provider || '').trim().toLowerCase()
+  const model = String(role.model || '').trim().toLowerCase()
+  let endpoint = String(role.baseUrl || role.base_url || '').trim()
+  try {
+    endpoint = resolveUnifiedAIChatEndpoint(endpoint)
+  } catch {
+    endpoint = endpoint.replace(/\/+$/, '')
+  }
+  return [provider, endpoint.toLowerCase(), model].join('|')
+}
 
 export const VISIBILITY_PROVIDER_PRESETS = Object.freeze([
   Object.freeze({
@@ -240,12 +384,20 @@ export const normalizeVisibilitySamplingResponse = value => {
       ? {
           execution: String(root.request_policy.execution || ''),
           maxOutputTokens: numberOrNull(root.request_policy.max_output_tokens),
+          outputBudgetMode: String(root.request_policy.output_budget_mode || ''),
+          outputBudgetProfile: String(root.request_policy.output_budget_profile || ''),
+          outputBudgetCeilingTokens: numberOrNull(root.request_policy.output_budget_ceiling_tokens),
+          configuredMaxOutputTokens: numberOrNull(root.request_policy.configured_max_output_tokens),
           timeoutSeconds: numberOrNull(root.request_policy.timeout_seconds),
           connectionTestEquivalent: Boolean(root.request_policy.connection_test_equivalent)
         }
       : {
           execution: '',
           maxOutputTokens: null,
+          outputBudgetMode: '',
+          outputBudgetProfile: '',
+          outputBudgetCeilingTokens: null,
+          configuredMaxOutputTokens: null,
           timeoutSeconds: null,
           connectionTestEquivalent: false
         },
@@ -386,6 +538,12 @@ export const normalizeVisibilityPanelResponse = value => {
     }
   })
   const measurementQuality = normalizePanelMeasurementQuality(root, targets)
+  const apiChannelAnalysis = normalizeApiChannelAnalysis(
+    root.api_channel_analysis ?? root.apiChannelAnalysis
+  )
+  const apiChannelAnalysisUnavailableReason = normalizeApiChannelAnalysisUnavailableReason(
+    root.api_channel_analysis_unavailable_reason ?? root.apiChannelAnalysisUnavailableReason
+  )
   return {
     status: ['completed', 'partial', 'need_action'].includes(String(root.status))
       ? String(root.status)
@@ -422,7 +580,9 @@ export const normalizeVisibilityPanelResponse = value => {
       ? root.consumer_parity
       : { status: 'unverified', claim_allowed: false },
     claimBoundary: String(root.claim_boundary || ''),
-    measurementQuality
+    measurementQuality,
+    apiChannelAnalysis,
+    apiChannelAnalysisUnavailableReason
   }
 }
 

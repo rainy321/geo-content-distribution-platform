@@ -270,10 +270,38 @@
             </div>
 
             <label class="sample-count-field">
-              <span>样本数</span>
-              <el-input-number v-model="sampling.sampleCount" :min="1" :max="5" controls-position="right" />
-              <small>{{ sampling.multiModel ? '默认每个模型 1 次；可手动增加，同一模型内仍按顺序采样。' : '按顺序执行，不并发突发。' }}</small>
+              <span>{{ sampling.multiModel ? '每模型样本数' : '样本数' }}</span>
+              <el-input-number
+                v-model="sampling.sampleCount"
+                :min="1"
+                :max="5"
+                controls-position="right"
+                @change="handleSamplingSampleCountChange"
+              />
+              <small>{{ sampling.multiModel ? `当前 ${configuredDistinctModelCount} 个独立模型，量化最低建议每模型 ${samplingPlan.minimumPerRole} 次；你仍可主动降低做低成本方向性测试。` : '按顺序执行，不并发突发。' }}</small>
             </label>
+
+            <div
+              v-if="sampling.multiModel"
+              class="sampling-capacity"
+              :class="samplingPlan.quantitativeThresholdMet ? 'is-quantitative' : 'is-directional'"
+              role="status"
+            >
+              <div>
+                <span>本次最大有效回答数</span>
+                <strong>{{ samplingPlan.maximumEffectiveResponseCount }} 条</strong>
+                <small>{{ sampling.sampleCount }} 次 / 模型 × {{ samplingPlan.effectiveModelCount }} 个独立模型</small>
+              </div>
+              <p v-if="samplingPlan.quantitativeThresholdMet">
+                <b>理论上达到 API 渠道量化门槛</b>
+                至少需要 {{ samplingPlan.minimumQuantitativeResponses }} 条有效回答；最终仍按实际成功返回数判定，不代表消费者 App / Web。
+              </p>
+              <p v-else>
+                <b>仅方向性对照，不生成或宣称量化评分</b>
+                <template v-if="samplingPlan.effectiveModelCount < 2">当前不足 2 个不同 API 模型。</template>
+                <template v-else>最多 {{ samplingPlan.maximumEffectiveResponseCount }} 条，低于 {{ samplingPlan.minimumQuantitativeResponses }} 条有效回答门槛。</template>
+              </p>
+            </div>
 
             <div class="dispatch-slip">
               <div class="dispatch-index" aria-hidden="true">OUT<br>01</div>
@@ -462,6 +490,87 @@
                     <li v-for="reason in panelMeasurement.reasons" :key="reason">{{ reason }}</li>
                   </ul>
                 </div>
+              </section>
+              <section
+                v-if="panelMeasurement.status === 'quantitative'"
+                class="panel-api-analysis"
+                aria-labelledby="panel-api-analysis-title"
+              >
+                <header>
+                  <div>
+                    <span>PROVIDER API AGGREGATE</span>
+                    <h5 id="panel-api-analysis-title">API 渠道聚合指标</h5>
+                  </div>
+                  <small>基于本批次已保留回答的本地确定性聚合，不会再次调用模型</small>
+                </header>
+                <template v-if="visibilityPanelReceipt.apiChannelAnalysis?.status === 'available'">
+                  <dl class="panel-api-metrics" aria-label="API 渠道聚合指标明细">
+                    <div>
+                      <dt>有效回答</dt>
+                      <dd>{{ formatMetricNumber(visibilityPanelReceipt.apiChannelAnalysis.summary.sampleCount, 0) }}</dd>
+                      <small>sample_count</small>
+                    </div>
+                    <div>
+                      <dt>品牌提及率</dt>
+                      <dd>{{ formatPercent(visibilityPanelReceipt.apiChannelAnalysis.summary.mentionRate) }}</dd>
+                      <small>mention_rate</small>
+                    </div>
+                    <div>
+                      <dt>品牌声量份额</dt>
+                      <dd>{{ formatPercent(visibilityPanelReceipt.apiChannelAnalysis.summary.shareOfVoice) }}</dd>
+                      <small>share_of_voice</small>
+                    </div>
+                    <div>
+                      <dt>平均推荐位次</dt>
+                      <dd>{{ formatApiAverageRank(visibilityPanelReceipt.apiChannelAnalysis.summary.averageRank) }}</dd>
+                      <small>average_rank</small>
+                    </div>
+                    <div>
+                      <dt>引用回答率</dt>
+                      <dd>{{ formatPercent(visibilityPanelReceipt.apiChannelAnalysis.summary.citationRate) }}</dd>
+                      <small>citation_rate</small>
+                    </div>
+                    <div>
+                      <dt>情感分</dt>
+                      <dd>{{ formatMetricNumber(visibilityPanelReceipt.apiChannelAnalysis.summary.sentimentScore, 2) }}</dd>
+                      <small>sentiment_score</small>
+                    </div>
+                    <div class="panel-api-confidence">
+                      <dt>指标置信度</dt>
+                      <dd>{{ visibilityPanelReceipt.apiChannelAnalysis.summary.confidence.label || '—' }}</dd>
+                      <small>{{ visibilityPanelReceipt.apiChannelAnalysis.summary.confidence.reason || '—' }}</small>
+                    </div>
+                  </dl>
+                </template>
+                <div v-else class="panel-api-analysis-unavailable" role="status">
+                  <div>
+                    <span>不可用原因</span>
+                    <strong>{{ panelApiAnalysisUnavailableReason.code }}</strong>
+                    <p>{{ panelApiAnalysisUnavailableReason.message }}</p>
+                  </div>
+                  <dl>
+                    <div>
+                      <dt>质量状态</dt>
+                      <dd>{{ panelApiAnalysisUnavailableReason.measurementQualityStatus || panelMeasurement.status }}</dd>
+                    </div>
+                    <div>
+                      <dt>指标渠道</dt>
+                      <dd>{{ panelApiAnalysisUnavailableReason.channelType }}</dd>
+                    </div>
+                    <div>
+                      <dt>额外外部调用</dt>
+                      <dd>{{ panelApiAnalysisUnavailableReason.externalCallAttempted ? '已尝试' : '未尝试' }}</dd>
+                    </div>
+                    <div v-if="panelApiAnalysisUnavailableReason.errorType">
+                      <dt>错误类型</dt>
+                      <dd>{{ panelApiAnalysisUnavailableReason.errorType }}</dd>
+                    </div>
+                  </dl>
+                </div>
+                <p class="panel-api-analysis-boundary">
+                  <strong>这不是单一总分，也不是消费者 App / Web 实测。</strong>
+                  指标只汇总本批次 configured provider API 回答，不外推消费者入口表现。
+                </p>
               </section>
               <div class="execution-receipts">
                 <article
@@ -1164,7 +1273,7 @@
 </template>
 
 <script setup>
-import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { ArrowRight, Document, Grid, Link, Loading, Refresh, View, WarningFilled } from '@element-plus/icons-vue'
@@ -1189,14 +1298,18 @@ import {
 import {
   VISIBILITY_PROVIDER_PRESETS,
   VISIBILITY_SAMPLE_OUTPUT_TOKEN_LIMIT,
+  VISIBILITY_SAMPLE_REASONING_OUTPUT_TOKEN_LIMIT,
   applyVisibilityProviderPreset,
   buildManualSampleImport,
   buildVisibilityPanelRequest,
   buildVisibilitySamplingRequest,
   normalizeVisibilityPanelResponse,
   normalizeVisibilitySamplingResponse,
+  reconcileVisibilitySampleCount,
   samplingStatusLabel,
   validateVisibilitySamplingDraft,
+  visibilityConfiguredModelIdentity,
+  visibilityQuantitativeSamplingPlan,
   visibilityPanelMeasurementPresentation,
   visibilityPanelTargetPresentation,
   visibilityProviderPreset
@@ -1271,6 +1384,7 @@ const sampling = reactive({
   sampleCount: 1,
   confirmed: false
 })
+const samplingSampleCountUserSelected = ref(false)
 
 const formRules = {
   projectId: [{ required: true, message: '请选择品牌项目', trigger: 'change' }],
@@ -1292,13 +1406,24 @@ const configuredModelRoles = computed(() => {
       ? role?.effectiveConfigured
       : role?.configured && !role?.fallback
     if (!eligible || !role?.model) return []
-    const identity = [role.provider, role.baseUrl, role.model].map(String).join('|').toLowerCase()
+    if (roleId === 'reviewer' && role.sameAsWriter) return []
+    if (roleId === 'evaluator' && (role.sameAsWriter || role.sameAsReviewer)) return []
+    const identity = visibilityConfiguredModelIdentity(role)
     if (seen.has(identity)) return []
     seen.add(identity)
     return [{ ...role, roleId }]
   })
 })
 const configuredDistinctModelCount = computed(() => configuredModelRoles.value.length)
+const configuredModelFingerprint = computed(() => configuredModelRoles.value
+  .map(visibilityConfiguredModelIdentity)
+  .sort()
+  .join('\n'))
+const samplingPlan = computed(() => visibilityQuantitativeSamplingPlan({
+  sampleCount: sampling.sampleCount,
+  multiModel: sampling.multiModel,
+  distinctConfiguredModelCount: configuredDistinctModelCount.value
+}))
 const configuredModelLabels = computed(() => configuredModelRoles.value.map(role => (
   `${role.providerLabel || role.provider || role.roleId} / ${role.model}`
 )))
@@ -1343,10 +1468,13 @@ const hasUnknownSamplingOutcome = computed(() => Boolean(
 ))
 const samplingRequestPolicyText = computed(() => {
   const policy = liveSamplingReceipt.value?.requestPolicy || {}
-  const tokenLimit = policy.maxOutputTokens || VISIBILITY_SAMPLE_OUTPUT_TOKEN_LIMIT
+  const tokenLimit = policy.maxOutputTokens
   const timeout = policy.timeoutSeconds
   const timeoutText = timeout ? `，单次等待 ${timeout} 秒` : ''
-  return `连接测试只要求模型回复“OK”；真实采样会生成完整回答。新版采样已独立限制为最多 ${tokenLimit} 个输出 Token${timeoutText}，不再复用写稿的 4096 Token 预算。`
+  if (tokenLimit) {
+    return `连接测试只要求模型回复“OK”；真实采样会生成完整回答。本次回执的实际输出上限为 ${tokenLimit} Token${timeoutText}，不再复用写稿的 4096 Token 预算。`
+  }
+  return `连接测试只要求模型回复“OK”；真实采样会生成完整回答。采样采用模型自适应上限：普通模型 ${VISIBILITY_SAMPLE_OUTPUT_TOKEN_LIMIT} Token，DeepSeek / GLM ${VISIBILITY_SAMPLE_REASONING_OUTPUT_TOKEN_LIMIT} Token；若配置更低则保留较低值。`
 })
 const parsedResponses = computed(() => parseVisibilityResponses(form.responsesText))
 const sampleCount = computed(() => parsedResponses.value.length)
@@ -1371,6 +1499,17 @@ const presentedPanelTargets = computed(() => (
 ))
 const panelMeasurement = computed(() => (
   visibilityPanelMeasurementPresentation(visibilityPanelReceipt.value)
+))
+const panelApiAnalysisUnavailableReason = computed(() => (
+  visibilityPanelReceipt.value?.apiChannelAnalysisUnavailableReason || {
+    code: 'api_channel_analysis_unavailable',
+    message: '后端未返回可展示的 API 渠道聚合指标或结构化原因。',
+    measurementQualityStatus: panelMeasurement.value.status,
+    channelType: 'provider_api',
+    externalCallAttempted: false,
+    consumerSurfaceVerified: false,
+    errorType: ''
+  }
 ))
 const diagnosticDelta = computed(() => diagnosticRetestDelta(commercialDiagnosticRuns.value))
 
@@ -1586,6 +1725,35 @@ const selectSamplingProvider = providerId => {
   sampling.confirmed = false
 }
 
+const applyAutomaticQuantitativeMinimum = () => {
+  const nextCount = reconcileVisibilitySampleCount({
+    sampleCount: sampling.sampleCount,
+    multiModel: sampling.multiModel,
+    distinctConfiguredModelCount: configuredDistinctModelCount.value,
+    userSelected: samplingSampleCountUserSelected.value
+  })
+  if (nextCount === sampling.sampleCount) return
+  sampling.sampleCount = nextCount
+  sampling.confirmed = false
+}
+
+const handleSamplingSampleCountChange = () => {
+  samplingSampleCountUserSelected.value = sampling.multiModel === true
+  sampling.confirmed = false
+}
+
+watch(
+  [() => sampling.multiModel, configuredModelFingerprint],
+  ([multiModel, modelFingerprint], [previousMultiModel, previousModelFingerprint]) => {
+    applyAutomaticQuantitativeMinimum()
+    if (multiModel && (
+      multiModel !== previousMultiModel
+      || modelFingerprint !== previousModelFingerprint
+    )) sampling.confirmed = false
+  },
+  { flush: 'sync' }
+)
+
 const handleSamplingModeChange = () => {
   sampling.confirmed = false
   if (!sampling.useUnifiedEngine) {
@@ -1599,7 +1767,6 @@ const handleMultiModelChange = () => {
   visibilityPanelReceipt.value = null
   if (sampling.multiModel) {
     sampling.useUnifiedEngine = true
-    sampling.sampleCount = 1
     samplingOverrideExpanded.value = false
   }
 }
@@ -1665,6 +1832,9 @@ const restoreSamplingForm = pending => {
   form.prompt = String(pending.prompt || form.prompt || '')
   form.aliases = Array.isArray(pending.aliases) ? pending.aliases : form.aliases
   form.competitors = Array.isArray(pending.competitors) ? pending.competitors : form.competitors
+  // Recovery must preserve the exact already-dispatched request instead of
+  // applying today's recommendation to an existing idempotency identity.
+  samplingSampleCountUserSelected.value = pending.mode === 'panel'
   sampling.sampleCount = Number.isInteger(Number(pending.sampleCount))
     ? Math.max(1, Math.min(5, Number(pending.sampleCount)))
     : sampling.sampleCount
@@ -1931,7 +2101,7 @@ const confirmSingleReplacementSample = async () => {
   if (samplingLoading.value) return
   try {
     await ElMessageBox.confirm(
-      `这不是重试原请求，而是创建一个新的供应商调用。系统会把样本数改为 1，并将回答限制在 ${VISIBILITY_SAMPLE_OUTPUT_TOKEN_LIMIT} 个输出 Token 内；仍可能产生费用。请先核对供应商账单。`,
+      `这不是重试原请求，而是创建一个新的供应商调用。系统会把样本数改为 1；回答采用模型自适应上限（普通模型 ${VISIBILITY_SAMPLE_OUTPUT_TOKEN_LIMIT} Token，DeepSeek / GLM ${VISIBILITY_SAMPLE_REASONING_OUTPUT_TOKEN_LIMIT} Token，配置更低时取较低值）。仍可能产生费用，请先核对供应商账单。`,
       '确认新建 1 次采样',
       {
         confirmButtonText: '已核账，创建新调用',
@@ -1944,6 +2114,7 @@ const confirmSingleReplacementSample = async () => {
     return
   }
   sampling.sampleCount = 1
+  samplingSampleCountUserSelected.value = false
   sampling.confirmed = true
   await startLiveSampling()
 }
@@ -2130,9 +2301,22 @@ const submitAnalysis = async () => {
 }
 
 const formatPercent = value => {
+  if (value == null || value === '') return '—'
   const number = Number(value)
   if (!Number.isFinite(number)) return '—'
   return `${new Intl.NumberFormat('zh-CN', { maximumFractionDigits: 1 }).format(number)}%`
+}
+
+const formatMetricNumber = (value, maximumFractionDigits = 2) => {
+  if (value == null || value === '') return '—'
+  const number = Number(value)
+  if (!Number.isFinite(number)) return '—'
+  return new Intl.NumberFormat('zh-CN', { maximumFractionDigits }).format(number)
+}
+
+const formatApiAverageRank = value => {
+  if (value == null || value === '') return '—'
+  return formatRank(value)
 }
 
 const boundedPercent = value => {
@@ -2694,6 +2878,26 @@ onBeforeUnmount(() => {
   > small { color: var(--muted); font-size: 8px; }
   :deep(.el-input-number) { width: 120px; }
 }
+.sampling-capacity {
+  display: grid;
+  grid-template-columns: minmax(170px, 0.45fr) minmax(0, 1fr);
+  gap: 16px;
+  align-items: center;
+  margin-top: 10px;
+  padding: 12px 14px;
+  border: 1px solid #d8d9d5;
+  border-left-width: 4px;
+  border-radius: 6px;
+  background: #f8f8f5;
+  > div { display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; align-items: baseline; }
+  > div > span { color: #6d6f73; font: 700 8px/1.2 "Cascadia Mono", monospace; letter-spacing: 0.06em; }
+  > div > strong { justify-self: end; color: var(--ink); font: 800 18px/1 "Cascadia Mono", monospace; }
+  > div > small { grid-column: 1 / -1; color: var(--muted); font-size: 8px; }
+  > p { margin: 0; color: #5f6165; font-size: 9px; line-height: 1.55; }
+  > p > b { display: block; margin-bottom: 2px; color: var(--ink); font-size: 10px; }
+  &.is-quantitative { border-left-color: #527c60; background: #f5faf6; }
+  &.is-directional { border-left-color: #bd7a25; background: #fff9ef; }
+}
 .dispatch-slip {
   display: grid;
   grid-template-columns: 64px minmax(0, 1fr);
@@ -2803,6 +3007,53 @@ onBeforeUnmount(() => {
   padding-top: 2px;
   > strong { color: #54565a; font-size: 9px; }
   ul { margin: 0; padding-left: 16px; color: #6a5e50; font-size: 8px; line-height: 1.6; }
+}
+.panel-api-analysis {
+  margin-top: 13px;
+  border: 1px solid #cbd8cf;
+  border-top: 3px solid #527c60;
+  background: #f7faf7;
+  > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; padding: 13px 14px; border-bottom: 1px solid #dce5de; }
+  > header span { color: #557361; font: 700 8px/1 "Cascadia Mono", monospace; letter-spacing: .09em; }
+  > header h5 { margin: 6px 0 0; color: var(--ink); font-size: 14px; }
+  > header small { max-width: 330px; color: #667168; font-size: 8px; line-height: 1.55; text-align: right; }
+}
+.panel-api-metrics {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  margin: 0;
+  padding: 0;
+  background: #fff;
+  > div { min-width: 0; padding: 12px; border-right: 1px solid #e0e7e2; border-bottom: 1px solid #e0e7e2; }
+  > div:nth-child(6) { border-right: 0; }
+  > div.panel-api-confidence { display: grid; grid-column: 1 / -1; grid-template-columns: 130px minmax(90px, .3fr) minmax(0, 1fr); gap: 8px 14px; align-items: baseline; border-right: 0; }
+  dt { color: #737d75; font-size: 8px; }
+  dd { margin: 7px 0 0; color: var(--ink); font: 800 14px/1 "Cascadia Mono", "Microsoft YaHei UI", monospace; overflow-wrap: anywhere; }
+  small { display: block; margin-top: 6px; color: var(--muted); font: 7px/1.45 "Cascadia Mono", "Microsoft YaHei UI", monospace; overflow-wrap: anywhere; }
+  .panel-api-confidence dd, .panel-api-confidence small { margin-top: 0; }
+}
+.panel-api-analysis-unavailable {
+  display: grid;
+  grid-template-columns: minmax(220px, 1.2fr) minmax(0, .8fr);
+  gap: 14px;
+  padding: 14px;
+  background: #fffaf1;
+  > div > span { color: #8a642b; font-size: 8px; font-weight: 700; }
+  > div > strong { display: block; margin-top: 6px; color: #5d482a; font: 700 9px/1.35 "Cascadia Mono", monospace; overflow-wrap: anywhere; }
+  > div > p { margin: 7px 0 0; color: #756451; font-size: 9px; line-height: 1.55; }
+  > dl { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin: 0; }
+  > dl > div { min-width: 0; padding: 8px 9px; border: 1px solid #e9dcc6; background: rgba(255, 255, 255, .75); }
+  dt { color: #8b7961; font-size: 7px; }
+  dd { margin: 5px 0 0; color: #4c4338; font: 700 8px/1.4 "Cascadia Mono", "Microsoft YaHei UI", monospace; overflow-wrap: anywhere; }
+}
+.panel-api-analysis-boundary {
+  margin: 0;
+  padding: 10px 14px;
+  background: #eff5f0;
+  color: #617066;
+  font-size: 8px;
+  line-height: 1.6;
+  strong { color: #35483b; }
 }
 .sampling-failure { margin: 12px 0 0; padding: 11px 12px; border: 1px solid #dfb6b2; background: #fff4f3; color: #8f4640; font-size: 10px; line-height: 1.55; p { margin: 4px 0 0; } small { display: block; margin-top: 6px; font-weight: 700; } }
 .sampling-recovery-rail {
@@ -3425,6 +3676,7 @@ onBeforeUnmount(() => {
   .provider-switch, .sampling-config-grid { grid-template-columns: 1fr; }
   .sample-count-field { grid-template-columns: auto 1fr; }
   .sample-count-field > small { grid-column: 1 / -1; }
+  .sampling-capacity { grid-template-columns: 1fr; }
   .dispatch-slip { grid-template-columns: 42px minmax(0, 1fr); }
   .dispatch-index { padding-right: 5px; padding-left: 5px; font-size: 10px; }
   .dispatch-main { padding: 14px; }
@@ -3436,6 +3688,12 @@ onBeforeUnmount(() => {
   .panel-measurement-gate > dl { grid-template-columns: 1fr 1fr; }
   .panel-measurement-gate > dl > div:nth-child(2) { border-right: 0; }
   .panel-measurement-gate > dl > div:nth-child(-n + 2) { border-bottom: 1px solid #e2e3df; }
+  .panel-api-analysis > header { flex-direction: column; }
+  .panel-api-analysis > header small { max-width: none; text-align: left; }
+  .panel-api-metrics { grid-template-columns: 1fr 1fr; }
+  .panel-api-metrics > div:nth-child(2n) { border-right: 0; }
+  .panel-api-metrics > div.panel-api-confidence { grid-template-columns: 1fr; }
+  .panel-api-analysis-unavailable { grid-template-columns: 1fr; }
   .execution-receipts > article { grid-template-columns: 58px minmax(0, 1fr); }
   .execution-receipts .panel-target-state,
   .execution-receipts .panel-target-message,

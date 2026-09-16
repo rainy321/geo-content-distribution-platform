@@ -4,17 +4,133 @@ import test from 'node:test'
 
 import {
   VISIBILITY_PROVIDER_PRESETS,
+  VISIBILITY_MINIMUM_QUANTITATIVE_RESPONSES,
   VISIBILITY_SAMPLE_OUTPUT_TOKEN_LIMIT,
+  VISIBILITY_SAMPLE_REASONING_OUTPUT_TOKEN_LIMIT,
   applyVisibilityProviderPreset,
   buildManualSampleImport,
   buildVisibilityPanelRequest,
   buildVisibilitySamplingRequest,
   normalizeVisibilityPanelResponse,
   normalizeVisibilitySamplingResponse,
+  reconcileVisibilitySampleCount,
   validateVisibilitySamplingDraft,
+  visibilityConfiguredModelIdentity,
+  visibilityQuantitativeSamplingPlan,
   visibilityPanelMeasurementPresentation,
   visibilityPanelTargetPresentation
 } from '../src/utils/visibilitySampling.js'
+
+test('multi-model sampling derives the smallest per-role count that can reach five answers', () => {
+  assert.equal(VISIBILITY_MINIMUM_QUANTITATIVE_RESPONSES, 5)
+  assert.equal(visibilityQuantitativeSamplingPlan({
+    sampleCount: 1,
+    multiModel: true,
+    distinctConfiguredModelCount: 3
+  }).minimumPerRole, 2)
+  assert.equal(visibilityQuantitativeSamplingPlan({
+    sampleCount: 1,
+    multiModel: true,
+    distinctConfiguredModelCount: 2
+  }).minimumPerRole, 3)
+  assert.equal(visibilityQuantitativeSamplingPlan({
+    sampleCount: 1,
+    multiModel: true,
+    distinctConfiguredModelCount: 1
+  }).minimumPerRole, 5)
+  assert.equal(visibilityQuantitativeSamplingPlan({
+    sampleCount: 1,
+    multiModel: true,
+    distinctConfiguredModelCount: 0
+  }).minimumPerRole, 5)
+  assert.equal(visibilityQuantitativeSamplingPlan({
+    sampleCount: 1,
+    multiModel: true,
+    distinctConfiguredModelCount: 99
+  }).minimumPerRole, 1)
+
+  const ready = visibilityQuantitativeSamplingPlan({
+    sampleCount: 2,
+    multiModel: true,
+    distinctConfiguredModelCount: 3
+  })
+  assert.equal(ready.maximumEffectiveResponseCount, 6)
+  assert.equal(ready.quantitativeThresholdMet, true)
+  assert.equal(ready.directionalOnly, false)
+
+  const directional = visibilityQuantitativeSamplingPlan({
+    sampleCount: 1,
+    multiModel: true,
+    distinctConfiguredModelCount: 3
+  })
+  assert.equal(directional.maximumEffectiveResponseCount, 3)
+  assert.equal(directional.quantitativeThresholdMet, false)
+  assert.equal(directional.directionalOnly, true)
+
+  const twoModelDirectional = visibilityQuantitativeSamplingPlan({
+    sampleCount: 2,
+    multiModel: true,
+    distinctConfiguredModelCount: 2
+  })
+  assert.equal(twoModelDirectional.maximumEffectiveResponseCount, 4)
+  assert.equal(twoModelDirectional.quantitativeThresholdMet, false)
+})
+
+test('automatic panel sampling follows model count while preserving deliberate high or low choices', () => {
+  assert.equal(reconcileVisibilitySampleCount({
+    sampleCount: 1,
+    multiModel: true,
+    distinctConfiguredModelCount: 3,
+    userSelected: false
+  }), 2)
+  assert.equal(reconcileVisibilitySampleCount({
+    sampleCount: 2,
+    multiModel: true,
+    distinctConfiguredModelCount: 2,
+    userSelected: false
+  }), 3)
+  assert.equal(reconcileVisibilitySampleCount({
+    sampleCount: 3,
+    multiModel: true,
+    distinctConfiguredModelCount: 3,
+    userSelected: false
+  }), 2)
+  assert.equal(reconcileVisibilitySampleCount({
+    sampleCount: 5,
+    multiModel: true,
+    distinctConfiguredModelCount: 3,
+    userSelected: true
+  }), 5)
+  assert.equal(reconcileVisibilitySampleCount({
+    sampleCount: 1,
+    multiModel: true,
+    distinctConfiguredModelCount: 3,
+    userSelected: true
+  }), 1)
+})
+
+test('configured model identity matches provider plus normalized endpoint plus model', () => {
+  const base = {
+    provider: 'CUSTOM',
+    model: 'Example-Model'
+  }
+  const normalized = visibilityConfiguredModelIdentity({
+    ...base,
+    baseUrl: 'https://api.example.test/v1/'
+  })
+  const equivalent = visibilityConfiguredModelIdentity({
+    ...base,
+    baseUrl: 'https://api.example.test/v1/chat/completions'
+  })
+  const differentEndpoint = visibilityConfiguredModelIdentity({
+    ...base,
+    baseUrl: 'https://api.example.test/v2'
+  })
+
+  assert.equal(normalized, equivalent)
+  assert.notEqual(normalized, differentEndpoint)
+  assert.equal(new Set([normalized, equivalent, differentEndpoint]).size, 2)
+})
 
 test('provider presets cover Qwen, DeepSeek, Doubao and custom without persisting secrets', () => {
   assert.deepEqual(VISIBILITY_PROVIDER_PRESETS.map(item => item.id), [
@@ -325,6 +441,124 @@ test('panel quality fallback stays directional below five answers and becomes AP
   assert.equal(quantitativePresentation.scopeLabel, 'provider_api · 仅 API 渠道')
 })
 
+test('quantitative panel safely normalizes available API aggregate metrics', () => {
+  const receipt = normalizeVisibilityPanelResponse({
+    data: {
+      status: 'completed',
+      requested_role_count: 3,
+      sampled_role_count: 3,
+      distinct_model_count: 3,
+      comparison_eligible: true,
+      targets: [2, 2, 1].map((count, index) => ({
+        role: ['writer', 'reviewer', 'evaluator'][index],
+        execution_status: 'executed',
+        requested_sample_count: count,
+        completed_sample_count: count,
+        analysis: { samples: Array.from({ length: count }, () => ({ text: 'answer' })) }
+      })),
+      measurement_quality: {
+        status: 'quantitative',
+        score_allowed: true,
+        valid_response_count: 5,
+        requested_response_count: 5,
+        valid_response_rate: 1,
+        valid_model_count: 3,
+        confidence_level: 'medium',
+        consumer_geo_claim_allowed: false
+      },
+      api_channel_analysis: {
+        status: 'available',
+        channel_type: 'provider_api',
+        metric_scope: 'configured_provider_api_responses_only',
+        consumer_surface_verified: false,
+        consumer_geo_claim_allowed: false,
+        single_composite_score_produced: false,
+        source_model_count: 3,
+        summary: {
+          sample_count: 5,
+          mention_rate: 0.4,
+          share_of_voice: null,
+          average_rank: 1.75,
+          citation_rate: 0.2,
+          sentiment_score: null,
+          confidence: {
+            label: '中',
+            reason: '样本达到最低量化门槛。'
+          }
+        }
+      },
+      api_channel_analysis_unavailable_reason: null
+    }
+  })
+
+  assert.equal(receipt.measurementQuality.status, 'quantitative')
+  assert.deepEqual(receipt.apiChannelAnalysis, {
+    status: 'available',
+    channelType: 'provider_api',
+    metricScope: 'configured_provider_api_responses_only',
+    consumerSurfaceVerified: false,
+    consumerGeoClaimAllowed: false,
+    singleCompositeScoreProduced: false,
+    sourceModelCount: 3,
+    summary: {
+      sampleCount: 5,
+      mentionRate: 40,
+      shareOfVoice: null,
+      averageRank: 1.75,
+      citationRate: 20,
+      sentimentScore: null,
+      confidence: {
+        label: '中',
+        reason: '样本达到最低量化门槛。'
+      }
+    }
+  })
+  assert.equal(receipt.apiChannelAnalysisUnavailableReason, null)
+})
+
+test('panel safely normalizes structured API aggregate unavailability without inventing metrics', () => {
+  const receipt = normalizeVisibilityPanelResponse({
+    data: {
+      status: 'completed',
+      requested_role_count: 2,
+      sampled_role_count: 2,
+      distinct_model_count: 2,
+      comparison_eligible: true,
+      targets: [],
+      measurement_quality: {
+        status: 'quantitative',
+        score_allowed: true,
+        valid_response_count: 6,
+        requested_response_count: 6,
+        valid_response_rate: 1,
+        valid_model_count: 2,
+        consumer_geo_claim_allowed: false
+      },
+      api_channel_analysis: null,
+      api_channel_analysis_unavailable_reason: {
+        code: 'aggregate_analysis_unavailable',
+        message: '本地聚合失败，原始回答已保留。',
+        measurement_quality_status: 'quantitative',
+        channel_type: 'provider_api',
+        external_call_attempted: false,
+        consumer_surface_verified: false,
+        error_type: 'RuntimeError'
+      }
+    }
+  })
+
+  assert.equal(receipt.apiChannelAnalysis, null)
+  assert.deepEqual(receipt.apiChannelAnalysisUnavailableReason, {
+    code: 'aggregate_analysis_unavailable',
+    message: '本地聚合失败，原始回答已保留。',
+    measurementQualityStatus: 'quantitative',
+    channelType: 'provider_api',
+    externalCallAttempted: false,
+    consumerSurfaceVerified: false,
+    errorType: 'RuntimeError'
+  })
+})
+
 test('panel target presentation distinguishes complete, retained partial, unknown and failed outcomes', () => {
   assert.deepEqual(visibilityPanelTargetPresentation({
     completedSampleCount: 3,
@@ -401,6 +635,10 @@ test('partial result keeps completed evidence, honest unknown cost and failure a
       request_policy: {
         execution: 'sequential_stop_on_first_failure',
         max_output_tokens: 768,
+        output_budget_mode: 'model_adaptive',
+        output_budget_profile: 'standard',
+        output_budget_ceiling_tokens: 768,
+        configured_max_output_tokens: 4096,
         timeout_seconds: 120,
         connection_test_equivalent: false
       }
@@ -416,6 +654,11 @@ test('partial result keeps completed evidence, honest unknown cost and failure a
   assert.equal(result.failure.outcomeUnknown, true)
   assert.equal(result.retryPolicy.automatic_retry, false)
   assert.equal(result.requestPolicy.maxOutputTokens, VISIBILITY_SAMPLE_OUTPUT_TOKEN_LIMIT)
+  assert.equal(VISIBILITY_SAMPLE_REASONING_OUTPUT_TOKEN_LIMIT, 2048)
+  assert.equal(result.requestPolicy.outputBudgetMode, 'model_adaptive')
+  assert.equal(result.requestPolicy.outputBudgetProfile, 'standard')
+  assert.equal(result.requestPolicy.outputBudgetCeilingTokens, 768)
+  assert.equal(result.requestPolicy.configuredMaxOutputTokens, 4096)
   assert.equal(result.requestPolicy.timeoutSeconds, 120)
   assert.equal(result.requestPolicy.connectionTestEquivalent, false)
   assert.equal(buildManualSampleImport(result), 'DongClaw 是一个选项。')
@@ -445,6 +688,8 @@ test('EXE visibility view defaults to the unified engine and keeps explicit-call
   assert.match(viewSource, /打开成本账单/)
   assert.match(viewSource, /新建 1 次采样/)
   assert.match(viewSource, /这不是重试原请求/)
+  assert.match(viewSource, /采样采用模型自适应上限/)
+  assert.match(viewSource, /DeepSeek \/ GLM/)
   assert.match(viewSource, /sampledRoleCount[^\n]*\/[^\n]*requestedRoleCount/)
   assert.match(viewSource, /对应[^\n]*distinctModelCount[^\n]*个独立模型/)
   assert.match(viewSource, /“取得有效回答数”不是“已配置模型数”/)
@@ -456,9 +701,30 @@ test('EXE visibility view defaults to the unified engine and keeps explicit-call
   assert.match(viewSource, /总体 GEO 可用分/)
   assert.match(viewSource, /provider_api 只代表 API 渠道/)
   assert.match(viewSource, /消费者 App \/ Web/)
+  assert.match(viewSource, /API 渠道聚合指标/)
+  assert.match(viewSource, /panelMeasurement\.status === 'quantitative'/)
+  assert.match(viewSource, /apiChannelAnalysis\?\.status === 'available'/)
+  assert.match(viewSource, /formatPercent\(visibilityPanelReceipt\.apiChannelAnalysis\.summary\.mentionRate\)/)
+  assert.match(viewSource, /formatPercent\(visibilityPanelReceipt\.apiChannelAnalysis\.summary\.shareOfVoice\)/)
+  assert.match(viewSource, /formatApiAverageRank\(visibilityPanelReceipt\.apiChannelAnalysis\.summary\.averageRank\)/)
+  assert.match(viewSource, /formatPercent\(visibilityPanelReceipt\.apiChannelAnalysis\.summary\.citationRate\)/)
+  assert.match(viewSource, /apiChannelAnalysis\.summary\.sentimentScore/)
+  assert.match(viewSource, /apiChannelAnalysis\.summary\.confidence\.label \|\| '—'/)
+  assert.match(viewSource, /apiChannelAnalysis\.summary\.confidence\.reason \|\| '—'/)
+  assert.match(viewSource, /panelApiAnalysisUnavailableReason\.code/)
+  assert.match(viewSource, /这不是单一总分，也不是消费者 App \/ Web 实测/)
   assert.match(viewSource, /检查原请求状态（不调用模型）/)
   assert.match(viewSource, /准备重新运行（新请求）/)
   assert.match(viewSource, /确认配置已修正，创建新请求/)
+  assert.match(viewSource, /本次最大有效回答数/)
+  assert.match(viewSource, /理论上达到 API 渠道量化门槛/)
+  assert.match(viewSource, /仅方向性对照，不生成或宣称量化评分/)
+  assert.match(viewSource, /handleSamplingSampleCountChange/)
+  assert.match(viewSource, /applyAutomaticQuantitativeMinimum/)
+  assert.match(viewSource, /configuredModelFingerprint/)
+  assert.match(viewSource, /const identity = visibilityConfiguredModelIdentity\(role\)/)
+  assert.match(viewSource, /samplingSampleCountUserSelected\.value = sampling\.multiModel === true/)
+  assert.match(viewSource, /samplingSampleCountUserSelected\.value = pending\.mode === 'panel'/)
   assert.match(viewSource, /applyVisibilityPanelReceipt/)
   assert.match(viewSource, /visibilityPanelReceipt\.value = null/)
   assert.match(viewSource, /\.panel-target-identity strong \{[^}]*overflow-wrap: anywhere;[^}]*white-space: normal;/)

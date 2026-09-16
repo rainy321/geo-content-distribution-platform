@@ -25,6 +25,7 @@ from services.ai_service import (
     resolve_ai_chat_completions_url,
 )
 from services.ai_visibility_sampling_service import run_ai_visibility_sample
+from services.ai_visibility_service import analyze_ai_visibility
 
 
 VISIBILITY_PANEL_VERSION = "api-model-visibility-panel-1.2.0"
@@ -255,6 +256,17 @@ def run_ai_visibility_panel(
         results=results,
         prompt_sha256=normalized["prompt_sha256"],
         replayed=False,
+        analysis_context={
+            "project_id": normalized["project_id"],
+            "project_name": normalized["project_name"],
+            "project_product": normalized["project_product"],
+            "project_keywords": normalized["project_keywords"],
+            "project_website": normalized["project_website"],
+            "stored_competitors": normalized["stored_competitors"],
+            "prompt": normalized["prompt"],
+            "aliases": normalized["aliases"],
+            "competitors": normalized["competitors"],
+        },
     )
     _finish_panel_request(
         database_path,
@@ -326,6 +338,11 @@ def _validate_panel_request(
         raise VisibilityPanelValidationError("persist 必须是布尔值")
     normalized_aliases = _optional_sequence(aliases, "aliases")
     normalized_competitors = _optional_sequence(competitors, "competitors")
+    project_name = str(project.get("name") or "").strip()
+    project_product = str(project.get("product") or "").strip()
+    project_keywords = project.get("keywords") or []
+    project_website = str(project.get("website") or "").strip()
+    stored_competitors = project.get("competitors") or []
     normalized_request_id = _request_identifier(request_id, "X-Request-ID", 128)
     normalized_key = _request_identifier(idempotency_key, "Idempotency-Key", 150)
     prompt_sha256 = hashlib.sha256(normalized_prompt.encode("utf-8")).hexdigest()
@@ -348,6 +365,11 @@ def _validate_panel_request(
     )
     return {
         "project_id": project_id,
+        "project_name": project_name,
+        "project_product": project_product,
+        "project_keywords": list(project_keywords),
+        "project_website": project_website,
+        "stored_competitors": list(stored_competitors),
         "prompt": normalized_prompt,
         "prompt_sha256": prompt_sha256,
         "sample_count": sample_count,
@@ -483,21 +505,25 @@ def _build_panel_result(
     results: Sequence[Mapping[str, Any]],
     prompt_sha256: str,
     replayed: bool,
+    analysis_context: Mapping[str, Any],
 ) -> dict[str, Any]:
     target_results = [dict(item) for item in results]
+    manifest_identities = {
+        str(item.get("role") or ""): str(item.get("identity_sha256") or "")
+        for item in manifest.get("targets", [])
+        if isinstance(item, Mapping)
+    }
+    for item in target_results:
+        identity = manifest_identities.get(str(item.get("role") or ""), "")
+        if identity:
+            item["identity_sha256"] = identity
     executed = [
         item for item in target_results if item.get("execution_status") != "skipped"
     ]
     sampled = [
         item for item in executed if int(item.get("completed_sample_count") or 0) > 0
     ]
-    distinct_sampled = {
-        (
-            str(item.get("provider") or "unknown").strip().casefold(),
-            str(item.get("model") or "unknown").strip().casefold(),
-        )
-        for item in sampled
-    }
+    distinct_sampled = {_panel_target_identity(item) for item in sampled}
     completed = [
         item
         for item in executed
@@ -525,6 +551,13 @@ def _build_panel_result(
             manifest.get("requested_sample_count_per_role") or 0
         ),
     )
+    api_channel_analysis, api_channel_analysis_unavailable_reason = (
+        _build_api_channel_analysis(
+            targets=completed,
+            measurement_quality=measurement_quality,
+            analysis_context=analysis_context,
+        )
+    )
     return {
         "status": panel_status,
         "need_action": panel_status != "completed",
@@ -542,6 +575,10 @@ def _build_panel_result(
         "multi_model_executed": len(distinct_sampled) >= 2,
         "comparison_eligible": comparison_eligible,
         "measurement_quality": measurement_quality,
+        "api_channel_analysis": api_channel_analysis,
+        "api_channel_analysis_unavailable_reason": (
+            api_channel_analysis_unavailable_reason
+        ),
         "targets": target_results,
         "channel_coverage": [
             {
@@ -578,7 +615,8 @@ def _build_panel_result(
         },
         "claim_boundary": (
             "本面板只比较已配置的 OpenAI-compatible API 模型。"
-            "completed 仅表示至少两个不同 provider/model 完整返回样本；"
+            "completed 仅表示至少两个不同 provider/endpoint/model "
+            "完整返回样本；"
             "不表示消费者入口、联网检索、收录或引用已验证。"
         ),
     }
@@ -657,6 +695,168 @@ def _measurement_quality(
     }
 
 
+def _build_api_channel_analysis(
+    *,
+    targets: Sequence[Mapping[str, Any]],
+    measurement_quality: Mapping[str, Any],
+    analysis_context: Mapping[str, Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Aggregate already captured API answers without another model call."""
+
+    quality_status = str(measurement_quality.get("status") or "invalid")
+    if quality_status != "quantitative":
+        return None, _api_analysis_unavailable(
+            code=f"measurement_quality_{quality_status}",
+            message=str(measurement_quality.get("reason") or "当前批次未达到量化门槛。"),
+            measurement_quality_status=quality_status,
+        )
+
+    responses: list[dict[str, Any]] = []
+    source_models: dict[str, dict[str, Any]] = {}
+    for target in targets:
+        analysis = target.get("analysis")
+        samples = analysis.get("samples") if isinstance(analysis, Mapping) else None
+        if not isinstance(samples, list):
+            continue
+        target_provider = str(target.get("provider") or "unknown").strip() or "unknown"
+        target_model = str(target.get("model") or "unknown").strip() or "unknown"
+        for sample in samples:
+            if not isinstance(sample, Mapping):
+                continue
+            text = sample.get("text")
+            if not isinstance(text, str) or not text.strip():
+                continue
+            provider = (
+                str(sample.get("provider") or target_provider).strip()
+                or target_provider
+            )
+            model = str(sample.get("model") or target_model).strip() or target_model
+            entry_point = (
+                str(
+                    sample.get("entry_point")
+                    or target.get("entry_point")
+                    or "openai_compatible_chat_completions"
+                ).strip()
+                or "openai_compatible_chat_completions"
+            )
+            response = {
+                "text": text,
+                "provider": provider,
+                "model": model,
+                # The panel only invoked provider APIs. Never promote a sample
+                # to consumer web/app evidence based on provider output fields.
+                "channel_type": "provider_api",
+                "entry_point": entry_point,
+                "web_search_verified": sample.get("web_search_verified") is True,
+                "consumer_surface_verified": False,
+            }
+            responses.append(response)
+            identity_sha256 = str(target.get("identity_sha256") or "")
+            key = _panel_target_identity(target)
+            source = source_models.setdefault(
+                key,
+                {
+                    "provider": provider,
+                    "model": model,
+                    "identity_sha256": identity_sha256,
+                    "channel_type": "provider_api",
+                    "entry_points": set(),
+                    "roles": set(),
+                    "sample_count": 0,
+                    "consumer_surface_verified": False,
+                },
+            )
+            source["entry_points"].add(entry_point)
+            source["roles"].add(str(target.get("role") or ""))
+            source["sample_count"] += 1
+
+    expected_sample_count = int(
+        measurement_quality.get("valid_response_count") or 0
+    )
+    if (
+        len(responses) != expected_sample_count
+        or len(source_models)
+        < int(measurement_quality.get("minimum_distinct_models") or 2)
+    ):
+        return None, _api_analysis_unavailable(
+            code="aggregate_source_samples_incomplete",
+            message=(
+                "质量门已达到量化级别，但成功目标未保留完整的原始回答样本或独立模型元数据；"
+                "未生成 API 渠道聚合指标。"
+            ),
+            measurement_quality_status=quality_status,
+        )
+
+    try:
+        aggregate = analyze_ai_visibility(
+            project_id=int(analysis_context["project_id"]),
+            project_name=str(analysis_context.get("project_name") or ""),
+            project_product=str(analysis_context.get("project_product") or ""),
+            project_keywords=analysis_context.get("project_keywords") or [],
+            project_website=str(analysis_context.get("project_website") or ""),
+            stored_competitors=analysis_context.get("stored_competitors") or [],
+            prompt=str(analysis_context.get("prompt") or ""),
+            responses=responses,
+            aliases=analysis_context.get("aliases"),
+            competitors=analysis_context.get("competitors"),
+        )
+    except Exception as exc:
+        return None, {
+            **_api_analysis_unavailable(
+                code="aggregate_analysis_unavailable",
+                message=(
+                    "已保留各模型原始结果，但本地 API 渠道聚合分析失败；"
+                    "面板未重试模型，也未把不完整指标当成量化结果。"
+                ),
+                measurement_quality_status=quality_status,
+            ),
+            "error_type": type(exc).__name__,
+        }
+
+    serialized_sources = [
+        {
+            **source,
+            "entry_points": sorted(source["entry_points"]),
+            "roles": sorted(role for role in source["roles"] if role),
+        }
+        for source in source_models.values()
+    ]
+    result = dict(aggregate)
+    result["status"] = "available"
+    result["channel_type"] = "provider_api"
+    result["metric_scope"] = "configured_provider_api_responses_only"
+    result["consumer_surface_verified"] = False
+    result["consumer_geo_claim_allowed"] = False
+    result["single_composite_score_produced"] = False
+    result["source_model_count"] = len(serialized_sources)
+    result["source_models"] = serialized_sources
+    result["methodology"] = {
+        **dict(result.get("methodology") or {}),
+        "panel_aggregation": True,
+        "aggregation_external_model_call": False,
+        "source_responses_from_external_models": True,
+        "source_channel": "provider_api",
+        "consumer_surface_inference": False,
+    }
+    return result, None
+
+
+def _api_analysis_unavailable(
+    *,
+    code: str,
+    message: str,
+    measurement_quality_status: str,
+) -> dict[str, Any]:
+    return {
+        "code": code,
+        "message": message,
+        "measurement_quality_status": measurement_quality_status,
+        "channel_type": "provider_api",
+        "external_call_attempted": False,
+        "consumer_surface_verified": False,
+    }
+
+
 def _started_panel_result(
     *,
     record: Mapping[str, Any],
@@ -667,18 +867,26 @@ def _started_panel_result(
     """Build a display-only view for an unfinished persisted parent request."""
 
     target_results = [dict(item) for item in targets]
+    manifest = (
+        record.get("manifest")
+        if isinstance(record.get("manifest"), Mapping)
+        else {}
+    )
+    manifest_identities = {
+        str(item.get("role") or ""): str(item.get("identity_sha256") or "")
+        for item in manifest.get("targets", [])
+        if isinstance(item, Mapping)
+    }
+    for item in target_results:
+        identity = manifest_identities.get(str(item.get("role") or ""), "")
+        if identity:
+            item["identity_sha256"] = identity
     sampled = [
         item
         for item in target_results
         if int(item.get("completed_sample_count") or 0) > 0
     ]
-    distinct_sampled = {
-        (
-            str(item.get("provider") or "unknown").strip().casefold(),
-            str(item.get("model") or "unknown").strip().casefold(),
-        )
-        for item in sampled
-    }
+    distinct_sampled = {_panel_target_identity(item) for item in sampled}
     observed_executed = [
         item
         for item in target_results
@@ -731,6 +939,22 @@ def _started_panel_result(
         "multi_model_executed": len(distinct_sampled) >= 2,
         "comparison_eligible": False,
         "measurement_quality": measurement_quality,
+        "api_channel_analysis": None,
+        "api_channel_analysis_unavailable_reason": _api_analysis_unavailable(
+            code=(
+                "panel_outcome_unknown"
+                if expired
+                else "panel_still_processing"
+            ),
+            message=(
+                "父请求结果未知，不能生成 API 渠道聚合指标。"
+                if expired
+                else "多模型采样仍在处理，尚不能生成 API 渠道聚合指标。"
+            ),
+            measurement_quality_status=str(
+                measurement_quality.get("status") or "invalid"
+            ),
+        ),
         "targets": target_results,
         "failure": failure,
         "channel_coverage": [
@@ -1254,13 +1478,51 @@ def _skipped_target(target: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
-def _model_identity(settings: AISettings) -> str:
-    resolved = urlsplit(resolve_ai_chat_completions_url(settings.base_url))
+def _panel_target_identity(target: Mapping[str, Any]) -> str:
+    """Return the frozen model identity, with a conservative legacy fallback."""
+
+    manifest_identity = str(target.get("identity_sha256") or "").strip().casefold()
+    if len(manifest_identity) == 64 and not (
+        set(manifest_identity) - set("0123456789abcdef")
+    ):
+        return f"manifest:{manifest_identity}"
+
+    endpoint = ""
+    for field in ("resolved_endpoint", "endpoint", "base_url"):
+        raw_endpoint = target.get(field)
+        if not isinstance(raw_endpoint, str) or not raw_endpoint.strip():
+            continue
+        try:
+            endpoint = _normalized_model_endpoint(raw_endpoint)
+        except Exception:
+            # Legacy/recovery targets may not retain a validated endpoint. Do
+            # not guess at it or expose it; provider/model remains a safe,
+            # conservative identity that cannot inflate the distinct count.
+            continue
+        break
+
+    return "fallback:" + _json_digest(
+        {
+            "provider": str(target.get("provider") or "unknown")
+            .strip()
+            .casefold(),
+            "endpoint": endpoint,
+            "model": str(target.get("model") or "unknown").strip().casefold(),
+        }
+    )
+
+
+def _normalized_model_endpoint(base_url: str) -> str:
+    resolved = urlsplit(resolve_ai_chat_completions_url(base_url))
     hostname = (resolved.hostname or "").rstrip(".").casefold()
     host = f"[{hostname}]" if ":" in hostname else hostname
     if resolved.port is not None and resolved.port != 443:
         host = f"{host}:{resolved.port}"
-    endpoint = urlunsplit(("https", host, resolved.path.rstrip("/"), "", ""))
+    return urlunsplit(("https", host, resolved.path.rstrip("/"), "", ""))
+
+
+def _model_identity(settings: AISettings) -> str:
+    endpoint = _normalized_model_endpoint(settings.base_url)
     raw = "\0".join(
         [
             provider_label_for_settings(settings).strip().casefold(),

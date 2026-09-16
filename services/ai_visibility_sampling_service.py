@@ -49,11 +49,12 @@ from services.ai_visibility_service import (
 )
 
 
-VISIBILITY_SAMPLING_VERSION = "controlled-live-visibility-sampling-1.2.0"
-VISIBILITY_SAMPLING_PREFLIGHT_VERSION = "visibility-sampling-preflight-1.0.0"
+VISIBILITY_SAMPLING_VERSION = "controlled-live-visibility-sampling-1.3.0"
+VISIBILITY_SAMPLING_PREFLIGHT_VERSION = "visibility-sampling-preflight-1.1.0"
 LOCAL_ANALYSIS_INPUT_SNAPSHOT_VERSION = "visibility-local-analysis-input-1.0.0"
 IN_PROGRESS_EXPIRY_SECONDS = 15 * 60
 VISIBILITY_SAMPLE_MAX_OUTPUT_TOKENS = 768
+VISIBILITY_SAMPLE_REASONING_MAX_OUTPUT_TOKENS = 2_048
 VISIBILITY_SAMPLE_MAX_TIMEOUT_SECONDS = 120.0
 MIN_SAMPLE_COUNT = 1
 MAX_SAMPLE_COUNT = 5
@@ -220,9 +221,9 @@ def run_ai_visibility_sample(
     # potentially billable provider call and still would not prove that the
     # real visibility prompt can complete within the same token budget.
     sampling_settings, contract_preflight = _prepare_sampling_contract(settings)
-    # Preserve the v1.2 durable identity so receipts created before this
-    # orchestration hardening still replay instead of conflicting after an
-    # endpoint-normalization-only change.
+    # The sampling version remains part of the provider-effect identity. A
+    # budget-policy change must conflict with an old idempotency key instead
+    # of silently dispatching a materially different paid request.
     fingerprint = _request_fingerprint(normalized, settings=settings)
     request_record, replayed = _begin_or_replay(
         database_path,
@@ -695,6 +696,14 @@ def run_ai_visibility_sample(
         "request_policy": {
             "execution": "sequential_stop_on_first_failure",
             "max_output_tokens": sampling_settings.max_tokens,
+            "output_budget_mode": contract_preflight["output_budget_mode"],
+            "output_budget_profile": contract_preflight["output_budget_profile"],
+            "output_budget_ceiling_tokens": contract_preflight[
+                "output_budget_ceiling_tokens"
+            ],
+            "configured_max_output_tokens": contract_preflight[
+                "configured_max_tokens"
+            ],
             "stop_on_reported_output_limit_mismatch": True,
             "timeout_seconds": sampling_settings.timeout_seconds,
             "max_timeout_seconds": VISIBILITY_SAMPLE_MAX_TIMEOUT_SECONDS,
@@ -881,10 +890,10 @@ def _prepare_sampling_contract(
         configured_timeout,
         VISIBILITY_SAMPLE_MAX_TIMEOUT_SECONDS,
     )
-    effective_max_tokens = min(
-        configured_max_tokens,
-        VISIBILITY_SAMPLE_MAX_OUTPUT_TOKENS,
+    output_budget_profile, output_budget_ceiling = _sampling_output_budget(
+        validated.model
     )
+    effective_max_tokens = min(configured_max_tokens, output_budget_ceiling)
     sampling_settings = replace(
         validated,
         timeout_seconds=effective_timeout,
@@ -903,6 +912,9 @@ def _prepare_sampling_contract(
         "timeout_capped": effective_timeout != configured_timeout,
         "max_output_tokens": effective_max_tokens,
         "configured_max_tokens": configured_max_tokens,
+        "output_budget_mode": "model_adaptive",
+        "output_budget_profile": output_budget_profile,
+        "output_budget_ceiling_tokens": output_budget_ceiling,
         "max_output_tokens_capped": (
             effective_max_tokens != configured_max_tokens
         ),
@@ -919,6 +931,16 @@ def _prepare_sampling_contract(
         ),
     }
     return sampling_settings, contract
+
+
+def _sampling_output_budget(model: str) -> tuple[str, int]:
+    normalized_model = str(model or "").strip().casefold()
+    if "deepseek" in normalized_model or "glm" in normalized_model:
+        return (
+            "reasoning_model_extended",
+            VISIBILITY_SAMPLE_REASONING_MAX_OUTPUT_TOKENS,
+        )
+    return "standard", VISIBILITY_SAMPLE_MAX_OUTPUT_TOKENS
 
 
 def _request_fingerprint(
@@ -1309,6 +1331,16 @@ def _processing_payload(
             "request_policy": {
                 "execution": "sequential_stop_on_first_failure",
                 "max_output_tokens": settings.max_tokens,
+                "output_budget_mode": contract_preflight["output_budget_mode"],
+                "output_budget_profile": contract_preflight[
+                    "output_budget_profile"
+                ],
+                "output_budget_ceiling_tokens": contract_preflight[
+                    "output_budget_ceiling_tokens"
+                ],
+                "configured_max_output_tokens": contract_preflight[
+                    "configured_max_tokens"
+                ],
                 "timeout_seconds": settings.timeout_seconds,
                 "first_requested_sample_is_contract_probe": True,
                 "extra_contract_probe_provider_calls": 0,
@@ -1787,6 +1819,7 @@ __all__ = [
     "MAX_SAMPLE_COUNT",
     "MIN_SAMPLE_COUNT",
     "VISIBILITY_SAMPLE_MAX_OUTPUT_TOKENS",
+    "VISIBILITY_SAMPLE_REASONING_MAX_OUTPUT_TOKENS",
     "VISIBILITY_SAMPLE_MAX_TIMEOUT_SECONDS",
     "VISIBILITY_SAMPLING_PREFLIGHT_VERSION",
     "VISIBILITY_SAMPLING_VERSION",
