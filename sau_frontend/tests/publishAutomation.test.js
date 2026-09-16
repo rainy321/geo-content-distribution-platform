@@ -99,12 +99,22 @@ test('the full article-by-platform matrix is preflighted and cached before final
 test('one-click repair previews model output before saving and never overwrites unresolved gates', () => {
   assert.match(source, /@click="autoRepairSelectedArticles"/)
   assert.match(source, /const autoRepairSelectedArticles = async \(\) =>/)
-  assert.match(source, /const optimization = await articleApi\.optimizeArticle\(articleId\)/)
+  assert.match(source, /const optimization = await articleApi\.optimizeArticle\(articleId, \{[\s\S]{0,120}target_platforms: \[\.\.\.selectedPlatforms\.value\][\s\S]{0,40}\}\)/)
   assert.match(source, /const candidateVariants = await previewArticleVariants\(articleId, optimized\)/)
   assert.match(source, /if \(candidateBlocked \|\| \(!clearedHardGate && candidateMinimum <= currentMinimum\)\)/)
   assert.match(source, /await articleApi\.updateArticle\(articleId/)
   assert.match(source, /await refreshPublishPreflight\(\{ preserveEdits: false \}\)/)
   assert.match(source, /软件不会伪造链接或数据/)
+})
+
+
+test('Sohu batch context reaches preflight and creation before any task is written', () => {
+  assert.match(source, /batch_article_ids: \[\.\.\.selectedArticleIds\.value\]/)
+  assert.match(source, /batch_article_ids: \[\.\.\.articleIds\]/)
+  assert.match(source, /previousBatchSignature/)
+  assert.match(source, /invalidatePublishPreflight\(\)[\s\S]{0,100}refreshPublishPreflight\(\{ preserveEdits: true \}\)/)
+  assert.match(source, /primaryChangedByBatchSelection[\s\S]{0,220}selectedArticleId's watcher owns this refresh/)
+  assert.match(source, /Keep user-edited channel drafts[\s\S]{0,260}preserveEdits: true/)
 })
 
 

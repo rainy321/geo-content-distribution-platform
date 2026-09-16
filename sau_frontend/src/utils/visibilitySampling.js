@@ -165,6 +165,8 @@ export const normalizeVisibilitySamplingResponse = value => {
     needAction: Boolean(root.need_action),
     requestId: String(root.request_id || ''),
     idempotencyKey: String(root.idempotency_key || ''),
+    configuredProvider: String(root.configured_provider || ''),
+    configuredModel: String(root.configured_model || ''),
     requestedSampleCount: Math.max(0, numberOrNull(root.requested_sample_count) ?? 0),
     completedSampleCount: Math.max(0, numberOrNull(root.completed_sample_count) ?? 0),
     unattemptedSampleCount: Math.max(0, numberOrNull(root.unattempted_sample_count) ?? 0),
@@ -236,22 +238,26 @@ export const normalizeVisibilitySamplingResponse = value => {
 
 export const normalizeVisibilityPanelResponse = value => {
   const root = unwrapSamplingPayload(value)
-  return {
-    status: ['completed', 'partial', 'need_action'].includes(String(root.status))
-      ? String(root.status)
-      : 'need_action',
-    needAction: Boolean(root.need_action),
-    requestId: String(root.request_id || ''),
-    idempotencyKey: String(root.idempotency_key || ''),
-    distinctModelCount: Math.max(0, numberOrNull(root.distinct_model_count) ?? 0),
-    multiModelExecuted: Boolean(root.multi_model_executed),
-    comparisonEligible: Boolean(root.comparison_eligible),
-    targets: asArray(root.targets).map(item => ({
-      role: String(item?.role || ''),
+  const manifest = root.manifest && typeof root.manifest === 'object' ? root.manifest : {}
+  const manifestByRole = new Map(asArray(manifest.targets).map(item => [String(item?.role || ''), item]))
+  const knownIdentity = (value, fallback) => {
+    const normalized = String(value || '').trim()
+    return !normalized || normalized.toLowerCase() === 'unknown'
+      ? String(fallback || '').trim()
+      : normalized
+  }
+  const targets = asArray(root.targets).map(item => {
+    const role = String(item?.role || '')
+    const frozen = manifestByRole.get(role) || {}
+    return {
+      role,
       executionStatus: String(item?.execution_status || 'skipped'),
       status: String(item?.status || 'not_configured'),
-      provider: String(item?.provider || ''),
-      model: String(item?.model || ''),
+      provider: knownIdentity(item?.provider, frozen?.provider),
+      model: knownIdentity(item?.model, frozen?.model),
+      requestId: String(item?.request_id || frozen?.subrequest_id || ''),
+      runId: item?.run_id ?? null,
+      analysisAvailable: Boolean(item?.analysis && typeof item.analysis === 'object'),
       completedSampleCount: Math.max(0, numberOrNull(item?.completed_sample_count) ?? 0),
       requestedSampleCount: Math.max(0, numberOrNull(item?.requested_sample_count) ?? 0),
       skipReason: String(item?.skip_reason || ''),
@@ -260,7 +266,27 @@ export const normalizeVisibilityPanelResponse = value => {
       consumerSurfaceVerified: Boolean(item?.consumer_surface_verified),
       failure: item?.failure && typeof item.failure === 'object' ? item.failure : null,
       capturedResponses: asArray(item?.analysis?.samples)
-    })),
+    }
+  })
+  return {
+    status: ['completed', 'partial', 'need_action'].includes(String(root.status))
+      ? String(root.status)
+      : 'need_action',
+    needAction: Boolean(root.need_action),
+    requestId: String(root.request_id || ''),
+    idempotencyKey: String(root.idempotency_key || ''),
+    requestedRoleCount: Math.max(0, numberOrNull(root.requested_role_count) ?? targets.length),
+    executedRoleCount: Math.max(0, numberOrNull(root.executed_role_count) ?? 0),
+    sampledRoleCount: Math.max(0, numberOrNull(root.sampled_role_count) ?? 0),
+    distinctModelCount: Math.max(0, numberOrNull(root.distinct_model_count) ?? 0),
+    multiModelExecuted: Boolean(root.multi_model_executed),
+    comparisonEligible: Boolean(root.comparison_eligible),
+    targets,
+    manifest,
+    outcomeUnknown: Boolean(root.outcome_unknown),
+    failure: root.failure && typeof root.failure === 'object' ? root.failure : null,
+    retryPolicy: root.retry_policy && typeof root.retry_policy === 'object' ? root.retry_policy : {},
+    recoveryPolicy: root.recovery_policy && typeof root.recovery_policy === 'object' ? root.recovery_policy : {},
     channelCoverage: asArray(root.channel_coverage).map(item => ({
       channelType: String(item?.channel_type || ''),
       status: String(item?.status || 'unverified'),
@@ -272,6 +298,62 @@ export const normalizeVisibilityPanelResponse = value => {
       : { status: 'unverified', claim_allowed: false },
     claimBoundary: String(root.claim_boundary || '')
   }
+}
+
+export const visibilityPanelTargetPresentation = value => {
+  const target = value && typeof value === 'object' ? value : {}
+  const completed = Math.max(0, numberOrNull(target.completedSampleCount ?? target.completed_sample_count) ?? 0)
+  const requested = Math.max(0, numberOrNull(target.requestedSampleCount ?? target.requested_sample_count) ?? 0)
+  const failure = target.failure && typeof target.failure === 'object' ? target.failure : null
+  const executionStatus = String(target.executionStatus ?? target.execution_status ?? '').trim()
+  const outcomeUnknown = Boolean(
+    target.outcomeUnknown
+    || target.outcome_unknown
+    || failure?.outcomeUnknown
+    || failure?.outcome_unknown
+    || executionStatus === 'outcome_unknown'
+  )
+  const analysisAvailable = Boolean(target.analysisAvailable ?? target.analysis)
+  const archivedSuffix = analysisAvailable ? '，已完成本地分析' : ''
+
+  if (requested > 0 && completed >= requested && !failure) {
+    return {
+      tone: 'complete',
+      label: '完整完成',
+      detail: `${completed} 条有效回答已保留${archivedSuffix}`
+    }
+  }
+  if (completed > 0) {
+    return {
+      tone: 'partial',
+      label: '部分完成',
+      detail: `已保留 ${completed} 条有效回答${archivedSuffix}`
+    }
+  }
+  if (outcomeUnknown) {
+    return {
+      tone: 'unknown',
+      label: '结果未知',
+      detail: '尚未取得可确认的有效回答'
+    }
+  }
+  if (failure || executionStatus === 'failed') {
+    return {
+      tone: 'failed',
+      label: '调用失败',
+      detail: '未取得有效回答'
+    }
+  }
+  if (executionStatus === 'in_progress') {
+    return { tone: 'pending', label: '处理中', detail: '正在等待原请求返回' }
+  }
+  if (executionStatus === 'pending') {
+    return { tone: 'pending', label: '等待执行', detail: '尚未开始调用' }
+  }
+  if (executionStatus === 'skipped') {
+    return { tone: 'skipped', label: '未调用', detail: '该目标未进入本次调用' }
+  }
+  return { tone: 'unknown', label: '状态未知', detail: '后端未返回完整状态' }
 }
 
 export const samplingStatusLabel = value => ({

@@ -229,6 +229,30 @@ class UnifiedAIConfigServiceTests(unittest.TestCase):
         self.assertTrue(status["roles"]["image"]["fallback"])
         self.assertEqual(self.service.load_settings("image").model, "writer-model")
 
+    def test_seedance_video_model_cannot_be_saved_as_image_role(self):
+        self.service.save(
+            provider="custom",
+            base_url="https://tongyuye.com/v1",
+            model="writer-model",
+            api_key="writer-secret",
+        )
+
+        with self.assertRaisesRegex(
+            AIConfigurationError,
+            "Seedance.*视频模型.*Seedream",
+        ):
+            self.service.save_role(
+                "image",
+                provider="custom",
+                base_url="https://tongyuye.com/v1",
+                model="seedance-5.0",
+                api_key="image-secret",
+            )
+
+        status = self.service.status().public_dict()
+        self.assertFalse(status["roles"]["image"]["configured"])
+        self.assertNotIn("image-secret", self.config_path.read_text(encoding="utf-8"))
+
     def test_reads_legacy_schema_one_and_upgrades_on_next_save(self):
         self.service.save(
             provider="qwen",

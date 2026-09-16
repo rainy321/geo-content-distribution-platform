@@ -25,6 +25,7 @@ from services.ai_service import (
     AIConfigurationError,
     AIConnectError,
     AIProtocolError,
+    AIProviderHTTPError,
     AIProviderRateLimitError,
     AIReadTimeoutError,
     AIServiceError,
@@ -45,7 +46,7 @@ from services.ai_visibility_service import (
 )
 
 
-VISIBILITY_SAMPLING_VERSION = "controlled-live-visibility-sampling-1.1.0"
+VISIBILITY_SAMPLING_VERSION = "controlled-live-visibility-sampling-1.2.0"
 LOCAL_ANALYSIS_INPUT_SNAPSHOT_VERSION = "visibility-local-analysis-input-1.0.0"
 IN_PROGRESS_EXPIRY_SECONDS = 15 * 60
 VISIBILITY_SAMPLE_MAX_OUTPUT_TOKENS = 768
@@ -330,6 +331,30 @@ def run_ai_visibility_sample(
                 "ai_usage": usage_record,
             }
         )
+        if failure is None:
+            reported_output_tokens = _reported_output_limit_mismatch(
+                usage,
+                requested_max_output_tokens=sampling_settings.max_tokens,
+            )
+            if reported_output_tokens is not None:
+                # The answer and its usage receipt are valid and must be kept,
+                # but a provider which substantially exceeds the requested
+                # output ceiling can make a multi-sample run unexpectedly
+                # expensive. Stop before another external request instead of
+                # silently repeating the same contract mismatch.
+                failure = {
+                    "code": "provider_output_limit_mismatch",
+                    "message": (
+                        "模型已返回并保留本条回答，但供应商报告的输出 Token "
+                        "明显超过本次请求上限；为避免继续超额计费，系统已停止该角色"
+                        "后续采样。请检查网关是否支持 max_tokens，或改用低推理模型"
+                    ),
+                    "sample_index": index,
+                    "outcome_unknown": False,
+                    "retry_after_seconds": None,
+                    "requested_max_output_tokens": sampling_settings.max_tokens,
+                    "reported_output_tokens": reported_output_tokens,
+                }
         if failure is not None:
             break
 
@@ -444,10 +469,19 @@ def run_ai_visibility_sample(
         "request_id": request_record["request_id"],
         "idempotency_key": request_record["idempotency_key"],
         "project_id": normalized["project_id"],
+        # Keep the requested identity even when the very first provider call
+        # fails and therefore produces no execution receipt.  A failed model
+        # must never be rendered as ``unknown`` when its frozen configuration
+        # is already known locally.
+        "configured_provider": provider,
+        "configured_model": settings.model,
         "requested_sample_count": normalized["sample_count"],
         "completed_sample_count": completed_count,
         "unattempted_sample_count": max(
-            0, normalized["sample_count"] - completed_count - (1 if failure else 0)
+            0,
+            normalized["sample_count"]
+            - completed_count
+            - _failed_provider_attempt_count(failure, completed_count),
         ),
         "persist_requested": normalized["persist"],
         "persisted": run_id is not None,
@@ -503,6 +537,7 @@ def run_ai_visibility_sample(
         "request_policy": {
             "execution": "sequential_stop_on_first_failure",
             "max_output_tokens": sampling_settings.max_tokens,
+            "stop_on_reported_output_limit_mismatch": True,
             "timeout_seconds": sampling_settings.timeout_seconds,
             "connection_test_equivalent": False,
         },
@@ -1127,6 +1162,9 @@ def _provider_failure(exc: AIServiceError, *, sample_index: int) -> dict[str, An
     elif isinstance(exc, AIProtocolError):
         code = "provider_protocol_error"
         outcome_unknown = False
+    elif isinstance(exc, AIProviderHTTPError):
+        outcome_unknown = bool(exc.outcome_unknown)
+        code = "provider_outcome_unknown" if outcome_unknown else "provider_error"
     else:
         code = "provider_error"
         outcome_unknown = False
@@ -1135,8 +1173,53 @@ def _provider_failure(exc: AIServiceError, *, sample_index: int) -> dict[str, An
         "message": str(exc),
         "sample_index": sample_index,
         "outcome_unknown": outcome_unknown,
+        "upstream_status": getattr(exc, "status_code", None),
         "retry_after_seconds": getattr(exc, "retry_after_seconds", None),
     }
+
+
+def _reported_output_limit_mismatch(
+    usage: Mapping[str, Any] | None,
+    *,
+    requested_max_output_tokens: int,
+) -> int | None:
+    """Return a clearly excessive reported output count, if one exists.
+
+    Small provider-side accounting differences are tolerated. The guard only
+    trips once the reported usage is both 128 tokens and 2x beyond the limit,
+    which keeps it focused on the costly mismatch seen with reasoning gateways.
+    """
+
+    if not isinstance(usage, Mapping):
+        return None
+    raw_output_tokens = usage.get("output_tokens")
+    if raw_output_tokens is None or isinstance(raw_output_tokens, bool):
+        return None
+    try:
+        output_tokens = int(raw_output_tokens)
+    except (TypeError, ValueError):
+        return None
+    allowed = max(1, int(requested_max_output_tokens))
+    mismatch_threshold = max(allowed + 128, allowed * 2)
+    return output_tokens if output_tokens > mismatch_threshold else None
+
+
+def _failed_provider_attempt_count(
+    failure: Mapping[str, Any] | None,
+    completed_count: int,
+) -> int:
+    """Count a failed external request without miscounting post-success guards."""
+
+    if not isinstance(failure, Mapping):
+        return 0
+    sample_index = failure.get("sample_index")
+    if isinstance(sample_index, bool):
+        return 0
+    try:
+        failed_index = int(sample_index)
+    except (TypeError, ValueError):
+        return 0
+    return 1 if failed_index > max(0, int(completed_count)) else 0
 
 
 def _failure_http_status(failure: Mapping[str, Any] | None) -> int:
@@ -1158,6 +1241,7 @@ def _data_disclosure(prompt: str, sample_count: int) -> dict[str, Any]:
             "ai_provider_authorization_header",
             "temperature",
             "max_tokens",
+            "stream_false",
         ],
         "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
         "operator_prompt_controls_all_text_content": True,

@@ -197,6 +197,50 @@ class AIVisibilityPanelServiceTests(unittest.TestCase):
         self.assertEqual(evaluator["execution_status"], "skipped")
         self.assertFalse(result["multi_model_executed"])
 
+    def test_first_sample_failures_keep_frozen_model_identity(self):
+        def runner(_database_path, **kwargs):
+            outcome_unknown = kwargs["settings"].model == "writer-model"
+            return {
+                "request_id": kwargs["request_id"],
+                "idempotency_key": kwargs["idempotency_key"],
+                "replayed": False,
+                "payload": {
+                    "data": {
+                        "status": "need_action",
+                        "completed_sample_count": 0,
+                        "requested_sample_count": 3,
+                        "executions": [],
+                        "failure": {
+                            "code": (
+                                "provider_outcome_unknown"
+                                if outcome_unknown
+                                else "provider_protocol_error"
+                            ),
+                            "message": "synthetic provider failure",
+                            "outcome_unknown": outcome_unknown,
+                        },
+                    }
+                },
+            }
+
+        result = self.run_panel(
+            runner,
+            targets=self.targets()[:2],
+            sample_count=3,
+        )
+
+        self.assertEqual(result["status"], "need_action")
+        self.assertEqual(result["distinct_model_count"], 0)
+        writer, reviewer = result["targets"]
+        self.assertEqual(writer["execution_status"], "outcome_unknown")
+        self.assertEqual(writer["provider"], "qwen")
+        self.assertEqual(writer["model"], "writer-model")
+        self.assertEqual(reviewer["execution_status"], "failed")
+        self.assertEqual(reviewer["provider"], "deepseek")
+        self.assertEqual(reviewer["model"], "review-model")
+        self.assertEqual(writer["request_id"], "panel-request:writer")
+        self.assertEqual(reviewer["request_id"], "panel-request:reviewer")
+
     def test_one_independent_model_is_rejected_before_any_runner_call(self):
         calls = []
         targets = [

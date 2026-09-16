@@ -32,6 +32,7 @@ from sau_backend import (
     run_async_function,
     sse_stream,
 )
+from services.weibo_official_connector import WeiboConnectorUnavailableError
 
 
 class LoginSseTests(unittest.TestCase):
@@ -432,6 +433,37 @@ class LoginSseTests(unittest.TestCase):
         self.assertEqual(response.get_data(as_text=True), "data: 200\n\n")
         with active_queues_lock:
             self.assertEqual(active_queues, {})
+
+    def test_weibo_login_requires_connector_before_starting_worker(self):
+        with patch(
+            "sau_backend.resolve_weibo_cli",
+            side_effect=WeiboConnectorUnavailableError("missing"),
+        ), patch("sau_backend.threading.Thread") as thread:
+            response = self.client.get(
+                "/login",
+                query_string={"type": 11, "id": "微博账号"},
+            )
+
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("需安装/授权官方连接器", response.get_json()["msg"])
+        thread.assert_not_called()
+
+    def test_weibo_default_oauth_session_is_globally_serialized(self):
+        with active_queues_lock:
+            active_queues[("11", "账号一")] = Queue()
+        with patch("sau_backend.resolve_weibo_cli", return_value="weibo.exe"), patch(
+            "sau_backend.threading.Thread"
+        ) as thread:
+            response = self.client.get(
+                "/login",
+                query_string={"type": 11, "id": "账号二"},
+            )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("另一个微博授权正在进行", response.get_json()["msg"])
+        thread.assert_not_called()
+        with active_queues_lock:
+            self.assertEqual(list(active_queues), [("11", "账号一")])
 
     def test_login_first_event_streams_through_real_waitress_http_stack(self):
         """Guard against WSGI hop-by-hop headers rejected by Waitress."""

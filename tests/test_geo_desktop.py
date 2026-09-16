@@ -23,6 +23,7 @@ from geo_desktop import (
     inspect_bilibili_runtime,
     inspect_publishing_runtime,
     load_build_info,
+    main,
     publishing_profile_allows_real,
     reserve_loopback_socket,
     resolve_browser_executable,
@@ -30,6 +31,70 @@ from geo_desktop import (
     resolve_desktop_ai_runtime,
     resolve_frontend_dir,
 )
+
+
+class DesktopEntrypointTests(unittest.TestCase):
+    def test_frozen_windows_main_flushes_logs_then_hard_exits(self):
+        events = []
+
+        with patch(
+            "geo_desktop.run",
+            side_effect=lambda: events.append("run") or 7,
+        ), patch(
+            "geo_desktop.logging.shutdown",
+            side_effect=lambda: events.append("shutdown"),
+        ) as shutdown, patch(
+            "geo_desktop.os._exit",
+            side_effect=lambda code: events.append(("hard_exit", code)),
+        ) as hard_exit, patch("geo_desktop.os.name", "nt"), patch.object(
+            sys,
+            "frozen",
+            True,
+            create=True,
+        ):
+            main()
+
+        self.assertEqual(["run", "shutdown", ("hard_exit", 7)], events)
+        shutdown.assert_called_once_with()
+        hard_exit.assert_called_once_with(7)
+
+    def test_windows_source_main_keeps_normal_system_exit(self):
+        with patch("geo_desktop.run", return_value=9), patch(
+            "geo_desktop.logging.shutdown"
+        ) as shutdown, patch("geo_desktop.os._exit") as hard_exit, patch(
+            "geo_desktop.os.name", "nt"
+        ), patch.object(
+            sys,
+            "frozen",
+            False,
+            create=True,
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                main()
+
+        self.assertEqual(9, raised.exception.code)
+        shutdown.assert_not_called()
+        hard_exit.assert_not_called()
+
+    def test_main_does_not_override_ui_smoke_hard_exit_inside_run(self):
+        class UiSmokeHardExit(BaseException):
+            pass
+
+        with patch("geo_desktop.run", side_effect=UiSmokeHardExit), patch(
+            "geo_desktop.logging.shutdown"
+        ) as shutdown, patch("geo_desktop.os._exit") as hard_exit, patch(
+            "geo_desktop.os.name", "nt"
+        ), patch.object(
+            sys,
+            "frozen",
+            True,
+            create=True,
+        ):
+            with self.assertRaises(UiSmokeHardExit):
+                main()
+
+        shutdown.assert_not_called()
+        hard_exit.assert_not_called()
 
 
 class DesktopPathsTests(unittest.TestCase):

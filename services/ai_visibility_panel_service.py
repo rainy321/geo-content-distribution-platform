@@ -578,7 +578,8 @@ def _started_panel_result(
     observed_executed = [
         item
         for item in target_results
-        if item.get("execution_status") in {"executed", "failed", "in_progress"}
+        if item.get("execution_status")
+        in {"executed", "failed", "outcome_unknown", "in_progress"}
     ]
     status = "need_action" if expired else "processing"
     provider_channel_status = "outcome_unknown" if expired else "processing"
@@ -1009,22 +1010,58 @@ def _completed_target(
     executions = list(data.get("executions") or [])
     first = executions[0] if executions and isinstance(executions[0], Mapping) else {}
     grounding = dict(data.get("grounding") or {})
+    settings = target.get("settings")
+    role_status = (
+        dict(target.get("role_status") or {})
+        if isinstance(target.get("role_status"), Mapping)
+        else {}
+    )
+    configured_provider = (
+        provider_label_for_settings(settings)
+        if isinstance(settings, AISettings)
+        else str(target.get("provider") or role_status.get("provider") or "")
+    )
+    configured_model = (
+        str(settings.model)
+        if isinstance(settings, AISettings)
+        else str(target.get("model") or role_status.get("model") or "")
+    )
+    failure = data.get("failure") if isinstance(data.get("failure"), Mapping) else None
+    completed_sample_count = int(data.get("completed_sample_count") or 0)
+    if completed_sample_count > 0:
+        execution_status = "executed"
+    elif failure and bool(failure.get("outcome_unknown")):
+        execution_status = "outcome_unknown"
+    elif failure:
+        execution_status = "failed"
+    else:
+        execution_status = "executed"
     return {
         "role": target["role"],
         "agent_run_id": f"visibility:{raw.get('request_id') or ''}",
-        "execution_status": "executed",
+        "execution_status": execution_status,
         "status": str(data.get("status") or "need_action"),
-        "provider": str(first.get("provider") or "unknown"),
-        "model": str(first.get("model") or "unknown"),
+        "provider": str(
+            first.get("provider")
+            or data.get("configured_provider")
+            or configured_provider
+            or "unknown"
+        ),
+        "model": str(
+            first.get("model")
+            or data.get("configured_model")
+            or configured_model
+            or "unknown"
+        ),
         "request_id": str(raw.get("request_id") or ""),
         "idempotency_key": str(raw.get("idempotency_key") or ""),
         "replayed": bool(raw.get("replayed")),
-        "completed_sample_count": int(data.get("completed_sample_count") or 0),
+        "completed_sample_count": completed_sample_count,
         "requested_sample_count": int(data.get("requested_sample_count") or 0),
         "run_id": data.get("run_id"),
         "analysis": data.get("analysis"),
         "executions": executions,
-        "failure": data.get("failure"),
+        "failure": dict(failure) if failure else None,
         "channel_type": "provider_api",
         "entry_point": "openai_compatible_chat_completions",
         "web_search_verified": bool(grounding.get("web_search_verified", False)),
@@ -1041,8 +1078,10 @@ def _failed_target(target: Mapping[str, Any], exc: Exception) -> dict[str, Any]:
         "status": "need_action",
         "provider": provider_label_for_settings(settings),
         "model": settings.model,
-        "request_id": "",
-        "idempotency_key": "",
+        "request_id": str(target.get("subrequest_id") or ""),
+        "idempotency_key": str(
+            target.get("subrequest_idempotency_key") or ""
+        ),
         "replayed": False,
         "completed_sample_count": 0,
         "requested_sample_count": 0,

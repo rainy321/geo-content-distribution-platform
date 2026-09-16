@@ -10,8 +10,16 @@ from unittest.mock import patch
 
 from db.createTable import initialize_database
 from sau_backend import _create_content_generation_service, app
-from services.ai_image_generation_service import AIImageGenerationResult
-from services.ai_service import AICompletionResult, AIConfigurationError, AISettings
+from services.ai_image_generation_service import (
+    AIImageGenerationError,
+    AIImageGenerationResult,
+)
+from services.ai_service import (
+    AICompletionResult,
+    AIConfigurationError,
+    AIProviderRateLimitError,
+    AISettings,
+)
 from services.unified_ai_config_service import UnifiedAIConfigService
 
 
@@ -252,6 +260,32 @@ class UnifiedAIConfigApiTests(unittest.TestCase):
             "https://api.example.test/compatible-mode/v1/images/generations",
         )
 
+    def test_image_role_rejects_seedance_without_overwriting_configuration(self):
+        self.client.put("/api/ai/config", json=self.save_payload())
+
+        response = self.client.put(
+            "/api/ai/config/roles/image",
+            json={
+                "provider": "custom",
+                "base_url": "https://tongyuye.com/v1",
+                "model": "seedance-5.0",
+                "api_key": "synthetic-image-secret",
+            },
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("Seedance 是视频模型", response.get_json()["msg"])
+        self.assertIn("Seedream", response.get_json()["msg"])
+        self.assertFalse(
+            self.config_service.status().public_dict()["roles"]["image"][
+                "configured"
+            ]
+        )
+        self.assertNotIn(
+            "synthetic-image-secret",
+            self.config_path.read_text(encoding="utf-8"),
+        )
+
     def test_reviewer_role_rejects_same_writer_model_connection(self):
         self.config_service.save(**self.save_payload())
 
@@ -476,6 +510,158 @@ class UnifiedAIConfigApiTests(unittest.TestCase):
             ["fixed_synthetic_image_prompt"],
         )
         self.assertFalse(data["data_disclosure"]["project_data_sent"])
+        self.assertEqual(data["request_profile"], "minimal_openai_images")
+        self.assertNotIn("synthetic-image-secret", response.get_data(as_text=True))
+
+    @patch("services.ai_image_generation_service.requests.post")
+    def test_legacy_saved_seedance_image_role_is_blocked_before_network(self, post):
+        self.config_service.save(**self.save_payload())
+        self.config_service.save_role(
+            "image",
+            provider="custom",
+            base_url="https://tongyuye.com/v1",
+            model="synthetic-image-model",
+            api_key="synthetic-image-secret",
+        )
+        persisted = json.loads(self.config_path.read_text(encoding="utf-8"))
+        persisted["roles"]["image"]["model"] = "seedance-5.0"
+        self.config_path.write_text(
+            json.dumps(persisted, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
+        response = self.client.post(
+            "/api/ai/config/test",
+            json={"confirm_external_call": True, "role": "image"},
+        )
+
+        self.assertEqual(response.status_code, 400)
+        post.assert_not_called()
+        data = response.get_json()["data"]
+        self.assertEqual(data["diagnostic_code"], "video_model_not_supported")
+        self.assertIsNone(data["upstream_status"])
+        self.assertEqual(
+            data["endpoint"],
+            "https://tongyuye.com/v1/images/generations",
+        )
+        self.assertFalse(data["request_sent"])
+        self.assertNotIn("synthetic-image-secret", response.get_data(as_text=True))
+
+    @patch("sau_backend.generate_ai_article_cover")
+    def test_image_connection_errors_expose_safe_structured_diagnostics(self, generate):
+        self.config_service.save(**self.save_payload())
+        self.config_service.save_role(
+            "image",
+            provider="custom",
+            base_url="https://images.example.test/v1",
+            model="synthetic-image-model",
+            api_key="synthetic-image-secret",
+        )
+        endpoint = "https://images.example.test/v1/images/generations"
+        cases = (
+            (401, "authentication_failed", 401, False, 502),
+            (403, "permission_denied", 403, False, 502),
+            (404, "image_endpoint_not_found", 404, False, 502),
+            (504, "provider_timeout_unknown", 504, True, 409),
+            (None, "connection_timeout", None, False, 504),
+        )
+
+        for upstream_status, code, expected_upstream, outcome_unknown, http_status in cases:
+            with self.subTest(code=code):
+                generate.side_effect = AIImageGenerationError(
+                    "safe synthetic diagnostic",
+                    request_sent=code != "connection_timeout",
+                    outcome_unknown=outcome_unknown,
+                    provider="custom",
+                    model="synthetic-image-model",
+                    diagnostic_code=code,
+                    upstream_status=upstream_status,
+                    endpoint=endpoint,
+                )
+
+                response = self.client.post(
+                    "/api/ai/config/test",
+                    json={"confirm_external_call": True, "role": "image"},
+                )
+
+                self.assertEqual(response.status_code, http_status)
+                data = response.get_json()["data"]
+                self.assertEqual(data["diagnostic_code"], code)
+                self.assertEqual(data["upstream_status"], expected_upstream)
+                self.assertEqual(data["endpoint"], endpoint)
+                self.assertEqual(data["outcome_unknown"], outcome_unknown)
+                self.assertEqual(data["request_profile"], "minimal_openai_images")
+                self.assertNotIn(
+                    "synthetic-image-secret",
+                    response.get_data(as_text=True),
+                )
+
+    @patch("sau_backend.generate_ai_article_cover")
+    def test_image_connection_rate_limit_exposes_retry_after(self, generate):
+        self.config_service.save(**self.save_payload())
+        self.config_service.save_role(
+            "image",
+            provider="custom",
+            base_url="https://images.example.test/v1",
+            model="synthetic-image-model",
+            api_key="synthetic-image-secret",
+        )
+        generate.side_effect = AIProviderRateLimitError(
+            "synthetic image rate limit",
+            retry_after_seconds=23,
+        )
+
+        response = self.client.post(
+            "/api/ai/config/test",
+            json={"confirm_external_call": True, "role": "image"},
+        )
+
+        self.assertEqual(response.status_code, 429)
+        self.assertEqual(response.headers["Retry-After"], "23")
+        data = response.get_json()["data"]
+        self.assertEqual(data["diagnostic_code"], "rate_limited")
+        self.assertEqual(data["upstream_status"], 429)
+        self.assertEqual(
+            data["endpoint"],
+            "https://images.example.test/v1/images/generations",
+        )
+
+    @patch("sau_backend.generate_ai_article_cover")
+    def test_real_cover_error_exposes_safe_endpoint_diagnostic(self, generate):
+        self.config_service.save(**self.save_payload())
+        self.config_service.save_role(
+            "image",
+            provider="custom",
+            base_url="https://images.example.test/v1",
+            model="synthetic-image-model",
+            api_key="synthetic-image-secret",
+        )
+        endpoint = "https://images.example.test/v1/images/generations"
+        generate.side_effect = AIImageGenerationError(
+            "HTTP 404 without an upstream body",
+            request_sent=True,
+            provider="custom",
+            model="synthetic-image-model",
+            diagnostic_code="image_endpoint_not_found",
+            upstream_status=404,
+            endpoint=endpoint,
+        )
+
+        response = self.client.post(
+            f"/api/articles/{self.article_id}/images/generate",
+            json={
+                "confirm_external_call": True,
+                "idempotency_key": "synthetic-cover-404",
+            },
+            headers={"Idempotency-Key": "synthetic-cover-404"},
+        )
+
+        self.assertEqual(response.status_code, 502)
+        data = response.get_json()["data"]
+        self.assertEqual(data["diagnostic_code"], "image_endpoint_not_found")
+        self.assertEqual(data["upstream_status"], 404)
+        self.assertEqual(data["endpoint"], endpoint)
+        self.assertTrue(data["request_sent"])
         self.assertNotIn("synthetic-image-secret", response.get_data(as_text=True))
 
     @patch("sau_backend.sample_ai_prompt_detailed")

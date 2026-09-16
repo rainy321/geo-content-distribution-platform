@@ -74,8 +74,17 @@
           </span>
         </div>
         <div v-if="selectedRole === 'image'" class="role-runtime-note" role="note">
-          <strong>生图连接已接入文章封面流程</strong>
-          <span>配置后，发布中心“生成封面”会调用 /images/generations；未配置时才使用本地确定性封面。调用回执进入成本账单，服务商不返回 Token 时保持未知。</span>
+          <strong>生图连接已接入文章封面流程 · IMAGE 只接收图片生成模型</strong>
+          <span>
+            系统只调用 OpenAI-compatible <code>/images/generations</code>。
+            火山方舟 Seedream 是图片模型，Seedance 是视频模型，不能配在此角色。
+            自定义网关即使支持对话或视频，也必须另行实现该图片端点。
+            调用回执进入成本账单，服务商不返回 Token 时保持未知。
+          </span>
+        </div>
+        <div v-if="imageCompatibilityIssue" class="role-risk" role="alert">
+          <strong>当前 IMAGE 配置不可用</strong>
+          <span>{{ imageCompatibilityIssue.message }}</span>
         </div>
 
         <div v-if="statusError" class="config-error" role="status">
@@ -175,12 +184,24 @@
             {{ connectionResult.provider }} · {{ connectionResult.model }} · {{ connectionResult.elapsedMs }} ms
           </small>
           <small v-if="connectionResult.ok && connectionResult.endpoint">{{ connectionResult.endpoint }}</small>
+          <small v-if="!connectionResult.ok && connectionResult.endpoint">
+            请求地址：{{ connectionResult.endpoint }}
+          </small>
+          <small v-if="!connectionResult.ok && connectionResult.diagnosticCode">
+            诊断：{{ connectionResult.diagnosticCode }}{{ connectionResult.upstreamStatus ? ` · HTTP ${connectionResult.upstreamStatus}` : '' }}
+          </small>
+          <small v-if="selectedRole === 'image' && connectionResult.requestProfile">
+            请求模板：{{ imageRequestProfileLabel(connectionResult.requestProfile) }}
+          </small>
+          <small v-if="!connectionResult.ok && connectionResult.providerRequestId">
+            服务商请求编号：{{ connectionResult.providerRequestId }}
+          </small>
         </div>
 
         <footer class="form-actions">
           <el-button :disabled="!canClearActiveRole || clearing" :loading="clearing" @click="clearConfig">{{ clearButtonLabel }}</el-button>
           <div>
-            <el-button :loading="testing" :disabled="!activeRoleStatus.effectiveConfigured" @click="testConnection">测试已保存角色</el-button>
+            <el-button :loading="testing" :disabled="!activeRoleStatus.effectiveConfigured || Boolean(imageCompatibilityIssue)" @click="testConnection">测试已保存角色</el-button>
             <el-button type="primary" :loading="saving" :disabled="!aiStatus.saveSupported" @click="saveConfig">
               {{ saveButtonLabel }}
             </el-button>
@@ -317,7 +338,9 @@ import {
   normalizeUnifiedAIStatus,
   resolveUnifiedAIChatEndpoint,
   resolveUnifiedAIImageEndpoint,
+  unifiedAIImageCompatibilityIssue,
   unifiedAIProviderConfigurationHint,
+  validateUnifiedAIImageCompatibility,
   validateUnifiedAIProviderBinding
 } from '@/utils/aiConfig'
 
@@ -379,14 +402,26 @@ const resolvedEndpointPreview = computed(() => {
   }
 })
 const providerConfigurationHint = computed(() => (
-  unifiedAIProviderConfigurationHint(form.provider)
+  selectedRole.value === 'image'
+    ? (String(form.provider || '').trim().toLowerCase() === 'doubao'
+        ? '图片生成请填 Seedream 图片模型或对应 ep-* 接入点；不要填 Seedance 视频模型。'
+        : '请确认网关和模型都明确支持 OpenAI-compatible Images API；支持对话不等于支持生图。')
+    : unifiedAIProviderConfigurationHint(form.provider)
 ))
 const modelPlaceholder = computed(() => ({
   qwen: '例如 qwen-plus',
   deepseek: '例如 deepseek-chat',
-  doubao: '填写控制台模型或接入点 ID',
-  custom: '填写兼容服务提供的模型 ID'
+  doubao: selectedRole.value === 'image' ? '例如 Seedream 图片模型或 ep-*' : '填写控制台模型或接入点 ID',
+  custom: selectedRole.value === 'image' ? '填写网关的图片生成模型 ID' : '填写兼容服务提供的模型 ID'
 }[String(form.provider || '').trim().toLowerCase()] || '填写模型 ID'))
+const imageCompatibilityIssue = computed(() => {
+  if (selectedRole.value !== 'image' || !String(form.baseUrl || '').trim()) return null
+  try {
+    return unifiedAIImageCompatibilityIssue(form.baseUrl, form.model)
+  } catch {
+    return null
+  }
+})
 const canReuseWriterCredential = computed(() => (
   selectedRole.value !== 'writer'
   && writerRoleStatus.value.apiKeyConfigured
@@ -464,6 +499,21 @@ const rules = {
   ],
   model: [
     { required: true, message: '请输入模型名称', trigger: 'blur' },
+    {
+      validator: (rule, value, callback) => {
+        if (selectedRole.value !== 'image' || !String(form.baseUrl || '').trim()) {
+          callback()
+          return
+        }
+        try {
+          validateUnifiedAIImageCompatibility(form.baseUrl, value)
+          callback()
+        } catch (error) {
+          callback(new Error(error?.message || 'IMAGE 角色只支持图片生成模型'))
+        }
+      },
+      trigger: ['blur', 'change']
+    },
     { max: 200, message: '模型名称不能超过 200 个字符', trigger: 'blur' }
   ],
   apiKey: [
@@ -647,7 +697,8 @@ const saveConfig = async () => {
       : buildUnifiedAIRoleConfigPayload(
           form,
           activeRoleStatus.value,
-          writerRoleStatus.value
+          writerRoleStatus.value,
+          selectedRole.value
         )
     const response = selectedRole.value === 'writer'
       ? await aiConfigApi.save(payload, { suppressGlobalError: true })
@@ -679,16 +730,32 @@ const testConnection = async () => {
       provider: data.provider || aiStatus.providerLabel,
       model: data.model || aiStatus.model,
       endpoint: data.endpoint || resolvedEndpointPreview.value,
+      requestProfile: String(data.request_profile || ''),
+      providerRequestId: String(data.provider_request_id || ''),
       elapsedMs: Number(data.elapsed_ms) || 0
     }
     ElMessage.success(`${activeRoleDefinition.value.label}连接正常`)
   } catch (error) {
     const message = readableError(error, '统一 AI 引擎连接失败')
-    connectionResult.value = { ok: false, message }
+    const diagnostic = error?.response?.data?.data || {}
+    connectionResult.value = {
+      ok: false,
+      message,
+      diagnosticCode: String(diagnostic.diagnostic_code || ''),
+      upstreamStatus: Number(diagnostic.upstream_status) || 0,
+      endpoint: String(diagnostic.endpoint || resolvedEndpointPreview.value || ''),
+      requestProfile: String(diagnostic.request_profile || ''),
+      providerRequestId: String(diagnostic.provider_request_id || '')
+    }
     ElMessage.error(message)
   } finally {
     testing.value = false
   }
+}
+
+const imageRequestProfileLabel = (profile) => {
+  if (profile === 'minimal_openai_images') return '最小 Images 请求（仅模型与提示词）'
+  return '安全兼容请求'
 }
 
 const clearConfig = async () => {

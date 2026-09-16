@@ -68,6 +68,31 @@ _TOUTIAO_LOGIN_ERROR_ACTIONS = {
     "unexpected_error": "retry_and_check_logs",
 }
 
+_WEIBO_LOGIN_ERROR_MESSAGES = {
+    "connector_required": "需安装/授权官方连接器：请安装 @weibo-ai/weibo-cli 后重试",
+    "authorization_failed": "微博官方连接器授权未完成或授权已失效",
+    "single_session_conflict": "微博官方 CLI 当前仅支持一个默认授权会话，请重新连接已有微博账号",
+    "login_timeout": "等待微博官方连接器授权超时",
+    "operator_cancelled": "已结束本次微博授权等待",
+    "unexpected_error": "微博官方连接器登录流程发生异常",
+}
+
+
+def _queue_weibo_login_error(status_queue, code: str) -> None:
+    normalized = code if code in _WEIBO_LOGIN_ERROR_MESSAGES else "unexpected_error"
+    _queue_login_event(
+        status_queue,
+        "error",
+        code=normalized,
+        message=_WEIBO_LOGIN_ERROR_MESSAGES[normalized],
+        action=(
+            "安装并授权官方连接器后重试"
+            if normalized == "connector_required"
+            else "重新连接已有微博账号或在官方 CLI 完成授权"
+        ),
+    )
+    status_queue.put("500")
+
 
 def _queue_login_event(status_queue, event_type: str, **fields) -> None:
     """Send a structured, secret-free event alongside the legacy SSE tokens."""
@@ -181,6 +206,7 @@ def _safe_login_log(
         "toutiao",
         "weixin_channels",
         "xiaohongshu",
+        "weibo",
     }:
         normalized_platform = "unknown"
 
@@ -1602,6 +1628,148 @@ async def bilibili_cookie_gen(
         _terminate_owned_login_process(process)
         if account_file is not None and not database_saved:
             _discard_unregistered_login_file(account_file)
+
+
+async def weibo_cookie_gen(
+    id,
+    status_queue,
+    *,
+    database_path=None,
+    cookies_directory=None,
+    timeout_seconds=600,
+):
+    """Authorize the one official CLI session and persist only an identity marker."""
+
+    import subprocess
+
+    from services.weibo_official_connector import (
+        WEIBO_SINGLE_SESSION_MESSAGE,
+        WeiboAuthorizationError,
+        WeiboConnectorUnavailableError,
+        WeiboOfficialConnector,
+        resolve_weibo_cli,
+    )
+
+    process = None
+    marker_path = None
+    database_saved = False
+    status_queue.put("MANUAL_LOGIN")
+    try:
+        if _login_cancelled(status_queue):
+            _queue_login_cancelled(status_queue, "weibo")
+            return None
+        try:
+            executable = resolve_weibo_cli()
+        except WeiboConnectorUnavailableError:
+            _queue_weibo_login_error(status_queue, "connector_required")
+            return None
+
+        options = {
+            "stdin": subprocess.DEVNULL,
+            "stdout": subprocess.DEVNULL,
+            "stderr": subprocess.DEVNULL,
+            "shell": False,
+        }
+        if hasattr(subprocess, "CREATE_NO_WINDOW"):
+            options["creationflags"] = subprocess.CREATE_NO_WINDOW
+        process = subprocess.Popen(
+            [executable, "auth", "login", "--browser"],
+            **options,
+        )
+        returncode = await _wait_for_owned_login_process(
+            process,
+            cancel_event=getattr(status_queue, "cancel_event", None),
+            timeout_seconds=max(30, int(timeout_seconds)),
+        )
+        if _login_cancelled(status_queue):
+            _queue_login_cancelled(status_queue, "weibo")
+            return None
+        if returncode is None:
+            _queue_weibo_login_error(status_queue, "login_timeout")
+            return None
+        if returncode != 0:
+            _queue_weibo_login_error(status_queue, "authorization_failed")
+            return None
+
+        connector = WeiboOfficialConnector(executable=executable)
+        try:
+            identity = await asyncio.to_thread(connector.read_identity)
+            await asyncio.to_thread(connector.doctor)
+        except WeiboAuthorizationError:
+            _queue_weibo_login_error(status_queue, "authorization_failed")
+            return None
+
+        cookies_dir = _login_cookies_directory(cookies_directory)
+        cookies_dir.mkdir(parents=True, exist_ok=True)
+        marker_path = cookies_dir / f"weibo_{uuid.uuid4().hex}.json"
+        await asyncio.to_thread(connector.write_marker, marker_path, identity)
+        existing_account_id = getattr(status_queue, "existing_account_id", None)
+        old_marker_name = ""
+        with closing(sqlite3.connect(_login_database_path(database_path))) as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            rows = conn.execute(
+                "SELECT id, filePath, userName FROM user_info WHERE type = 11 AND status != -2"
+            ).fetchall()
+            if existing_account_id is None:
+                if rows:
+                    conn.rollback()
+                    _queue_weibo_login_error(status_queue, "single_session_conflict")
+                    return None
+                conn.execute(
+                    """
+                    INSERT INTO user_info (
+                        type, filePath, userName, status, last_checked_at
+                    ) VALUES (11, ?, ?, 1, CURRENT_TIMESTAMP)
+                    """,
+                    (marker_path.name, identity.username),
+                )
+            else:
+                matching = [row for row in rows if int(row[0]) == int(existing_account_id)]
+                if len(rows) != 1 or len(matching) != 1:
+                    conn.rollback()
+                    raise RuntimeError(WEIBO_SINGLE_SESSION_MESSAGE)
+                old_marker_name = str(matching[0][1] or "")
+                cursor = conn.execute(
+                    """
+                    UPDATE user_info
+                    SET filePath = ?, userName = ?, status = 1,
+                        last_checked_at = CURRENT_TIMESTAMP,
+                        credential_epoch = credential_epoch + 1
+                    WHERE id = ? AND type = 11 AND status != -2
+                    """,
+                    (marker_path.name, identity.username, int(existing_account_id)),
+                )
+                if cursor.rowcount != 1:
+                    conn.rollback()
+                    raise RuntimeError(WEIBO_SINGLE_SESSION_MESSAGE)
+            if _login_cancelled(status_queue):
+                conn.rollback()
+                _queue_login_cancelled(status_queue, "weibo")
+                return None
+            conn.commit()
+            database_saved = True
+        if old_marker_name and old_marker_name != marker_path.name:
+            old_marker = (cookies_dir / old_marker_name).resolve()
+            try:
+                old_marker.relative_to(cookies_dir.resolve())
+                old_marker.unlink(missing_ok=True)
+            except (OSError, ValueError):
+                pass
+        status_queue.put("200")
+        return True
+    except Exception as exc:
+        _safe_login_log("weibo", "login_failed", level="error", error=exc)
+        _queue_weibo_login_error(
+            status_queue,
+            "single_session_conflict"
+            if str(exc) == "微博官方 CLI 当前仅支持一个默认授权会话，请重新连接已有微博账号"
+            else "unexpected_error",
+        )
+        return None
+    finally:
+        _terminate_owned_login_process(process)
+        if marker_path is not None and not database_saved:
+            _discard_unregistered_login_file(marker_path)
 
 
 async def tiktok_cookie_gen(

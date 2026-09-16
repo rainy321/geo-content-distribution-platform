@@ -183,6 +183,11 @@ from services.platform_capability_service import (
     list_platform_capabilities,
     normalize_platform_key,
 )
+from services.weibo_official_connector import (
+    WEIBO_OFFICIAL_CONNECTOR_REQUIRED_MESSAGE,
+    WeiboConnectorUnavailableError,
+    resolve_weibo_cli,
+)
 from services.content_generation_run_service import (
     GenerationRunNotFoundError,
     GenerationRunStateError,
@@ -260,6 +265,11 @@ from services.publish_outcome_service import (
 from services.platform_publish_policy_service import (
     evaluate_platform_offline_preflight,
     get_platform_publish_policy,
+)
+from services.sohu_publication_guard_service import (
+    SohuPublicationGuardError,
+    evaluate_sohu_account_publication_guard,
+    evaluate_sohu_batch_similarity,
 )
 from services.publish_scheduler_runtime import create_publish_scheduler
 from services.publish_review_monitor_service import (
@@ -409,7 +419,7 @@ PRODUCT_PUBLISH_VIDEO_MAX_BYTES = 150 * 1024 * 1024
 # exact user_info row.  Every other helper creates a new row, so accepting an
 # existing_account_id for those platforms would silently leave the old account
 # (and its risk/task bindings) behind.
-IN_PLACE_REAUTH_ACCOUNT_TYPES = frozenset({"9"})
+IN_PLACE_REAUTH_ACCOUNT_TYPES = frozenset({"9", "11"})
 active_login_stream_transports = {}
 app = Flask(__name__)
 
@@ -1988,6 +1998,34 @@ def _public_ai_role_resolution(role, *, explicit_request=False):
     }
 
 
+def _ai_image_error_http_status(error):
+    if error.diagnostic_code in {
+        "video_model_not_supported",
+        "video_endpoint_not_supported",
+    }:
+        return 400
+    if error.diagnostic_code == "connection_timeout":
+        return 504
+    if error.outcome_unknown:
+        return 409
+    return 502
+
+
+def _public_ai_image_error_data(error, *, ai_usage=None):
+    return {
+        "request_sent": error.request_sent,
+        "outcome_unknown": error.outcome_unknown,
+        "retry_forbidden": error.request_sent,
+        "ai_usage": ai_usage,
+        "diagnostic_code": error.diagnostic_code,
+        "upstream_status": error.upstream_status,
+        "endpoint": error.endpoint,
+        "model": error.model,
+        "request_profile": error.request_profile,
+        "provider_request_id": error.provider_request_id,
+    }
+
+
 @app.route('/api/ai/config', methods=['GET'])
 @app.route('/api/ai/config-status', methods=['GET'])
 def get_ai_config_status():
@@ -2224,12 +2262,42 @@ def test_ai_config_connection():
             sent_fields = ["fixed_synthetic_prompt"]
             result_message = "固定合成测试已收到模型响应"
     except AIProviderRateLimitError as exc:
-        response = jsonify({"code": 429, "msg": str(exc), "data": None})
+        response = jsonify(
+            {
+                "code": 429,
+                "msg": str(exc),
+                "data": {
+                    "diagnostic_code": "rate_limited",
+                    "upstream_status": 429,
+                    "endpoint": (
+                        resolve_ai_image_generations_url(settings.base_url)
+                        if role == "image"
+                        else resolve_ai_chat_completions_url(settings.base_url)
+                    ),
+                    "retry_after_seconds": exc.retry_after_seconds,
+                },
+            }
+        )
         if exc.retry_after_seconds is not None:
             response.headers["Retry-After"] = str(exc.retry_after_seconds)
         return response, 429
     except AIConnectError as exc:
-        return jsonify({"code": 502, "msg": str(exc), "data": {"request_sent": False}}), 502
+        return jsonify(
+            {
+                "code": 502,
+                "msg": str(exc),
+                "data": {
+                    "request_sent": False,
+                    "diagnostic_code": "connection_failed",
+                    "upstream_status": None,
+                    "endpoint": (
+                        resolve_ai_image_generations_url(settings.base_url)
+                        if role == "image"
+                        else resolve_ai_chat_completions_url(settings.base_url)
+                    ),
+                },
+            }
+        ), 502
     except AIImageGenerationError as exc:
         usage_record = None
         if exc.request_sent:
@@ -2241,17 +2309,17 @@ def test_ai_config_connection():
                 elapsed_ms=exc.elapsed_ms,
                 outcome="unknown" if exc.outcome_unknown else "failed_after_request",
             )
+        status_code = _ai_image_error_http_status(exc)
         return jsonify(
             {
-                "code": 502,
+                "code": status_code,
                 "msg": str(exc),
-                "data": {
-                    "request_sent": exc.request_sent,
-                    "retry_forbidden": exc.request_sent,
-                    "ai_usage": usage_record,
-                },
+                "data": _public_ai_image_error_data(
+                    exc,
+                    ai_usage=usage_record,
+                ),
             }
-        ), 502
+        ), status_code
     except AIReadTimeoutError as exc:
         usage_record = _record_ai_connection_test_usage(
             settings=settings,
@@ -2303,6 +2371,11 @@ def test_ai_config_connection():
                 "provider": provider_label_for_settings(settings),
                 "model": result.model,
                 "endpoint": endpoint,
+                "request_profile": (
+                    getattr(result, "request_profile", "")
+                    if role == "image"
+                    else ""
+                ),
                 "role": role,
                 "ai_role": _public_ai_role_resolution(
                     role,
@@ -4252,7 +4325,18 @@ def create_article_cover_image(article_id):
             settings=settings,
         )
     except AIProviderRateLimitError as exc:
-        response = jsonify({"code": 429, "msg": str(exc), "data": None})
+        response = jsonify(
+            {
+                "code": 429,
+                "msg": str(exc),
+                "data": {
+                    "diagnostic_code": "rate_limited",
+                    "upstream_status": 429,
+                    "endpoint": resolve_ai_image_generations_url(settings.base_url),
+                    "retry_after_seconds": exc.retry_after_seconds,
+                },
+            }
+        )
         if exc.retry_after_seconds is not None:
             response.headers["Retry-After"] = str(exc.retry_after_seconds)
         return response, 429
@@ -4261,7 +4345,13 @@ def create_article_cover_image(article_id):
             {
                 "code": 502,
                 "msg": str(exc),
-                "data": {"retry_forbidden": False, "request_sent": False},
+                "data": {
+                    "retry_forbidden": False,
+                    "request_sent": False,
+                    "diagnostic_code": "connection_failed",
+                    "upstream_status": None,
+                    "endpoint": resolve_ai_image_generations_url(settings.base_url),
+                },
             }
         ), 502
     except AIImageGenerationError as exc:
@@ -4291,16 +4381,15 @@ def create_article_cover_image(article_id):
                     "image generation failure receipt could not be recorded article_id=%s",
                     article_id,
                 )
-        status_code = 409 if exc.outcome_unknown else 502
+        status_code = _ai_image_error_http_status(exc)
         response = jsonify(
             {
                 "code": status_code,
                 "msg": str(exc),
-                "data": {
-                    "request_sent": exc.request_sent,
-                    "retry_forbidden": exc.request_sent,
-                    "ai_usage": usage_record,
-                },
+                "data": _public_ai_image_error_data(
+                    exc,
+                    ai_usage=usage_record,
+                ),
             }
         )
         response.headers["Idempotency-Key"] = idempotency_key
@@ -4445,6 +4534,31 @@ def optimize_article(article_id):
     if project is None:
         return jsonify({"code": 409, "msg": "文章关联的品牌项目不存在", "data": None}), 409
 
+    raw_target_platforms = data.get("target_platforms", [])
+    if raw_target_platforms is None:
+        raw_target_platforms = []
+    if not isinstance(raw_target_platforms, list):
+        return jsonify(
+            {"code": 400, "msg": "target_platforms 必须是字符串数组", "data": None}
+        ), 400
+    if len(raw_target_platforms) > len(list_platform_capabilities()):
+        return jsonify(
+            {"code": 400, "msg": "target_platforms 数量超过支持范围", "data": None}
+        ), 400
+    target_platforms = []
+    for raw_platform in raw_target_platforms:
+        if not isinstance(raw_platform, str):
+            return jsonify(
+                {"code": 400, "msg": "target_platforms 必须是字符串数组", "data": None}
+            ), 400
+        platform = normalize_platform_key(raw_platform)
+        if not platform:
+            return jsonify(
+                {"code": 400, "msg": f"暂不支持优化平台：{raw_platform}", "data": None}
+            ), 400
+        if platform not in target_platforms:
+            target_platforms.append(platform)
+
     score_brand = project["name"]
     score_keywords = project["keywords"]
     scoring_project = project
@@ -4499,6 +4613,81 @@ def optimize_article(article_id):
         requested_target_length=requested_target_length,
         source=length_source,
     )
+    platform_optimization_context = []
+    for platform in target_platforms:
+        capability = get_platform_capability(platform) or {}
+        platform_name = str(capability.get("name") or platform)
+        try:
+            platform_variant = build_platform_publish_variant(
+                platform=platform,
+                title=article["title"],
+                content=article["content"],
+                tags=article.get("tags") or (),
+                required_phrases=(
+                    str(project.get("name") or "").strip(),
+                    str(project.get("product") or "").strip(),
+                ),
+            )
+            issues = platform_variant.get("offline_preflight", {}).get("issues", [])
+        except (PublishContentLimitError, ValueError) as exc:
+            issues = [
+                {
+                    "code": "platform_variant_error",
+                    "severity": "blocking",
+                    "message": str(exc),
+                    "suggestion": "按该平台发布边界重写标题和正文。",
+                }
+            ]
+        normalized_issues = []
+        for issue in issues:
+            if not isinstance(issue, dict):
+                continue
+            message = str(issue.get("message") or "").strip()
+            suggestion = str(issue.get("suggestion") or "").strip()
+            if not message and not suggestion:
+                continue
+            normalized_issues.append(
+                {
+                    "code": str(issue.get("code") or "platform_preflight"),
+                    "severity": str(issue.get("severity") or "warning"),
+                    "message": message,
+                    "suggestion": suggestion,
+                }
+            )
+        if platform == "sohu":
+            normalized_issues.append(
+                {
+                    "code": "sohu_editorial_mode",
+                    "severity": "guidance",
+                    "message": "搜狐号需要中性、可核验且与同批稿件实质不同的编辑稿。",
+                    "suggestion": (
+                        "标题直接说明技术问题，不用疑问/选型/科普外壳只推广单一产品；"
+                        "正文删除官网、联系方式、购买引导和机械标签，仅保留必要的一次实体说明，"
+                        "增加机制、限制与事实边界；不要用同义词改写重复稿。"
+                    ),
+                }
+            )
+        platform_optimization_context.append(
+            {
+                "platform": platform,
+                "platform_name": platform_name,
+                "issues": normalized_issues,
+            }
+        )
+    if platform_optimization_context:
+        before_score = dict(before_score)
+        before_score["suggestions"] = [
+            *(
+                before_score.get("suggestions")
+                if isinstance(before_score.get("suggestions"), list)
+                else []
+            ),
+            *[
+                f"{item['platform_name']}：{issue['message']} {issue['suggestion']}".strip()
+                for item in platform_optimization_context
+                for issue in item["issues"]
+            ],
+        ]
     try:
         ai_settings = _request_ai_settings(data, role="reviewer")
     except AIConfigurationError as exc:
@@ -4648,6 +4837,7 @@ def optimize_article(article_id):
                 "after": after_score,
                 "ai_usage": ai_usage_record,
                 "warnings": ai_usage_warnings,
+                "platform_optimization_context": platform_optimization_context,
                 "ai_role": _public_ai_role_resolution(
                     "reviewer",
                     explicit_request=data.get("ai_config") is not None,
@@ -4821,18 +5011,152 @@ def _parse_positive_query_integer(name, *, default=None):
     return value, None
 
 
+def _parse_optional_positive_integer_list(data, name, *, max_items=20):
+    raw_values = data.get(name)
+    if raw_values is None:
+        return [], None
+    if not isinstance(raw_values, list):
+        return None, f"{name} 必须是正整数数组"
+    if len(raw_values) > max_items:
+        return None, f"{name} 一次最多 {max_items} 项"
+    normalized = []
+    for raw_value in raw_values:
+        if isinstance(raw_value, bool):
+            return None, f"{name} 必须是正整数数组"
+        if isinstance(raw_value, int):
+            value = raw_value
+        elif isinstance(raw_value, str) and re.fullmatch(
+            r"[1-9][0-9]*", raw_value.strip()
+        ):
+            value = int(raw_value.strip())
+        else:
+            return None, f"{name} 必须是正整数数组"
+        if value <= 0:
+            return None, f"{name} 必须是正整数数组"
+        if value not in normalized:
+            normalized.append(value)
+    return normalized, None
+
+
+def _parse_optional_positive_integer_value(raw_value, name):
+    if raw_value is None or raw_value == "":
+        return None, None
+    if isinstance(raw_value, bool):
+        return None, f"{name} 必须是正整数"
+    if isinstance(raw_value, int):
+        value = raw_value
+    elif isinstance(raw_value, str) and re.fullmatch(
+        r"[1-9][0-9]*", raw_value.strip()
+    ):
+        value = int(raw_value.strip())
+    else:
+        return None, f"{name} 必须是正整数"
+    if value <= 0:
+        return None, f"{name} 必须是正整数"
+    return value, None
+
+
+def _assert_connected_platform_account(account_id, platform):
+    capability = get_platform_capability(platform)
+    if capability is None:
+        raise PublishContentLimitError(f"暂不支持发布平台：{platform}")
+    with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
+        row = conn.execute(
+            "SELECT type, status FROM user_info WHERE id = ?",
+            (int(account_id),),
+        ).fetchone()
+    if (
+        row is None
+        or int(row[0]) != int(capability["account_type"])
+        or int(row[1]) != 1
+    ):
+        raise PublishContentLimitError(
+            f"{platform} account_id 不存在、平台不匹配或当前不可用"
+        )
+
+
+def _load_sohu_batch_publication_snapshots(
+    batch_article_ids,
+    *,
+    current_article_id,
+    current_variant=None,
+    require_ready=False,
+):
+    """Load the declared Sohu batch from the database before any task write.
+
+    ``batch_article_ids`` is client input, so IDs alone are never treated as
+    similarity evidence.  Every member must resolve to a real article and the
+    guard compares the actual Sohu-ready title/body snapshot.  The current
+    article may use its exact edited preflight variant while sibling articles
+    are derived from their persisted source.
+    """
+
+    snapshots = []
+    for batch_article_id in batch_article_ids:
+        article = get_article(app.config["DATABASE_PATH"], batch_article_id)
+        if require_ready and str(article.get("status") or "") != "ready":
+            raise PublishContentLimitError(
+                f"搜狐批次中的文章 {batch_article_id} 不是待发布状态"
+            )
+        if (
+            int(batch_article_id) == int(current_article_id)
+            and isinstance(current_variant, dict)
+        ):
+            variant = current_variant
+        else:
+            project = get_project(
+                app.config["DATABASE_PATH"],
+                int(article["project_id"]),
+            )
+            variant = build_platform_publish_variant(
+                platform="sohu",
+                title=article["title"],
+                content=article["content"],
+                tags=article.get("tags") or (),
+                required_phrases=(str(project.get("name") or "").strip(),),
+            )
+        snapshots.append(
+            {
+                "article_id": int(batch_article_id),
+                "title": str(variant.get("title") or "").strip(),
+                "content": str(variant.get("publish_content") or "").strip(),
+            }
+        )
+    return snapshots
+
+
 @app.route('/api/publish/preflight', methods=['POST'])
 def preview_publish_variants():
     data = request.get_json(silent=True)
     if not isinstance(data, dict):
         return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
 
-    try:
-        article_id = int(data.get("article_id"))
-    except (TypeError, ValueError):
-        return jsonify({"code": 400, "msg": "article_id 必须是整数", "data": None}), 400
-    if article_id <= 0:
-        return jsonify({"code": 400, "msg": "article_id 必须是正整数", "data": None}), 400
+    article_id, article_error = _parse_optional_positive_integer_value(
+        data.get("article_id"),
+        "article_id",
+    )
+    if article_error or article_id is None:
+        return jsonify(
+            {
+                "code": 400,
+                "msg": article_error or "article_id 必须是正整数",
+                "data": None,
+            }
+        ), 400
+    batch_article_ids, batch_error = _parse_optional_positive_integer_list(
+        data,
+        "batch_article_ids",
+    )
+    if batch_error:
+        return jsonify({"code": 400, "msg": batch_error, "data": None}), 400
+    if batch_article_ids and article_id not in batch_article_ids:
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "batch_article_ids 必须包含当前 article_id",
+                "data": None,
+            }
+        ), 400
 
     requested_platforms = data.get("platforms")
     if not isinstance(requested_platforms, list) or not requested_platforms:
@@ -4846,6 +5170,9 @@ def preview_publish_variants():
     title_overrides = data.get("title_overrides", {})
     if not isinstance(title_overrides, dict):
         return jsonify({"code": 400, "msg": "title_overrides 必须是对象", "data": None}), 400
+    account_ids = data.get("account_ids", {})
+    if not isinstance(account_ids, dict):
+        return jsonify({"code": 400, "msg": "account_ids 必须是对象", "data": None}), 400
     try:
         article = get_article(app.config["DATABASE_PATH"], article_id)
     except ArticleNotFoundError as exc:
@@ -4900,8 +5227,74 @@ def preview_publish_variants():
                     else []
                 ),
             )
+            if platform == "sohu":
+                raw_account_id = account_ids.get(platform)
+                guard = None
+                normalized_account_id, account_error = (
+                    _parse_optional_positive_integer_value(
+                        raw_account_id,
+                        "sohu account_id",
+                    )
+                )
+                if account_error:
+                    raise PublishContentLimitError(account_error)
+                if normalized_account_id is not None:
+                    _assert_connected_platform_account(
+                        normalized_account_id,
+                        "sohu",
+                    )
+                    guard = evaluate_sohu_account_publication_guard(
+                        app.config["DATABASE_PATH"],
+                        account_id=normalized_account_id,
+                        article_id=article_id,
+                        title=variant["title"],
+                        content=variant["publish_content"],
+                    )
+                    variant["account_publication_guard"] = guard
+
+                batch_snapshots = _load_sohu_batch_publication_snapshots(
+                    batch_article_ids or [article_id],
+                    current_article_id=article_id,
+                    current_variant=variant,
+                    require_ready=True,
+                )
+                batch_guard = evaluate_sohu_batch_similarity(batch_snapshots)
+                variant["batch_publication_guard"] = batch_guard
+                combined_guard_issues = [
+                    *((guard or {}).get("issues") or []),
+                    *batch_guard["issues"],
+                ]
+                if combined_guard_issues:
+                    preflight = dict(variant["offline_preflight"])
+                    preflight["issues"] = [
+                        *(preflight.get("issues") or []),
+                        *combined_guard_issues,
+                    ]
+                    preflight["blocking_count"] = sum(
+                        item.get("severity") == "blocking"
+                        for item in preflight["issues"]
+                        if isinstance(item, dict)
+                    )
+                    preflight["warning_count"] = sum(
+                        item.get("severity") == "warning"
+                        for item in preflight["issues"]
+                        if isinstance(item, dict)
+                    )
+                    preflight["passed"] = preflight["blocking_count"] == 0
+                    guard_disclaimer = (
+                        str(guard.get("disclaimer") or "") if guard else ""
+                    )
+                    preflight["disclaimer"] = (
+                        f"{preflight.get('disclaimer', '')} {guard_disclaimer} "
+                        f"{batch_guard['disclaimer']}"
+                    ).strip()
+                    variant["offline_preflight"] = preflight
             variants.append(variant)
             seen.add(platform)
+    except ArticleNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except ProjectNotFoundError as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
     except (PublishContentLimitError, GEOArticleCompilerError) as exc:
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
 
@@ -4924,30 +5317,41 @@ def create_publish_task():
     if not isinstance(data, dict):
         return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
 
-    try:
-        article_id = int(data.get("article_id"))
-    except (TypeError, ValueError):
-        return jsonify({"code": 400, "msg": "article_id 必须是整数", "data": None}), 400
-    if article_id <= 0:
-        return jsonify({"code": 400, "msg": "article_id 必须是正整数", "data": None}), 400
+    article_id, article_error = _parse_optional_positive_integer_value(
+        data.get("article_id"),
+        "article_id",
+    )
+    if article_error or article_id is None:
+        return jsonify(
+            {
+                "code": 400,
+                "msg": article_error or "article_id 必须是正整数",
+                "data": None,
+            }
+        ), 400
+    batch_article_ids, batch_error = _parse_optional_positive_integer_list(
+        data,
+        "batch_article_ids",
+    )
+    if batch_error:
+        return jsonify({"code": 400, "msg": batch_error, "data": None}), 400
+    if batch_article_ids and article_id not in batch_article_ids:
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "batch_article_ids 必须包含当前 article_id",
+                "data": None,
+            }
+        ), 400
 
-    raw_account_id = data.get("account_id")
-    account_id = None
-    if raw_account_id not in {None, ""}:
-        if isinstance(raw_account_id, bool):
-            return jsonify(
-                {"code": 400, "msg": "account_id 必须是正整数", "data": None}
-            ), 400
-        try:
-            account_id = int(raw_account_id)
-        except (TypeError, ValueError):
-            return jsonify(
-                {"code": 400, "msg": "account_id 必须是正整数", "data": None}
-            ), 400
-        if account_id <= 0:
-            return jsonify(
-                {"code": 400, "msg": "account_id 必须是正整数", "data": None}
-            ), 400
+    account_id, account_error = _parse_optional_positive_integer_value(
+        data.get("account_id"),
+        "account_id",
+    )
+    if account_error:
+        return jsonify(
+            {"code": 400, "msg": account_error, "data": None}
+        ), 400
 
     platform = str(data.get("platform") or "").strip().lower()
     if not platform:
@@ -4974,6 +5378,67 @@ def create_publish_task():
     capability = get_platform_capability(platform)
     if capability is None:
         return jsonify({"code": 400, "msg": "暂不支持该发布平台", "data": None}), 400
+    if platform == "sohu":
+        try:
+            current_article = get_article(app.config["DATABASE_PATH"], article_id)
+            current_project = get_project(
+                app.config["DATABASE_PATH"],
+                int(current_article["project_id"]),
+            )
+            current_variant = build_platform_publish_variant(
+                platform="sohu",
+                title=current_article["title"],
+                content=current_article["content"],
+                tags=current_article.get("tags") or (),
+                publish_title=publish_title,
+                publish_content=publish_content,
+                required_phrases=(
+                    str(current_project.get("name") or "").strip(),
+                ),
+            )
+            batch_snapshots = _load_sohu_batch_publication_snapshots(
+                batch_article_ids or [article_id],
+                current_article_id=article_id,
+                current_variant=current_variant,
+                require_ready=True,
+            )
+            sohu_batch_guard = evaluate_sohu_batch_similarity(batch_snapshots)
+        except ArticleNotFoundError as exc:
+            return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+        except ProjectNotFoundError as exc:
+            return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+        except (PublishContentLimitError, GEOArticleCompilerError) as exc:
+            return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+        if sohu_batch_guard["passed"] is not True:
+            summary = "；".join(
+                str(item.get("message") or "").strip()
+                for item in sohu_batch_guard["issues"][:3]
+            )
+            return jsonify(
+                {
+                    "code": 409,
+                    "msg": f"搜狐批次发布保护已阻止创建任务：{summary}",
+                    "data": {
+                        "action": "sohu_one_article_per_batch_required",
+                        "platform": platform,
+                        "publication_guard": sohu_batch_guard,
+                    },
+                }
+            ), 409
+    if platform == "weibo":
+        try:
+            resolve_weibo_cli()
+        except WeiboConnectorUnavailableError:
+            return jsonify(
+                {
+                    "code": 503,
+                    "msg": WEIBO_OFFICIAL_CONNECTOR_REQUIRED_MESSAGE,
+                    "data": {
+                        "action": "install_or_authorize_official_connector",
+                        "platform": "weibo",
+                    },
+                }
+            ), 503
     auto_execute = data.get("auto_execute", False)
     if not isinstance(auto_execute, bool):
         return jsonify(
@@ -5004,6 +5469,20 @@ def create_publish_task():
         ), 403
     if (
         not app.config.get("DEMO_MODE", False)
+        and not _real_publishing_authorized()
+    ):
+        return jsonify(
+            {
+                "code": 403,
+                "msg": "当前构建未授权创建真实发布任务",
+                "data": {
+                    "action": "real_publishing_not_authorized",
+                    "platform": platform,
+                },
+            }
+        ), 403
+    if (
+        not app.config.get("DEMO_MODE", False)
         and not app.config.get("PUBLISHING_RUNTIME_READY", False)
     ):
         return jsonify(
@@ -5018,9 +5497,19 @@ def create_publish_task():
         ), 503
     if (
         not app.config.get("DEMO_MODE", False)
-        and app.config.get("ALLOW_REAL_PUBLISHING", False)
-        and account_id is None
+        and not app.config.get("ALLOW_REAL_PUBLISHING", False)
     ):
+        return jsonify(
+            {
+                "code": 403,
+                "msg": "真实发布运行开关未开启，未创建任务",
+                "data": {
+                    "action": "enable_real_publishing",
+                    "platform": platform,
+                },
+            }
+        ), 403
+    if not app.config.get("DEMO_MODE", False) and account_id is None:
         return jsonify(
             {
                 "code": 409,
@@ -5121,6 +5610,30 @@ def create_publish_task():
                     str(project_for_gate.get("name") or "").strip(),
                 ),
             )
+            if platform == "sohu" and account_id is not None:
+                sohu_guard = evaluate_sohu_account_publication_guard(
+                    app.config["DATABASE_PATH"],
+                    account_id=account_id,
+                    article_id=article_id,
+                    title=exact_variant["title"],
+                    content=exact_variant["publish_content"],
+                )
+                if sohu_guard["passed"] is not True:
+                    summary = "；".join(
+                        str(item.get("message") or "").strip()
+                        for item in sohu_guard["issues"][:3]
+                    )
+                    return jsonify(
+                        {
+                            "code": 409,
+                            "msg": f"搜狐账号发布保护已阻止创建任务：{summary}",
+                            "data": {
+                                "action": "sohu_review_or_rewrite_required",
+                                "platform": platform,
+                                "publication_guard": sohu_guard,
+                            },
+                        }
+                    ), 409
             citeability = evaluate_publish_citeability(
                 title=exact_variant["title"],
                 content=exact_variant["publish_content"],
@@ -5177,6 +5690,18 @@ def create_publish_task():
         )
     except ArticleNotFoundError as exc:
         return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except SohuPublicationGuardError as exc:
+        return jsonify(
+            {
+                "code": 409,
+                "msg": f"搜狐账号发布保护已阻止创建任务：{exc}",
+                "data": {
+                    "action": "sohu_review_or_rewrite_required",
+                    "platform": "sohu",
+                    "publication_guard": exc.report,
+                },
+            }
+        ), 409
     except (UnsupportedPublishPlatformError, ValueError) as exc:
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
 
@@ -5628,6 +6153,17 @@ def execute_real_publish_task(job_id):
                 "data": None,
             }
         ), 403
+    if current["platform"] == "weibo":
+        try:
+            resolve_weibo_cli()
+        except WeiboConnectorUnavailableError:
+            return jsonify(
+                {
+                    "code": 503,
+                    "msg": WEIBO_OFFICIAL_CONNECTOR_REQUIRED_MESSAGE,
+                    "data": {"action": "install_or_authorize_official_connector"},
+                }
+            ), 503
     data = request.get_json(silent=True) or {}
     if data.get("confirm") is not True:
         return jsonify(
@@ -6049,6 +6585,11 @@ def get_publish_platforms():
         and app.config.get("PUBLISHING_RUNTIME_READY", False)
         and not demo_available
     )
+    try:
+        resolve_weibo_cli()
+        weibo_connector_available = True
+    except WeiboConnectorUnavailableError:
+        weibo_connector_available = False
     capabilities = []
     for item in list_platform_capabilities():
         runtime_available = bool(
@@ -6057,8 +6598,11 @@ def get_publish_platforms():
                 item["key"] != BILIBILI_PLATFORM_KEY
                 or app.config.get("ENABLE_BILIBILI_RUNTIME", False)
             )
+            and (item["key"] != "weibo" or weibo_connector_available)
         )
-        if item["key"] == BILIBILI_PLATFORM_KEY and not app.config.get(
+        if item["key"] == "weibo" and not weibo_connector_available:
+            unavailable_reason = WEIBO_OFFICIAL_CONNECTOR_REQUIRED_MESSAGE
+        elif item["key"] == BILIBILI_PLATFORM_KEY and not app.config.get(
             "ENABLE_BILIBILI_RUNTIME", False
         ):
             unavailable_reason = (
@@ -6082,12 +6626,16 @@ def get_publish_platforms():
                 "publish_policy": get_platform_publish_policy(item["key"]),
                 "verification": get_platform_verification_policy(item["key"]),
                 "frequency_guidance": get_platform_frequency_guidance(item["key"]),
+                "connector_available": (
+                    weibo_connector_available if item["key"] == "weibo" else None
+                ),
                 "runtime_available": runtime_available,
                 "login_available": runtime_available,
                 "real_publishing_authorized": real_publishing_authorized,
                 "demo_available": demo_available,
                 "task_creation_available": bool(
-                    demo_available or runtime_available
+                    (demo_available or runtime_available)
+                    and (item["key"] != "weibo" or weibo_connector_available)
                 ),
                 "scheduled_real_publishing_enabled": bool(
                     app.config.get("SCHEDULED_REAL_PUBLISHING_ENABLED", False)
@@ -6687,7 +7235,10 @@ def login():
             return jsonify(
                 {"code": 400, "msg": "已有账号标识无效", "data": None}
             ), 400
-    if login_type not in {str(value) for value in range(1, 11)}:
+    supported_account_types = {
+        str(item["account_type"]) for item in list_platform_capabilities()
+    }
+    if login_type not in supported_account_types:
         return jsonify({"code": 400, "msg": "不支持的平台类型", "data": None}), 400
     if (
         existing_account_id is not None
@@ -6719,6 +7270,36 @@ def login():
         return jsonify(
             {"code": 403, "msg": "当前桌面构建未开启媒体账号登录", "data": None}
         ), 403
+    if login_type == "11":
+        try:
+            resolve_weibo_cli()
+        except WeiboConnectorUnavailableError:
+            return jsonify(
+                {
+                    "code": 503,
+                    "msg": WEIBO_OFFICIAL_CONNECTOR_REQUIRED_MESSAGE,
+                    "data": {"action": "install_or_authorize_official_connector"},
+                }
+            ), 503
+        if existing_account_id is None:
+            try:
+                with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
+                    active_weibo = conn.execute(
+                        "SELECT id FROM user_info WHERE type = 11 AND status != ? LIMIT 1",
+                        (DISCONNECTED_ACCOUNT_STATUS,),
+                    ).fetchone()
+            except sqlite3.Error:
+                return jsonify(
+                    {"code": 500, "msg": "无法校验微博默认授权会话", "data": None}
+                ), 500
+            if active_weibo is not None:
+                return jsonify(
+                    {
+                        "code": 409,
+                        "msg": "微博官方 CLI 当前仅支持一个默认授权会话，请重新连接已有微博账号",
+                        "data": {"existing_account_id": int(active_weibo[0])},
+                    }
+                ), 409
     if not app.config.get("PUBLISHING_RUNTIME_READY", False):
         return jsonify(
             {
@@ -6743,6 +7324,20 @@ def login():
     created_session = False
     with active_queues_lock:
         _prune_recent_login_queues()
+        if login_type == "11" and any(
+            key[0] == "11" and key != session_key
+            for key in active_queues
+        ):
+            return jsonify(
+                {
+                    "code": 409,
+                    "msg": (
+                        "微博官方 CLI 当前仅支持一个默认授权会话；"
+                        "另一个微博授权正在进行，请等待其结束后再重新连接已有账号"
+                    ),
+                    "data": None,
+                }
+            ), 409
         active_status_queue = active_queues.get(session_key)
         if active_status_queue is not None:
             active_session_id = str(
@@ -6893,7 +7488,9 @@ def cancel_media_login():
         )
     except ValueError as exc:
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
-    if login_type not in {str(value) for value in range(1, 11)}:
+    if login_type not in {
+        str(item["account_type"]) for item in list_platform_capabilities()
+    }:
         return jsonify(
             {"code": 400, "msg": "不支持的平台类型", "data": None}
         ), 400
@@ -7804,6 +8401,7 @@ def _load_login_helpers():
         toutiao_cookie_gen,
         tiktok_cookie_gen,
         xiaohongshu_cookie_gen,
+        weibo_cookie_gen,
         zhihu_cookie_gen,
     )
 
@@ -7818,6 +8416,7 @@ def _load_login_helpers():
         "8": sohu_cookie_gen,
         "9": zhihu_cookie_gen,
         "10": tiktok_cookie_gen,
+        "11": weibo_cookie_gen,
     }
 
 
@@ -7845,13 +8444,18 @@ def _run_login_coroutine(coroutine):
 
 def _queue_login_runtime_error(status_queue, platform_type):
     is_zhihu = str(platform_type) == "9"
+    is_weibo = str(platform_type) == "11"
     payload = {
         "type": "error",
         "code": "unexpected_error",
         "message": (
             "知乎登录发生异常，请重试并查看本机日志"
             if is_zhihu
-            else "平台登录发生异常，请重试并查看本机日志"
+            else (
+                WEIBO_OFFICIAL_CONNECTOR_REQUIRED_MESSAGE
+                if is_weibo
+                else "平台登录发生异常，请重试并查看本机日志"
+            )
         ),
         "action": "重试；如仍失败，请查看本机登录日志",
     }

@@ -285,6 +285,7 @@ import { ElButton, ElIcon, ElMessage, ElMessageBox } from 'element-plus'
 import { accountApi } from '@/api/account'
 import { publishApi } from '@/api/publish'
 import { apiUrl } from '@/config/api'
+import { withWeiboAccountPlatform, withWeiboCapability } from '@/utils/weiboPlatform'
 import {
   buildStreamFailure,
   parseLoginSessionEvent,
@@ -600,9 +601,9 @@ const fetchOverview = async () => {
     ])
     if (accountResult.status === 'rejected') throw accountResult.reason
 
-    const capabilityItems = capabilityResult.status === 'fulfilled'
+    const capabilityItems = withWeiboCapability(capabilityResult.status === 'fulfilled'
       ? (capabilityResult.value.data || [])
-      : []
+      : [])
     capabilitiesLoadError.value = capabilityResult.status === 'rejected'
     if (capabilitiesLoadError.value) {
       console.error('加载发布能力清单失败:', capabilityResult.reason)
@@ -613,7 +614,10 @@ const fetchOverview = async () => {
       ...rawOverview,
       summary: { ...emptyOverview().summary, ...(rawOverview.summary || {}) },
       accounts: [...(rawOverview.accounts || [])],
-      platforms: (rawOverview.platforms || []).map(platform => ({
+      platforms: withWeiboAccountPlatform(
+        rawOverview.platforms || [],
+        rawOverview.accounts || []
+      ).map(platform => ({
         ...platform,
         login_available: false,
         runtime_available: false,

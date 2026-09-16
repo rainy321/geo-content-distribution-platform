@@ -50,6 +50,13 @@ const VERIFICATION_DESTINATIONS = Object.freeze({
     // localized or account-specific content path after authentication.
     url: 'https://www.tiktok.com/tiktokstudio',
     pathPrefix: '/tiktokstudio'
+  }),
+  weibo: Object.freeze({
+    label: '微博个人主页 / 作品核验',
+    url: 'https://me.weibo.com/',
+    // This is an operator-only verification entry, never public-success
+    // evidence. Keep it exact because authenticated redirects can vary.
+    exactUrl: true
   })
 })
 
@@ -90,6 +97,11 @@ const PUBLIC_CONTENT_RULES = Object.freeze({
       host: 'www.tiktok.com',
       path: /^\/@[A-Za-z0-9_](?:[A-Za-z0-9._]{0,22}[A-Za-z0-9_])?\/video\/[1-9]\d*\/?$/
     })
+  ]),
+  weibo: Object.freeze([
+    Object.freeze({ host: 'weibo.com', path: /^\/[1-9]\d{4,19}\/[A-Za-z0-9]{5,32}\/?$/ }),
+    Object.freeze({ host: 'www.weibo.com', path: /^\/[1-9]\d{4,19}\/[A-Za-z0-9]{5,32}\/?$/ }),
+    Object.freeze({ host: 'm.weibo.cn', path: /^\/detail\/[1-9]\d{5,19}\/?$/ })
   ])
 })
 
@@ -130,11 +142,13 @@ export const isSafeExternalVerificationUrl = (value, platform) => {
   const url = parseStrictHttpsUrl(value)
   if (!destination || !url) return false
   const allowed = new URL(destination.url)
-  return url.hostname === allowed.hostname
-    && (
-      url.pathname === destination.pathPrefix
-      || url.pathname.startsWith(`${destination.pathPrefix}/`)
-    )
+  const pathAllowed = destination.exactUrl
+    ? url.href === allowed.href
+    : (
+        url.pathname === destination.pathPrefix
+        || url.pathname.startsWith(`${destination.pathPrefix}/`)
+      )
+  return url.hostname === allowed.hostname && pathAllowed
 }
 
 export const isSafePublishedContentUrl = (value, platform) => {

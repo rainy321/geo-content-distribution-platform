@@ -60,6 +60,16 @@ class P2ContentWorkflowApiTests(unittest.TestCase):
             "MEDIA_ROOT": app.config["MEDIA_ROOT"],
             "DEMO_MODE": app.config["DEMO_MODE"],
             "AI_RATE_LIMIT_PER_MINUTE": app.config["AI_RATE_LIMIT_PER_MINUTE"],
+            "REAL_PUBLISHING_AUTHORIZED": app.config.get(
+                "REAL_PUBLISHING_AUTHORIZED"
+            ),
+            "ALLOW_REAL_PUBLISHING": app.config.get("ALLOW_REAL_PUBLISHING"),
+            "PUBLISHING_RUNTIME_READY": app.config.get(
+                "PUBLISHING_RUNTIME_READY"
+            ),
+            "ENABLE_BILIBILI_RUNTIME": app.config.get(
+                "ENABLE_BILIBILI_RUNTIME"
+            ),
         }
         app.config.update(
             DATABASE_PATH=self.db_path,
@@ -73,6 +83,28 @@ class P2ContentWorkflowApiTests(unittest.TestCase):
     def tearDown(self):
         app.config.update(self.original)
         self.temp_dir.cleanup()
+
+    def _enable_real_task_creation(self, *, account_type, platform_name):
+        app.config.update(
+            DEMO_MODE=False,
+            REAL_PUBLISHING_AUTHORIZED=True,
+            ALLOW_REAL_PUBLISHING=True,
+            PUBLISHING_RUNTIME_READY=True,
+            ENABLE_BILIBILI_RUNTIME=True,
+        )
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                return conn.execute(
+                    """
+                    INSERT INTO user_info (type, filePath, userName, status)
+                    VALUES (?, ?, ?, 1)
+                    """,
+                    (
+                        account_type,
+                        f"{platform_name}-contract.json",
+                        f"{platform_name}-contract-account",
+                    ),
+                ).lastrowid
 
     def test_template_crud_and_generation_instruction(self):
         listed = self.client.get("/api/content-templates")
@@ -433,16 +465,23 @@ class P2ContentWorkflowApiTests(unittest.TestCase):
 
     def test_platform_manifest_and_video_job_contract(self):
         platforms = self.client.get("/api/publish/platforms").get_json()["data"]
-        self.assertEqual(len(platforms), 10)
+        self.assertEqual(len(platforms), 11)
         bilibili = next(item for item in platforms if item["key"] == "bilibili")
         douyin = next(item for item in platforms if item["key"] == "douyin")
         self.assertTrue(bilibili["requires_video"])
         self.assertTrue(douyin["requires_images"])
 
-        app.config["DEMO_MODE"] = False
+        account_id = self._enable_real_task_creation(
+            account_type=6,
+            platform_name="bilibili",
+        )
         missing = self.client.post(
             "/api/publish",
-            json={"article_id": self.article_id, "platform": "bilibili"},
+            json={
+                "article_id": self.article_id,
+                "platform": "bilibili",
+                "account_id": account_id,
+            },
         )
         self.assertEqual(missing.status_code, 400)
         self.assertIn("视频素材", missing.get_json()["msg"])
@@ -455,12 +494,21 @@ class P2ContentWorkflowApiTests(unittest.TestCase):
                 "height": 1080,
                 "duration_seconds": 12,
             },
+        ), patch(
+            "sau_backend.evaluate_publish_citeability",
+            return_value={
+                "score": 100,
+                "passed": True,
+                "publish_gate_passed": True,
+                "blocking_issues": [],
+            },
         ):
             created = self.client.post(
                 "/api/publish",
                 json={
                     "article_id": self.article_id,
                     "platform": "bilibili",
+                    "account_id": account_id,
                     "video": "demo.mp4",
                 },
             )
@@ -468,15 +516,28 @@ class P2ContentWorkflowApiTests(unittest.TestCase):
         self.assertEqual(created.get_json()["data"]["video"], "demo.mp4")
 
     def test_auto_image_creates_portable_cover_for_image_channel(self):
-        app.config["DEMO_MODE"] = False
-        response = self.client.post(
-            "/api/publish",
-            json={
-                "article_id": self.article_id,
-                "platform": "douyin",
-                "auto_image": True,
-            },
+        account_id = self._enable_real_task_creation(
+            account_type=3,
+            platform_name="douyin",
         )
+        with patch(
+            "sau_backend.evaluate_publish_citeability",
+            return_value={
+                "score": 100,
+                "passed": True,
+                "publish_gate_passed": True,
+                "blocking_issues": [],
+            },
+        ):
+            response = self.client.post(
+                "/api/publish",
+                json={
+                    "article_id": self.article_id,
+                    "platform": "douyin",
+                    "account_id": account_id,
+                    "auto_image": True,
+                },
+            )
         self.assertEqual(response.status_code, 201)
         images = response.get_json()["data"]["images"]
         self.assertEqual(len(images), 1)

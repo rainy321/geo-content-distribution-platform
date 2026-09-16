@@ -36,6 +36,7 @@ from services.ai_service import (
     provider_label_for_settings,
     resolve_ai_chat_completions_url,
     resolve_ai_image_generations_url,
+    validate_ai_image_role_compatibility,
 )
 
 
@@ -538,6 +539,11 @@ class UnifiedAIConfigService:
             candidate_provider = _normalize_provider(provider)
             if not candidate_provider:
                 candidate_provider = provider_label_for_settings(candidate_settings)
+            if normalized_role == "image":
+                validate_ai_image_role_compatibility(
+                    base_url=candidate_settings.base_url,
+                    model=candidate_settings.model,
+                )
             endpoint_resolver = (
                 resolve_ai_image_generations_url
                 if normalized_role == "image"

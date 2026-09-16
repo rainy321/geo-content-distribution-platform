@@ -11,7 +11,7 @@ import {
 
 test('every publish platform has a direct creator content-management destination', () => {
   const destinations = listPlatformVerificationDestinations()
-  assert.equal(destinations.length, 10)
+  assert.equal(destinations.length, 11)
   for (const item of destinations) {
     assert.match(item.url, /^https:\/\//)
     assert.equal(isSafeExternalVerificationUrl(item.url, item.platform), true)
@@ -19,6 +19,10 @@ test('every publish platform has a direct creator content-management destination
   assert.equal(
     platformVerificationDestination('tiktok')?.url,
     'https://www.tiktok.com/tiktokstudio'
+  )
+  assert.equal(
+    platformVerificationDestination('weibo')?.url,
+    'https://me.weibo.com/'
   )
 })
 
@@ -41,6 +45,10 @@ test('management links are checked against the selected platform host and path',
     isSafeExternalVerificationUrl('https://mp.sohu.com/mpfe/v4/contentManagement', 'zhihu'),
     false
   )
+  assert.equal(isSafeExternalVerificationUrl('https://me.weibo.com/', 'weibo'), true)
+  assert.equal(isSafeExternalVerificationUrl('https://me.weibo.com/creator', 'weibo'), false)
+  assert.equal(isSafeExternalVerificationUrl('https://me.weibo.com/?redirect=evil', 'weibo'), false)
+  assert.equal(isSafeExternalVerificationUrl('https://weibo.com/', 'weibo'), false)
 })
 
 test('platform lookup is normalized and unknown platforms fail closed', () => {
@@ -63,7 +71,8 @@ test('public evidence URL allowlist accepts each platform content shape', () => 
     douyin: 'https://www.douyin.com/video/123456789',
     kuaishou: 'https://www.kuaishou.com/short-video/AbCd_123',
     bilibili: 'https://www.bilibili.com/video/BV1ab411c7dE/',
-    tiktok: 'https://www.tiktok.com/@brand/video/123456789'
+    tiktok: 'https://www.tiktok.com/@brand/video/123456789',
+    weibo: 'https://weibo.com/7387181478/PzLkll9Yh'
   }
 
   for (const [platform, url] of Object.entries(samples)) {
@@ -107,4 +116,9 @@ test('public evidence rejects management pages, cross-platform hosts and unsafe 
     isSafePublishedContentUrl('https://www.tiktok.com/@brand/photo/123456789', 'tiktok'),
     false
   )
+  assert.equal(isSafePublishedContentUrl('https://m.weibo.cn/detail/5323991493381816', 'weibo'), true)
+  assert.equal(isSafePublishedContentUrl('https://me.weibo.com/', 'weibo'), false)
+  assert.equal(isSafePublishedContentUrl('https://t.cn/A6abc123', 'weibo'), false)
+  assert.equal(isSafePublishedContentUrl('https://weibo.com/u/2892492275', 'weibo'), false)
+  assert.equal(isSafePublishedContentUrl('https://weibo.com/7387181478', 'weibo'), false)
 })

@@ -88,6 +88,22 @@ class PublishOutcomeServiceTests(unittest.TestCase):
         self.assertEqual(failed["action"], "retry_after_validation")
         self.assertTrue(failed["retry_allowed"])
 
+    def test_explicit_platform_rejection_requires_new_version_not_retry(self):
+        outcome = classify_publish_outcome(
+            status="failed",
+            message=(
+                "后台只读监测发现平台明确未通过："
+                "文章内容不符合搜狐号发文规范"
+            ),
+            account_id=7,
+        )
+
+        self.assertEqual(outcome["category"], "failed")
+        self.assertEqual(outcome["action"], "rewrite_new_version")
+        self.assertFalse(outcome["retry_allowed"])
+        self.assertFalse(outcome["auto_repair_eligible"])
+        self.assertIn("不要重试原稿", outcome["next_action"])
+
     def test_queued_jobs_explain_execute_or_rebuild_instead_of_success(self):
         executable = classify_publish_outcome(
             status="queued",

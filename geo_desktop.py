@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any, Mapping, MutableMapping, Sequence
 
 
-APP_VERSION = "1.2.5"
+APP_VERSION = "1.2.6"
 BUILD_INFO_SCHEMA_VERSION = 1
 APP_TITLE = "GEO 智能内容分发平台"
 APP_DIRECTORY_NAME = "GEOContentPlatform"
@@ -1214,7 +1214,16 @@ def run(argv: Sequence[str] | None = None) -> int:
 
 
 def main() -> None:
-    raise SystemExit(run())
+    exit_code = run()
+    if os.name == "nt" and bool(getattr(sys, "frozen", False)):
+        # Python.NET/WebView2 can leave CLR helper threads alive after the
+        # window closes.  ``run`` has already completed its ``finally`` block,
+        # so flush logs and end the frozen child process without waiting for
+        # those runtime-owned threads.  The PyInstaller parent then exits too.
+        logging.shutdown()
+        os._exit(exit_code)
+    else:
+        raise SystemExit(exit_code)
 
 
 if __name__ == "__main__":

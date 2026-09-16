@@ -14,7 +14,8 @@ from sau_backend import (
     PRODUCT_PUBLISH_VIDEO_MAX_BYTES,
     app,
 )
-from services.publish_job_service import transition_publish_job
+from services.publish_job_service import create_publish_job, transition_publish_job
+from services.weibo_official_connector import WeiboConnectorUnavailableError
 
 
 def _test_image_bytes(*, image_format="PNG"):
@@ -153,6 +154,112 @@ class PublishJobsApiTests(unittest.TestCase):
             ).fetchone()[0]
         self.assertEqual(stored_original, original)
 
+    def test_sohu_preflight_blocks_multi_article_batch_before_any_task(self):
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                second_article_id = conn.execute(
+                    """
+                    INSERT INTO articles (project_id, title, content, tags, status)
+                    SELECT project_id,
+                           'AI Agent 指南：接口选择',
+                           '文章正文：接口选择',
+                           tags,
+                           'ready'
+                    FROM articles WHERE id = ?
+                    """,
+                    (self.article_id,),
+                ).lastrowid
+        response = self.client.post(
+            "/api/publish/preflight",
+            json={
+                "article_id": self.article_id,
+                "batch_article_ids": [self.article_id, second_article_id],
+                "platforms": ["sohu"],
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        variant = response.get_json()["data"]["variants"][0]
+        self.assertFalse(variant["offline_preflight"]["passed"])
+        self.assertIn(
+            "sohu_batch_one_at_a_time",
+            {item["code"] for item in variant["offline_preflight"]["issues"]},
+        )
+        self.assertIn(
+            "sohu_batch_similarity",
+            {item["code"] for item in variant["offline_preflight"]["issues"]},
+        )
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM publish_jobs").fetchone()[0],
+                0,
+            )
+
+    def test_sohu_create_blocks_declared_batch_before_any_task_in_demo_mode(self):
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                second_article_id = conn.execute(
+                    """
+                    INSERT INTO articles (project_id, title, content, tags, status)
+                    SELECT project_id, '另一篇独立稿件', '另一篇独立正文', tags, 'ready'
+                    FROM articles WHERE id = ?
+                    """,
+                    (self.article_id,),
+                ).lastrowid
+
+        response = self.client.post(
+            "/api/publish",
+            json={
+                "article_id": self.article_id,
+                "batch_article_ids": [self.article_id, second_article_id],
+                "platform": "sohu",
+            },
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.get_json()["data"]["action"],
+            "sohu_one_article_per_batch_required",
+        )
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM publish_jobs").fetchone()[0],
+                0,
+            )
+
+    def test_sohu_batch_and_account_inputs_reject_objects_and_fractional_ids(self):
+        fractional_batch = self.client.post(
+            "/api/publish/preflight",
+            json={
+                "article_id": self.article_id,
+                "batch_article_ids": [self.article_id, 1.5],
+                "platforms": ["sohu"],
+            },
+        )
+        invalid_preflight_account = self.client.post(
+            "/api/publish/preflight",
+            json={
+                "article_id": self.article_id,
+                "platforms": ["sohu"],
+                "account_ids": {"sohu": []},
+            },
+        )
+        invalid_create_account = self.client.post(
+            "/api/publish",
+            json={
+                "article_id": self.article_id,
+                "platform": "sohu",
+                "account_id": {},
+            },
+        )
+
+        self.assertEqual(fractional_batch.status_code, 400)
+        self.assertIn("正整数数组", fractional_batch.get_json()["msg"])
+        self.assertEqual(invalid_preflight_account.status_code, 400)
+        self.assertIn("account_id 必须是正整数", invalid_preflight_account.get_json()["msg"])
+        self.assertEqual(invalid_create_account.status_code, 400)
+        self.assertIn("account_id 必须是正整数", invalid_create_account.get_json()["msg"])
+
     def test_kuaishou_preflight_keeps_project_brand_in_automatic_short_copy(self):
         opening = (
             "个人开发者选择 AI API 服务时，应核对模型范围、接口兼容、计费规则与技术支持。"
@@ -219,6 +326,38 @@ class PublishJobsApiTests(unittest.TestCase):
             "不是平台官方",
             douyin["frequency_guidance"]["disclaimer"],
         )
+
+    def test_weibo_manifest_and_task_gate_report_missing_official_connector(self):
+        with patch(
+            "sau_backend.resolve_weibo_cli",
+            side_effect=WeiboConnectorUnavailableError("missing"),
+        ):
+            capabilities = self.client.get("/api/publish/platforms").get_json()["data"]
+            weibo = next(item for item in capabilities if item["key"] == "weibo")
+            response = self.client.post(
+                "/api/publish",
+                json={"article_id": self.article_id, "platform": "weibo"},
+            )
+        with patch("sau_backend.resolve_weibo_cli", return_value="weibo.exe"):
+            installed_capabilities = self.client.get(
+                "/api/publish/platforms"
+            ).get_json()["data"]
+        installed_weibo = next(
+            item for item in installed_capabilities if item["key"] == "weibo"
+        )
+
+        self.assertFalse(weibo["connector_available"])
+        self.assertFalse(weibo["runtime_available"])
+        self.assertFalse(weibo["task_creation_available"])
+        self.assertIn("需安装/授权官方连接器", weibo["unavailable_reason"])
+        self.assertEqual(response.status_code, 503)
+        self.assertIn("需安装/授权官方连接器", response.get_json()["msg"])
+        self.assertTrue(installed_weibo["connector_available"])
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM publish_jobs").fetchone()[0],
+                0,
+            )
 
     def test_executes_demo_job_through_full_state_flow(self):
         job = self._create_job()
@@ -453,15 +592,66 @@ class PublishJobsApiTests(unittest.TestCase):
         browser_factory.assert_not_called()
 
     def test_real_image_backed_platform_requires_an_image_at_job_creation(self):
+        original_authorized = app.config.get("REAL_PUBLISHING_AUTHORIZED")
+        original_allow = app.config.get("ALLOW_REAL_PUBLISHING")
+        original_runtime = app.config.get("PUBLISHING_RUNTIME_READY")
         app.config["DEMO_MODE"] = False
-
-        response = self.client.post(
-            "/api/publish",
-            json={"article_id": self.article_id, "platform": "xiaohongshu"},
-        )
+        app.config["REAL_PUBLISHING_AUTHORIZED"] = True
+        app.config["ALLOW_REAL_PUBLISHING"] = True
+        app.config["PUBLISHING_RUNTIME_READY"] = True
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                account_id = conn.execute(
+                    """
+                    INSERT INTO user_info (type, filePath, userName, status)
+                    VALUES (1, 'xhs.json', '小红书测试账号', 1)
+                    """
+                ).lastrowid
+        try:
+            response = self.client.post(
+                "/api/publish",
+                json={
+                    "article_id": self.article_id,
+                    "platform": "xiaohongshu",
+                    "account_id": account_id,
+                },
+            )
+        finally:
+            app.config["REAL_PUBLISHING_AUTHORIZED"] = original_authorized
+            app.config["ALLOW_REAL_PUBLISHING"] = original_allow
+            app.config["PUBLISHING_RUNTIME_READY"] = original_runtime
 
         self.assertEqual(response.status_code, 400)
         self.assertIn("至少一张", response.get_json()["msg"])
+
+    def test_unauthorized_real_build_cannot_create_dead_queued_task(self):
+        original_authorized = app.config.get("REAL_PUBLISHING_AUTHORIZED")
+        original_allow = app.config.get("ALLOW_REAL_PUBLISHING")
+        original_runtime = app.config.get("PUBLISHING_RUNTIME_READY")
+        app.config["DEMO_MODE"] = False
+        app.config["REAL_PUBLISHING_AUTHORIZED"] = False
+        app.config["ALLOW_REAL_PUBLISHING"] = False
+        app.config["PUBLISHING_RUNTIME_READY"] = True
+        try:
+            response = self.client.post(
+                "/api/publish",
+                json={"article_id": self.article_id, "platform": "sohu"},
+            )
+        finally:
+            app.config["REAL_PUBLISHING_AUTHORIZED"] = original_authorized
+            app.config["ALLOW_REAL_PUBLISHING"] = original_allow
+            app.config["PUBLISHING_RUNTIME_READY"] = original_runtime
+
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(
+            response.get_json()["data"]["action"],
+            "real_publishing_not_authorized",
+        )
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM publish_jobs").fetchone()[0],
+                0,
+            )
 
     def test_lists_jobs_with_filters_and_pagination(self):
         zhihu = self._create_job(platform="zhihu")
@@ -560,13 +750,18 @@ class PublishJobsApiTests(unittest.TestCase):
 
     def test_real_job_cannot_be_executed_by_safe_demo_endpoint(self):
         app.config["DEMO_MODE"] = False
-        job = self._create_job()
+        job = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="zhihu",
+            demo=False,
+        )
 
-        response = self.client.post(f"/api/publish/jobs/{job['job_id']}/execute")
+        response = self.client.post(f"/api/publish/jobs/{job['id']}/execute")
 
         self.assertEqual(response.status_code, 409)
         self.assertIn("不能通过演示执行入口", response.get_json()["msg"])
-        detail = self.client.get(f"/api/publish/jobs/{job['job_id']}").get_json()["data"]
+        detail = self.client.get(f"/api/publish/jobs/{job['id']}").get_json()["data"]
         self.assertEqual(detail["status"], "queued")
         self.assertFalse(detail["demo"])
 
@@ -576,12 +771,24 @@ class PublishJobsApiTests(unittest.TestCase):
         original_runtime = app.config.get("PUBLISHING_RUNTIME_READY")
         app.config["DEMO_MODE"] = False
         app.config["REAL_PUBLISHING_AUTHORIZED"] = True
-        app.config["ALLOW_REAL_PUBLISHING"] = False
+        app.config["ALLOW_REAL_PUBLISHING"] = True
         app.config["PUBLISHING_RUNTIME_READY"] = True
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                account_id = conn.execute(
+                    """
+                    INSERT INTO user_info (type, filePath, userName, status)
+                    VALUES (9, 'zhihu-citeability.json', '知乎门禁测试账号', 1)
+                    """
+                ).lastrowid
         try:
             response = self.client.post(
                 "/api/publish",
-                json={"article_id": self.article_id, "platform": "zhihu"},
+                json={
+                    "article_id": self.article_id,
+                    "platform": "zhihu",
+                    "account_id": account_id,
+                },
             )
         finally:
             app.config["REAL_PUBLISHING_AUTHORIZED"] = original_authorized
@@ -602,8 +809,16 @@ class PublishJobsApiTests(unittest.TestCase):
         original_runtime = app.config.get("PUBLISHING_RUNTIME_READY")
         app.config["DEMO_MODE"] = False
         app.config["REAL_PUBLISHING_AUTHORIZED"] = True
-        app.config["ALLOW_REAL_PUBLISHING"] = False
+        app.config["ALLOW_REAL_PUBLISHING"] = True
         app.config["PUBLISHING_RUNTIME_READY"] = True
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                account_id = conn.execute(
+                    """
+                    INSERT INTO user_info (type, filePath, userName, status)
+                    VALUES (9, 'zhihu-score.json', '知乎评分测试账号', 1)
+                    """
+                ).lastrowid
         try:
             with patch(
                 "sau_backend.evaluate_publish_citeability",
@@ -626,7 +841,11 @@ class PublishJobsApiTests(unittest.TestCase):
             ):
                 response = self.client.post(
                     "/api/publish",
-                    json={"article_id": self.article_id, "platform": "zhihu"},
+                    json={
+                        "article_id": self.article_id,
+                        "platform": "zhihu",
+                        "account_id": account_id,
+                    },
                 )
         finally:
             app.config["REAL_PUBLISHING_AUTHORIZED"] = original_authorized
@@ -667,6 +886,14 @@ class PublishJobsApiTests(unittest.TestCase):
             "/api/publish",
             json={"article_id": "abc", "platform": "zhihu"},
         )
+        fractional_article = self.client.post(
+            "/api/publish",
+            json={"article_id": 1.5, "platform": "zhihu"},
+        )
+        fractional_preflight_article = self.client.post(
+            "/api/publish/preflight",
+            json={"article_id": 1.5, "platforms": ["zhihu"]},
+        )
         missing_article = self.client.post(
             "/api/publish",
             json={"article_id": 999999, "platform": "zhihu"},
@@ -687,6 +914,8 @@ class PublishJobsApiTests(unittest.TestCase):
 
         self.assertEqual(invalid_json.status_code, 400)
         self.assertEqual(invalid_article.status_code, 400)
+        self.assertEqual(fractional_article.status_code, 400)
+        self.assertEqual(fractional_preflight_article.status_code, 400)
         self.assertEqual(missing_article.status_code, 404)
         self.assertEqual(invalid_platform.status_code, 400)
         self.assertEqual(invalid_time.status_code, 400)

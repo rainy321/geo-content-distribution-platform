@@ -285,7 +285,9 @@ class SoHuArticle(object):
 
     def _normalize_tags(self) -> list[str]:
         tags = [str(t).strip().lstrip("#") for t in (self.tags or []) if str(t).strip()]
-        return tags[:10]
+        # Product-side conservative strategy, not a claim about Sohu's
+        # official topic quota.  The policy preview uses the same 0-3 bound.
+        return tags[:3]
 
     async def fill_title(self, page: Page) -> None:
         if len(self.title) < 5:
@@ -391,11 +393,7 @@ class SoHuArticle(object):
             sohu_logger.info("正文已通过 DOM 写入")
 
     async def fill_body(self, page: Page) -> None:
-        tags = self._normalize_tags()
         body_text = (self.body or "").rstrip()
-        if tags:
-            tag_line = " ".join(f"#{t}" for t in tags)
-            body_text = f"{body_text}\n\n{tag_line}" if body_text else tag_line
         if not body_text.strip():
             raise ValueError("文章正文不能为空")
 
@@ -723,7 +721,7 @@ class SoHuArticle(object):
             sohu_logger.warning(f"设置信息来源失败（可忽略）: {exc}")
 
     async def fill_tags(self, page: Page) -> None:
-        """若页面有独立标签输入框则填写；否则标签已写入正文。"""
+        """Only attempt Sohu's independent tag field; never append to body."""
         tags = self._normalize_tags()
         if not tags:
             return
@@ -742,7 +740,7 @@ class SoHuArticle(object):
             except Exception:
                 continue
         if not tag_field:
-            sohu_logger.info("未找到独立标签输入框，标签已写入正文（如适用）")
+            sohu_logger.info("未找到独立标签输入框，已跳过标签；不会把标签机械追加到正文")
             return
 
         for tag in tags:
@@ -1045,7 +1043,7 @@ class SoHuArticle(object):
             )
 
     async def upload(self, playwright: Playwright) -> None:
-        if not (self.body or "").strip() and not self.tags:
+        if not (self.body or "").strip():
             raise ValueError("文章正文不能为空")
 
         # 搜狐发文页常出滑块验证，强制有头方便人工处理

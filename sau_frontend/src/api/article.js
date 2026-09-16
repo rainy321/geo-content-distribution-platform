@@ -10,8 +10,8 @@ export const articleApi = {
     return http.get(`/api/articles/${id}`)
   },
 
-  optimizeArticle(id) {
-    return http.post(`/api/articles/${id}/optimize`, {})
+  optimizeArticle(id, data = {}) {
+    return http.post(`/api/articles/${id}/optimize`, data)
   },
 
   generateArticle(data, config = {}) {

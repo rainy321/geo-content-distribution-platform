@@ -13,10 +13,11 @@ from services.platform_publish_policy_service import (
     adapt_tags_for_platform,
     evaluate_platform_offline_preflight,
     get_platform_publish_policy,
+    sanitize_sohu_publish_copy,
 )
 
 
-PUBLISH_CONTENT_POLICY_VERSION = "2026-09-11.2"
+PUBLISH_CONTENT_POLICY_VERSION = "2026-09-16.1"
 
 
 class PublishContentLimitError(ValueError):
@@ -137,6 +138,17 @@ _CONTENT_POLICIES: dict[str, dict[str, Any]] = {
         "basis": "not_verified",
         "safe_limit_basis": "product_conservative_guardrail",
     },
+    "weibo": {
+        "content_mode": "social_post",
+        "hard_limit": None,
+        "default_safe_limit": 620,
+        "fixed_reserve": 0,
+        "tags_share_content_limit": False,
+        "label": "微博正文",
+        "counting_note": "620 字是产品侧保守安全线，不是微博官方上限；标题、正文和最多五个截短话题合计预留在 800 字产品总预算内",
+        "basis": "not_verified",
+        "safe_limit_basis": "product_conservative_guardrail",
+    },
 }
 
 
@@ -182,6 +194,13 @@ _TITLE_POLICIES: dict[str, dict[str, Any]] = {
         "basis": "not_verified",
         "safe_limit_basis": "product_conservative_guardrail",
     },
+    "weibo": {
+        "hard_limit": None,
+        "safe_limit": 80,
+        "min_length": 1,
+        "basis": "not_verified",
+        "safe_limit_basis": "product_conservative_guardrail",
+    },
 }
 
 _PLAIN_TEXT_CONTENT_PLATFORMS = frozenset(
@@ -196,6 +215,7 @@ _PLAIN_TEXT_CONTENT_PLATFORMS = frozenset(
         "bilibili",
         "channels",
         "tiktok",
+        "weibo",
     }
 )
 
@@ -251,6 +271,10 @@ _VERIFICATION_POLICIES: dict[str, dict[str, Any]] = {
         "methods": ("邮件验证码", "短信验证", "安全验证"),
         "notice": "TikTok 可能要求邮件、短信或安全验证，请保持绑定邮箱和手机可用。",
     },
+    "weibo": {
+        "methods": ("官方 OAuth 浏览器授权", "设备码授权", "微博安全验证"),
+        "notice": "微博仅通过官方 CLI OAuth 授权；可能要求浏览器、设备码或微博安全验证，不会绕过验证。",
+    },
 }
 
 
@@ -265,6 +289,7 @@ PLATFORM_FREQUENCY_GUIDANCE_DEFAULTS: dict[str, dict[str, int]] = {
     "bilibili": {"daily_recommended_max": 2, "cooldown_minutes": 180},
     "channels": {"daily_recommended_max": 3, "cooldown_minutes": 120},
     "tiktok": {"daily_recommended_max": 3, "cooldown_minutes": 120},
+    "weibo": {"daily_recommended_max": 5, "cooldown_minutes": 30},
 }
 
 
@@ -447,6 +472,15 @@ def build_platform_publish_variant(
     manually_edited = publish_content is not None
     hygiene = sanitize_generated_content(original_content)
     automatic_source_content = hygiene.content
+    platform_cleanup = {
+        "applied": False,
+        "changed": False,
+        "removed_redirect_lines": 0,
+        "removed_contact_clauses": 0,
+        "removed_cta_clauses": 0,
+        "removed_hashtag_tails": 0,
+        "removed_duplicate_sentences": 0,
+    }
     if manually_edited:
         actual_content = _normalize_line_endings(publish_content).strip()
         if not actual_content:
@@ -456,6 +490,10 @@ def build_platform_publish_variant(
             automatic_source_content,
             platform=normalized_platform,
         )
+        if normalized_platform == "sohu":
+            sanitized = sanitize_sohu_publish_copy(compact_content)
+            compact_content = sanitized["content"]
+            platform_cleanup = sanitized["audit"]
         actual_content = (
             _shorten_to_limit(
                 compact_content,
@@ -467,6 +505,10 @@ def build_platform_publish_variant(
         )
     else:
         actual_content = automatic_source_content
+    if not actual_content.strip():
+        raise PublishContentLimitError(
+            "平台发布副本清理后为空；请在原稿中补充中性事实、机制或适用边界"
+        )
 
     actual_length = character_count(actual_content)
     original_length = character_count(original_content)
@@ -502,6 +544,11 @@ def build_platform_publish_variant(
     adapted = actual_content != original_content
     if manually_edited:
         adaptation_reason = "用户编辑的平台副本"
+    elif platform_cleanup["changed"]:
+        adaptation_reason = (
+            "搜狐自动平台副本已移除纯导流 URL、联系方式、强促销引导、"
+            "尾部标签或完全重复句；原稿保持不变"
+        )
     elif hygiene.changed and adapted:
         adaptation_reason = (
             "已移除未完成的作者、日期或证据占位标记；"
@@ -524,6 +571,30 @@ def build_platform_publish_variant(
         content=actual_content,
         tags=tags,
     )
+    submission_preview = None
+    if normalized_platform == "weibo":
+        from services.weibo_official_connector import (
+            WEIBO_PRODUCT_TEXT_SAFE_LIMIT,
+            build_weibo_status_text,
+        )
+
+        selected_tags = offline_preflight["tag_preview"]["selected"]
+        submission_text = build_weibo_status_text(
+            actual_title,
+            actual_content,
+            selected_tags,
+        )
+        submission_length = character_count(submission_text)
+        if submission_length > WEIBO_PRODUCT_TEXT_SAFE_LIMIT:
+            raise PublishContentLimitError(
+                f"微博标题、正文与话题合计 {submission_length} 字，超过产品侧 "
+                f"{WEIBO_PRODUCT_TEXT_SAFE_LIMIT} 字保守总预算；该预算不是微博官方配额"
+            )
+        submission_preview = {
+            "text_length": submission_length,
+            "safe_limit": WEIBO_PRODUCT_TEXT_SAFE_LIMIT,
+            "basis": "product_conservative_guardrail",
+        }
 
     return {
         "platform": normalized_platform,
@@ -547,10 +618,12 @@ def build_platform_publish_variant(
             "removed_lines": hygiene.removed_lines if not manually_edited else 0,
             "replaced_markers": hygiene.replaced_markers if not manually_edited else 0,
         },
+        "platform_cleanup": platform_cleanup,
         "content_policy": policy,
         "platform_policy": platform_policy,
         "offline_preflight": offline_preflight,
         "verification": get_platform_verification_policy(normalized_platform),
+        "submission_preview": submission_preview,
     }
 
 

@@ -69,6 +69,38 @@ class SohuArticleBlockingStateTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(article.info_source, "内容为转载")
 
+    def test_tags_use_product_side_three_item_bound(self):
+        article = SoHuArticle(
+            title="GEO 内容生成测试说明",
+            body="正文",
+            tags=["标签一", "标签二", "标签三", "标签四"],
+            publish_date=0,
+            account_file="account.json",
+        )
+
+        self.assertEqual(article._normalize_tags(), ["标签一", "标签二", "标签三"])
+
+    async def test_fill_body_never_appends_tags(self):
+        article = SoHuArticle(
+            title="GEO 内容生成测试说明",
+            body="仅发送这段正文",
+            tags=["标签一", "标签二"],
+            publish_date=0,
+            account_file="account.json",
+        )
+        page = Mock()
+        editor = Mock()
+        article._find_editor = AsyncMock(return_value=(page, editor))
+        article._paste_or_type_text = AsyncMock()
+
+        await article.fill_body(page)
+
+        article._paste_or_type_text.assert_awaited_once_with(
+            page,
+            editor,
+            "仅发送这段正文",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

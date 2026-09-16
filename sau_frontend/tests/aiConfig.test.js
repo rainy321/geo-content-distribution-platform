@@ -11,8 +11,10 @@ import {
   normalizeUnifiedAIStatus,
   resolveUnifiedAIChatEndpoint,
   resolveUnifiedAIImageEndpoint,
+  unifiedAIImageCompatibilityIssue,
   unifiedAIProviderConfigurationHint,
-  unifiedAICredentialLabel
+  unifiedAICredentialLabel,
+  validateUnifiedAIImageCompatibility
 } from '../src/utils/aiConfig.js'
 
 test('unified AI status exposes safe metadata without inventing a credential', () => {
@@ -226,6 +228,45 @@ test('image endpoint replaces a pasted chat endpoint without duplicate paths', (
     resolveUnifiedAIImageEndpoint('https://gateway.example.com/v1/images/generations'),
     'https://gateway.example.com/v1/images/generations'
   )
+  assert.equal(
+    resolveUnifiedAIImageEndpoint('https://tongyuye.com/v1'),
+    'https://tongyuye.com/v1/images/generations'
+  )
+})
+
+test('image role rejects Seedance and video task endpoints before save', () => {
+  const issue = unifiedAIImageCompatibilityIssue(
+    'https://tongyuye.com/v1',
+    'seedance-5.0'
+  )
+  assert.equal(issue.code, 'video_model_not_supported')
+  assert.match(issue.message, /Seedance 是视频模型/)
+  assert.match(issue.message, /Seedream/)
+  assert.throws(() => buildUnifiedAIRoleConfigPayload({
+    provider: 'custom',
+    baseUrl: 'https://tongyuye.com/v1',
+    model: 'seedance-5.0',
+    apiKey: 'synthetic-secret',
+    reuseWriterCredential: false
+  }, {}, {}, 'image'), /Seedance 是视频模型/)
+  assert.throws(() => validateUnifiedAIImageCompatibility(
+    'https://ark.cn-beijing.volces.com/api/v3/contents/generations/tasks',
+    'ep-synthetic-video-endpoint'
+  ), /视频生成任务地址/)
+  assert.equal(validateUnifiedAIImageCompatibility(
+    'https://ark.cn-beijing.volces.com/api/v3',
+    'seedream-5.0'
+  ), true)
+
+  const settingsSource = readFileSync(
+    new URL('../src/views/SystemSettings.vue', import.meta.url),
+    'utf8'
+  )
+  assert.match(settingsSource, /IMAGE 只接收图片生成模型/)
+  assert.match(settingsSource, /Seedream 是图片模型，Seedance 是视频模型/)
+  assert.match(settingsSource, /diagnosticCode/)
+  assert.match(settingsSource, /最小 Images 请求（仅模型与提示词）/)
+  assert.match(settingsSource, /服务商请求编号/)
 })
 
 test('ark preset binds the api v3 base and requires its own model id', () => {

@@ -289,9 +289,12 @@
                 v-for="platform in platforms"
                 :key="platform.key"
                 :label="platform.key"
+                :disabled="platform.connector_available === false"
+                :title="platform.unavailable_reason || `发布到${platform.name}`"
                 class="platform-radio"
               >
                 {{ platform.name }}
+                <span v-if="platform.connector_available === false" class="optional-hint">（官方连接器未安装 / 需 OAuth 授权）</span>
               </el-radio>
             </el-radio-group>
           </div>
@@ -725,6 +728,10 @@ import { materialApi } from '@/api/material'
 import { accountApi } from '@/api/account'
 import { http } from '@/utils/request'
 import { API_BASE_URL } from '@/config/api'
+import {
+  WEIBO_ACCOUNT_TYPE,
+  WEIBO_CONNECTOR_UNAVAILABLE_REASON
+} from '@/utils/weiboPlatform'
 
 // API base URL
 const apiBaseUrl = API_BASE_URL
@@ -766,7 +773,13 @@ const platforms = [
   { key: 5, name: '百家号' },
   { key: 7, name: '今日头条' },
   { key: 8, name: '搜狐' },
-  { key: 9, name: '知乎' }
+  { key: 9, name: '知乎' },
+  {
+    key: WEIBO_ACCOUNT_TYPE,
+    name: '微博',
+    connector_available: false,
+    unavailable_reason: WEIBO_CONNECTOR_UNAVAILABLE_REASON
+  }
 ]
 
 const defaultTabInit = {
@@ -940,7 +953,8 @@ const availableAccounts = computed(() => {
     6: 'B站',
     7: '今日头条',
     8: '搜狐',
-    9: '知乎'
+    9: '知乎',
+    11: '微博'
   }
   const currentPlatform = currentTab.value ? platformMap[currentTab.value.selectedPlatform] : null
   return currentPlatform ? accountStore.accounts.filter(acc => acc.platform === currentPlatform) : []
@@ -1310,6 +1324,11 @@ const confirmPublish = async (tab) => {
   // 防止重复点击
   if (tab.publishing) {
     throw new Error('正在发布中，请稍候...')
+  }
+
+  if (tab.selectedPlatform === WEIBO_ACCOUNT_TYPE) {
+    ElMessage.warning(WEIBO_CONNECTOR_UNAVAILABLE_REASON)
+    throw new Error(WEIBO_CONNECTOR_UNAVAILABLE_REASON)
   }
 
   tab.publishing = true // 设置发布状态为进行中

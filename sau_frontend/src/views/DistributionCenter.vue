@@ -791,6 +791,14 @@
               修复正文后重建
             </el-button>
             <el-button
+              v-else-if="jobOutcome(job).action === 'rewrite_new_version'"
+              type="primary"
+              plain
+              @click="repairJobContent(job)"
+            >
+              打开原稿定向修订
+            </el-button>
+            <el-button
               v-else-if="jobOutcome(job).action === 'auto_repair'"
               type="primary"
               plain
@@ -1015,6 +1023,7 @@ import {
   isPublishedContentUrlRequired,
   platformVerificationDestination
 } from '@/utils/platformVerification'
+import { withWeiboCapability } from '@/utils/weiboPlatform'
 import {
   clearPublishBatchCheckpoint,
   mergePublishBatchCheckpoint,
@@ -1027,9 +1036,9 @@ const router = useRouter()
 
 const platformCodes = {
   zhihu: 'ZH', toutiao: 'TT', baijiahao: 'BJ', sohu: 'SH', xiaohongshu: 'XH',
-  douyin: 'DY', kuaishou: 'KS', bilibili: 'BI', channels: 'WX', tiktok: 'TK'
+  douyin: 'DY', kuaishou: 'KS', bilibili: 'BI', channels: 'WX', tiktok: 'TK', weibo: 'WB'
 }
-const modeNames = { article: '文章', image_article: '图文', image_note: '图片笔记', video: '视频' }
+const modeNames = { article: '文章', image_article: '图文', image_note: '图片笔记', video: '视频', short_post: '短内容' }
 const platformMaturityNotes = {
   zhihu: '可用 · 文章发布',
   toutiao: '可用 · 文章发布',
@@ -1040,7 +1049,8 @@ const platformMaturityNotes = {
   channels: '提交后需后台核对',
   douyin: '实验性 · 可能转待人工',
   kuaishou: '实验性 · 可能转待人工',
-  bilibili: '兼容运行时 · 视频发布'
+  bilibili: '兼容运行时 · 视频发布',
+  weibo: '官方连接器未安装 / 需微博 OAuth 授权'
 }
 const platforms = ref([])
 const capabilitiesLoaded = ref(false)
@@ -1071,6 +1081,7 @@ const preflightLoading = ref(false)
 const preflightError = ref('')
 let preflightRequestSerial = 0
 let preflightDebounceTimer = null
+let primaryChangedByBatchSelection = false
 const scheduleEnabled = ref(false)
 const publishAt = ref('')
 const autoExecuteAtDue = ref(false)
@@ -1470,7 +1481,7 @@ const fetchPlatforms = async () => {
   platformsLoadError.value = false
   try {
     const response = await publishApi.getPlatforms()
-    platforms.value = (response.data || []).map(item => ({
+    platforms.value = withWeiboCapability(response.data || []).map(item => ({
       ...item,
       code: platformCodes[item.key] || item.key.slice(0, 2).toUpperCase(),
       note: item.maturity || (item.key === 'bilibili' && item.demo_available
@@ -1514,13 +1525,17 @@ const fetchAccounts = async () => {
   }
 }
 
-const clearPublishPreflight = () => {
+const invalidatePublishPreflight = () => {
   if (preflightDebounceTimer) window.clearTimeout(preflightDebounceTimer)
   preflightDebounceTimer = null
   preflightRequestSerial += 1
+  preflightError.value = ''
+}
+
+const clearPublishPreflight = () => {
+  invalidatePublishPreflight()
   for (const key of Object.keys(platformDrafts)) delete platformDrafts[key]
   for (const key of Object.keys(automaticPlatformVariants)) delete automaticPlatformVariants[key]
-  preflightError.value = ''
 }
 
 const refreshPublishPreflight = async ({ preserveEdits = true } = {}) => {
@@ -1536,7 +1551,12 @@ const refreshPublishPreflight = async ({ preserveEdits = true } = {}) => {
   try {
     const payload = {
       article_id: selectedArticleId.value,
-      platforms: platformKeys
+      platforms: platformKeys,
+      batch_article_ids: [...selectedArticleIds.value],
+      account_ids: Object.fromEntries(platformKeys.map(platform => [
+        platform,
+        selectedAccountIds[platform] || null
+      ]))
     }
     if (preserveEdits) {
       const overrides = {}
@@ -1708,7 +1728,15 @@ const autoConfigureDispatch = async () => {
 
 const previewArticleVariants = async (articleId, overrides = null) => {
   const platforms = [...selectedPlatforms.value]
-  const payload = { article_id: articleId, platforms }
+  const payload = {
+    article_id: articleId,
+    platforms,
+    batch_article_ids: [...selectedArticleIds.value],
+    account_ids: Object.fromEntries(platforms.map(platform => [
+      platform,
+      selectedAccountIds[platform] || null
+    ]))
+  }
   if (overrides?.title != null) {
     payload.title_overrides = Object.fromEntries(
       platforms.map(platform => [platform, String(overrides.title)])
@@ -1748,7 +1776,9 @@ const autoRepairSelectedArticles = async () => {
           continue
         }
 
-        const optimization = await articleApi.optimizeArticle(articleId)
+        const optimization = await articleApi.optimizeArticle(articleId, {
+          target_platforms: [...selectedPlatforms.value]
+        })
         const optimized = optimization.data?.optimized || {}
         if (!String(optimized.title || '').trim() || !String(optimized.content || '').trim()) {
           throw new Error('调优模型没有返回完整标题和正文')
@@ -2184,7 +2214,12 @@ const resolveArticleDispatchDrafts = async (articleId, platformKeys = selectedPl
   }
   const response = await publishApi.previewVariants({
     article_id: articleId,
-    platforms: [...platformKeys]
+    platforms: [...platformKeys],
+    batch_article_ids: [...selectedArticleIds.value],
+    account_ids: Object.fromEntries(platformKeys.map(platform => [
+      platform,
+      selectedAccountIds[platform] || null
+    ]))
   })
   const drafts = Object.fromEntries((response.data?.variants || []).map(variant => (
     [variant.platform, refreshEditableVariant(variant)]
@@ -2335,6 +2370,7 @@ const dispatchArticle = async () => {
         const capability = platforms.value.find(item => item.key === platform)
         const response = await publishApi.createJob({
           article_id: articleId,
+          batch_article_ids: [...articleIds],
           platform,
           images: imageSnapshot ? [imageSnapshot.filename] : [],
           video: capability?.requires_video ? (videoSnapshot?.filename || '') : '',
@@ -3429,9 +3465,38 @@ watch(selectedArticleIds, values => {
     return
   }
   if (!normalized.includes(Number(selectedArticleId.value))) {
+    primaryChangedByBatchSelection = true
     selectedArticleId.value = normalized.at(0) || null
   }
 }, { deep: true })
+
+watch(
+  () => [...new Set(
+    (selectedArticleIds.value || []).map(Number).filter(Number.isInteger)
+  )].slice(0, MAX_BATCH_ARTICLES).join('|'),
+  (batchSignature, previousBatchSignature) => {
+    if (batchSignature === previousBatchSignature) return
+    if (primaryChangedByBatchSelection) {
+      primaryChangedByBatchSelection = false
+      // selectedArticleId's watcher owns this refresh. This avoids two API
+      // requests when removing the batch's current primary article.
+      return
+    }
+    const selectedIds = batchSignature
+      .split('|')
+      .filter(Boolean)
+      .map(Number)
+    if (!selectedIds.includes(Number(selectedArticleId.value))) {
+      // The primary-article watcher will refresh after it selects the new
+      // primary. Avoid issuing a stale request for the removed article.
+      return
+    }
+    // Keep user-edited channel drafts long enough for refreshPublishPreflight
+    // to send them as overrides. Only cancel stale in-flight/debounced work.
+    invalidatePublishPreflight()
+    void refreshPublishPreflight({ preserveEdits: true })
+  }
+)
 
 watch(selectedArticleId, async value => {
   selectedImage.value = null
@@ -3448,6 +3513,12 @@ watch(selectedArticleId, async value => {
 watch(
   () => selectedPlatforms.value.join('|'),
   () => refreshPublishPreflight({ preserveEdits: true })
+)
+
+watch(
+  selectedAccountIds,
+  () => refreshPublishPreflight({ preserveEdits: true }),
+  { deep: true }
 )
 
 onBeforeUnmount(() => {

@@ -11,7 +11,8 @@ import {
   buildVisibilitySamplingRequest,
   normalizeVisibilityPanelResponse,
   normalizeVisibilitySamplingResponse,
-  validateVisibilitySamplingDraft
+  validateVisibilitySamplingDraft,
+  visibilityPanelTargetPresentation
 } from '../src/utils/visibilitySampling.js'
 
 test('provider presets cover Qwen, DeepSeek, Doubao and custom without persisting secrets', () => {
@@ -152,15 +153,28 @@ test('panel receipt never promotes provider API samples into consumer app verifi
     data: {
       status: 'completed',
       need_action: false,
+      requested_role_count: 2,
+      executed_role_count: 2,
+      sampled_role_count: 2,
       distinct_model_count: 2,
       multi_model_executed: true,
       comparison_eligible: true,
+      manifest: {
+        targets: [{
+          role: 'writer',
+          provider: 'qwen',
+          model: 'writer-model',
+          subrequest_id: 'panel-request:writer'
+        }]
+      },
       targets: [{
         role: 'writer',
         execution_status: 'executed',
         status: 'completed',
-        provider: 'qwen',
-        model: 'writer-model',
+        provider: 'unknown',
+        model: 'unknown',
+        run_id: 91,
+        analysis: { samples: [{ text: '已保留回答' }] },
         completed_sample_count: 1,
         requested_sample_count: 1,
         channel_type: 'provider_api',
@@ -178,6 +192,14 @@ test('panel receipt never promotes provider API samples into consumer app verifi
   })
 
   assert.equal(receipt.distinctModelCount, 2)
+  assert.equal(receipt.requestedRoleCount, 2)
+  assert.equal(receipt.executedRoleCount, 2)
+  assert.equal(receipt.sampledRoleCount, 2)
+  assert.equal(receipt.targets[0].provider, 'qwen')
+  assert.equal(receipt.targets[0].model, 'writer-model')
+  assert.equal(receipt.targets[0].requestId, 'panel-request:writer')
+  assert.equal(receipt.targets[0].runId, 91)
+  assert.equal(receipt.targets[0].analysisAvailable, true)
   assert.equal(receipt.multiModelExecuted, true)
   assert.equal(receipt.targets[0].channelType, 'provider_api')
   assert.equal(receipt.targets[0].webSearchVerified, false)
@@ -188,12 +210,74 @@ test('panel receipt never promotes provider API samples into consumer app verifi
   assert.equal(receipt.consumerParity.claim_allowed, false)
 })
 
+test('panel receipt keeps root unknown-outcome recovery instructions', () => {
+  const receipt = normalizeVisibilityPanelResponse({
+    data: {
+      status: 'need_action',
+      need_action: true,
+      outcome_unknown: true,
+      requested_role_count: 3,
+      executed_role_count: 3,
+      sampled_role_count: 0,
+      distinct_model_count: 0,
+      failure: { code: 'panel_outcome_unknown', message: '先核对模型账单' },
+      retry_policy: { automatic_retry: false },
+      recovery_policy: { read_only: true },
+      targets: []
+    }
+  })
+
+  assert.equal(receipt.outcomeUnknown, true)
+  assert.equal(receipt.failure.code, 'panel_outcome_unknown')
+  assert.equal(receipt.retryPolicy.automatic_retry, false)
+  assert.equal(receipt.recoveryPolicy.read_only, true)
+})
+
+test('panel target presentation distinguishes complete, retained partial, unknown and failed outcomes', () => {
+  assert.deepEqual(visibilityPanelTargetPresentation({
+    completedSampleCount: 3,
+    requestedSampleCount: 3,
+    analysisAvailable: true
+  }), {
+    tone: 'complete',
+    label: '完整完成',
+    detail: '3 条有效回答已保留，已完成本地分析'
+  })
+
+  const partial = visibilityPanelTargetPresentation({
+    executionStatus: 'executed',
+    completedSampleCount: 1,
+    requestedSampleCount: 3,
+    analysisAvailable: true,
+    failure: { code: 'provider_outcome_unknown', outcome_unknown: true }
+  })
+  assert.equal(partial.tone, 'partial')
+  assert.equal(partial.label, '部分完成')
+  assert.equal(partial.detail, '已保留 1 条有效回答，已完成本地分析')
+
+  assert.equal(visibilityPanelTargetPresentation({
+    executionStatus: 'outcome_unknown',
+    completedSampleCount: 0,
+    requestedSampleCount: 3,
+    failure: { outcome_unknown: true }
+  }).label, '结果未知')
+
+  assert.equal(visibilityPanelTargetPresentation({
+    executionStatus: 'failed',
+    completedSampleCount: 0,
+    requestedSampleCount: 3,
+    failure: { code: 'provider_protocol_error' }
+  }).label, '调用失败')
+})
+
 test('partial result keeps completed evidence, honest unknown cost and failure action', () => {
   const result = normalizeVisibilitySamplingResponse({
     code: 207,
     data: {
       status: 'partial',
       need_action: true,
+      configured_provider: 'qwen',
+      configured_model: 'qwen-plus',
       requested_sample_count: 5,
       completed_sample_count: 1,
       unattempted_sample_count: 3,
@@ -232,6 +316,8 @@ test('partial result keeps completed evidence, honest unknown cost and failure a
   })
 
   assert.equal(result.status, 'partial')
+  assert.equal(result.configuredProvider, 'qwen')
+  assert.equal(result.configuredModel, 'qwen-plus')
   assert.equal(result.completedSampleCount, 1)
   assert.equal(result.executions[0].receipt.totalTokens, null)
   assert.equal(result.executions[0].receipt.costStatus, 'unknown_usage')
@@ -267,4 +353,14 @@ test('EXE visibility view defaults to the unified engine and keeps explicit-call
   assert.match(viewSource, /打开成本账单/)
   assert.match(viewSource, /新建 1 次采样/)
   assert.match(viewSource, /这不是重试原请求/)
+  assert.match(viewSource, /sampledRoleCount[^\n]*\/[^\n]*requestedRoleCount/)
+  assert.match(viewSource, /对应[^\n]*distinctModelCount[^\n]*个独立模型/)
+  assert.match(viewSource, /“取得有效回答数”不是“已配置模型数”/)
+  assert.match(viewSource, /panel-target-message/)
+  assert.match(viewSource, /target\.presentation\.detail/)
+  assert.match(viewSource, /applyVisibilityPanelReceipt/)
+  assert.match(viewSource, /visibilityPanelReceipt\.value = null/)
+  assert.match(viewSource, /\.panel-target-identity strong \{[^}]*overflow-wrap: anywhere;[^}]*white-space: normal;/)
+  assert.match(viewSource, /\.panel-target-message \{[^}]*grid-column: 2 \/ -1;[^}]*overflow-wrap: anywhere;/)
+  assert.match(viewSource, /\.execution-receipts \.panel-target-message \{ grid-template-columns: 1fr; \}/)
 })

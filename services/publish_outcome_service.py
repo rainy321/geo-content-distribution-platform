@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 
-PUBLISH_OUTCOME_VERSION = "publish-outcome-1.0.0"
+PUBLISH_OUTCOME_VERSION = "publish-outcome-1.1.0"
 PUBLICATION_EVIDENCE_VERSION = "publication-evidence-1.0.0"
 PUBLISH_OUTCOME_CATEGORIES = (
     "published",
@@ -91,6 +91,8 @@ _SUBMISSION_MAY_HAVE_HAPPENED_MARKERS = (
     "未收到回执",
     "未取得明确发布结果",
 )
+
+_EXPLICIT_PLATFORM_REJECTION_PREFIX = "后台只读监测发现平台明确未通过："
 
 _HUMAN_OR_ACCOUNT_MARKERS = (
     "短信",
@@ -299,16 +301,24 @@ def classify_publish_outcome(
     elif normalized_status == "failed":
         category = "failed"
         reason = normalized_message or "发布任务已明确失败，未记录为发布成功。"
-        if automatic_repair["eligible"]:
+        if normalized_message.startswith(_EXPLICIT_PLATFORM_REJECTION_PREFIX):
+            next_action = (
+                "平台已明确拒绝当前版本；不要重试原稿。请按拒稿原因生成实质性修订版本，"
+                "重新完成平台预检并确认后再创建新任务。"
+            )
+            action = "rewrite_new_version"
+            retry_allowed = False
+        elif automatic_repair["eligible"]:
             next_action = automatic_repair["summary"]
             action = "auto_repair"
+            retry_allowed = True
         else:
             next_action = (
                 "根据失败原因修复正文、素材、账号或运行环境；确认平台未产生内容后，"
                 "再手动重新排队。"
             )
             action = "retry_after_validation"
-        retry_allowed = True
+            retry_allowed = True
         validation_required = True
     else:
         category = "action_required"

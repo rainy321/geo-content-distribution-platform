@@ -4,11 +4,21 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone, tzinfo
 from pathlib import Path
+from time import monotonic
 from typing import Any
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from conf import LOCAL_CHROME_PATH
 from services.media_account_risk_service import classify_media_account_risk
+from services.weibo_official_connector import (
+    WEIBO_OFFICIAL_CONNECTOR_REQUIRED_MESSAGE,
+    WeiboAuthorizationError,
+    WeiboCatalogError,
+    WeiboConnectorError,
+    WeiboConnectorUnavailableError,
+    WeiboOfficialConnector,
+    normalize_weibo_public_status_url,
+)
 
 
 @dataclass(frozen=True)
@@ -17,6 +27,7 @@ class ReviewPagePolicy:
     manage_url: str
     public_url_patterns: tuple[re.Pattern[str], ...]
     display_timezone: tzinfo | None
+    read_rejection_details: bool = False
 
 
 _CHINA_TIMEZONE = timezone(timedelta(hours=8), "Asia/Shanghai")
@@ -37,9 +48,10 @@ _POLICIES = {
     ),
     "sohu": ReviewPagePolicy(
         "搜狐号",
-        "https://mp.sohu.com/mpfe/v4/contentManagement/news",
+        "https://mp.sohu.com/mpfe/v4/contentManagement/first/page",
         (re.compile(r"https?://(?:www\.)?sohu\.com/a/\d+_\d+/?", re.I),),
         _CHINA_TIMEZONE,
+        read_rejection_details=True,
     ),
     "xiaohongshu": ReviewPagePolicy(
         "小红书",
@@ -152,6 +164,51 @@ _VISIBLE_ALERT_SELECTORS = (
     '[class*="ban"]:visible',
     '[class*="verify"]:visible',
 )
+_REJECTION_DETAIL_ATTRIBUTES = (
+    "title",
+    "aria-label",
+    "data-title",
+    "data-original-title",
+    "data-tooltip",
+    "data-content",
+)
+_REJECTION_DETAIL_NODE_SELECTOR = ", ".join(
+    f"[{attribute}]" for attribute in _REJECTION_DETAIL_ATTRIBUTES
+)
+_VISIBLE_TOOLTIP_SELECTOR = (
+    '[role="tooltip"]:visible, '
+    '.ant-tooltip:visible, '
+    '.el-tooltip__popper:visible, '
+    '[class*="tooltip"]:visible, '
+    '[class*="popover"]:visible'
+)
+_SOHU_REJECTION_TEXT_SELECTOR = ".article-reson-text, .article-reason-text"
+_REJECTION_HOVER_SELECTORS = (
+    '[aria-describedby]',
+    '[class*="question"]',
+    '[class*="help"]',
+    '[class*="tip"]',
+    '[class*="reason"]',
+    "svg",
+    "i",
+)
+_GENERIC_REJECTION_LABELS = {
+    "未通过",
+    "审核未通过",
+    "审核不通过",
+    "审核失败",
+    "已拒绝",
+    "发布失败",
+    "查看原因",
+    "查看详情",
+    "详情",
+    "提示",
+    "帮助",
+    "问题说明",
+    "编辑",
+    "更多",
+    "操作",
+}
 
 
 class PlatformReviewVerifier:
@@ -168,10 +225,12 @@ class PlatformReviewVerifier:
         *,
         navigation_timeout_ms: int = 60_000,
         settle_ms: int = 2_500,
+        weibo_connector_factory: Any = WeiboOfficialConnector,
     ):
         self.cookies_directory = Path(cookies_directory).expanduser().resolve()
         self.navigation_timeout_ms = int(navigation_timeout_ms)
         self.settle_ms = int(settle_ms)
+        self.weibo_connector_factory = weibo_connector_factory
         if self.navigation_timeout_ms < 1_000:
             raise ValueError("只读核验导航超时不能少于 1000ms")
         if not 0 <= self.settle_ms <= 15_000:
@@ -192,6 +251,8 @@ class PlatformReviewVerifier:
             }
         if platform == "zhihu":
             return self._verify_zhihu(snapshot, title)
+        if platform == "weibo":
+            return self._verify_weibo(snapshot, title)
         policy = _POLICIES.get(platform)
         if policy is None:
             return {
@@ -199,6 +260,91 @@ class PlatformReviewVerifier:
                 "message": f"{platform or '该平台'}尚未配置只读作品管理页核验器",
             }
         return self._verify_management_page(snapshot, title, policy)
+
+    def _verify_weibo(
+        self,
+        snapshot: dict[str, Any],
+        title: str,
+    ) -> dict[str, Any]:
+        marker_path = self._cookie_path(snapshot)
+        if marker_path is None:
+            return _session_expired_result("微博账号绑定标记不存在，请重新连接")
+        if int(snapshot.get("account_status") or 0) != 1:
+            return _session_expired_result("微博官方连接器授权已失效，请重新连接")
+        try:
+            connector = self.weibo_connector_factory()
+            connector.verify_marker(marker_path)
+            rows = connector.recent_status_rows(title, count=20)
+        except WeiboConnectorUnavailableError:
+            return {
+                "state": "unsupported",
+                "message": WEIBO_OFFICIAL_CONNECTOR_REQUIRED_MESSAGE,
+            }
+        except WeiboAuthorizationError as exc:
+            return _session_expired_result(str(exc))
+        except WeiboCatalogError as exc:
+            return {"state": "unsupported", "message": str(exc)}
+        except WeiboConnectorError as exc:
+            return {
+                "state": "error",
+                "message": f"微博官方连接器只读核验失败：{exc}",
+            }
+        except Exception as exc:
+            return {
+                "state": "error",
+                "message": f"微博官方连接器只读核验异常：{exc.__class__.__name__}",
+            }
+        if not rows:
+            return {
+                "state": "not_found",
+                "message": "微博最近公开状态尚未出现本次精确标题",
+            }
+        guarded_rows: list[dict[str, Any]] = []
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            if row.get("title_match_confirmed") is not True:
+                continue
+            row_text = str(row.get("text") or "").strip()
+            if not (
+                row_text == title
+                or row_text.startswith(f"{title} ")
+                or row_text.startswith(f"{title}\n")
+            ):
+                continue
+            public_urls = tuple(
+                normalized
+                for normalized in (
+                    normalize_weibo_public_status_url(url)
+                    for url in row.get("urls") or ()
+                )
+                if normalized
+            )
+            guarded = dict(row)
+            if row.get("public_visibility_confirmed") is True and len(set(public_urls)) == 1:
+                guarded["urls"] = tuple(dict.fromkeys(public_urls))
+            else:
+                guarded["text"] = f"{title} 公开可见性或公开作品链接未确认"
+                guarded["urls"] = public_urls
+            guarded_rows.append(guarded)
+        if not guarded_rows:
+            return {
+                "state": "processing",
+                "message": "微博只读核验没有返回可安全解释的状态条目，请人工核验",
+            }
+        return _resolve_exact_title_rows(
+            snapshot,
+            guarded_rows,
+            platform_name="微博",
+            public_url_patterns=(
+                re.compile(r"https?://m\.weibo\.cn/detail/[1-9]\d*/?", re.I),
+                re.compile(
+                    r"https?://(?:www\.)?weibo\.com/[1-9]\d*/[0-9A-Za-z]{5,32}/?",
+                    re.I,
+                ),
+            ),
+            display_timezone=_CHINA_TIMEZONE,
+        )
 
     def _verify_zhihu(
         self,
@@ -341,11 +487,12 @@ class PlatformReviewVerifier:
                         f"{policy.name}作品管理页跳转登录，登录会话已失效"
                     )
 
-                rows = self._exact_title_rows(
+                rows = self._wait_for_exact_title_rows(
                     page,
                     title,
                     policy.manage_url,
                     policy.public_url_patterns,
+                    read_rejection_details=policy.read_rejection_details,
                 )
                 if not rows:
                     body = self._safe_text(page.locator("body"), limit=4_000)
@@ -373,6 +520,58 @@ class PlatformReviewVerifier:
             finally:
                 context.close()
                 browser.close()
+
+    def _wait_for_exact_title_rows(
+        self,
+        page: Any,
+        title: str,
+        base_url: str,
+        public_url_patterns: tuple[re.Pattern[str], ...],
+        *,
+        read_rejection_details: bool,
+    ) -> list[dict[str, Any]]:
+        """Poll the dynamic management list until the matching row has status.
+
+        ``domcontentloaded`` is too early for creator pages whose article list is
+        rendered after an API request.  Polling reads only the DOM and keeps the
+        title match exact.  An unfinished row is returned when the bounded wait
+        expires, so the caller stays conservative instead of guessing.
+        """
+
+        wait_budget_ms = min(12_000, max(1_000, self.navigation_timeout_ms // 4))
+        deadline = monotonic() + wait_budget_ms / 1_000
+        last_rows: list[dict[str, Any]] = []
+        while True:
+            rows = self._exact_title_rows(
+                page,
+                title,
+                base_url,
+                public_url_patterns,
+            )
+            if rows:
+                last_rows = rows
+                if any(_row_has_observable_status(row) for row in rows):
+                    if read_rejection_details and any(
+                        _contains_any(str(row.get("text") or ""), _REJECTED_MARKERS)
+                        for row in rows
+                    ):
+                        detailed_rows = self._exact_title_rows(
+                            page,
+                            title,
+                            base_url,
+                            public_url_patterns,
+                            read_rejection_details=True,
+                        )
+                        return detailed_rows or rows
+                    return rows
+
+            remaining_ms = int((deadline - monotonic()) * 1_000)
+            if remaining_ms <= 0:
+                return last_rows
+            try:
+                page.wait_for_timeout(min(400, remaining_ms))
+            except Exception:
+                return last_rows
 
     def _cookie_path(self, snapshot: dict[str, Any]) -> Path | None:
         value = str(snapshot.get("account_file") or "").strip()
@@ -425,6 +624,8 @@ class PlatformReviewVerifier:
         title: str,
         base_url: str,
         public_url_patterns: tuple[re.Pattern[str], ...],
+        *,
+        read_rejection_details: bool = False,
     ) -> list[dict[str, Any]]:
         try:
             candidates = page.get_by_text(title, exact=True)
@@ -440,7 +641,8 @@ class PlatformReviewVerifier:
                     continue
             except Exception:
                 continue
-            selected = None
+            status_candidates: list[tuple[int, Any, str, tuple[str, ...]]] = []
+            url_fallbacks: list[tuple[int, Any, str, tuple[str, ...]]] = []
             for depth in range(1, 7):
                 try:
                     node = candidate.locator("xpath=" + "/.." * depth)
@@ -457,11 +659,35 @@ class PlatformReviewVerifier:
                         text.lower(),
                         (*_PUBLISHED_MARKERS, *_PROCESSING_MARKERS, *_REJECTED_MARKERS),
                     )
-                    if has_status or urls:
-                        selected = {"text": text, "urls": tuple(dict.fromkeys(urls))}
-                        break
+                    normalized_urls = tuple(dict.fromkeys(urls))
+                    if has_status:
+                        status_candidates.append(
+                            (depth, node, text, normalized_urls)
+                        )
+                    elif urls:
+                        url_fallbacks.append((depth, node, text, normalized_urls))
                 except Exception:
                     continue
+            selected = None
+            ranked = status_candidates or url_fallbacks
+            if ranked:
+                _depth, selected_node, selected_text, selected_urls = min(
+                    ranked,
+                    key=lambda item: item[0],
+                )
+                selected = {"text": selected_text, "urls": selected_urls}
+                if (
+                    read_rejection_details
+                    and _contains_any(selected_text, _REJECTED_MARKERS)
+                ):
+                    rejection_reason = PlatformReviewVerifier._read_rejection_reason(
+                        page,
+                        selected_node,
+                        title=title,
+                        row_text=selected_text,
+                    )
+                    if rejection_reason:
+                        selected["rejection_reason"] = rejection_reason
             if selected is None:
                 selected = {
                     "text": PlatformReviewVerifier._safe_text(candidate, limit=500),
@@ -474,9 +700,121 @@ class PlatformReviewVerifier:
         )
 
     @staticmethod
+    def _read_rejection_reason(
+        page: Any,
+        row: Any,
+        *,
+        title: str,
+        row_text: str,
+    ) -> str:
+        """Read a rejection reason bound to one matched row without clicking.
+
+        Sohu exposes the reason either as a DOM attribute or as a tooltip after
+        hovering the question/help affordance.  Hover is intentionally the only
+        interaction here: it neither submits nor changes publication state.
+        """
+
+        values: list[str] = []
+        PlatformReviewVerifier._append_rejection_attributes(values, row)
+        try:
+            reason_nodes = row.locator(_SOHU_REJECTION_TEXT_SELECTOR)
+            for index in range(min(reason_nodes.count(), 10)):
+                reason_text = PlatformReviewVerifier._safe_text_content(
+                    reason_nodes.nth(index),
+                    limit=500,
+                )
+                if reason_text:
+                    values.append(reason_text)
+        except Exception:
+            pass
+        try:
+            attribute_nodes = row.locator(_REJECTION_DETAIL_NODE_SELECTOR)
+            for index in range(min(attribute_nodes.count(), 30)):
+                PlatformReviewVerifier._append_rejection_attributes(
+                    values,
+                    attribute_nodes.nth(index),
+                )
+        except Exception:
+            pass
+
+        before_tooltips = set(
+            PlatformReviewVerifier._visible_tooltip_texts(page)
+        )
+        hover_targets: list[Any] = []
+        for marker in _REJECTED_MARKERS[:6]:
+            try:
+                status_nodes = row.get_by_text(marker, exact=True)
+                for index in range(min(status_nodes.count(), 3)):
+                    hover_targets.append(status_nodes.nth(index))
+            except Exception:
+                continue
+        for selector in _REJECTION_HOVER_SELECTORS:
+            try:
+                nodes = row.locator(selector)
+                for index in range(min(nodes.count(), 4)):
+                    hover_targets.append(nodes.nth(index))
+            except Exception:
+                continue
+
+        for target in hover_targets[:12]:
+            try:
+                if not target.is_visible():
+                    continue
+                target.hover(timeout=1_000)
+                page.wait_for_timeout(120)
+            except Exception:
+                continue
+            for tooltip_text in PlatformReviewVerifier._visible_tooltip_texts(page):
+                if tooltip_text not in before_tooltips:
+                    values.append(tooltip_text)
+
+        for value in values:
+            normalized = _normalize_rejection_detail(
+                value,
+                title=title,
+                row_text=row_text,
+            )
+            if normalized:
+                return normalized
+        return ""
+
+    @staticmethod
+    def _append_rejection_attributes(values: list[str], node: Any) -> None:
+        for attribute in _REJECTION_DETAIL_ATTRIBUTES:
+            try:
+                value = str(node.get_attribute(attribute) or "").strip()
+            except Exception:
+                continue
+            if value:
+                values.append(value)
+
+    @staticmethod
+    def _visible_tooltip_texts(page: Any) -> tuple[str, ...]:
+        values: list[str] = []
+        try:
+            tooltips = page.locator(_VISIBLE_TOOLTIP_SELECTOR)
+            for index in range(min(tooltips.count(), 20)):
+                tooltip = tooltips.nth(index)
+                if not tooltip.is_visible():
+                    continue
+                text = PlatformReviewVerifier._safe_text(tooltip, limit=500)
+                if text:
+                    values.append(text)
+        except Exception:
+            pass
+        return tuple(dict.fromkeys(values))
+
+    @staticmethod
     def _safe_text(locator: Any, *, limit: int) -> str:
         try:
             return " ".join(str(locator.inner_text() or "").split())[:limit]
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _safe_text_content(locator: Any, *, limit: int) -> str:
+        try:
+            return " ".join(str(locator.text_content() or "").split())[:limit]
         except Exception:
             return ""
 
@@ -686,10 +1024,17 @@ def _classify_bound_rows(
         )
 
     if rejected_rows:
+        reason = str(rejected_rows[0].get("rejection_reason") or "").strip()
+        message = f"{platform_name}已按{binding}核验本次条目未通过"
+        if reason:
+            message = f"{message}：{reason}"
+        evidence = str(rejected_rows[0].get("text") or "").strip()
+        if reason and reason not in evidence:
+            evidence = f"{evidence} | 未通过原因：{reason}"
         return {
             "state": "rejected",
-            "message": f"{platform_name}已按{binding}核验本次条目未通过",
-            "evidence": str(rejected_rows[0].get("text") or "")[:500],
+            "message": message[:500],
+            "evidence": evidence[:500],
         }
 
     if published_rows:
@@ -926,6 +1271,42 @@ def _row_time_intervals(
 def _contains_any(text: str, markers: tuple[str, ...]) -> bool:
     normalized = str(text or "").lower()
     return any(_contains_marker(normalized, marker) for marker in markers)
+
+
+def _row_has_observable_status(row: dict[str, Any]) -> bool:
+    return _contains_any(
+        str(row.get("text") or ""),
+        (*_PUBLISHED_MARKERS, *_PROCESSING_MARKERS, *_REJECTED_MARKERS),
+    )
+
+
+def _normalize_rejection_detail(
+    value: Any,
+    *,
+    title: str,
+    row_text: str,
+) -> str:
+    normalized = " ".join(str(value or "").split()).strip()
+    if not normalized or normalized in {title, row_text}:
+        return ""
+    normalized = re.sub(
+        r"^(?:未通过|审核未通过|审核不通过|审核失败|已拒绝|发布失败)"
+        r"\s*(?:原因|详情)?\s*[:：\-—]?\s*",
+        "",
+        normalized,
+        count=1,
+    ).strip()
+    if not normalized or normalized in _GENERIC_REJECTION_LABELS:
+        return ""
+    if normalized == title or normalized == row_text:
+        return ""
+    if title and title in normalized:
+        return ""
+    if len(normalized) < 4 and not any(
+        marker in normalized for marker in ("广告", "侵权", "违规", "低俗", "重复")
+    ):
+        return ""
+    return normalized[:500]
 
 
 def _contains_marker(text: str, marker: str) -> bool:

@@ -25,7 +25,7 @@ from services.publish_job_service import (
 )
 
 
-PUBLISH_REVIEW_MONITOR_VERSION = "publish-review-monitor-1.0.0"
+PUBLISH_REVIEW_MONITOR_VERSION = "publish-review-monitor-1.1.0"
 DEFAULT_MAX_ATTEMPTS = 12
 DEFAULT_BATCH_LIMIT = 2
 
@@ -191,6 +191,12 @@ def run_publish_review_monitor_tick(
     seed_publish_review_monitors(database_path, now=reference_time)
     _sync_terminal_publish_review_state(database_path, now=reference_time)
     _recover_stale_claims(database_path, now=reference_time)
+    # Legacy tasks can lose or change their account binding after a login is
+    # removed.  Such a monitor can never satisfy the claim query, so leaving it
+    # in ``watching`` creates a permanent false "still monitoring" state.  Stop
+    # it locally and make the manual-check boundary explicit; never migrate an
+    # old publish attempt to a newly logged-in account.
+    _pause_detached_account_monitors(database_path, now=reference_time)
     # Account risk is a hard local safety boundary.  Resolve it before any
     # verifier snapshot is claimed so a permanently banned, restricted,
     # verification-blocked or expired account is never opened in the
@@ -585,6 +591,120 @@ def _claim_due_monitors(
             conn.rollback()
             raise
     return snapshots
+
+
+def _pause_detached_account_monitors(
+    database_path: str | Path,
+    *,
+    now: datetime,
+) -> int:
+    """Close monitors whose immutable attempt/account binding was detached.
+
+    This repair is intentionally local-only.  A task created with account A
+    must never be inspected through account B merely because B is now the
+    active login for that platform.  Older databases also contain tasks whose
+    ``publish_jobs.account_id`` was cleared while the monitor retained A; those
+    rows otherwise remain ``watching`` forever because the claim query quite
+    correctly refuses them.
+    """
+
+    timestamp = _format_timestamp(now)
+    paused_count = 0
+    with closing(_connect(database_path)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            _ensure_schema(conn)
+            rows = conn.execute(
+                """
+                SELECT m.publish_job_id, m.account_id,
+                       m.observed_job_version, j.state_version,
+                       j.account_id AS job_account_id, j.platform
+                FROM publish_review_monitors AS m
+                JOIN publish_jobs AS j ON j.id = m.publish_job_id
+                WHERE m.state IN ('watching', 'checking')
+                  AND j.status = 'need_action'
+                  AND j.reconciliation_required = 1
+                  AND (
+                      j.account_id IS NULL
+                      OR j.account_id != m.account_id
+                  )
+                ORDER BY m.publish_job_id
+                """
+            ).fetchall()
+            for row in rows:
+                job_id = int(row["publish_job_id"])
+                monitor_account_id = int(row["account_id"])
+                observed_version = int(row["observed_job_version"])
+                job_version = int(row["state_version"])
+                job_account_id = row["job_account_id"]
+                if job_account_id is None:
+                    message = (
+                        "任务原账号已解绑，旧任务只读监测已停止；软件不会自动改用"
+                        "新账号核验旧发布尝试，请到原平台后台人工核对。"
+                    )
+                else:
+                    message = (
+                        "任务账号绑定已变更，旧任务只读监测已停止；软件不会使用"
+                        "新账号核验旧发布尝试，请按原账号与原任务人工核对。"
+                    )
+
+                cursor = conn.execute(
+                    """
+                    UPDATE publish_review_monitors
+                    SET state = 'paused', next_check_at = NULL,
+                        last_result = 'account_binding_changed',
+                        last_message = ?, completed_at = ?, updated_at = ?
+                    WHERE publish_job_id = ?
+                      AND account_id = ?
+                      AND observed_job_version = ?
+                      AND state IN ('watching', 'checking')
+                      AND EXISTS (
+                          SELECT 1
+                          FROM publish_jobs AS current_job
+                          WHERE current_job.id = publish_review_monitors.publish_job_id
+                            AND current_job.state_version = ?
+                            AND current_job.status = 'need_action'
+                            AND current_job.reconciliation_required = 1
+                            AND (
+                                current_job.account_id IS NULL
+                                OR current_job.account_id != publish_review_monitors.account_id
+                            )
+                      )
+                    """,
+                    (
+                        message[:500],
+                        timestamp,
+                        timestamp,
+                        job_id,
+                        monitor_account_id,
+                        observed_version,
+                        job_version,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    continue
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO publish_review_alerts (
+                        event_key, category, severity, title, message,
+                        publish_job_id, account_id, result_url, created_at
+                    ) VALUES (?, 'manual_check', 'error', ?, ?, ?, ?, '', ?)
+                    """,
+                    (
+                        f"job:{job_id}:account-binding-changed"[:160],
+                        f"{_platform_name(row['platform'])}旧任务账号绑定已变化"[:160],
+                        message[:1000],
+                        job_id,
+                        monitor_account_id,
+                        timestamp,
+                    ),
+                )
+                paused_count += 1
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+    return paused_count
 
 
 def _pause_ineligible_account_monitors(
@@ -1778,14 +1898,15 @@ def _sync_terminal_publish_review_state(
     *,
     now: datetime | str | None = None,
 ) -> int:
-    """Repair a terminal job/monitor/alert crash window, locally and idempotently.
+    """Synchronize terminal jobs with their obsolete local monitor state.
 
     Reconciliation is committed by ``publish_job_service`` before this service
     can finish the monitor and insert its alert.  A process interruption in
     either gap must not cause another platform read (and especially not another
-    submission).  The message prefix is provenance: only terminal states that
-    this read-only monitor itself reconciled are repaired here.  Arbitrary
-    failed/successful jobs are deliberately left alone.
+    submission).  Monitor-origin prefixes remain the provenance gate for
+    creating a new published/rejected alert.  Human reconciliation and other
+    terminal transitions still close stale ``watching``/``exhausted`` rows and
+    superseded monitor alerts, but they never manufacture a platform verdict.
     """
 
     timestamp = _normalize_timestamp(now)
@@ -1806,14 +1927,9 @@ def _sync_terminal_publish_review_state(
                 FROM publish_review_monitors AS m
                 JOIN publish_jobs AS j ON j.id = m.publish_job_id
                 WHERE j.reconciliation_required = 0
-                  AND (
-                      (j.status = 'success' AND j.message LIKE ?)
-                      OR
-                      (j.status = 'failed' AND j.message LIKE ?)
-                  )
+                  AND j.status IN ('success', 'failed')
                 ORDER BY m.publish_job_id
                 """,
-                (f"{success_prefix}%", f"{rejected_prefix}%"),
             ).fetchall()
             for row in rows:
                 terminal_version = int(row["state_version"])
@@ -1823,10 +1939,25 @@ def _sync_terminal_publish_review_state(
                 if int(row["observed_job_version"]) >= terminal_version:
                     continue
                 published = str(row["status"]) == "success"
-                monitor_state = "published" if published else "rejected"
-                category = monitor_state
+                raw_message = str(row["message"] or "")
+                monitor_origin = raw_message.startswith(
+                    success_prefix if published else rejected_prefix
+                )
+                if published:
+                    monitor_state = "published"
+                    last_result = "published"
+                elif monitor_origin:
+                    monitor_state = "rejected"
+                    last_result = "rejected"
+                else:
+                    # A human-confirmed "not published" result, a pre-submit
+                    # failure, or any other terminal failure is not evidence of
+                    # platform rejection.  Close the obsolete watcher without
+                    # inventing that stronger claim.
+                    monitor_state = "paused"
+                    last_result = "manual_reconciled"
                 event_time = str(row["finished_at"] or timestamp)
-                message = str(row["message"] or "")[:1000]
+                message = raw_message[:1000]
                 result_url = str(row["result_url"] or "") if published else ""
 
                 monitor_update = conn.execute(
@@ -1834,6 +1965,7 @@ def _sync_terminal_publish_review_state(
                     UPDATE publish_review_monitors
                     SET state = ?, next_check_at = NULL,
                         last_result = ?, last_message = ?,
+                        observed_job_version = ?,
                         completed_at = COALESCE(completed_at, ?),
                         updated_at = ?
                     WHERE publish_job_id = ?
@@ -1845,43 +1977,62 @@ def _sync_terminal_publish_review_state(
                     """,
                     (
                         monitor_state,
-                        category,
+                        last_result,
                         message[:500],
+                        terminal_version,
                         event_time,
                         timestamp,
                         int(row["publish_job_id"]),
                         terminal_version,
                         monitor_state,
-                        category,
+                        last_result,
                     ),
                 )
-                alert = conn.execute(
+                acknowledged = conn.execute(
                     """
-                    INSERT OR IGNORE INTO publish_review_alerts (
-                        event_key, category, severity, title, message,
-                        publish_job_id, account_id, result_url, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    UPDATE publish_review_alerts
+                    SET acknowledged_at = COALESCE(acknowledged_at, ?)
+                    WHERE publish_job_id = ?
+                      AND acknowledged_at IS NULL
+                      AND category IN ('monitor_exhausted', 'manual_check')
                     """,
-                    (
-                        (
-                            f"job:{int(row['publish_job_id'])}:"
-                            f"{category}:v{terminal_version}"
-                        ),
-                        category,
-                        "success" if published else "error",
-                        (
-                            f"{_platform_name(row['platform'])}内容已通过并发布"
-                            if published
-                            else f"{_platform_name(row['platform'])}内容未通过"
-                        ),
-                        message,
-                        int(row["publish_job_id"]),
-                        int(row["account_id"]),
-                        result_url,
-                        event_time,
-                    ),
+                    (timestamp, int(row["publish_job_id"])),
                 )
-                changed += int(monitor_update.rowcount) + int(alert.rowcount)
+                alert_count = 0
+                if monitor_origin:
+                    category = "published" if published else "rejected"
+                    alert = conn.execute(
+                        """
+                        INSERT OR IGNORE INTO publish_review_alerts (
+                            event_key, category, severity, title, message,
+                            publish_job_id, account_id, result_url, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            (
+                                f"job:{int(row['publish_job_id'])}:"
+                                f"{category}:v{terminal_version}"
+                            ),
+                            category,
+                            "success" if published else "error",
+                            (
+                                f"{_platform_name(row['platform'])}内容已通过并发布"
+                                if published
+                                else f"{_platform_name(row['platform'])}内容未通过"
+                            ),
+                            message,
+                            int(row["publish_job_id"]),
+                            int(row["account_id"]),
+                            result_url,
+                            event_time,
+                        ),
+                    )
+                    alert_count = int(alert.rowcount)
+                changed += (
+                    int(monitor_update.rowcount)
+                    + int(acknowledged.rowcount)
+                    + alert_count
+                )
             conn.commit()
         except Exception:
             conn.rollback()
@@ -2139,6 +2290,7 @@ def _platform_name(platform: Any) -> str:
         "bilibili": "Bilibili",
         "channels": "视频号",
         "tiktok": "TikTok",
+        "weibo": "微博",
     }.get(str(platform or "").strip().lower(), str(platform or "未知平台"))
 
 

@@ -272,7 +272,7 @@
             <label class="sample-count-field">
               <span>样本数</span>
               <el-input-number v-model="sampling.sampleCount" :min="1" :max="5" controls-position="right" />
-              <small>{{ sampling.multiModel ? '不同模型并行；同一模型内仍按顺序采样。' : '按顺序执行，不并发突发。' }}</small>
+              <small>{{ sampling.multiModel ? '默认每个模型 1 次；可手动增加，同一模型内仍按顺序采样。' : '按顺序执行，不并发突发。' }}</small>
             </label>
 
             <div class="dispatch-slip">
@@ -319,7 +319,7 @@
             </p>
 
             <article
-              v-if="liveSamplingReceipt || samplingError"
+              v-if="liveSamplingReceipt || (samplingError && !visibilityPanelReceipt)"
               class="sampling-receipt"
               :class="`status-${liveSamplingReceipt?.status || 'need_action'}`"
               aria-live="polite"
@@ -338,6 +338,9 @@
               <div v-if="liveSamplingReceipt?.failure" class="sampling-failure">
                 <strong>{{ liveSamplingReceipt.failure.code }}</strong>
                 <p>{{ liveSamplingReceipt.failure.message }}</p>
+                <small v-if="liveSamplingReceipt.configuredModel">
+                  调用目标：{{ liveSamplingReceipt.configuredProvider || 'OpenAI-compatible' }} · {{ liveSamplingReceipt.configuredModel }}
+                </small>
                 <small v-if="liveSamplingReceipt.failure.outcomeUnknown">远端结果未知：先查模型账单，不要直接重发。</small>
               </div>
 
@@ -406,23 +409,55 @@
             <article v-if="visibilityPanelReceipt" class="sampling-receipt" :class="`status-${visibilityPanelReceipt.status}`" aria-live="polite">
               <header>
                 <div><span>API MODEL PANEL RECEIPT</span><h4>多模型 API 对照</h4></div>
-                <strong>{{ visibilityPanelReceipt.distinctModelCount }} 个独立模型</strong>
+                <div
+                  class="panel-coverage-count"
+                  :aria-label="`${visibilityPanelReceipt.sampledRoleCount} / ${visibilityPanelReceipt.requestedRoleCount} 个调用目标取得回答，对应 ${visibilityPanelReceipt.distinctModelCount} 个独立模型`"
+                >
+                  <strong>{{ visibilityPanelReceipt.sampledRoleCount }} / {{ visibilityPanelReceipt.requestedRoleCount }}</strong>
+                  <span>个调用目标取得回答</span>
+                  <small>对应 {{ visibilityPanelReceipt.distinctModelCount }} 个独立模型</small>
+                </div>
               </header>
+              <p v-if="samplingError" class="sampling-failure">{{ samplingError }}</p>
+              <div v-if="visibilityPanelReceipt.failure" class="sampling-failure">
+                <strong>{{ visibilityPanelReceipt.failure.code || 'panel_failed' }}</strong>
+                <p>{{ visibilityPanelReceipt.failure.message || '多模型请求未完成' }}</p>
+                <small v-if="visibilityPanelReceipt.outcomeUnknown">远端结果未知：先核对模型账单，不要直接重发。</small>
+              </div>
               <div class="execution-receipts">
-                <article v-for="target in visibilityPanelReceipt.targets" :key="target.role">
+                <article
+                  v-for="target in presentedPanelTargets"
+                  :key="target.role"
+                  :class="`target-${target.presentation.tone}`"
+                >
                   <span>{{ target.role.toUpperCase() }}</span>
-                  <div>
-                    <strong>{{ target.provider || '未配置' }} · {{ target.model || '未配置' }}</strong>
-                    <small>{{ target.executionStatus }} · {{ target.completedSampleCount }} / {{ target.requestedSampleCount }} 条</small>
+                  <div class="panel-target-identity">
+                    <strong :title="`${target.provider || '未配置'} · ${target.model || '未配置'}`">
+                      {{ target.provider || '未配置' }} · {{ target.model || '未配置' }}
+                    </strong>
+                    <small>{{ target.completedSampleCount }} / {{ target.requestedSampleCount }} 条有效回答</small>
                   </div>
-                  <b>{{ target.skipReason || target.failure?.message || target.status }}</b>
+                  <div class="panel-target-state">
+                    <strong>{{ target.presentation.label }}</strong>
+                    <small>{{ target.presentation.detail }}</small>
+                  </div>
+                  <p v-if="target.skipReason || target.failure?.message" class="panel-target-message">
+                    <code v-if="target.failure?.code">{{ target.failure.code }}</code>
+                    <span>{{ target.skipReason || target.failure.message }}</span>
+                  </p>
                 </article>
               </div>
               <div class="receipt-boundary">
-                <p><strong>channel_type：</strong>provider_api；多模型实际执行：{{ visibilityPanelReceipt.multiModelExecuted ? '是' : '否' }}。</p>
+                <p><strong>调用结果：</strong>{{ visibilityPanelReceipt.sampledRoleCount }} 个目标取得回答，{{ visibilityPanelReceipt.executedRoleCount }} 个目标已发起；“取得有效回答数”不是“已配置模型数”。</p>
+                <p><strong>channel_type：</strong>provider_api；多模型实际形成可比样本：{{ visibilityPanelReceipt.multiModelExecuted ? '是' : '否' }}。</p>
                 <p><strong>联网检索：</strong>未验证。<strong>消费者网页：</strong>未验证。<strong>手机 App：</strong>未验证。</p>
+                <p><strong>连接测试边界：</strong>系统设置中的测试只要求短回答；完整问题仍可能被上游网关超时、限流或返回非兼容格式。</p>
                 <p><strong>真实性边界：</strong>{{ visibilityPanelReceipt.claimBoundary }}</p>
               </div>
+              <footer>
+                <el-button @click="router.push('/settings')">检查三个模型配置</el-button>
+                <small>修正模型或网关后请创建新请求；旧请求不会被自动重发或重复计费。</small>
+              </footer>
             </article>
           </section>
 
@@ -1113,6 +1148,7 @@ import {
   normalizeVisibilitySamplingResponse,
   samplingStatusLabel,
   validateVisibilitySamplingDraft,
+  visibilityPanelTargetPresentation,
   visibilityProviderPreset
 } from '@/utils/visibilitySampling'
 import { diagnosticRetestDelta } from '@/utils/dashboardPresentation'
@@ -1182,7 +1218,7 @@ const sampling = reactive({
   baseUrl: visibilityProviderPreset('qwen').baseUrl,
   model: visibilityProviderPreset('qwen').model,
   apiKey: '',
-  sampleCount: 3,
+  sampleCount: 1,
   confirmed: false
 })
 
@@ -1277,6 +1313,12 @@ const canAnalyze = computed(() => (
   sampleCount.value >= 1 &&
   sampleCount.value <= 20
 ))
+const presentedPanelTargets = computed(() => (
+  (visibilityPanelReceipt.value?.targets || []).map(target => ({
+    ...target,
+    presentation: visibilityPanelTargetPresentation(target)
+  }))
+))
 const diagnosticDelta = computed(() => diagnosticRetestDelta(commercialDiagnosticRuns.value))
 
 const normalizeStringList = value => {
@@ -1294,6 +1336,7 @@ const handleProjectChange = () => {
   applyProjectDefaults()
   result.value = null
   liveSamplingReceipt.value = null
+  visibilityPanelReceipt.value = null
   samplingError.value = ''
   sampling.confirmed = false
   manualImportSnapshot.value = null
@@ -1503,6 +1546,7 @@ const handleMultiModelChange = () => {
   visibilityPanelReceipt.value = null
   if (sampling.multiModel) {
     sampling.useUnifiedEngine = true
+    sampling.sampleCount = 1
     samplingOverrideExpanded.value = false
   }
 }
@@ -1644,15 +1688,24 @@ const pollPendingSampling = async pending => {
   }
 }
 
+const applyVisibilityPanelReceipt = receipt => {
+  visibilityPanelReceipt.value = receipt
+  if (receipt.targets.some(target => target.runId != null)) {
+    void loadHistory(form.projectId)
+  }
+}
+
 const finishRestoredPanel = responseData => {
   const receipt = normalizeVisibilityPanelResponse(responseData)
   clearPendingSamplingSession()
   samplingLoading.value = false
   samplingError.value = ''
-  visibilityPanelReceipt.value = receipt
+  applyVisibilityPanelReceipt(receipt)
   const count = receipt.distinctModelCount
   if (receipt.multiModelExecuted && receipt.status === 'completed') {
     ElMessage.success(`已恢复多模型 API 对照：${count} 个独立模型完整返回。`)
+  } else if (receipt.sampledRoleCount > 0) {
+    ElMessage.warning(`已恢复部分结果：${receipt.sampledRoleCount} / ${receipt.requestedRoleCount} 个调用目标取得回答，已有样本已保留。`)
   } else {
     ElMessage.warning('已恢复原多模型结果；样本未全部完成，系统没有重复调用模型。')
   }
@@ -1835,10 +1888,13 @@ const startLiveSampling = async () => {
         return
       }
       clearPendingSamplingSession()
-      visibilityPanelReceipt.value = normalizeVisibilityPanelResponse(response)
-      const count = visibilityPanelReceipt.value.distinctModelCount
-      if (visibilityPanelReceipt.value.multiModelExecuted) {
+      const receipt = normalizeVisibilityPanelResponse(response)
+      applyVisibilityPanelReceipt(receipt)
+      const count = receipt.distinctModelCount
+      if (receipt.multiModelExecuted) {
         ElMessage.success(`多模型 API 对照完成：实际取得 ${count} 个独立模型的样本。`)
+      } else if (receipt.sampledRoleCount > 0) {
+        ElMessage.warning(`多模型对照部分完成：${receipt.sampledRoleCount} / ${receipt.requestedRoleCount} 个调用目标取得回答，已有样本已保留。`)
       } else {
         ElMessage.warning('没有取得至少两个不同 API 模型的样本，不能称为多模型对照。')
       }
@@ -1861,7 +1917,7 @@ const startLiveSampling = async () => {
         scheduleSamplingResumePoll(readPendingSamplingSession())
       } else {
         clearPendingSamplingSession()
-        visibilityPanelReceipt.value = normalizeVisibilityPanelResponse(responseData)
+        applyVisibilityPanelReceipt(normalizeVisibilityPanelResponse(responseData))
       }
     } else if (!multiModel && responseData?.data && typeof responseData.data === 'object') {
       clearPendingSamplingSession()
@@ -2590,6 +2646,17 @@ onBeforeUnmount(() => {
   > footer { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 13px; padding-top: 13px; border-top: 1px solid var(--rule); }
   > footer small { color: var(--muted); font-size: 8px; }
 }
+.sampling-receipt > header .panel-coverage-count {
+  display: grid;
+  flex: 0 0 auto;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 8px;
+  align-items: baseline;
+  text-align: right;
+  > strong { grid-row: 1 / 3; color: var(--ink); font: 800 20px/1 "Cascadia Mono", monospace; }
+  > span { color: #4c4e52; font: 700 9px/1.2 "Microsoft YaHei UI", sans-serif; letter-spacing: 0; }
+  > small { color: var(--muted); font: 8px/1.35 "Cascadia Mono", monospace; }
+}
 .sampling-failure { margin: 12px 0 0; padding: 11px 12px; border: 1px solid #dfb6b2; background: #fff4f3; color: #8f4640; font-size: 10px; line-height: 1.55; p { margin: 4px 0 0; } small { display: block; margin-top: 6px; font-weight: 700; } }
 .sampling-recovery-rail {
   margin-top: 12px;
@@ -2610,7 +2677,28 @@ onBeforeUnmount(() => {
   li :deep(.el-button) { grid-column: 1 / -1; width: 100%; margin-top: 9px; border-radius: 5px; }
   li :deep(.el-button--primary) { border-color: var(--ink); background: var(--ink); }
 }
-.execution-receipts { display: grid; gap: 7px; margin-top: 13px; > article { display: grid; grid-template-columns: 32px minmax(0, 1fr) minmax(220px, auto); gap: 10px; align-items: center; padding: 10px 11px; border: 1px solid #e0e1de; border-radius: 5px; background: #fafaf8; } > article > span { color: #67696d; font: 700 9px/1 "Cascadia Mono", monospace; } > article > div { display: flex; min-width: 0; flex-direction: column; gap: 4px; } > article > div strong { overflow: hidden; font-size: 10px; text-overflow: ellipsis; white-space: nowrap; } > article > div small { overflow: hidden; color: var(--muted); font: 8px/1.3 "Cascadia Mono", monospace; text-overflow: ellipsis; white-space: nowrap; } dl { display: grid; grid-template-columns: repeat(2, minmax(100px, 1fr)); gap: 10px; margin: 0; } dl > div { min-width: 0; } dt { color: #85878b; font-size: 7px; } dd { margin: 4px 0 0; color: #38393d; font-size: 8px; line-height: 1.35; } }
+.execution-receipts {
+  display: grid;
+  gap: 7px;
+  margin-top: 13px;
+  > article { display: grid; grid-template-columns: 58px minmax(180px, 1fr) minmax(180px, .75fr); gap: 8px 12px; align-items: start; padding: 11px 12px; border: 1px solid #e0e1de; border-radius: 5px; background: #fafaf8; }
+  > article > span { padding-top: 2px; color: #67696d; font: 700 9px/1 "Cascadia Mono", monospace; }
+  > article > div { display: flex; min-width: 0; flex-direction: column; gap: 4px; }
+  > article > div strong { min-width: 0; font-size: 10px; line-height: 1.35; }
+  > article > div small { min-width: 0; color: var(--muted); font: 8px/1.4 "Cascadia Mono", monospace; }
+  .panel-target-identity strong { overflow-wrap: anywhere; white-space: normal; }
+  .panel-target-state { padding-left: 10px; border-left: 2px solid #a5a6a2; }
+  .target-complete .panel-target-state { border-left-color: #547d61; }
+  .target-partial .panel-target-state { border-left-color: var(--amber); }
+  .target-unknown .panel-target-state,
+  .target-failed .panel-target-state { border-left-color: var(--red); }
+  .panel-target-message { display: grid; min-width: 0; grid-column: 2 / -1; grid-template-columns: auto minmax(0, 1fr); gap: 7px; margin: 0; padding-top: 8px; border-top: 1px solid #e4d6d3; color: #8f4640; font-size: 9px; line-height: 1.55; overflow-wrap: anywhere; }
+  .panel-target-message code { align-self: start; min-width: 0; padding: 2px 4px; background: #f3dfdc; color: #82433e; font: 700 7px/1.25 "Cascadia Mono", monospace; overflow-wrap: anywhere; }
+  dl { display: grid; grid-template-columns: repeat(2, minmax(100px, 1fr)); gap: 10px; margin: 0; }
+  dl > div { min-width: 0; }
+  dt { color: #85878b; font-size: 7px; }
+  dd { margin: 4px 0 0; color: #38393d; font-size: 8px; line-height: 1.35; }
+}
 .receipt-boundary { margin-top: 12px; padding: 11px 12px; border: 1px solid #e0e1de; background: #f6f6f3; p { margin: 0; color: #686a6f; font-size: 8px; line-height: 1.65; } p + p { margin-top: 4px; } strong { color: #303135; } }
 .captured-response-list { margin-top: 11px; border: 1px solid #dedfdb; border-radius: 5px; summary { padding: 10px 12px; cursor: pointer; color: #404145; font-size: 9px; font-weight: 700; } > article { padding: 12px; border-top: 1px solid #e3e4e1; } > article strong { font: 700 8px/1.3 "Cascadia Mono", monospace; } > article p { max-height: 180px; overflow: auto; margin: 8px 0 0; color: #55575b; font-size: 9px; line-height: 1.65; white-space: pre-wrap; } }
 .manual-divider { display: flex; grid-column: 1 / -1; align-items: baseline; gap: 14px; padding-top: 4px; border-bottom: 1px solid var(--rule); span { color: #5f6166; font: 700 9px/1 "Cascadia Mono", monospace; letter-spacing: 0.09em; } p { margin: 0 0 9px; color: var(--muted); font-size: 9px; } }
@@ -3194,8 +3282,13 @@ onBeforeUnmount(() => {
   .dispatch-main { padding: 14px; }
   .dispatch-title { grid-template-columns: 1fr; }
   .dispatch-confirm :deep(.el-button) { width: 100%; }
-  .execution-receipts > article { grid-template-columns: 28px minmax(0, 1fr); }
+  .sampling-receipt > header { align-items: flex-start; flex-direction: column; }
+  .sampling-receipt > header .panel-coverage-count { text-align: left; }
+  .execution-receipts > article { grid-template-columns: 58px minmax(0, 1fr); }
+  .execution-receipts .panel-target-state,
+  .execution-receipts .panel-target-message,
   .execution-receipts dl { grid-column: 2; }
+  .execution-receipts .panel-target-message { grid-template-columns: 1fr; }
   .sampling-recovery-rail ol { grid-template-columns: 1fr; }
   .sampling-recovery-rail li + li { border-top: 1px solid #e5d7bd; border-left: 0; }
   .manual-divider { align-items: flex-start; flex-direction: column; gap: 5px; }

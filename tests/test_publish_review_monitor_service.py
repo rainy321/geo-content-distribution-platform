@@ -12,10 +12,12 @@ from services.media_account_risk_service import (
     record_media_account_risk,
 )
 from services.publish_job_service import (
+    InvalidPublishJobTransitionError,
     create_publish_job,
     get_publish_job,
     mark_publish_job_awaiting_reconciliation,
     reconcile_publish_job_platform_success,
+    retry_publish_job,
     transition_publish_job,
 )
 from services.publish_review_monitor_service import (
@@ -362,6 +364,77 @@ class PublishReviewMonitorServiceTests(unittest.TestCase):
         self.assertEqual(second["summary"]["unread_alerts"], 1)
         self.assertEqual(first["alerts"][0]["category"], "published")
 
+    def test_human_success_closes_exhausted_monitor_and_superseded_alert(self):
+        job = self._pending_job()
+        seed_publish_review_monitors(
+            self.db_path,
+            now="2026-09-12T01:40:00Z",
+            max_attempts=1,
+        )
+        run_publish_review_monitor_tick(
+            self.db_path,
+            verifier=lambda _snapshot: {"state": "not_found"},
+            now="2026-09-12T01:40:00Z",
+        )
+        before = get_publish_review_overview(self.db_path, unread_only=True)
+        self.assertEqual(
+            get_publish_review_monitor(self.db_path, job["id"])["state"],
+            "exhausted",
+        )
+        self.assertEqual(before["alerts"][0]["category"], "monitor_exhausted")
+
+        current = get_publish_job(self.db_path, job["id"])
+        reconcile_publish_job_platform_success(
+            self.db_path,
+            job["id"],
+            message="人工核验已发布：已在正确账号后台确认公开",
+            result_url="https://zhuanlan.zhihu.com/p/444444444",
+            expected_state_version=current["state_version"],
+        )
+
+        verifier_calls = []
+        tick = run_publish_review_monitor_tick(
+            self.db_path,
+            verifier=lambda snapshot: verifier_calls.append(snapshot),
+            now="2026-09-12T01:41:00Z",
+        )
+        monitor = get_publish_review_monitor(self.db_path, job["id"])
+        unread = get_publish_review_overview(self.db_path, unread_only=True)
+        self.assertEqual(tick["checked_count"], 0)
+        self.assertEqual(verifier_calls, [])
+        self.assertEqual(monitor["state"], "published")
+        self.assertEqual(monitor["last_result"], "published")
+        self.assertEqual(unread["summary"]["unread_alerts"], 0)
+        self.assertEqual(unread["alerts"], [])
+
+    def test_detached_job_account_pauses_old_monitor_without_using_new_login(self):
+        job = self._pending_job()
+        seed_publish_review_monitors(
+            self.db_path,
+            now="2026-09-12T01:50:00Z",
+        )
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE publish_jobs SET account_id = NULL WHERE id = ?",
+                    (job["id"],),
+                )
+
+        verifier_calls = []
+        tick = run_publish_review_monitor_tick(
+            self.db_path,
+            verifier=lambda snapshot: verifier_calls.append(snapshot),
+            now="2026-09-12T01:50:01Z",
+        )
+        monitor = get_publish_review_monitor(self.db_path, job["id"])
+        overview = get_publish_review_overview(self.db_path, unread_only=True)
+        self.assertEqual(tick["checked_count"], 0)
+        self.assertEqual(verifier_calls, [])
+        self.assertEqual(monitor["state"], "paused")
+        self.assertEqual(monitor["last_result"], "account_binding_changed")
+        self.assertIn("不会自动改用新账号", monitor["last_message"])
+        self.assertEqual(overview["alerts"][0]["category"], "manual_check")
+
     def test_explicit_rejection_closes_job_without_any_retry(self):
         job = self._pending_job()
 
@@ -379,6 +452,11 @@ class PublishReviewMonitorServiceTests(unittest.TestCase):
         self.assertEqual(current["status"], "failed")
         self.assertFalse(current["reconciliation_required"])
         self.assertIn("明确未通过", current["message"])
+        with self.assertRaisesRegex(
+            InvalidPublishJobTransitionError,
+            "禁止原稿重试",
+        ):
+            retry_publish_job(self.db_path, job["id"])
 
     def test_rejection_crash_after_monitor_finish_backfills_alert_once(self):
         job = self._pending_job()

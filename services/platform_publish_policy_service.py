@@ -10,7 +10,7 @@ from services.platform_capability_service import (
 )
 
 
-PLATFORM_PUBLISH_POLICY_VERSION = "2026-09-11.1"
+PLATFORM_PUBLISH_POLICY_VERSION = "2026-09-16.1"
 
 
 # This matrix intentionally distinguishes a verified field constraint from a
@@ -93,9 +93,10 @@ _PLATFORM_PUBLISH_POLICIES: dict[str, dict[str, Any]] = {
             "safe_limit_basis": "product_conservative_guardrail",
         },
         "tags": {
-            "submission_mode": "topic_picker_and_body_hashtags",
-            "max_count": 10,
-            "basis": "repository_adapter_behavior",
+            "submission_mode": "independent_topic_field_if_available",
+            "max_count": 3,
+            "basis": "product_conservative_guardrail",
+            "disclaimer": "0-3 个是产品侧保守策略，不是搜狐号官方配额。",
         },
     },
     "xiaohongshu": {
@@ -234,6 +235,30 @@ _PLATFORM_PUBLISH_POLICIES: dict[str, dict[str, Any]] = {
             "basis": "product_operational_guardrail",
         },
     },
+    "weibo": {
+        "format": "plain_social_post",
+        "title": {
+            "min_length": 1,
+            "hard_limit": None,
+            "safe_limit": 80,
+            "basis": "not_verified",
+            "safe_limit_basis": "product_conservative_guardrail",
+        },
+        "content": {
+            "hard_limit": None,
+            "safe_limit": 620,
+            "fixed_reserve": 0,
+            "tags_share_content_limit": False,
+            "basis": "not_verified",
+            "safe_limit_basis": "product_conservative_guardrail",
+        },
+        "tags": {
+            "submission_mode": "literal_hashtags",
+            "max_count": 5,
+            "max_length": 16,
+            "basis": "product_operational_guardrail",
+        },
+    },
 }
 
 
@@ -261,10 +286,44 @@ _ABSOLUTE_CLAIM_PATTERN = re.compile(
 )
 _PROMOTIONAL_CTA_PATTERN = re.compile(
     r"(?:扫码|加微(?:信)?|私信).{0,8}(?:咨询|领取|购买)|"
-    r"立即(?:购买|下单|咨询)|限时(?:抢购|优惠)|免费领取",
+    r"立即(?:购买|下单|咨询)|限时(?:抢购|优惠)|免费领取|"
+    r"(?:点击|访问|前往).{0,8}(?:官网|链接|网站)|"
+    r"(?:联系|咨询)(?:客服|我们)",
     flags=re.IGNORECASE,
 )
-_PUBLIC_URL_PATTERN = re.compile(r"https?://[^\s<>]+", flags=re.IGNORECASE)
+_PUBLIC_URL_PATTERN = re.compile(
+    r"(?:https?://|www\.)[^\s<>]+",
+    flags=re.IGNORECASE,
+)
+_SOHU_CONTACT_PATTERN = re.compile(
+    r"(?:微信|微\s*信|V\s*X|QQ|扣扣|电话|手机(?:号)?|联系(?:方式|人)?|"
+    r"客服|邮箱|E-?mail)\s*[:：]?\s*[A-Za-z0-9_@.+-]{4,}|"
+    r"(?<!\d)1[3-9]\d{9}(?!\d)|"
+    r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}",
+    flags=re.IGNORECASE,
+)
+_SOHU_PURE_REDIRECT_URL_LINE_PATTERN = re.compile(
+    r"(?m)^\s*(?:(?:官网|官方网站|网址|链接|详情(?:链接)?|购买链接|"
+    r"咨询链接|访问(?:地址|链接|官网)?|了解更多)\s*[:：]?\s*)?"
+    r"(?:https?://|www\.)\S+\s*[。.]?\s*$",
+    flags=re.IGNORECASE,
+)
+_SOHU_SEO_QUESTION_TITLE_PATTERN = re.compile(
+    r"(?:如何|怎么|怎样|哪个|哪些|哪家|哪个好|怎么选|值得吗|靠谱吗|"
+    r"是什么|为什么|指南|攻略|推荐).{0,24}[？?]?$",
+    flags=re.IGNORECASE,
+)
+_SOHU_BRAND_MARKETING_PATTERN = re.compile(
+    r"(?:品牌|公司|企业|产品|服务|平台|官网|解决方案|推出|提供|支持|"
+    r"价格|计费|购买|优惠|推荐|首选)",
+    flags=re.IGNORECASE,
+)
+_SOHU_TRAILING_HASHTAG_LINE_PATTERN = re.compile(
+    r"^\s*(?:#[^\s#，,。；;]{1,32}\s*){1,10}$"
+)
+_SOHU_TRAILING_HASHTAG_SUFFIX_PATTERN = re.compile(
+    r"(?:\s+#[^\s#，,。；;]{1,32}){1,10}\s*$"
+)
 _NO_PUBLIC_EVIDENCE_PATTERN = re.compile(
     r"(?:暂无|没有|未发现).{0,8}可核验(?:的)?公开(?:证据|来源)",
     flags=re.IGNORECASE,
@@ -440,6 +499,89 @@ def adapt_tags_for_platform(
     }
 
 
+def sanitize_sohu_publish_copy(content: str) -> dict[str, Any]:
+    """Remove deterministic Sohu diversion residue from an automatic copy.
+
+    This is deliberately loss-minimising: only clauses containing a clear
+    call-to-action/contact marker, pure redirect URL lines, trailing hashtag
+    tails and exact repeated sentences are removed.  It never adds claims or
+    mutates the source article.
+    """
+
+    original = str(content or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    lines = original.split("\n")
+    removed_hashtag_tails = 0
+    while lines and not lines[-1].strip():
+        lines.pop()
+    while lines and _SOHU_TRAILING_HASHTAG_LINE_PATTERN.fullmatch(lines[-1]):
+        lines.pop()
+        removed_hashtag_tails += 1
+        while lines and not lines[-1].strip():
+            lines.pop()
+
+    cleaned_lines: list[str] = []
+    seen_sentences: set[str] = set()
+    removed_redirect_lines = 0
+    removed_contact_clauses = 0
+    removed_cta_clauses = 0
+    removed_duplicate_sentences = 0
+
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line:
+            if cleaned_lines and cleaned_lines[-1] != "":
+                cleaned_lines.append("")
+            continue
+        if _SOHU_PURE_REDIRECT_URL_LINE_PATTERN.fullmatch(line):
+            removed_redirect_lines += 1
+            continue
+
+        suffix_match = _SOHU_TRAILING_HASHTAG_SUFFIX_PATTERN.search(line)
+        if suffix_match:
+            line = line[: suffix_match.start()].rstrip()
+            removed_hashtag_tails += 1
+            if not line:
+                continue
+
+        kept_fragments: list[str] = []
+        for fragment in re.split(r"(?<=[，,；;。！？!?])", line):
+            clause = fragment.strip()
+            if not clause:
+                continue
+            if _SOHU_CONTACT_PATTERN.search(clause):
+                removed_contact_clauses += 1
+                continue
+            if _PROMOTIONAL_CTA_PATTERN.search(clause):
+                removed_cta_clauses += 1
+                continue
+
+            identity = re.sub(r"[\s，,。；;！!？?]+", "", clause).casefold()
+            if len(identity) >= 8 and identity in seen_sentences:
+                removed_duplicate_sentences += 1
+                continue
+            if len(identity) >= 8:
+                seen_sentences.add(identity)
+            kept_fragments.append(clause)
+
+        if kept_fragments:
+            cleaned_lines.append("".join(kept_fragments))
+
+    while cleaned_lines and not cleaned_lines[-1]:
+        cleaned_lines.pop()
+    sanitized = "\n".join(cleaned_lines)
+    sanitized = re.sub(r"\n{3,}", "\n\n", sanitized).strip()
+    audit = {
+        "applied": True,
+        "changed": sanitized != original,
+        "removed_redirect_lines": removed_redirect_lines,
+        "removed_contact_clauses": removed_contact_clauses,
+        "removed_cta_clauses": removed_cta_clauses,
+        "removed_hashtag_tails": removed_hashtag_tails,
+        "removed_duplicate_sentences": removed_duplicate_sentences,
+    }
+    return {"content": sanitized, "audit": audit}
+
+
 def evaluate_platform_offline_preflight(
     *,
     platform: str,
@@ -594,14 +736,67 @@ def evaluate_platform_offline_preflight(
         )
 
     if policy["format"] == "conservative_enterprise_education_article":
-        if _PROMOTIONAL_CTA_PATTERN.search(normalized_content):
+        has_external_url = bool(_PUBLIC_URL_PATTERN.search(normalized_content))
+        has_contact = bool(_SOHU_CONTACT_PATTERN.search(normalized_content))
+        has_promotional_cta = bool(_PROMOTIONAL_CTA_PATTERN.search(normalized_content))
+        has_pure_redirect_url = bool(
+            _SOHU_PURE_REDIRECT_URL_LINE_PATTERN.search(normalized_content)
+        )
+        if has_external_url:
+            issues.append(
+                _issue(
+                    "sohu_external_url_review_risk",
+                    "warning",
+                    "content",
+                    "搜狐号副本包含站外 URL，可能被平台结合上下文判断为导流。",
+                    "仅保留确实支持正文事实的来源页；不要写官网、购买、咨询或了解更多入口。",
+                )
+            )
+        if has_contact:
+            issues.append(
+                _issue(
+                    "sohu_contact_information",
+                    "blocking",
+                    "content",
+                    "搜狐号副本包含邮箱、手机号、微信、QQ 或其他联系方式。",
+                    "从平台副本中删除联系方式；原稿和客户资料不会因此被改写。",
+                )
+            )
+        if has_promotional_cta:
             issues.append(
                 _issue(
                     "sohu_promotional_call_to_action",
-                    "warning",
+                    "blocking",
                     "content",
-                    "搜狐号副本包含扫码、私信、限时或立即购买等强促销引导。",
+                    "搜狐号副本包含扫码、私信、访问官网、限时或立即购买等强促销引导。",
                     "改成中性企业科普：说明问题、机制、适用场景、边界和可核验来源。",
+                )
+            )
+        if has_pure_redirect_url or (
+            has_external_url and (has_contact or has_promotional_cta)
+        ):
+            issues.append(
+                _issue(
+                    "sohu_high_confidence_external_redirect",
+                    "blocking",
+                    "content",
+                    "搜狐号副本存在纯站外链接，或站外 URL 与联系方式、促销引导同时出现。",
+                    "自动实发已阻断；删除纯导流入口，只保留与文章事实直接相关的中性说明。",
+                )
+            )
+        if (
+            _SOHU_SEO_QUESTION_TITLE_PATTERN.search(normalized_title)
+            and _SOHU_BRAND_MARKETING_PATTERN.search(
+                normalized_title + "\n" + normalized_content
+            )
+        ):
+            issues.append(
+                _issue(
+                    "sohu_seo_question_brand_marketing_combo",
+                    "warning",
+                    "title",
+                    "标题呈明显搜索问句或指南结构，同时正文含品牌、产品或服务营销语义。",
+                    "改成具体的信息型标题，并让正文以判断标准、机制、证据和限制为主；不要堆叠同义问句。",
                 )
             )
         paragraph_count = len(
@@ -617,17 +812,6 @@ def evaluate_platform_offline_preflight(
                     "按直接结论、机制或步骤、适用边界与来源组织至少三个自然段。",
                 )
             )
-        if not _PUBLIC_URL_PATTERN.search(normalized_content):
-            issues.append(
-                _issue(
-                    "sohu_no_public_source_url",
-                    "warning",
-                    "content",
-                    "搜狐号副本没有可公开核验的来源链接。",
-                    "若文章包含产品或事实性主张，请补充能直接支持该主张的公开页面。",
-                )
-            )
-
     blocking_count = sum(issue["severity"] == "blocking" for issue in issues)
     warning_count = sum(issue["severity"] == "warning" for issue in issues)
     return {
@@ -664,4 +848,5 @@ __all__ = [
     "get_platform_publish_policy",
     "list_platform_publish_policies",
     "normalize_policy_tags",
+    "sanitize_sohu_publish_copy",
 ]

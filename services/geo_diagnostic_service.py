@@ -107,6 +107,17 @@ _CHANNEL_ARCHETYPES: dict[str, dict[str, Any]] = {
         "content_angle": "目标市场语言 + 单一场景演示 + 当地合规复核",
         "segment_bonus": {"international": 28, "video_demo": 8, "general": -18},
     },
+    "weibo": {
+        "label": "短帖式实体与事实印证",
+        "objective": "用可公开核验的短帖补充品牌、产品实体名称、事实摘要和来源指向",
+        "content_angle": "标题作首句 + 单一事实 + 实体全称 + 稳定来源；不把互动量当作 AI 收录证明",
+        "segment_bonus": {
+            "technology_b2b": 10,
+            "consumer_lifestyle": 8,
+            "local_service": 8,
+            "general": 6,
+        },
+    },
 }
 
 

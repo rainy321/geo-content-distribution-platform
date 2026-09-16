@@ -56,6 +56,17 @@ class AIProviderRateLimitError(AIServiceError):
         self.retry_after_seconds = retry_after_seconds
 
 
+class AIProviderHTTPError(AIServiceError):
+    """A non-rate-limit HTTP response returned by the configured provider."""
+
+    def __init__(self, message: str, *, status_code: int) -> None:
+        super().__init__(message)
+        self.status_code = int(status_code)
+        # A gateway timeout means the request reached a remote gateway, but
+        # the final model outcome and billing state are not knowable locally.
+        self.outcome_unknown = self.status_code == 504
+
+
 class AIProtocolError(AIServiceError):
     """Raised when the provider response cannot satisfy the strict contract."""
 
@@ -440,6 +451,10 @@ def _request_chat_completion_detailed(
         "messages": messages,
         "temperature": temperature,
         "max_tokens": settings.max_tokens,
+        # Some OpenAI-compatible gateways default to an SSE response even
+        # when the caller did not ask for streaming.  This client consumes one
+        # complete JSON object, so make that transport contract explicit.
+        "stream": False,
     }
     if _should_disable_dashscope_thinking(settings):
         # Qwen 3.8 enables hybrid thinking by default. For synchronous content
@@ -462,6 +477,7 @@ def _request_chat_completion_detailed(
             headers={
                 "Authorization": f"Bearer {settings.api_key}",
                 "Content-Type": "application/json",
+                "Accept": "application/json",
             },
             json=request_body,
             timeout=settings.timeout_seconds,
@@ -563,19 +579,16 @@ def _request_chat_completion_detailed(
         # Provider bodies are untrusted and can echo prompts, credentials or
         # internal diagnostics. Only use the locally derived provider and
         # normalized endpoint in actionable diagnostics.
-        raise AIServiceError(
+        raise AIProviderHTTPError(
             _provider_http_error_message(
                 response.status_code,
                 endpoint=endpoint,
                 provider=_provider_label(settings),
-            )
+            ),
+            status_code=response.status_code,
         )
 
-    try:
-        payload = response.json()
-        raw_content = _extract_message_content(payload)
-    except (TypeError, ValueError, KeyError) as exc:
-        raise AIProtocolError("AI 服务返回格式无效") from exc
+    payload, raw_content = _decode_chat_completion_response(response)
 
     headers = getattr(response, "headers", {}) or {}
     provider_request_id = str(
@@ -680,6 +693,57 @@ def resolve_ai_image_generations_url(base_url: str) -> str:
     return urlunsplit((parsed.scheme, parsed.netloc, endpoint_path, "", ""))
 
 
+_VIDEO_GENERATION_ENDPOINT_SUFFIXES = (
+    "/contents/generations/tasks",
+    "/video/generations",
+    "/videos/generations",
+)
+
+
+def ai_image_role_compatibility_issue(
+    *,
+    base_url: str,
+    model: str,
+) -> tuple[str, str] | None:
+    """Return a stable diagnostic when IMAGE is configured with video I/O.
+
+    IMAGE deliberately implements the synchronous OpenAI-compatible Images
+    contract.  Video generation uses a different, normally asynchronous task
+    contract and must not be made to look compatible by appending an image
+    path to a video endpoint.
+    """
+
+    normalized_model = str(model or "").strip()
+    folded_model = normalized_model.casefold()
+    if "seedance" in folded_model:
+        return (
+            "video_model_not_supported",
+            f"IMAGE 角色不支持视频生成模型 {normalized_model!r}："
+            "Seedance 是视频模型，请改用 Seedream、GPT Image / DALL-E "
+            "或供应商明确支持 /images/generations 的图片模型；"
+            "视频模型需接入独立的异步视频生成流程。",
+        )
+
+    normalized_base = normalize_ai_base_url(base_url)
+    path = urlsplit(normalized_base).path.rstrip("/").casefold()
+    if any(path.endswith(suffix) for suffix in _VIDEO_GENERATION_ENDPOINT_SUFFIXES):
+        return (
+            "video_endpoint_not_supported",
+            "IMAGE 角色只调用 OpenAI-compatible Images API；"
+            "当前 Base URL 是视频生成任务地址。"
+            "请改填图片 API 根路径或完整 /images/generations 地址。",
+        )
+    return None
+
+
+def validate_ai_image_role_compatibility(*, base_url: str, model: str) -> None:
+    """Reject a known video model/endpoint before IMAGE can be persisted."""
+
+    issue = ai_image_role_compatibility_issue(base_url=base_url, model=model)
+    if issue is not None:
+        raise AIConfigurationError(issue[1])
+
+
 def _known_provider_for_host(hostname: str) -> str:
     normalized = hostname.rstrip(".").lower()
     if normalized.endswith(".aliyuncs.com"):
@@ -749,6 +813,22 @@ def _provider_http_error_message(
             f"AI 服务返回 HTTP 404（{provider_label}，请求地址 {safe_endpoint}）："
             "请检查 Base URL 和模型 ID；系统只会补一次 /chat/completions。"
             f"{provider_hint}"
+        )
+    if status_code == 502:
+        return (
+            "AI 服务返回 HTTP 502：上游模型网关没有取得有效响应；"
+            "连接测试成功不代表完整回答一定能生成，请核对模型状态或更换低延迟模型"
+        )
+    if status_code == 503:
+        return (
+            "AI 服务返回 HTTP 503：上游模型当前不可用或过载；"
+            "请先在供应商控制台确认服务状态，系统不会自动重发"
+        )
+    if status_code == 504:
+        return (
+            "AI 服务返回 HTTP 504：上游网关在生成完整回答时超时；"
+            "这不是本地页面卡死。连接测试只验证短回答，请先核对账单，"
+            "再改为 1 次采样或更换低延迟模型"
         )
     return f"AI 服务返回 HTTP {status_code}"
 
@@ -1344,6 +1424,196 @@ def _extract_message_content(payload: Mapping[str, Any]) -> str:
         if text:
             return text
     raise ValueError("message.content")
+
+
+def _decode_chat_completion_response(response: Any) -> tuple[Mapping[str, Any], str]:
+    """Decode a bounded set of common OpenAI-compatible response envelopes.
+
+    The configured endpoint is still required to behave like a chat-completion
+    service.  Some compatible gateways wrap the JSON object, return a Responses
+    style text field, or force a complete SSE body despite ``stream=false``.
+    Accept those transport variations without exposing response bodies or ever
+    treating private reasoning fields as the provider's final answer.
+    """
+
+    payload: Any = None
+    json_error: BaseException | None = None
+    try:
+        payload = response.json()
+    except (TypeError, ValueError) as exc:
+        json_error = exc
+
+    if isinstance(payload, Mapping):
+        for candidate in _chat_payload_candidates(payload):
+            try:
+                return candidate, _extract_message_content(candidate)
+            except (TypeError, ValueError, KeyError):
+                compatible_text = _extract_compatible_output_text(candidate)
+                if compatible_text:
+                    return _normalized_completion_payload(candidate, compatible_text), compatible_text
+
+        protocol_hint = _chat_protocol_hint(payload)
+        if protocol_hint:
+            raise AIProtocolError(protocol_hint)
+
+    sse_payload = _parse_complete_sse_chat_response(str(getattr(response, "text", "") or ""))
+    if sse_payload is not None:
+        return sse_payload, _extract_message_content(sse_payload)
+
+    content_type = str(
+        (getattr(response, "headers", {}) or {}).get("Content-Type") or ""
+    ).lower()
+    transport_hint = (
+        "；网关返回了 SSE，但流中没有可用的最终正文"
+        if "text/event-stream" in content_type
+        else ""
+    )
+    raise AIProtocolError(
+        "AI 服务返回格式无效：未取得 choices[0].message.content、"
+        "兼容文本字段或完整 SSE 正文；请核对模型接口类型与网关协议"
+        + transport_hint
+    ) from json_error
+
+
+def _chat_payload_candidates(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    candidates = [payload]
+    for key in ("data", "result", "response"):
+        nested = payload.get(key)
+        if isinstance(nested, Mapping) and nested not in candidates:
+            candidates.append(nested)
+    return candidates
+
+
+def _extract_compatible_output_text(payload: Mapping[str, Any]) -> str:
+    output_text = payload.get("output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], Mapping):
+        legacy_text = choices[0].get("text")
+        if isinstance(legacy_text, str) and legacy_text.strip():
+            return legacy_text.strip()
+
+    output = payload.get("output")
+    if isinstance(output, list):
+        parts: list[str] = []
+        for item in output:
+            if not isinstance(item, Mapping):
+                continue
+            content = item.get("content")
+            if not isinstance(content, list):
+                continue
+            for part in content:
+                if not isinstance(part, Mapping):
+                    continue
+                part_type = str(part.get("type") or "").strip().lower()
+                text = part.get("text")
+                if part_type not in {"output_text", "text"}:
+                    continue
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+        return "".join(parts).strip()
+    return ""
+
+
+def _normalized_completion_payload(
+    payload: Mapping[str, Any],
+    content: str,
+) -> Mapping[str, Any]:
+    return {
+        "id": payload.get("id"),
+        "model": payload.get("model"),
+        "usage": payload.get("usage"),
+        "choices": [{"message": {"content": content}}],
+    }
+
+
+def _chat_protocol_hint(payload: Mapping[str, Any]) -> str:
+    choices = payload.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], Mapping):
+        choice = choices[0]
+        message = choice.get("message")
+        if isinstance(message, Mapping):
+            reasoning = message.get("reasoning_content")
+            if isinstance(reasoning, str) and reasoning.strip():
+                finish_reason = str(choice.get("finish_reason") or "").strip().lower()
+                if finish_reason == "length":
+                    return (
+                        "AI 服务只返回推理字段，并在最终回答前达到输出 Token 上限；"
+                        "系统不会把内部推理当成答案。请改用低推理模型，或提高该角色的输出上限"
+                    )
+                return (
+                    "AI 服务只返回 reasoning_content、没有最终 content；"
+                    "系统不会把内部推理当成答案。请关闭该模型的深度推理或改用标准对话模型"
+                )
+    if isinstance(payload.get("error"), Mapping):
+        return (
+            "AI 网关以成功状态返回了错误封装，而不是模型回答；"
+            "请在网关侧核对模型权限、额度和上游状态"
+        )
+    return ""
+
+
+def _parse_complete_sse_chat_response(text: str) -> Mapping[str, Any] | None:
+    if not text or "data:" not in text[:1024]:
+        return None
+    # A forced streaming response is already buffered by ``requests`` here.
+    # Bound parsing work and never include the body in diagnostics.
+    if len(text) > 4_000_000:
+        return None
+    parts: list[str] = []
+    response_id = ""
+    model = ""
+    usage: Mapping[str, Any] | None = None
+    for raw_line in text.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("data:"):
+            continue
+        value = line[5:].strip()
+        if not value or value == "[DONE]":
+            continue
+        try:
+            chunk = json.loads(value)
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(chunk, Mapping):
+            continue
+        response_id = str(chunk.get("id") or response_id).strip()
+        model = str(chunk.get("model") or model).strip()
+        if isinstance(chunk.get("usage"), Mapping):
+            usage = chunk["usage"]
+        choices = chunk.get("choices")
+        if not isinstance(choices, list):
+            continue
+        for choice in choices:
+            if not isinstance(choice, Mapping):
+                continue
+            container = choice.get("delta")
+            if not isinstance(container, Mapping):
+                container = choice.get("message")
+            if isinstance(container, Mapping):
+                content = container.get("content")
+                if isinstance(content, str) and content:
+                    parts.append(content)
+                elif isinstance(content, list):
+                    parts.extend(
+                        str(part.get("text") or "")
+                        for part in content
+                        if isinstance(part, Mapping) and part.get("text")
+                    )
+            legacy_text = choice.get("text")
+            if isinstance(legacy_text, str) and legacy_text:
+                parts.append(legacy_text)
+    content = "".join(parts).strip()
+    if not content:
+        return None
+    return {
+        "id": response_id,
+        "model": model,
+        "usage": usage,
+        "choices": [{"message": {"content": content}}],
+    }
 
 
 def _normalize_ai_usage(value: Any) -> dict[str, int] | None:

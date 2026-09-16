@@ -57,12 +57,12 @@ class GEODiagnosticServiceTests(unittest.TestCase):
         channel_strategy = result["channel_strategy"]
         self.assertEqual(channel_strategy["version"], CHANNEL_RECOMMENDATION_VERSION)
         self.assertTrue(channel_strategy["baseline_required"])
-        self.assertEqual(channel_strategy["evaluated_platform_count"], 10)
+        self.assertEqual(channel_strategy["evaluated_platform_count"], 11)
         self.assertEqual(
             {item["platform"] for item in channel_strategy["recommendations"]},
             {
                 "zhihu", "toutiao", "baijiahao", "sohu", "xiaohongshu",
-                "douyin", "kuaishou", "bilibili", "channels", "tiktok",
+                "douyin", "kuaishou", "bilibili", "channels", "tiktok", "weibo",
             },
         )
         self.assertTrue(
@@ -525,7 +525,7 @@ class GEODiagnosticServiceTests(unittest.TestCase):
         self.assertFalse(any(gap["key"] == "visibility.baseline" for gap in result["gaps"]))
         self.assertFalse(result["channel_strategy"]["baseline_required"])
         ranked = result["channel_strategy"]["recommendations"]
-        self.assertEqual([item["rank"] for item in ranked], list(range(1, 11)))
+        self.assertEqual([item["rank"] for item in ranked], list(range(1, 12)))
         self.assertEqual(ranked, sorted(ranked, key=lambda item: (-item["fit_score"], item["platform"])))
         self.assertIn(ranked[0]["platform"], {"zhihu", "sohu", "toutiao", "baijiahao"})
         self.assertEqual(
@@ -539,6 +539,10 @@ class GEODiagnosticServiceTests(unittest.TestCase):
                 "相对同口径基线改善；没有基线时先建立基线，不预填虚假提升比例。",
             )
             self.assertIn("不可由本软件保证", item["risks"][0])
+        weibo = next(item for item in ranked if item["platform"] == "weibo")
+        self.assertEqual(weibo["fit_label"], "短帖式实体与事实印证")
+        self.assertIn("稳定来源", weibo["content_angle"])
+        self.assertIn("不把互动量当作 AI 收录证明", weibo["content_angle"])
 
     def test_project_digest_ignores_stale_score_but_changes_with_current_content(self):
         with closing(sqlite3.connect(self.database_path)) as conn:

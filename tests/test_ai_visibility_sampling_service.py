@@ -9,6 +9,7 @@ from pathlib import Path
 from db.createTable import initialize_database
 from services.ai_service import (
     AICompletionResult,
+    AIProviderHTTPError,
     AIReadTimeoutError,
     AISettings,
     sample_ai_prompt_detailed,
@@ -619,6 +620,44 @@ class AIVisibilitySamplingServiceTests(unittest.TestCase):
         self.assertEqual(data["failure"]["code"], "provider_outcome_unknown")
         self.assertTrue(data["failure"]["outcome_unknown"])
 
+    def test_excessive_reported_output_stops_before_another_paid_sample(self):
+        calls = []
+
+        def sampler(**_kwargs):
+            calls.append(1)
+            return AICompletionResult(
+                content="DongClaw 小龙虾值得考虑。",
+                model="sample-model",
+                provider_request_id="provider-one",
+                elapsed_ms=1,
+                usage={
+                    "input_tokens": 55,
+                    "output_tokens": 4_986,
+                    "total_tokens": 5_041,
+                },
+            )
+
+        result = self.run_sample(sampler, sample_count=3, persist=False)
+
+        self.assertEqual(calls, [1])
+        self.assertEqual(result["http_status"], 207)
+        data = result["payload"]["data"]
+        self.assertEqual(data["status"], "partial")
+        self.assertEqual(data["completed_sample_count"], 1)
+        self.assertEqual(data["unattempted_sample_count"], 2)
+        self.assertEqual(
+            data["failure"]["code"], "provider_output_limit_mismatch"
+        )
+        self.assertEqual(
+            data["failure"]["requested_max_output_tokens"],
+            VISIBILITY_SAMPLE_MAX_OUTPUT_TOKENS,
+        )
+        self.assertEqual(data["failure"]["reported_output_tokens"], 4_986)
+        self.assertFalse(data["failure"]["outcome_unknown"])
+        self.assertTrue(
+            data["request_policy"]["stop_on_reported_output_limit_mismatch"]
+        )
+
     def test_first_timeout_is_saved_and_replayed_without_retry(self):
         calls = []
 
@@ -637,8 +676,35 @@ class AIVisibilitySamplingServiceTests(unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(first["http_status"], 504)
         self.assertEqual(first["payload"]["data"]["status"], "need_action")
+        self.assertEqual(
+            first["payload"]["data"]["configured_provider"],
+            "api.example.test",
+        )
+        self.assertEqual(
+            first["payload"]["data"]["configured_model"],
+            "sample-model",
+        )
         self.assertTrue(replay["replayed"])
         self.assertEqual(replay["payload"], first["payload"])
+
+    def test_upstream_504_is_an_unknown_outcome_with_status_preserved(self):
+        calls = []
+
+        def sampler(**_kwargs):
+            calls.append(1)
+            raise AIProviderHTTPError(
+                "AI 服务返回 HTTP 504：上游网关超时",
+                status_code=504,
+            )
+
+        result = self.run_sample(sampler, sample_count=3, persist=False)
+
+        self.assertEqual(calls, [1])
+        self.assertEqual(result["http_status"], 504)
+        failure = result["payload"]["data"]["failure"]
+        self.assertEqual(failure["code"], "provider_outcome_unknown")
+        self.assertTrue(failure["outcome_unknown"])
+        self.assertEqual(failure["upstream_status"], 504)
 
     def test_started_request_never_resends_automatically(self):
         with closing(sqlite3.connect(self.database_path)) as conn:

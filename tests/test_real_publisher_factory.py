@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from contextlib import closing
 from pathlib import Path
+from unittest.mock import patch
 
 from db.createTable import initialize_database
 from services.publish_job_executor import PublisherNotConfiguredError
@@ -21,6 +22,7 @@ from services.publisher_adapter import (
     ZhihuPublisherAdapter,
 )
 from services.real_publisher_factory import RealPublisherFactory
+from services.weibo_publisher_adapter import WeiboPublisherAdapter
 
 
 class RealPublisherFactoryTests(unittest.TestCase):
@@ -167,6 +169,36 @@ class RealPublisherFactoryTests(unittest.TestCase):
             "Bilibili.*运行时",
         ):
             factory({"platform": "bilibili", "account_id": account_id})
+
+    def test_weibo_factory_requires_installed_official_connector(self):
+        marker = self.cookies_dir / "weibo.json"
+        marker.write_text("{}", encoding="utf-8")
+        account_id = self._insert_account(
+            marker.name,
+            account_type=11,
+            account_name="微博账号",
+        )
+        factory = RealPublisherFactory(
+            self.db_path,
+            cookies_directory=self.cookies_dir,
+        )
+
+        with patch(
+            "services.real_publisher_factory.WeiboOfficialConnector.is_available",
+            return_value=False,
+        ), self.assertRaisesRegex(
+            PublisherNotConfiguredError,
+            "需安装/授权官方连接器",
+        ):
+            factory({"platform": "weibo", "account_id": account_id})
+
+        with patch(
+            "services.real_publisher_factory.WeiboOfficialConnector.is_available",
+            return_value=True,
+        ):
+            publisher = factory({"platform": "weibo", "account_id": account_id})
+        self.assertIsInstance(publisher, WeiboPublisherAdapter)
+        self.assertEqual(publisher.account_file, marker.resolve())
 
     def test_refuses_unbound_job_instead_of_selecting_newest_account(self):
         old_cookie = self.cookies_dir / "channels-old.json"

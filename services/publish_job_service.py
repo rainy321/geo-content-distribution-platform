@@ -20,6 +20,10 @@ from services.publish_preflight_service import (
     assert_platform_publish_variant_ready,
     build_platform_publish_variant,
 )
+from services.sohu_publication_guard_service import (
+    SohuPublicationGuardError,
+    evaluate_sohu_account_publication_guard_in_connection,
+)
 
 
 PUBLISH_JOB_STATUSES = frozenset(
@@ -105,6 +109,17 @@ _PUBLIC_WORK_URL_RULES = {
             ),
         ),
     ),
+    "weibo": (
+        ("m.weibo.cn", re.compile(r"/detail/[1-9]\d*/?")),
+        (
+            "weibo.com",
+            re.compile(r"/[1-9]\d*/[0-9A-Za-z]{5,32}/?"),
+        ),
+        (
+            "www.weibo.com",
+            re.compile(r"/[1-9]\d*/[0-9A-Za-z]{5,32}/?"),
+        ),
+    ),
 }
 _PLATFORMS_WITHOUT_STABLE_PUBLIC_WORK_URL = frozenset({"channels"})
 
@@ -141,6 +156,10 @@ def create_publish_job(
 ) -> dict[str, Any]:
     if not isinstance(auto_execute, bool):
         raise ValueError("auto_execute 必须是布尔值")
+    normalized_article_id = _normalize_required_positive_integer(
+        article_id,
+        "article_id",
+    )
     normalized_platform = _normalize_platform(platform)
     normalized_images = normalize_publish_images(images)
     normalized_video = normalize_publish_video(video)
@@ -151,8 +170,13 @@ def create_publish_job(
     initial_status = "scheduled" if normalized_publish_at else "queued"
 
     with closing(_connect(database_path)) as conn:
+        # Keep the Sohu guard read and job insert in one write transaction.
+        # Otherwise two concurrent callers could both pass an empty-history
+        # check before either one persisted its task.
+        if normalized_platform == "sohu" and not demo:
+            conn.execute("BEGIN IMMEDIATE")
         with conn:
-            article_row = _fetch_authorization_article(conn, article_id)
+            article_row = _fetch_authorization_article(conn, normalized_article_id)
             if article_row is None:
                 raise ArticleNotFoundError("文章不存在")
             if article_row["status"] != "ready":
@@ -173,6 +197,16 @@ def create_publish_job(
                 requested_account_id=account_id,
                 demo=demo,
             )
+            if normalized_platform == "sohu" and resolved_account_id is not None:
+                publication_guard = evaluate_sohu_account_publication_guard_in_connection(
+                    conn,
+                    account_id=resolved_account_id,
+                    article_id=int(article_row["id"]),
+                    title=variant["title"],
+                    content=variant["publish_content"],
+                )
+                if publication_guard["passed"] is not True:
+                    raise SohuPublicationGuardError(publication_guard)
             authorization_fingerprint = (
                 build_publish_authorization_fingerprint(
                     article=dict(article_row),
@@ -197,7 +231,7 @@ def create_publish_job(
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
-                    article_id,
+                    normalized_article_id,
                     resolved_account_id,
                     normalized_platform,
                     initial_status,
@@ -789,6 +823,10 @@ def retry_publish_job(
                 raise InvalidPublishJobTransitionError(
                     "平台结果尚未核验；请先使用“核验平台结果”确认未发布，禁止直接重试"
                 )
+            if _has_explicit_platform_rejection(conn, current_row):
+                raise InvalidPublishJobTransitionError(
+                    "平台已明确拒绝该版本；禁止原稿重试，请生成修订副本并重新确认"
+                )
             current_status = current_row["status"]
             current_version = _state_version(current_row)
             cursor = conn.execute(
@@ -1085,6 +1123,8 @@ def _validate_reconciliation_result_url(
             len(article_ids) == 1
             and re.fullmatch(r"[1-9]\d*", article_ids[0]) is not None
         )
+    if matches_public_work and normalized_platform == "weibo":
+        matches_public_work = not parsed.query and not parsed.fragment
     if not matches_public_work:
         raise ValueError(
             f"公开链接必须是{platform_name}官方公开作品链接，"
@@ -1155,6 +1195,39 @@ def _connect(database_path: str | Path) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA busy_timeout = 30000")
     return conn
+
+
+def _has_explicit_platform_rejection(
+    conn: sqlite3.Connection,
+    job_row: sqlite3.Row,
+) -> bool:
+    if _normalize_text(job_row["message"]).startswith(
+        "后台只读监测发现平台明确未通过："
+    ):
+        return True
+    has_monitor_table = conn.execute(
+        """
+        SELECT 1 FROM sqlite_master
+        WHERE type = 'table' AND name = 'publish_review_monitors'
+        """
+    ).fetchone() is not None
+    if not has_monitor_table:
+        return False
+    row = conn.execute(
+        """
+        SELECT state, last_result
+        FROM publish_review_monitors
+        WHERE publish_job_id = ?
+        """,
+        (int(job_row["id"]),),
+    ).fetchone()
+    return bool(
+        row is not None
+        and (
+            str(row["state"] or "") == "rejected"
+            or str(row["last_result"] or "") == "rejected"
+        )
+    )
 
 
 def _fetch_authorization_article(conn: sqlite3.Connection, article_id: int):
@@ -1305,18 +1378,24 @@ def normalize_publish_video(video: str | None) -> str:
     return filename
 
 
+def _normalize_required_positive_integer(value: Any, field: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{field} 必须是正整数")
+    if isinstance(value, int):
+        normalized = value
+    elif isinstance(value, str) and re.fullmatch(r"[1-9][0-9]*", value.strip()):
+        normalized = int(value.strip())
+    else:
+        raise ValueError(f"{field} 必须是正整数")
+    if normalized <= 0:
+        raise ValueError(f"{field} 必须是正整数")
+    return normalized
+
+
 def _normalize_optional_account_id(account_id: Any) -> int | None:
     if account_id is None or account_id == "":
         return None
-    if isinstance(account_id, bool):
-        raise ValueError("account_id 必须是正整数")
-    try:
-        normalized = int(account_id)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("account_id 必须是正整数") from exc
-    if normalized <= 0:
-        raise ValueError("account_id 必须是正整数")
-    return normalized
+    return _normalize_required_positive_integer(account_id, "account_id")
 
 
 def _resolve_publish_account_id(

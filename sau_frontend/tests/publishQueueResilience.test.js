@@ -72,6 +72,8 @@ test('retry is gated by the latest backend outcome and an explicit validation co
   assert.match(source, /已修复并核对未发布，重新排队/)
   assert.match(source, /已完成验证并核对未发布，重新排队/)
   assert.match(source, /jobOutcome\(job\)\.action === 'fix_and_rebuild'/)
+  assert.match(source, /jobOutcome\(job\)\.action === 'rewrite_new_version'/)
+  assert.match(source, /打开原稿定向修订/)
 })
 
 

@@ -2,9 +2,9 @@
 
 > - 文档状态：当前实现说明
 > - 适用产品：GEO 智能内容分发平台 Windows 桌面版
-> - 产品版本：`1.2.5`
-> - 基线提交：`88e7f4375afea27e067cedf6b8c1d23768cb04f2`
-> - 更新时间：2026-09-14
+> - 产品版本：`1.2.6`
+> - 基线提交：以发布目录 manifest 的 `source.commit` 为准
+> - 更新时间：2026-09-16
 > - 面向读者：产品开发、算法开发、测试、交付、运营和后续接手的 AI Agent
 
 本文把仓库中分散的 AI 配置、文章生成、GEO 编译、可引用性门禁、AI 可见度、黑盒回测、成本台账、平台发布和审核监测说明合并为一份开发总览。本文以当前代码为准；历史 Web、候选服务器架构和上游交接包只在说明来源或扩展方向时出现。
@@ -1097,9 +1097,9 @@ pwsh -NoProfile -File .\scripts\package_source.ps1
 
 | 产物 | 相对路径或文件名 | SHA-256 / 状态 |
 | --- | --- | --- |
-| 内部源码包 | `release/source/GEO-Content-Platform-Source-Internal-1.2.5-20260912T094644Z-88e7f437/...zip` | `C03CF910C702F7662A876FE94F87CBA9EEEE88FC433EDA2544ED10FB95DF8576` |
-| Windows x64 ZIP | `release/windows/GEO-Content-Platform-1.2.5-authorized-real-20260912T094706Z-88e7f437/...windows-x64.zip` | `4847B669D3AF7DCC58C9A3D4D56C68DD4FB3B631AC4C175E9B370C0DC381E276` |
-| Windows EXE | 同一 Windows 目录下的 `GEO-Content-Platform.exe` | `7A9B4F987614A875F135F84EAB005FB9A89AACCB1F6B05C72519188A6AA29F68` |
+| 内部源码包 | `release/source/GEO-Content-Platform-Source-Internal-1.2.6-<UTC时间>-<提交短SHA>/...zip` | 以同目录 `.sha256.txt` 和 `SOURCE-PACKAGE-RECEIPT.json` 为准 |
+| Windows x64 ZIP | `release/windows/GEO-Content-Platform-1.2.6-authorized-real-<UTC时间>-<提交短SHA>/...windows-x64.zip` | 以同目录 manifest 与 SHA-256 清单为准 |
+| Windows EXE | 同一 Windows 目录下的 `GEO-Content-Platform.exe` | 以同目录 `GEO-Content-Platform.manifest.json` 为准 |
 | 代码签名 | 当前 EXE | `NotSigned` |
 
 这组结果是当前代码基线的本地合同与成品验证，不是模型供应商或媒体平台的在线验收。本综合文档在上述源码包生成后新增，因此要让交接 ZIP 包含本文，必须在文档提交后重新运行源码打包脚本；不能声称旧 ZIP 已包含它。
@@ -1202,7 +1202,7 @@ pwsh -NoProfile -File .\scripts\package_source.ps1
 
 ### 21.1 当前已知实现差异
 
-以下是当前 `1.2.5` 源码中已经确认、但尚未在本文档任务中修改的工程问题：
+以下是当前 `1.2.6` 源码中已经确认、但尚未在本文档任务中修改的工程问题：
 
 1. **可见度 prompt 上限不一致**：单模型采样和多模型面板允许 8,000 字符，本机分析器只接受 4,000 字符。4,001–8,000 字符可能在 provider 调用完成后才在本机分析阶段失败。应在联网前统一限制为 4,000，或同步升级分析器并补齐测试。
 2. **临时采样密钥清理文案与 `KeepAlive` 行为不完全一致**：当前页面临时 API Key 在组件卸载时清理，但普通侧栏切换可能只触发停用而不卸载。应在 `onDeactivated` 清理，或把 UI 文案改为“窗口关闭/组件销毁时清除”。

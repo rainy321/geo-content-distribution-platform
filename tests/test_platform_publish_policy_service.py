@@ -17,10 +17,10 @@ from services.publish_preflight_service import (
 
 
 class PlatformPublishPolicyServiceTests(unittest.TestCase):
-    def test_matrix_has_one_independent_policy_for_all_ten_platforms(self):
+    def test_matrix_has_one_independent_policy_for_all_eleven_platforms(self):
         policies = list_platform_publish_policies()
 
-        self.assertEqual(len(policies), 10)
+        self.assertEqual(len(policies), 11)
         self.assertEqual(
             {item["platform"] for item in policies},
             set(SUPPORTED_PUBLISH_PLATFORMS),
@@ -52,7 +52,7 @@ class PlatformPublishPolicyServiceTests(unittest.TestCase):
             "product_conservative_guardrail",
         )
 
-    def test_all_ten_platforms_have_title_and_content_safe_limits(self):
+    def test_all_eleven_platforms_have_title_and_content_safe_limits(self):
         for platform in SUPPORTED_PUBLISH_PLATFORMS:
             with self.subTest(platform=platform):
                 canonical = get_platform_publish_policy(platform)
@@ -142,7 +142,10 @@ class PlatformPublishPolicyServiceTests(unittest.TestCase):
         self.assertEqual(adapt_tags_for_platform("baijiahao", tags)["selected"], [])
         self.assertEqual(len(adapt_tags_for_platform("xiaohongshu", tags)["selected"]), 5)
         self.assertEqual(len(adapt_tags_for_platform("douyin", tags)["selected"]), 5)
-        self.assertEqual(len(adapt_tags_for_platform("sohu", tags)["selected"]), 6)
+        sohu = adapt_tags_for_platform("sohu", tags)
+        self.assertEqual(sohu["selected"], ["核心", "行业", "产品"])
+        self.assertEqual(sohu["policy"]["basis"], "product_conservative_guardrail")
+        self.assertIn("不是搜狐号官方配额", sohu["policy"]["disclaimer"])
         tiktok = adapt_tags_for_platform("tiktok", tags)
         self.assertEqual(len(tiktok["selected"]), 5)
         self.assertEqual(
@@ -150,6 +153,32 @@ class PlatformPublishPolicyServiceTests(unittest.TestCase):
             "product_operational_guardrail",
         )
         self.assertEqual(adapt_tags_for_platform("zhihu", tags)["selected"], [])
+
+    def test_weibo_preflight_and_execution_share_one_total_text_budget(self):
+        title = "标" * 80
+        content = "文" * 620
+        tags = [f"标签{index}" + "长" * 13 for index in range(5)]
+
+        variant = validate_platform_publish_variant(
+            platform="weibo",
+            title=title,
+            content=content,
+            tags=tags,
+        )
+
+        self.assertLessEqual(variant["submission_preview"]["text_length"], 800)
+        self.assertEqual(variant["submission_preview"]["safe_limit"], 800)
+        self.assertEqual(
+            adapt_tags_for_platform("weibo", tags)["selected"],
+            [tag[:16] for tag in tags],
+        )
+        with self.assertRaisesRegex(PublishContentLimitError, "621 字"):
+            validate_platform_publish_variant(
+                platform="weibo",
+                title=title,
+                content="文" * 621,
+                tags=tags,
+            )
 
     def test_eight_tags_are_bounded_for_douyin_tiktok_and_bilibili(self):
         tags = [f"标签{index}" for index in range(1, 9)]
@@ -275,27 +304,113 @@ class PlatformPublishPolicyServiceTests(unittest.TestCase):
                 tags=[],
             )
 
-    def test_sohu_returns_explainable_conservative_article_warnings(self):
+    def test_sohu_automatic_copy_removes_deterministic_diversion_residue(self):
+        original = (
+            "## 直接答案\n\n"
+            "这是一项面向开发者的模型接口服务。\n\n"
+            "文章说明接口兼容机制和适用边界。\n\n"
+            "结果应以实际环境测试为准。\n\n"
+            "结果应以实际环境测试为准。\n\n"
+            "立即购买并私信领取优惠。\n\n"
+            "官网：https://example.com/product\n\n"
+            "#人工智能 #开发者"
+        )
         result = build_platform_publish_variant(
             platform="sohu",
             title="企业模型接口使用说明",
-            content=(
-                "## 直接答案\n\n"
-                "这是一项面向开发者的模型接口服务。\n\n"
-                "立即购买并私信领取优惠。"
-            ),
-            tags=["AI"],
+            content=original,
+            tags=["AI", "接口", "开发者", "第四个标签"],
         )
 
         self.assertEqual(
             result["platform_policy"]["format"],
             "conservative_enterprise_education_article",
         )
+        self.assertEqual(result["original_content"], original)
         self.assertNotIn("##", result["publish_content"])
+        self.assertNotIn("立即购买", result["publish_content"])
+        self.assertNotIn("https://example.com/product", result["publish_content"])
+        self.assertNotIn("#人工智能", result["publish_content"])
+        self.assertEqual(result["publish_content"].count("结果应以实际环境测试为准"), 1)
+        self.assertTrue(result["platform_cleanup"]["changed"])
+        self.assertEqual(result["platform_cleanup"]["removed_redirect_lines"], 1)
+        self.assertEqual(result["platform_cleanup"]["removed_cta_clauses"], 1)
+        self.assertEqual(result["platform_cleanup"]["removed_hashtag_tails"], 1)
+        self.assertEqual(result["platform_cleanup"]["removed_duplicate_sentences"], 1)
+        self.assertEqual(result["offline_preflight"]["tag_preview"]["selected"], ["AI", "接口", "开发者"])
         codes = {item["code"] for item in result["offline_preflight"]["issues"]}
-        self.assertIn("sohu_promotional_call_to_action", codes)
-        self.assertIn("sohu_no_public_source_url", codes)
+        self.assertNotIn("sohu_promotional_call_to_action", codes)
+        self.assertNotIn("sohu_no_public_source_url", codes)
         self.assertTrue(result["offline_preflight"]["passed"])
+
+    def test_sohu_source_url_is_a_warning_but_no_url_is_not_a_warning(self):
+        without_url = evaluate_platform_offline_preflight(
+            platform="sohu",
+            title="企业接口兼容机制说明",
+            content="第一段说明问题。\n\n第二段说明机制。\n\n第三段说明适用边界。",
+            tags=[],
+        )
+        without_codes = {item["code"] for item in without_url["issues"]}
+        self.assertNotIn("sohu_no_public_source_url", without_codes)
+        self.assertTrue(without_url["passed"])
+
+        with_url = evaluate_platform_offline_preflight(
+            platform="sohu",
+            title="企业接口兼容机制说明",
+            content=(
+                "第一段说明问题。\n\n第二段说明机制。\n\n"
+                "参考资料：产品技术文档：https://example.com/report"
+            ),
+            tags=[],
+        )
+        with_codes = {item["code"] for item in with_url["issues"]}
+        self.assertIn("sohu_external_url_review_risk", with_codes)
+        self.assertNotIn("sohu_high_confidence_external_redirect", with_codes)
+        self.assertTrue(with_url["passed"])
+
+    def test_sohu_high_confidence_diversion_blocks_manual_execution_copy(self):
+        result = evaluate_platform_offline_preflight(
+            platform="sohu",
+            title="企业接口服务说明",
+            content=(
+                "第一段说明服务边界。\n\n第二段说明兼容机制。\n\n"
+                "微信：service_1234，立即咨询。\n\n"
+                "官网：https://example.com/product"
+            ),
+            tags=[],
+        )
+
+        codes = {item["code"] for item in result["issues"]}
+        self.assertFalse(result["passed"])
+        self.assertIn("sohu_contact_information", codes)
+        self.assertIn("sohu_high_confidence_external_redirect", codes)
+        with self.assertRaisesRegex(PublishContentLimitError, "联系方式"):
+            validate_platform_publish_variant(
+                platform="sohu",
+                title="企业接口服务说明",
+                content=(
+                    "第一段说明服务边界。\n\n第二段说明兼容机制。\n\n"
+                    "微信：service_1234，立即咨询。\n\n"
+                    "官网：https://example.com/product"
+                ),
+                tags=[],
+            )
+
+    def test_sohu_seo_question_and_brand_marketing_combo_is_explained(self):
+        result = evaluate_platform_offline_preflight(
+            platform="sohu",
+            title="个人开发者如何选择AI API中转站？",
+            content=(
+                "本文介绍企业服务的判断维度。\n\n"
+                "产品能力需要结合接口兼容和计费方式核验。\n\n"
+                "选择结果应以实际测试和合同边界为准。"
+            ),
+            tags=[],
+        )
+
+        codes = {item["code"] for item in result["issues"]}
+        self.assertIn("sohu_seo_question_brand_marketing_combo", codes)
+        self.assertTrue(result["passed"])
 
 
 if __name__ == "__main__":

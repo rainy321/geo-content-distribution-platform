@@ -114,6 +114,17 @@ PLATFORM_CAPABILITIES = (
         "supports_schedule": True,
         "release_status": "stable",
     },
+    {
+        "key": "weibo",
+        "name": "微博",
+        "account_type": 11,
+        "priority": "P1",
+        "content_mode": "social_post",
+        "requires_images": False,
+        "requires_video": False,
+        "supports_schedule": True,
+        "release_status": "official_connector_required",
+    },
 )
 
 PLATFORM_BY_KEY = {item["key"]: item for item in PLATFORM_CAPABILITIES}
@@ -135,6 +146,7 @@ PLATFORM_KEY_ALIASES = {
     "头条": "toutiao",
     "搜狐": "sohu",
     "微信视频号": "channels",
+    "新浪微博": "weibo",
 }
 
 

@@ -2,6 +2,7 @@ import inspect
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from services.platform_review_verifier import (
     PlatformReviewVerifier,
@@ -80,6 +81,313 @@ class PlatformReviewVerifierTests(unittest.TestCase):
         self.assertEqual(channels["state"], "unsupported")
         self.assertIn("人工核验", channels["message"])
         self.assertEqual(unknown["state"], "unsupported")
+
+    def test_sohu_policy_uses_current_content_management_page(self):
+        self.assertEqual(
+            _POLICIES["sohu"].manage_url,
+            "https://mp.sohu.com/mpfe/v4/contentManagement/first/page",
+        )
+        self.assertTrue(_POLICIES["sohu"].read_rejection_details)
+
+    def test_dynamic_management_list_waits_for_exact_title_status(self):
+        class Page:
+            def __init__(self):
+                self.waits = []
+
+            def wait_for_timeout(self, milliseconds):
+                self.waits.append(milliseconds)
+
+        page = Page()
+        final_rows = [{"text": "精确标题 未通过 2026-09-16 10:10", "urls": ()}]
+        with patch.object(
+            PlatformReviewVerifier,
+            "_exact_title_rows",
+            side_effect=[[], [{"text": "精确标题", "urls": ()}], final_rows],
+        ):
+            rows = self.verifier._wait_for_exact_title_rows(
+                page,
+                "精确标题",
+                _POLICIES["sohu"].manage_url,
+                _POLICIES["sohu"].public_url_patterns,
+                read_rejection_details=False,
+            )
+
+        self.assertEqual(rows, final_rows)
+        self.assertEqual(len(page.waits), 2)
+
+    def test_title_row_prefers_deeper_status_over_shallow_url_only_ancestor(self):
+        class Locator:
+            def __init__(self, nodes=()):
+                self.nodes = list(nodes)
+
+            def count(self):
+                return len(self.nodes)
+
+            def nth(self, index):
+                return self.nodes[index]
+
+        class Anchor:
+            def __init__(self, href):
+                self.href = href
+
+            def get_attribute(self, name):
+                return self.href if name == "href" else None
+
+        class Node:
+            def __init__(self, text, *hrefs):
+                self.text = text
+                self.hrefs = hrefs
+
+            def inner_text(self):
+                return self.text
+
+            def locator(self, selector):
+                if selector == "a[href]":
+                    return Locator([Anchor(href) for href in self.hrefs])
+                return Locator()
+
+        class Candidate(Node):
+            def __init__(self, text, ancestors):
+                super().__init__(text)
+                self.ancestors = ancestors
+
+            def is_visible(self):
+                return True
+
+            def locator(self, selector):
+                if selector.startswith("xpath="):
+                    return self.ancestors[selector.count("/..")]
+                return super().locator(selector)
+
+        class Page:
+            def __init__(self, candidate):
+                self.candidate = candidate
+
+            def get_by_text(self, text, exact):
+                if text == "精确标题" and exact:
+                    return Locator([self.candidate])
+                return Locator()
+
+        ancestors = {
+            1: Node("精确标题", "/mpfe/v4/edit/123"),
+            2: Node(
+                "精确标题 未通过 2026-09-16 10:10",
+                "/mpfe/v4/edit/123",
+            ),
+            3: Node("精确标题"),
+            4: Node(""),
+            5: Node(""),
+            6: Node(""),
+        }
+        rows = PlatformReviewVerifier._exact_title_rows(
+            Page(Candidate("精确标题", ancestors)),
+            "精确标题",
+            _POLICIES["sohu"].manage_url,
+            _POLICIES["sohu"].public_url_patterns,
+        )
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["text"], "精确标题 未通过 2026-09-16 10:10")
+
+    def test_sohu_hidden_reason_text_is_read_without_visibility_requirement(self):
+        class Locator:
+            def __init__(self, nodes=()):
+                self.nodes = list(nodes)
+
+            def count(self):
+                return len(self.nodes)
+
+            def nth(self, index):
+                return self.nodes[index]
+
+        class HiddenReason:
+            def text_content(self):
+                return "未通过原因：标题营销推广倾向明显"
+
+        class Row:
+            def get_attribute(self, _name):
+                return None
+
+            def locator(self, selector):
+                if selector == ".article-reson-text, .article-reason-text":
+                    return Locator([HiddenReason()])
+                return Locator()
+
+            def get_by_text(self, _text, exact):
+                return Locator()
+
+        class Page:
+            def locator(self, _selector):
+                return Locator()
+
+        reason = PlatformReviewVerifier._read_rejection_reason(
+            Page(),
+            Row(),
+            title="精确标题",
+            row_text="精确标题 未通过 2026-09-16 10:10",
+        )
+
+        self.assertEqual(reason, "标题营销推广倾向明显")
+
+    def test_sohu_rejection_reason_is_returned_after_attempt_binding(self):
+        policy = _POLICIES["sohu"]
+        result = _resolve_exact_title_rows(
+            {
+                "started_at": "2026-09-16 02:00:00",
+                "observed_at": "2026-09-16 02:30:00",
+            },
+            [
+                {
+                    "text": "精确标题 未通过 2026-09-16 10:10",
+                    "urls": (),
+                    "rejection_reason": "标题营销推广倾向明显",
+                }
+            ],
+            platform_name=policy.name,
+            public_url_patterns=policy.public_url_patterns,
+            display_timezone=policy.display_timezone,
+        )
+
+        self.assertEqual(result["state"], "rejected")
+        self.assertIn("标题营销推广倾向明显", result["message"])
+        self.assertIn("未通过原因", result["evidence"])
+
+    def test_sohu_rejection_tooltip_is_read_by_hover_without_click(self):
+        class Locator:
+            def __init__(self, nodes=()):
+                self.nodes = list(nodes)
+
+            def count(self):
+                return len(self.nodes)
+
+            def nth(self, index):
+                return self.nodes[index]
+
+        class Element:
+            def __init__(self, *, page=None, text="", attributes=None):
+                self.page = page
+                self.text = text
+                self.attributes = attributes or {}
+
+            def get_attribute(self, name):
+                return self.attributes.get(name)
+
+            def is_visible(self):
+                return True
+
+            def hover(self, timeout):
+                self.page.hovered = True
+
+            def inner_text(self):
+                return self.text
+
+        class Row(Element):
+            def __init__(self, page, target):
+                super().__init__(page=page)
+                self.target = target
+
+            def locator(self, selector):
+                if selector == '[class*="question"]':
+                    return Locator([self.target])
+                return Locator()
+
+            def get_by_text(self, text, exact):
+                if text == "未通过" and exact:
+                    return Locator([self.target])
+                return Locator()
+
+        class Page:
+            def __init__(self):
+                self.hovered = False
+                self.tooltip = Element(
+                    page=self,
+                    text="未通过原因：正文营销推广倾向明显",
+                )
+
+            def locator(self, _selector):
+                return Locator([self.tooltip]) if self.hovered else Locator()
+
+            def wait_for_timeout(self, _milliseconds):
+                return None
+
+        page = Page()
+        target = Element(page=page, text="未通过")
+        reason = PlatformReviewVerifier._read_rejection_reason(
+            page,
+            Row(page, target),
+            title="精确标题",
+            row_text="精确标题 未通过 2026-09-16 10:10",
+        )
+
+        self.assertTrue(page.hovered)
+        self.assertEqual(reason, "正文营销推广倾向明显")
+
+    def test_weibo_reviewer_requires_returned_public_url_not_only_status_id(self):
+        marker = self.cookies_dir / "weibo.json"
+        marker.write_text("{}", encoding="utf-8")
+
+        class Connector:
+            def __init__(self, rows):
+                self.rows = rows
+
+            def verify_marker(self, _marker):
+                return True
+
+            def recent_status_rows(self, _title, *, count):
+                self.count = count
+                return self.rows
+
+        snapshot = {
+            "platform": "weibo",
+            "title": "精确标题",
+            "account_file": marker.name,
+            "account_status": 1,
+            "started_at": "2026-09-15 08:00:00",
+            "observed_at": "2026-09-15 08:30:00",
+        }
+        interval = (("2026-09-15T08:10:00+00:00", "2026-09-15T08:10:01+00:00"),)
+        id_only = PlatformReviewVerifier(
+            self.cookies_dir,
+            navigation_timeout_ms=1_000,
+            settle_ms=0,
+            weibo_connector_factory=lambda: Connector(
+                [
+                    {
+                        "text": "精确标题 已发布 status_id=1234567890",
+                        "urls": (),
+                        "external_ids": ("1234567890",),
+                        "time_intervals": interval,
+                        "public_visibility_confirmed": True,
+                        "title_match_confirmed": True,
+                    }
+                ]
+            ),
+        )(snapshot)
+        public = PlatformReviewVerifier(
+            self.cookies_dir,
+            navigation_timeout_ms=1_000,
+            settle_ms=0,
+            weibo_connector_factory=lambda: Connector(
+                [
+                    {
+                        "text": "精确标题 已发布 status_id=1234567890",
+                        "urls": ("https://m.weibo.cn/detail/1234567890",),
+                        "external_ids": ("1234567890",),
+                        "time_intervals": interval,
+                        "public_visibility_confirmed": True,
+                        "title_match_confirmed": True,
+                    }
+                ]
+            ),
+        )(snapshot)
+
+        self.assertEqual(id_only["state"], "processing")
+        self.assertNotIn("result_url", id_only)
+        self.assertEqual(public["state"], "published")
+        self.assertEqual(
+            public["result_url"],
+            "https://m.weibo.cn/detail/1234567890",
+        )
 
     def test_implementation_exposes_only_navigation_and_read_operations(self):
         source = inspect.getsource(PlatformReviewVerifier)

@@ -27,6 +27,11 @@ from services.publisher_adapter import (
     XiaohongshuPublisherAdapter,
     ZhihuPublisherAdapter,
 )
+from services.weibo_official_connector import (
+    WEIBO_OFFICIAL_CONNECTOR_REQUIRED_MESSAGE,
+    WeiboOfficialConnector,
+)
+from services.weibo_publisher_adapter import WeiboPublisherAdapter
 
 
 REAL_PUBLISH_PLATFORMS = SUPPORTED_PUBLISH_PLATFORMS
@@ -110,6 +115,16 @@ class RealPublisherFactory:
                     return ChannelsPublisherAdapter(account_file)
                 if platform == "tiktok":
                     return TiktokPublisherAdapter(account_file)
+                if platform == "weibo":
+                    connector = WeiboOfficialConnector()
+                    if not connector.is_available():
+                        raise PublisherNotConfiguredError(
+                            WEIBO_OFFICIAL_CONNECTOR_REQUIRED_MESSAGE
+                        )
+                    return WeiboPublisherAdapter(
+                        account_file,
+                        connector=connector,
+                    )
 
         raise PublisherNotConfiguredError(
             f"{platform} 任务绑定的账号 {bound_account_id} 当前不可用，"

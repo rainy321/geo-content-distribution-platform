@@ -1,6 +1,11 @@
 const objectValue = value => (value && typeof value === 'object' ? value : {})
 const CHAT_COMPLETIONS_SUFFIX = '/chat/completions'
 const IMAGE_GENERATIONS_SUFFIX = '/images/generations'
+const VIDEO_GENERATION_ENDPOINT_SUFFIXES = [
+  '/contents/generations/tasks',
+  '/video/generations',
+  '/videos/generations'
+]
 
 export const normalizeUnifiedAIBaseUrl = value => {
   const raw = String(value || '').trim()
@@ -66,6 +71,32 @@ export const resolveUnifiedAIImageEndpoint = value => {
     return `${parsed.origin}${IMAGE_GENERATIONS_SUFFIX}`
   }
   return `${parsed.origin}/v1${IMAGE_GENERATIONS_SUFFIX}`
+}
+
+export const unifiedAIImageCompatibilityIssue = (baseUrl, model) => {
+  const normalizedModel = String(model || '').trim()
+  if (normalizedModel.toLowerCase().includes('seedance')) {
+    return {
+      code: 'video_model_not_supported',
+      message: `IMAGE 角色不支持视频生成模型 "${normalizedModel}"：Seedance 是视频模型，请改用 Seedream、GPT Image / DALL-E 或供应商明确支持 /images/generations 的图片模型。`
+    }
+  }
+  const path = new URL(normalizeUnifiedAIBaseUrl(baseUrl)).pathname
+    .replace(/\/+$/, '')
+    .toLowerCase()
+  if (VIDEO_GENERATION_ENDPOINT_SUFFIXES.some(suffix => path.endsWith(suffix))) {
+    return {
+      code: 'video_endpoint_not_supported',
+      message: 'IMAGE 角色只调用 OpenAI-compatible Images API；当前 Base URL 是视频生成任务地址。请改填图片 API 根路径或完整 /images/generations 地址。'
+    }
+  }
+  return null
+}
+
+export const validateUnifiedAIImageCompatibility = (baseUrl, model) => {
+  const issue = unifiedAIImageCompatibilityIssue(baseUrl, model)
+  if (issue) throw new Error(issue.message)
+  return true
 }
 
 const knownProviderForHost = hostname => {
@@ -221,12 +252,20 @@ export const buildUnifiedAIConfigPayload = (draft, status = {}) => {
   return payload
 }
 
-export const buildUnifiedAIRoleConfigPayload = (draft, roleStatus = {}, writerStatus = {}) => {
+export const buildUnifiedAIRoleConfigPayload = (
+  draft,
+  roleStatus = {},
+  writerStatus = {},
+  role = roleStatus?.id || ''
+) => {
   const payload = {
     provider: String(draft?.provider || 'custom').trim().toLowerCase(),
     base_url: validateUnifiedAIProviderBinding(draft?.provider || 'custom', draft?.baseUrl),
     model: String(draft?.model || '').trim(),
     reuse_writer_credential: Boolean(draft?.reuseWriterCredential)
+  }
+  if (String(role || '').trim().toLowerCase() === 'image') {
+    validateUnifiedAIImageCompatibility(payload.base_url, payload.model)
   }
   const apiKey = String(draft?.apiKey || '').trim()
   if (apiKey) payload.api_key = apiKey

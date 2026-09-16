@@ -926,7 +926,8 @@ const platforms = [
   { label: '快手', value: '快手' },
   { label: 'Bilibili', value: 'Bilibili' },
   { label: '视频号', value: '视频号' },
-  { label: 'TikTok', value: 'TikTok' }
+  { label: 'TikTok', value: 'TikTok' },
+  { label: '微博', value: '微博' }
 ]
 
 const brief = reactive({
@@ -1652,7 +1653,8 @@ const recoveredPlatformValue = (value) => {
     kuaishou: '快手',
     bilibili: 'Bilibili',
     tencent: '视频号',
-    tiktok: 'TikTok'
+    tiktok: 'TikTok',
+    weibo: '微博'
   }
   const normalized = String(value || '').trim()
   return aliases[normalized.toLocaleLowerCase()] || normalized

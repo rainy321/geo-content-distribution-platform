@@ -694,6 +694,41 @@ class RealPublishApiTests(unittest.TestCase):
 
         self.assertTrue(payload["can_execute_real"])
 
+    def test_sohu_multi_article_batch_is_rejected_before_job_creation(self):
+        account_id = self._create_account("sohu")
+        app.config["REAL_PUBLISHING_AUTHORIZED"] = True
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                second_article_id = conn.execute(
+                    """
+                    INSERT INTO articles (project_id, title, content, status)
+                    SELECT project_id, '第二篇待发布文章', '第二篇正文', 'ready'
+                    FROM articles WHERE id = ?
+                    """,
+                    (self.article_id,),
+                ).lastrowid
+
+        response = self.client.post(
+            "/api/publish",
+            json={
+                "article_id": self.article_id,
+                "batch_article_ids": [self.article_id, second_article_id],
+                "platform": "sohu",
+                "account_id": account_id,
+            },
+        )
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.get_json()["data"]["action"],
+            "sohu_one_article_per_batch_required",
+        )
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(
+                conn.execute("SELECT COUNT(*) FROM publish_jobs").fetchone()[0],
+                0,
+            )
+
     def test_baijiahao_and_xiaohongshu_payloads_expose_real_action(self):
         for platform in ("baijiahao", "xiaohongshu"):
             with self.subTest(platform=platform):

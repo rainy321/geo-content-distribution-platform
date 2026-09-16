@@ -1,3 +1,5 @@
+import asyncio
+
 from playwright.async_api import async_playwright
 
 from conf import BASE_DIR, LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
@@ -191,6 +193,21 @@ async def check_cookie(type, file_path, *, cookies_directory=None):
             from uploader.tk_uploader.main_chrome import cookie_auth as tiktok_cookie_auth
 
             return await tiktok_cookie_auth(cookies_root / file_path)
+        # 微博：仅核验官方 CLI 的当前授权身份与本地无密钥绑定标记。
+        case 11:
+            from services.weibo_official_connector import (
+                WeiboConnectorError,
+                WeiboOfficialConnector,
+            )
+
+            try:
+                await asyncio.to_thread(
+                    WeiboOfficialConnector().verify_marker,
+                    cookies_root / file_path,
+                )
+            except WeiboConnectorError:
+                return False
+            return True
         case _:
             return False
 

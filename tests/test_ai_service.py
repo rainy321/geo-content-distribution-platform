@@ -7,6 +7,7 @@ import requests
 from services.ai_service import (
     AIConfigurationError,
     AIConnectError,
+    AIProviderHTTPError,
     AIReadTimeoutError,
     AIServiceError,
     AISettings,
@@ -22,10 +23,11 @@ from services.ai_service import (
 
 
 class FakeResponse:
-    def __init__(self, payload, status_code=200, text=""):
+    def __init__(self, payload, status_code=200, text="", headers=None):
         self._payload = payload
         self.status_code = status_code
         self.text = text
+        self.headers = headers or {}
 
     def json(self):
         return self._payload
@@ -91,7 +93,9 @@ class AIServiceTests(unittest.TestCase):
         self.assertEqual(captured["headers"]["Authorization"], "Bearer test-key")
         self.assertEqual(captured["json"]["model"], "test-model")
         self.assertEqual(captured["json"]["max_tokens"], 4096)
+        self.assertIs(captured["json"]["stream"], False)
         self.assertNotIn("enable_thinking", captured["json"])
+        self.assertEqual(captured["headers"]["Accept"], "application/json")
         self.assertEqual(captured["timeout"], 15)
         self.assertFalse(captured["allow_redirects"])
         prompt = captured["json"]["messages"][1]["content"]
@@ -538,6 +542,127 @@ class AIServiceTests(unittest.TestCase):
         self.assertIn("模型或接入点 ID", message)
         self.assertNotIn(secret_body, message)
         self.assertNotIn("bearer-secret", message)
+        self.assertIsInstance(raised.exception, AIProviderHTTPError)
+        self.assertEqual(raised.exception.status_code, 404)
+        self.assertFalse(raised.exception.outcome_unknown)
+
+    def test_accepts_wrapped_openai_compatible_payload(self):
+        def fake_post(*args, **kwargs):
+            return FakeResponse(
+                {
+                    "data": {
+                        "id": "wrapped-request",
+                        "model": "wrapped-model",
+                        "choices": [{"message": {"content": "包装后的有效回答"}}],
+                    }
+                }
+            )
+
+        result = sample_ai_prompt_detailed(
+            prompt="测试完整回答",
+            settings=self.settings,
+            http_post=fake_post,
+        )
+
+        self.assertEqual(result.content, "包装后的有效回答")
+        self.assertEqual(result.model, "wrapped-model")
+        self.assertEqual(result.provider_request_id, "wrapped-request")
+
+    def test_accepts_responses_style_output_text(self):
+        def fake_post(*args, **kwargs):
+            return FakeResponse(
+                {
+                    "id": "responses-request",
+                    "model": "responses-model",
+                    "output": [
+                        {
+                            "content": [
+                                {"type": "output_text", "text": "Responses 风格回答"}
+                            ]
+                        }
+                    ],
+                }
+            )
+
+        result = sample_ai_prompt_detailed(
+            prompt="测试完整回答",
+            settings=self.settings,
+            http_post=fake_post,
+        )
+
+        self.assertEqual(result.content, "Responses 风格回答")
+        self.assertEqual(result.model, "responses-model")
+
+    def test_accepts_complete_forced_sse_response_without_retry(self):
+        class ForcedSSEResponse(FakeResponse):
+            def json(self):
+                raise ValueError("not a single JSON document")
+
+        def fake_post(*args, **kwargs):
+            return ForcedSSEResponse(
+                None,
+                text=(
+                    'data: {"id":"sse-request","model":"sse-model",'
+                    '"choices":[{"delta":{"content":"第一段"}}]}\n\n'
+                    'data: {"choices":[{"delta":{"content":"第二段"}}],'
+                    '"usage":{"prompt_tokens":3,"completion_tokens":4}}\n\n'
+                    "data: [DONE]\n\n"
+                ),
+                headers={"Content-Type": "text/event-stream"},
+            )
+
+        result = sample_ai_prompt_detailed(
+            prompt="测试完整回答",
+            settings=self.settings,
+            http_post=fake_post,
+        )
+
+        self.assertEqual(result.content, "第一段第二段")
+        self.assertEqual(result.model, "sse-model")
+        self.assertEqual(result.provider_request_id, "sse-request")
+        self.assertEqual(result.usage["input_tokens"], 3)
+        self.assertEqual(result.usage["output_tokens"], 4)
+
+    def test_rejects_reasoning_only_payload_with_actionable_message(self):
+        def fake_post(*args, **kwargs):
+            return FakeResponse(
+                {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": "",
+                                "reasoning_content": "private reasoning must not escape",
+                            },
+                            "finish_reason": "length",
+                        }
+                    ]
+                }
+            )
+
+        with self.assertRaisesRegex(AIServiceError, "达到输出 Token 上限") as raised:
+            sample_ai_prompt_detailed(
+                prompt="测试完整回答",
+                settings=self.settings,
+                http_post=fake_post,
+            )
+
+        self.assertNotIn("private reasoning", str(raised.exception))
+
+    def test_http_504_preserves_ambiguous_upstream_status(self):
+        def fake_post(*args, **kwargs):
+            return FakeResponse({}, status_code=504, text="untrusted gateway body")
+
+        with self.assertRaises(AIProviderHTTPError) as raised:
+            sample_ai_prompt_detailed(
+                prompt="测试完整回答",
+                settings=self.settings,
+                http_post=fake_post,
+            )
+
+        self.assertEqual(raised.exception.status_code, 504)
+        self.assertTrue(raised.exception.outcome_unknown)
+        self.assertIn("上游网关", str(raised.exception))
+        self.assertNotIn("untrusted gateway body", str(raised.exception))
 
     def test_http_404_reports_provider_specific_endpoint_actions(self):
         cases = (
