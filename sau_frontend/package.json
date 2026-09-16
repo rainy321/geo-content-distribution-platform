@@ -1,7 +1,7 @@
 {
   "name": "sau-admin",
   "private": true,
-  "version": "1.2.6",
+  "version": "1.2.7",
   "author": "Edan.Lee",
   "type": "module",
   "scripts": {

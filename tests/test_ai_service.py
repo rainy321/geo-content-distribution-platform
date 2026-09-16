@@ -568,6 +568,94 @@ class AIServiceTests(unittest.TestCase):
         self.assertEqual(result.model, "wrapped-model")
         self.assertEqual(result.provider_request_id, "wrapped-request")
 
+    def test_accepts_recursive_envelopes_and_message_content_parts(self):
+        def fake_post(*args, **kwargs):
+            return FakeResponse(
+                {
+                    "request_id": "outer-request",
+                    "usage": {"prompt_tokens": 7, "completion_tokens": 9},
+                    "data": {
+                        "result": {
+                            "response": {
+                                "model": "nested-model",
+                                "choices": [
+                                    {
+                                        "message": {
+                                            "content": [
+                                                {"type": "text", "text": "嵌套"},
+                                                {
+                                                    "type": "output_text",
+                                                    "text": {"value": " 回答"},
+                                                },
+                                            ]
+                                        }
+                                    }
+                                ],
+                            }
+                        }
+                    },
+                }
+            )
+
+        result = sample_ai_prompt_detailed(
+            prompt="测试嵌套回答",
+            settings=self.settings,
+            http_post=fake_post,
+        )
+
+        self.assertEqual(result.content, "嵌套 回答")
+        self.assertEqual(result.model, "nested-model")
+        self.assertEqual(result.provider_request_id, "outer-request")
+        self.assertEqual(result.usage["input_tokens"], 7)
+        self.assertEqual(result.usage["output_tokens"], 9)
+
+    def test_accepts_explicit_final_answer_without_exposing_reasoning(self):
+        cases = (
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": None,
+                            "reasoning_content": "private-reasoning-message",
+                            "final_answer": "消息最终回答",
+                        }
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "content": "",
+                            "analysis": "private-reasoning-choice",
+                        },
+                        "answer": {"type": "text", "text": "选项最终回答"},
+                    }
+                ]
+            },
+            {
+                "thinking": "private-reasoning-root",
+                "final": [{"type": "text", "text": "根级最终回答"}],
+            },
+            {"choices": [{"text": "旧版 choices.text 回答"}]},
+        )
+        expected = (
+            "消息最终回答",
+            "选项最终回答",
+            "根级最终回答",
+            "旧版 choices.text 回答",
+        )
+
+        for payload, expected_content in zip(cases, expected):
+            with self.subTest(expected_content=expected_content):
+                result = sample_ai_prompt_detailed(
+                    prompt="测试显式最终回答",
+                    settings=self.settings,
+                    http_post=lambda *args, payload=payload, **kwargs: FakeResponse(payload),
+                )
+                self.assertEqual(result.content, expected_content)
+                self.assertNotIn("private-reasoning", result.content)
+
     def test_accepts_responses_style_output_text(self):
         def fake_post(*args, **kwargs):
             return FakeResponse(
@@ -623,6 +711,80 @@ class AIServiceTests(unittest.TestCase):
         self.assertEqual(result.usage["input_tokens"], 3)
         self.assertEqual(result.usage["output_tokens"], 4)
 
+    def test_accepts_multiline_nested_deepseek_sse_and_ignores_reasoning(self):
+        class ForcedSSEResponse(FakeResponse):
+            def json(self):
+                raise ValueError("not a single JSON document")
+
+        response_text = (
+            'data: {"id":"deepseek-request","model":"deepseek-reasoner",'
+            '"choices":[{"delta":{"reasoning_content":"private-reasoning"}}]}\n\n'
+            "event: message\n"
+            "data: {\n"
+            'data:   "data": {\n'
+            'data:     "result": {"choices":[{"delta":{"content":"最终"}}]}\n'
+            "data:   }\n"
+            "data: }\n\n"
+            'data: {"data":{"result":{"choices":[{"delta":{"content":"回答"},'
+            '"finish_reason":"stop"}],"usage":{"prompt_tokens":5,'
+            '"completion_tokens":6}}}}\n'
+            "data: [DONE]\n"
+        )
+
+        result = sample_ai_prompt_detailed(
+            prompt="测试 DeepSeek SSE",
+            settings=self.settings,
+            http_post=lambda *args, **kwargs: ForcedSSEResponse(
+                None,
+                text=response_text,
+                headers={"Content-Type": "text/event-stream"},
+            ),
+        )
+
+        self.assertEqual(result.content, "最终回答")
+        self.assertEqual(result.model, "deepseek-reasoner")
+        self.assertEqual(result.provider_request_id, "deepseek-request")
+        self.assertEqual(result.usage["input_tokens"], 5)
+        self.assertEqual(result.usage["output_tokens"], 6)
+        self.assertNotIn("private-reasoning", result.content)
+
+    def test_accepts_responses_sse_deltas_without_duplicating_done_text(self):
+        class ForcedSSEResponse(FakeResponse):
+            def json(self):
+                raise ValueError("not a single JSON document")
+
+        response_text = (
+            "event: response.output_text.delta\n"
+            'data: {"type":"response.output_text.delta","response_id":"resp-1",'
+            '"delta":"第一段"}\n\n'
+            "event: response.output_text.delta\n"
+            'data: {"type":"response.output_text.delta","delta":" 第二段"}\n\n'
+            "event: response.output_text.done\n"
+            'data: {"type":"response.output_text.done","text":"第一段 第二段"}\n\n'
+            "event: response.completed\n"
+            'data: {"type":"response.completed","response":{"id":"resp-1",'
+            '"model":"responses-model","usage":{"input_tokens":2,"output_tokens":3},'
+            '"output":[{"type":"message","content":[{"type":"output_text",'
+            '"text":"第一段 第二段"}]}]}}\n\n'
+            "data: [DONE]\n\n"
+        )
+
+        result = sample_ai_prompt_detailed(
+            prompt="测试 Responses SSE",
+            settings=self.settings,
+            http_post=lambda *args, **kwargs: ForcedSSEResponse(
+                None,
+                text=response_text,
+                headers={"Content-Type": "text/event-stream"},
+            ),
+        )
+
+        self.assertEqual(result.content, "第一段 第二段")
+        self.assertEqual(result.model, "responses-model")
+        self.assertEqual(result.provider_request_id, "resp-1")
+        self.assertEqual(result.usage["input_tokens"], 2)
+        self.assertEqual(result.usage["output_tokens"], 3)
+
     def test_rejects_reasoning_only_payload_with_actionable_message(self):
         def fake_post(*args, **kwargs):
             return FakeResponse(
@@ -647,6 +809,124 @@ class AIServiceTests(unittest.TestCase):
             )
 
         self.assertNotIn("private reasoning", str(raised.exception))
+
+    def test_rejects_reasoning_only_sse_without_exposing_reasoning(self):
+        class ForcedSSEResponse(FakeResponse):
+            def json(self):
+                raise ValueError("not a single JSON document")
+
+        response_text = (
+            'data: {"id":"glm-request","model":"glm-5.2","choices":[{'
+            '"delta":{"reasoning_content":"private streamed reasoning"}}]}\n\n'
+            'data: {"choices":[{"delta":{"content":""},'
+            '"finish_reason":"length"}]}\n\n'
+            "data: [DONE]\n\n"
+        )
+
+        with self.assertRaisesRegex(AIServiceError, "达到输出 Token 上限") as raised:
+            sample_ai_prompt_detailed(
+                prompt="测试 GLM reasoning-only SSE",
+                settings=self.settings,
+                http_post=lambda *args, **kwargs: ForcedSSEResponse(
+                    None,
+                    text=response_text,
+                    headers={"content-type": "text/event-stream"},
+                ),
+            )
+
+        message = str(raised.exception)
+        self.assertIn("协议形状", message)
+        self.assertNotIn("private streamed reasoning", message)
+
+    def test_rejects_mixed_reasoning_field_and_reports_only_safe_shape(self):
+        payload = {
+            "data": {
+                "result": {
+                    "choices": [
+                        {
+                            "message": {
+                                "content": None,
+                                "analysis": "private analysis </think> guessed final",
+                            },
+                            "finish_reason": "stop",
+                        }
+                    ]
+                }
+            }
+        }
+
+        with self.assertRaisesRegex(AIServiceError, "协议形状") as raised:
+            sample_ai_prompt_detailed(
+                prompt="测试推理字段安全边界",
+                settings=self.settings,
+                http_post=lambda *args, **kwargs: FakeResponse(payload),
+            )
+
+        message = str(raised.exception)
+        self.assertIn("root.data.result.choices", message)
+        self.assertIn("analysis=string", message)
+        self.assertNotIn("private analysis", message)
+        self.assertNotIn("guessed final", message)
+
+    def test_sampling_disables_thinking_only_for_supported_reasoning_models(self):
+        cases = (
+            ("https://api.deepseek.com", "deepseek-reasoner"),
+            ("https://open.bigmodel.cn/api/paas/v4", "glm-5.2"),
+            (
+                "https://ark.cn-beijing.volces.com/api/v3",
+                "doubao-seed-2-1-pro-250715",
+            ),
+        )
+
+        for base_url, model in cases:
+            with self.subTest(model=model):
+                captured = {}
+
+                def fake_post(*args, **kwargs):
+                    captured.update(kwargs)
+                    return FakeResponse(
+                        {"choices": [{"message": {"content": "最终回答"}}]}
+                    )
+
+                sample_ai_prompt_detailed(
+                    prompt="测试低延迟最终回答",
+                    settings=AISettings(
+                        base_url=base_url,
+                        api_key="synthetic-secret",
+                        model=model,
+                    ),
+                    http_post=fake_post,
+                )
+
+                self.assertEqual(
+                    captured["json"]["thinking"],
+                    {"type": "disabled"},
+                )
+
+    def test_article_generation_does_not_apply_sampling_thinking_policy(self):
+        captured = {}
+
+        def fake_post(*args, **kwargs):
+            captured.update(kwargs)
+            return FakeResponse(
+                {"choices": [{"message": {"content": "普通文章回答"}}]}
+            )
+
+        generate_geo_content(
+            project=self.project,
+            topic="测试",
+            keywords=[],
+            length=600,
+            content_type="行业科普",
+            settings=AISettings(
+                base_url="https://open.bigmodel.cn/api/paas/v4",
+                api_key="synthetic-secret",
+                model="glm-5.2",
+            ),
+            http_post=fake_post,
+        )
+
+        self.assertNotIn("thinking", captured["json"])
 
     def test_http_504_preserves_ambiguous_upstream_status(self):
         def fake_post(*args, **kwargs):

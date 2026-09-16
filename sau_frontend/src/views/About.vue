@@ -115,7 +115,7 @@
 
     <footer class="about-footer">
       <span>GEO CONTENT WORKBENCH</span>
-      <p>版本 1.2.6 · 本机优先 · 可审计证据 · {{ publishingFooter }}</p>
+      <p>版本 1.2.7 · 本机优先 · 可审计证据 · {{ publishingFooter }}</p>
     </footer>
   </main>
 </template>

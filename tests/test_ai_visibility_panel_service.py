@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sqlite3
 import tempfile
@@ -131,6 +132,12 @@ class AIVisibilityPanelServiceTests(unittest.TestCase):
         self.assertEqual(first["status"], "completed")
         self.assertEqual(first["distinct_model_count"], 2)
         self.assertTrue(first["multi_model_executed"])
+        self.assertEqual(first["measurement_quality"]["status"], "directional")
+        self.assertFalse(first["measurement_quality"]["score_allowed"])
+        self.assertEqual(first["measurement_quality"]["valid_response_count"], 2)
+        self.assertEqual(first["measurement_quality"]["requested_response_count"], 2)
+        self.assertEqual(first["measurement_quality"]["valid_response_rate"], 1.0)
+        self.assertFalse(first["measurement_quality"]["consumer_geo_claim_allowed"])
         self.assertEqual(len(calls), 2)
         self.assertEqual(
             [item["execution_status"] for item in first["targets"]],
@@ -165,6 +172,85 @@ class AIVisibilityPanelServiceTests(unittest.TestCase):
         self.assertEqual(request_count, 3)
         self.assertEqual(usage_count, 2)
 
+    def test_version_1_1_request_shape_replays_without_new_provider_calls(self):
+        calls = []
+
+        def runner(_database_path, **kwargs):
+            calls.append(kwargs["settings"].model)
+            return {
+                "request_id": kwargs["request_id"],
+                "idempotency_key": kwargs["idempotency_key"],
+                "replayed": False,
+                "payload": {
+                    "data": {
+                        "status": "completed",
+                        "completed_sample_count": 1,
+                        "requested_sample_count": 1,
+                        "executions": [
+                            {
+                                "provider": kwargs["settings"].provider,
+                                "model": kwargs["settings"].model,
+                            }
+                        ],
+                        "grounding": {"web_search_verified": False},
+                    }
+                },
+            }
+
+        first = self.run_panel(runner)
+        self.assertEqual(first["status"], "completed")
+        self.assertEqual(len(calls), 2)
+
+        legacy_shape = {
+            "project_id": self.project_id,
+            "prompt_sha256": hashlib.sha256(
+                "哪些 AI Agent 值得考虑？".encode("utf-8")
+            ).hexdigest(),
+            "sample_count": 1,
+            "aliases": ["XX科技"],
+            "competitors": ["YY科技"],
+            "persist": False,
+            "roles": ["writer", "reviewer", "evaluator"],
+            "panel_version": "api-model-visibility-panel-1.1.0",
+        }
+        legacy_shape_sha256 = hashlib.sha256(
+            json.dumps(
+                legacy_shape,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        with closing(sqlite3.connect(self.database_path)) as conn:
+            row = conn.execute(
+                "SELECT id, result_json FROM ai_visibility_sample_requests "
+                "WHERE request_id = ?",
+                ("panel-request",),
+            ).fetchone()
+            storage = json.loads(row[1])
+            storage["manifest"]["panel_version"] = (
+                "api-model-visibility-panel-1.1.0"
+            )
+            storage["manifest"]["request_shape_sha256"] = legacy_shape_sha256
+            conn.execute(
+                "UPDATE ai_visibility_sample_requests SET result_json = ? WHERE id = ?",
+                (
+                    json.dumps(
+                        storage,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    ),
+                    row[0],
+                ),
+            )
+            conn.commit()
+
+        replay = self.run_panel(runner)
+
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(len(calls), 2)
+
     def test_one_model_failure_preserves_other_completed_result(self):
         def runner(_database_path, **kwargs):
             if kwargs["settings"].model == "review-model":
@@ -196,6 +282,41 @@ class AIVisibilityPanelServiceTests(unittest.TestCase):
         self.assertEqual(reviewer["failure"]["code"], "panel_target_failed")
         self.assertEqual(evaluator["execution_status"], "skipped")
         self.assertFalse(result["multi_model_executed"])
+        self.assertEqual(result["measurement_quality"]["status"], "insufficient")
+        self.assertFalse(result["measurement_quality"]["score_allowed"])
+
+    def test_five_or_more_complete_api_answers_unlock_quantitative_panel_only(self):
+        def runner(_database_path, **kwargs):
+            settings = kwargs["settings"]
+            count = int(kwargs["sample_count"])
+            return {
+                "request_id": kwargs["request_id"],
+                "idempotency_key": kwargs["idempotency_key"],
+                "replayed": False,
+                "payload": {
+                    "data": {
+                        "status": "completed",
+                        "completed_sample_count": count,
+                        "requested_sample_count": count,
+                        "executions": [
+                            {"provider": settings.provider, "model": settings.model}
+                        ],
+                    }
+                },
+            }
+
+        result = self.run_panel(runner, sample_count=3)
+
+        quality = result["measurement_quality"]
+        self.assertEqual(result["status"], "completed")
+        self.assertEqual(quality["status"], "quantitative")
+        self.assertTrue(quality["score_allowed"])
+        self.assertTrue(quality["api_channel_claim_allowed"])
+        self.assertFalse(quality["consumer_geo_claim_allowed"])
+        self.assertEqual(quality["confidence_level"], "MEDIUM")
+        self.assertEqual(quality["valid_response_count"], 6)
+        self.assertEqual(quality["requested_response_count"], 6)
+        self.assertEqual(quality["valid_response_rate"], 1.0)
 
     def test_first_sample_failures_keep_frozen_model_identity(self):
         def runner(_database_path, **kwargs):
@@ -231,6 +352,10 @@ class AIVisibilityPanelServiceTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "need_action")
         self.assertEqual(result["distinct_model_count"], 0)
+        self.assertEqual(result["measurement_quality"]["status"], "invalid")
+        self.assertEqual(result["measurement_quality"]["valid_response_count"], 0)
+        self.assertEqual(result["measurement_quality"]["requested_response_count"], 6)
+        self.assertEqual(result["measurement_quality"]["valid_response_rate"], 0.0)
         writer, reviewer = result["targets"]
         self.assertEqual(writer["execution_status"], "outcome_unknown")
         self.assertEqual(writer["provider"], "qwen")

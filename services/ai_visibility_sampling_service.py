@@ -12,7 +12,9 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 import sqlite3
+import time
 from contextlib import closing
 from dataclasses import replace
 from datetime import datetime, timezone
@@ -31,6 +33,7 @@ from services.ai_service import (
     AIServiceError,
     AISettings,
     provider_label_for_settings,
+    resolve_ai_chat_completions_url,
     sample_ai_prompt_detailed,
 )
 from services.ai_visibility_run_service import (
@@ -47,9 +50,11 @@ from services.ai_visibility_service import (
 
 
 VISIBILITY_SAMPLING_VERSION = "controlled-live-visibility-sampling-1.2.0"
+VISIBILITY_SAMPLING_PREFLIGHT_VERSION = "visibility-sampling-preflight-1.0.0"
 LOCAL_ANALYSIS_INPUT_SNAPSHOT_VERSION = "visibility-local-analysis-input-1.0.0"
 IN_PROGRESS_EXPIRY_SECONDS = 15 * 60
 VISIBILITY_SAMPLE_MAX_OUTPUT_TOKENS = 768
+VISIBILITY_SAMPLE_MAX_TIMEOUT_SECONDS = 120.0
 MIN_SAMPLE_COUNT = 1
 MAX_SAMPLE_COUNT = 5
 MAX_PROMPT_LENGTH = 8_000
@@ -209,6 +214,15 @@ def run_ai_visibility_sample(
         request_id=request_id,
         idempotency_key=idempotency_key,
     )
+    # Validate the effective transport contract before reserving a durable
+    # request or entering user-supplied sampler code.  This is deliberately a
+    # local preflight: a synthetic "reply OK" request would be another
+    # potentially billable provider call and still would not prove that the
+    # real visibility prompt can complete within the same token budget.
+    sampling_settings, contract_preflight = _prepare_sampling_contract(settings)
+    # Preserve the v1.2 durable identity so receipts created before this
+    # orchestration hardening still replay instead of conflicting after an
+    # endpoint-normalization-only change.
     fingerprint = _request_fingerprint(normalized, settings=settings)
     request_record, replayed = _begin_or_replay(
         database_path,
@@ -236,23 +250,45 @@ def run_ai_visibility_sample(
         }
 
     executions: list[dict[str, Any]] = []
+    attempts: list[dict[str, Any]] = []
     analysis_inputs: list[dict[str, Any]] = []
     failure: dict[str, Any] | None = None
-    provider = provider_label_for_settings(settings)
-    # A visibility probe asks for a short answer, not a full article.  Reusing
-    # the writer's 4096-token ceiling allowed reasoning/generation to run until
-    # the 120-second transport timeout even though the fixed "reply OK" health
-    # check succeeded.  Keep credentials, endpoint, model and timeout intact,
-    # but cap only this workflow's output budget.
-    sampling_settings = replace(
-        settings,
-        max_tokens=max(
-            1,
-            min(int(settings.max_tokens), VISIBILITY_SAMPLE_MAX_OUTPUT_TOKENS),
-        ),
-    )
+    provider = provider_label_for_settings(sampling_settings)
 
     for index in range(1, normalized["sample_count"] + 1):
+        phase = "contract_probe" if index == 1 else "measurement"
+        active_attempt = {
+            "index": index,
+            "phase": phase,
+            "state": "dispatching_or_in_flight",
+            "provider": provider,
+            "model": sampling_settings.model,
+            "request_state": "may_have_been_sent",
+            "provider_outcome": "unknown",
+            "billing_outcome": "unknown",
+            "timeout_seconds": sampling_settings.timeout_seconds,
+            "max_output_tokens": sampling_settings.max_tokens,
+            "automatic_retry_allowed": False,
+        }
+        # Persist intent immediately before handing control to the transport.
+        # If the process dies in or after that call, operators can distinguish
+        # a never-started row from an ambiguous, potentially billable attempt.
+        _checkpoint_request(
+            database_path,
+            record_id=request_record["id"],
+            result=_processing_payload(
+                request_record=request_record,
+                normalized=normalized,
+                settings=sampling_settings,
+                provider=provider,
+                contract_preflight=contract_preflight,
+                attempts=attempts,
+                executions=executions,
+                analysis_inputs=analysis_inputs,
+                active_attempt=active_attempt,
+            ),
+        )
+        attempt_started = time.perf_counter()
         try:
             completion = sampler(
                 prompt=normalized["prompt"],
@@ -260,22 +296,109 @@ def run_ai_visibility_sample(
             )
         except AIServiceError as exc:
             failure = _provider_failure(exc, sample_index=index)
+            usage_record, usage_ledger_status = _record_failed_attempt_usage(
+                database_path,
+                usage_recorder=usage_recorder,
+                error=exc,
+                provider=provider,
+                model=sampling_settings.model,
+                project_id=normalized["project_id"],
+                reference_id=f"{request_record['id']}:{index}",
+                failure=failure,
+            )
+            failure["usage_ledger_status"] = usage_ledger_status
+            attempts.append(
+                {
+                    **active_attempt,
+                    "state": (
+                        "outcome_unknown"
+                        if failure["outcome_unknown"]
+                        else "failed"
+                    ),
+                    "request_state": failure["request_state"],
+                    "provider_outcome": (
+                        "unknown" if failure["outcome_unknown"] else "failed"
+                    ),
+                    "billing_outcome": failure["billing_outcome"],
+                    "elapsed_ms": max(
+                        0, round((time.perf_counter() - attempt_started) * 1000)
+                    ),
+                    "usage": None,
+                    "usage_status": (
+                        "unknown" if usage_record is not None else "not_recorded"
+                    ),
+                    "ai_usage": usage_record,
+                    "failure": dict(failure),
+                }
+            )
             break
 
-        model = _bounded_metadata(completion.model or settings.model, 200, "unknown")
+        model = _bounded_metadata(
+            completion.model or sampling_settings.model, 200, "unknown"
+        )
         provider_request_id = _bounded_metadata(
             completion.provider_request_id, 200, ""
         )
         usage = dict(completion.usage) if isinstance(completion.usage, Mapping) else None
         text = str(completion.content or "").strip()
+        try:
+            usage_record = usage_recorder(
+                database_path,
+                operation="visibility_sample",
+                provider=provider,
+                model=model,
+                usage=usage,
+                usage_status="reported" if usage is not None else "unknown",
+                project_id=normalized["project_id"],
+                reference_type="visibility_sample",
+                reference_id=f"{request_record['id']}:{index}",
+                metadata={
+                    "outcome": "succeeded" if text else "invalid_response",
+                    "usage_origin": (
+                        "provider_response" if usage is not None else "not_reported"
+                    ),
+                },
+            )
+        except (AIUsageLedgerError, sqlite3.Error):
+            # The model answered, so the response must be retained and the key
+            # closed as ambiguous. Retrying could incur a duplicate charge.
+            usage_record = None
+            usage_ledger_failed = True
+        else:
+            usage_ledger_failed = False
+
         if not text:
             failure = {
                 "code": "empty_provider_response",
                 "message": "模型返回了空回答，后续样本已停止；不要自动重试",
                 "sample_index": index,
                 "outcome_unknown": False,
+                "request_state": "response_received",
+                "billing_outcome": (
+                    "reported" if usage is not None else "unknown"
+                ),
+                "usage_ledger_status": (
+                    "failed" if usage_ledger_failed else "recorded"
+                ),
                 "retry_after_seconds": None,
             }
+            attempts.append(
+                {
+                    **active_attempt,
+                    "state": "failed",
+                    "request_state": "response_received",
+                    "provider_outcome": "invalid_response",
+                    "billing_outcome": failure["billing_outcome"],
+                    "provider_request_id": provider_request_id,
+                    "elapsed_ms": max(0, int(completion.elapsed_ms)),
+                    "usage": usage,
+                    "usage_status": (
+                        "reported" if usage is not None else "unknown"
+                    ),
+                    "ai_usage": usage_record,
+                    "failure": dict(failure),
+                }
+            )
             break
 
         analysis_inputs.append(
@@ -289,33 +412,15 @@ def run_ai_visibility_sample(
                 "consumer_surface_verified": False,
             }
         )
-        try:
-            usage_record = usage_recorder(
-                database_path,
-                operation="visibility_sample",
-                provider=provider,
-                model=model,
-                usage=usage,
-                usage_status="reported" if usage is not None else "unknown",
-                project_id=normalized["project_id"],
-                reference_type="visibility_sample",
-                reference_id=f"{request_record['id']}:{index}",
-                metadata={
-                    "outcome": "succeeded",
-                    "usage_origin": (
-                        "provider_response" if usage is not None else "not_reported"
-                    ),
-                },
-            )
-        except (AIUsageLedgerError, sqlite3.Error):
-            # The model answered, so the response must be retained and the key
-            # closed as ambiguous. Retrying could incur a duplicate charge.
-            usage_record = None
+        if usage_ledger_failed:
             failure = {
                 "code": "cost_ledger_failed",
                 "message": "模型已返回，但本地费用凭据未能保存；请人工核对，勿自动重试",
                 "sample_index": index,
                 "outcome_unknown": False,
+                "request_state": "response_received",
+                "billing_outcome": "unknown",
+                "usage_ledger_status": "failed",
                 "retry_after_seconds": None,
             }
 
@@ -329,6 +434,23 @@ def run_ai_visibility_sample(
                 "usage": usage,
                 "usage_status": "reported" if usage is not None else "unknown",
                 "ai_usage": usage_record,
+            }
+        )
+        attempts.append(
+            {
+                **active_attempt,
+                "state": "succeeded",
+                "request_state": "response_received",
+                "provider_outcome": "succeeded",
+                "billing_outcome": (
+                    "reported" if usage is not None else "unknown"
+                ),
+                "provider_request_id": provider_request_id,
+                "elapsed_ms": max(0, int(completion.elapsed_ms)),
+                "usage": usage,
+                "usage_status": "reported" if usage is not None else "unknown",
+                "ai_usage": usage_record,
+                "failure": None,
             }
         )
         if failure is None:
@@ -351,12 +473,37 @@ def run_ai_visibility_sample(
                     ),
                     "sample_index": index,
                     "outcome_unknown": False,
+                    "request_state": "response_received",
+                    "billing_outcome": (
+                        "reported" if usage is not None else "unknown"
+                    ),
+                    "usage_ledger_status": "recorded",
                     "retry_after_seconds": None,
+                    "requested_max_output_tokens": sampling_settings.max_tokens,
+                    "reported_output_tokens": reported_output_tokens,
+                }
+                attempts[-1]["contract_mismatch"] = {
+                    "code": failure["code"],
                     "requested_max_output_tokens": sampling_settings.max_tokens,
                     "reported_output_tokens": reported_output_tokens,
                 }
         if failure is not None:
             break
+        _checkpoint_request(
+            database_path,
+            record_id=request_record["id"],
+            result=_processing_payload(
+                request_record=request_record,
+                normalized=normalized,
+                settings=sampling_settings,
+                provider=provider,
+                contract_preflight=contract_preflight,
+                attempts=attempts,
+                executions=executions,
+                analysis_inputs=analysis_inputs,
+                active_attempt=None,
+            ),
+        )
 
     analysis = None
     run_id = None
@@ -419,6 +566,9 @@ def run_ai_visibility_sample(
                 "message": "模型回答已取得，但本地分析或保存失败；请人工处理，勿自动重试",
                 "sample_index": len(analysis_inputs),
                 "outcome_unknown": False,
+                "request_state": "provider_responses_received",
+                "billing_outcome": "see_attempt_receipts",
+                "usage_ledger_status": "see_attempt_receipts",
                 "retry_after_seconds": None,
             }
             analysis = None
@@ -461,6 +611,7 @@ def run_ai_visibility_sample(
         "stored_versions": current_versions if analysis is not None else {},
         "current_versions": current_versions,
     }
+    contract_probe = _contract_probe_summary(attempts, failure=failure)
 
     payload = {
         "status": status,
@@ -474,9 +625,13 @@ def run_ai_visibility_sample(
         # must never be rendered as ``unknown`` when its frozen configuration
         # is already known locally.
         "configured_provider": provider,
-        "configured_model": settings.model,
+        "configured_model": sampling_settings.model,
         "requested_sample_count": normalized["sample_count"],
         "completed_sample_count": completed_count,
+        "provider_attempt_count": len(attempts),
+        "unknown_outcome_count": sum(
+            item.get("state") == "outcome_unknown" for item in attempts
+        ),
         "unattempted_sample_count": max(
             0,
             normalized["sample_count"]
@@ -488,8 +643,11 @@ def run_ai_visibility_sample(
         "run_id": run_id,
         "created_at": created_at,
         "executions": executions,
+        "attempts": attempts,
         "captured_responses": analysis_inputs,
         "failure": failure,
+        "contract_preflight": contract_preflight,
+        "contract_probe": contract_probe,
         "analysis": analysis,
         "local_analysis": local_analysis,
         "local_analysis_input_snapshot": {
@@ -539,7 +697,10 @@ def run_ai_visibility_sample(
             "max_output_tokens": sampling_settings.max_tokens,
             "stop_on_reported_output_limit_mismatch": True,
             "timeout_seconds": sampling_settings.timeout_seconds,
+            "max_timeout_seconds": VISIBILITY_SAMPLE_MAX_TIMEOUT_SECONDS,
             "connection_test_equivalent": False,
+            "first_requested_sample_is_contract_probe": True,
+            "extra_contract_probe_provider_calls": 0,
         },
         "retry_policy": {
             "automatic_retry": False,
@@ -610,7 +771,7 @@ def _validate_request(
             "必须设置 confirm_external_call=true，确认只把 prompt 发送给当前配置模型"
         )
     if not isinstance(settings, AISettings):
-        raise AIConfigurationError("缺少有效的 AI 配置")
+        raise VisibilitySamplingValidationError("缺少有效的 AI 配置")
     normalized_request_id = _request_identifier(request_id, "X-Request-ID", 128)
     normalized_key = _request_identifier(
         idempotency_key, "Idempotency-Key", 150
@@ -655,6 +816,109 @@ def _validate_request(
         "request_id": normalized_request_id,
         "idempotency_key": normalized_key,
     }
+
+
+def _prepare_sampling_contract(
+    settings: AISettings,
+) -> tuple[AISettings, dict[str, Any]]:
+    """Validate and freeze the effective sampling transport without I/O.
+
+    The first real requested sample is the only useful runtime compatibility
+    probe.  A separate tiny prompt would add cost while proving little about a
+    provider's reasoning-token behaviour for the actual GEO question.
+    """
+
+    if not isinstance(settings, AISettings):
+        raise VisibilitySamplingValidationError("缺少有效的 AI 配置")
+    try:
+        validated = AISettings.from_mapping(
+            {
+                "base_url": settings.base_url,
+                "api_key": settings.api_key,
+                "model": settings.model,
+                "provider": settings.provider,
+            }
+        )
+        endpoint = resolve_ai_chat_completions_url(validated.base_url)
+    except (AIConfigurationError, TypeError, ValueError) as exc:
+        raise VisibilitySamplingValidationError(
+            f"采样前契约检测失败：{exc}"
+        ) from exc
+
+    raw_timeout = settings.timeout_seconds
+    if isinstance(raw_timeout, bool):
+        raise VisibilitySamplingValidationError(
+            "采样前契约检测失败：timeout_seconds 必须是正数"
+        )
+    try:
+        configured_timeout = float(raw_timeout)
+    except (TypeError, ValueError) as exc:
+        raise VisibilitySamplingValidationError(
+            "采样前契约检测失败：timeout_seconds 必须是正数"
+        ) from exc
+    if not math.isfinite(configured_timeout) or configured_timeout <= 0:
+        raise VisibilitySamplingValidationError(
+            "采样前契约检测失败：timeout_seconds 必须是正数"
+        )
+
+    raw_max_tokens = settings.max_tokens
+    if isinstance(raw_max_tokens, bool):
+        raise VisibilitySamplingValidationError(
+            "采样前契约检测失败：max_tokens 必须是正整数"
+        )
+    try:
+        configured_max_tokens = int(raw_max_tokens)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise VisibilitySamplingValidationError(
+            "采样前契约检测失败：max_tokens 必须是正整数"
+        ) from exc
+    if configured_max_tokens <= 0 or configured_max_tokens != raw_max_tokens:
+        raise VisibilitySamplingValidationError(
+            "采样前契约检测失败：max_tokens 必须是正整数"
+        )
+
+    effective_timeout = min(
+        configured_timeout,
+        VISIBILITY_SAMPLE_MAX_TIMEOUT_SECONDS,
+    )
+    effective_max_tokens = min(
+        configured_max_tokens,
+        VISIBILITY_SAMPLE_MAX_OUTPUT_TOKENS,
+    )
+    sampling_settings = replace(
+        validated,
+        timeout_seconds=effective_timeout,
+        max_tokens=effective_max_tokens,
+    )
+    provider = provider_label_for_settings(sampling_settings)
+    contract = {
+        "version": VISIBILITY_SAMPLING_PREFLIGHT_VERSION,
+        "status": "passed",
+        "mode": "local_before_provider_call",
+        "provider": provider,
+        "model": sampling_settings.model,
+        "endpoint_sha256": hashlib.sha256(endpoint.encode("utf-8")).hexdigest(),
+        "timeout_seconds": effective_timeout,
+        "configured_timeout_seconds": configured_timeout,
+        "timeout_capped": effective_timeout != configured_timeout,
+        "max_output_tokens": effective_max_tokens,
+        "configured_max_tokens": configured_max_tokens,
+        "max_output_tokens_capped": (
+            effective_max_tokens != configured_max_tokens
+        ),
+        "network_requests": 0,
+        "provider_capabilities_verified": False,
+        "runtime_probe_sample_index": 1,
+        "runtime_probe_reuses_requested_sample": True,
+        "extra_provider_requests": 0,
+        "automatic_retry_on_unknown_outcome": False,
+        "boundary": (
+            "本地预检只验证端点、凭据形态、模型标识、超时和输出上限；"
+            "供应商是否真正遵守 OpenAI-compatible 响应及 max_tokens，"
+            "由第一条正式样本验证，不额外发送测试请求。"
+        ),
+    }
+    return sampling_settings, contract
 
 
 def _request_fingerprint(
@@ -992,6 +1256,131 @@ def _refresh_sample_record_locally(
     return output
 
 
+def _processing_payload(
+    *,
+    request_record: Mapping[str, Any],
+    normalized: Mapping[str, Any],
+    settings: AISettings,
+    provider: str,
+    contract_preflight: Mapping[str, Any],
+    attempts: Sequence[Mapping[str, Any]],
+    executions: Sequence[Mapping[str, Any]],
+    analysis_inputs: Sequence[Mapping[str, Any]],
+    active_attempt: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Build a durable, secret-free in-progress receipt.
+
+    ``active_attempt`` is intentionally conservative: once the sampler is
+    about to receive control, a crash cannot prove whether bytes reached the
+    provider.  The checkpoint therefore forbids automatic retry.
+    """
+
+    attempt_count = len(attempts) + (1 if active_attempt is not None else 0)
+    completed_count = len(analysis_inputs)
+    return {
+        "code": 202,
+        "msg": "采样处理中；请按原 request_id 查询，勿自动重试或更换幂等键",
+        "data": {
+            "status": "processing",
+            "need_action": False,
+            "sampling_version": VISIBILITY_SAMPLING_VERSION,
+            "request_id": request_record["request_id"],
+            "idempotency_key": request_record["idempotency_key"],
+            "project_id": normalized["project_id"],
+            "configured_provider": provider,
+            "configured_model": settings.model,
+            "requested_sample_count": normalized["sample_count"],
+            "completed_sample_count": completed_count,
+            "provider_attempt_count": attempt_count,
+            "unattempted_sample_count": max(
+                0, normalized["sample_count"] - attempt_count
+            ),
+            "executions": copy.deepcopy(list(executions)),
+            "attempts": copy.deepcopy(list(attempts)),
+            "active_attempt": (
+                copy.deepcopy(dict(active_attempt))
+                if active_attempt is not None
+                else None
+            ),
+            "captured_responses": copy.deepcopy(list(analysis_inputs)),
+            "contract_preflight": copy.deepcopy(dict(contract_preflight)),
+            "contract_probe": _contract_probe_summary(attempts, failure=None),
+            "outcome_unknown": active_attempt is not None,
+            "request_policy": {
+                "execution": "sequential_stop_on_first_failure",
+                "max_output_tokens": settings.max_tokens,
+                "timeout_seconds": settings.timeout_seconds,
+                "first_requested_sample_is_contract_probe": True,
+                "extra_contract_probe_provider_calls": 0,
+            },
+            "retry_policy": {
+                "automatic_retry": False,
+                "same_key_replays_saved_result": True,
+                "ambiguous_outcome_action": (
+                    "先核对模型账单与原请求；仅在确认需要新调用后使用新的幂等键"
+                ),
+            },
+        },
+    }
+
+
+def _contract_probe_summary(
+    attempts: Sequence[Mapping[str, Any]],
+    *,
+    failure: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    first = next(
+        (
+            dict(item)
+            for item in attempts
+            if not isinstance(item.get("index"), bool)
+            and item.get("index") == 1
+        ),
+        None,
+    )
+    if first is None:
+        status = "not_attempted"
+        outcome_unknown = False
+        failure_code = None
+    else:
+        first_failure = (
+            first.get("failure")
+            if isinstance(first.get("failure"), Mapping)
+            else None
+        )
+        mismatch = (
+            first.get("contract_mismatch")
+            if isinstance(first.get("contract_mismatch"), Mapping)
+            else None
+        )
+        outcome_unknown = first.get("state") == "outcome_unknown"
+        if outcome_unknown:
+            status = "outcome_unknown"
+        elif first.get("state") != "succeeded" or mismatch is not None:
+            status = "failed"
+        else:
+            status = "passed"
+        failure_code = str(
+            (first_failure or mismatch or {}).get("code") or ""
+        ) or None
+        if (
+            status == "passed"
+            and isinstance(failure, Mapping)
+            and failure.get("sample_index") == 1
+            and failure.get("code") == "provider_output_limit_mismatch"
+        ):
+            status = "failed"
+            failure_code = "provider_output_limit_mismatch"
+    return {
+        "status": status,
+        "sample_index": 1,
+        "reuses_requested_sample": True,
+        "extra_provider_requests": 0,
+        "outcome_unknown": outcome_unknown,
+        "failure_code": failure_code,
+    }
+
+
 def _begin_or_replay(
     database_path: str | Path,
     *,
@@ -1047,6 +1436,34 @@ def _begin_or_replay(
             conn.rollback()
             raise
     return _serialize_request(row), False
+
+
+def _checkpoint_request(
+    database_path: str | Path,
+    *,
+    record_id: int,
+    result: Mapping[str, Any],
+) -> None:
+    encoded = json.dumps(
+        result, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    with closing(_connect(database_path)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
+        cursor = conn.execute(
+            """
+            UPDATE ai_visibility_sample_requests
+            SET result_json = ?,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            WHERE id = ? AND status = 'started'
+            """,
+            (encoded, int(record_id)),
+        )
+        if cursor.rowcount != 1:
+            conn.rollback()
+            raise VisibilitySamplingConflictError(
+                "采样请求状态已变化，未启动新的供应商调用"
+            )
+        conn.commit()
 
 
 def _finish_request(
@@ -1150,32 +1567,96 @@ def _provider_failure(exc: AIServiceError, *, sample_index: int) -> dict[str, An
     if isinstance(exc, AIReadTimeoutError):
         code = "provider_outcome_unknown"
         outcome_unknown = True
+        request_state = "sent_outcome_unknown"
+        billing_outcome = "unknown"
     elif isinstance(exc, AIProviderRateLimitError):
         code = "provider_rate_limited"
         outcome_unknown = False
+        request_state = "response_rejected_before_completion"
+        billing_outcome = "not_expected"
     elif isinstance(exc, AIConnectError):
         code = "provider_unavailable"
         outcome_unknown = False
+        request_state = "not_sent"
+        billing_outcome = "not_expected"
     elif isinstance(exc, AIConfigurationError):
         code = "provider_not_configured"
         outcome_unknown = False
+        request_state = "not_sent"
+        billing_outcome = "not_expected"
     elif isinstance(exc, AIProtocolError):
         code = "provider_protocol_error"
         outcome_unknown = False
+        request_state = "response_received"
+        billing_outcome = "unknown"
     elif isinstance(exc, AIProviderHTTPError):
-        outcome_unknown = bool(exc.outcome_unknown)
+        upstream_status = int(exc.status_code)
+        outcome_unknown = bool(exc.outcome_unknown) or upstream_status == 408
         code = "provider_outcome_unknown" if outcome_unknown else "provider_error"
+        request_state = (
+            "sent_outcome_unknown" if outcome_unknown else "error_response_received"
+        )
+        billing_outcome = "unknown" if upstream_status >= 500 else "not_expected"
     else:
-        code = "provider_error"
-        outcome_unknown = False
+        # The base error type does not prove whether transport setup failed or
+        # bytes reached the remote gateway. Fail closed and require manual
+        # reconciliation rather than making a second potentially paid call.
+        code = "provider_outcome_unknown"
+        outcome_unknown = True
+        request_state = "unknown"
+        billing_outcome = "unknown"
     return {
         "code": code,
         "message": str(exc),
         "sample_index": sample_index,
         "outcome_unknown": outcome_unknown,
+        "request_state": request_state,
+        "billing_outcome": billing_outcome,
         "upstream_status": getattr(exc, "status_code", None),
         "retry_after_seconds": getattr(exc, "retry_after_seconds", None),
     }
+
+
+def _record_failed_attempt_usage(
+    database_path: str | Path,
+    *,
+    usage_recorder: Callable[..., dict[str, Any]],
+    error: AIServiceError,
+    provider: str,
+    model: str,
+    project_id: int,
+    reference_id: str,
+    failure: Mapping[str, Any],
+) -> tuple[dict[str, Any] | None, str]:
+    """Record only attempts whose charge cannot be ruled out locally."""
+
+    if failure.get("billing_outcome") != "unknown":
+        return None, "not_applicable"
+    try:
+        record = usage_recorder(
+            database_path,
+            operation="visibility_sample",
+            provider=provider,
+            model=model,
+            usage=None,
+            usage_status="unknown",
+            project_id=project_id,
+            reference_type="visibility_sample",
+            reference_id=reference_id,
+            metadata={
+                "outcome": (
+                    "unknown" if failure.get("outcome_unknown") else "failed"
+                ),
+                "usage_origin": (
+                    "provider_error_without_usage"
+                    if isinstance(error, (AIProtocolError, AIProviderHTTPError))
+                    else "transport_outcome_unknown"
+                ),
+            },
+        )
+    except (AIUsageLedgerError, sqlite3.Error):
+        return None, "failed"
+    return record, "recorded_unknown"
 
 
 def _reported_output_limit_mismatch(
@@ -1306,6 +1787,8 @@ __all__ = [
     "MAX_SAMPLE_COUNT",
     "MIN_SAMPLE_COUNT",
     "VISIBILITY_SAMPLE_MAX_OUTPUT_TOKENS",
+    "VISIBILITY_SAMPLE_MAX_TIMEOUT_SECONDS",
+    "VISIBILITY_SAMPLING_PREFLIGHT_VERSION",
     "VISIBILITY_SAMPLING_VERSION",
     "VisibilitySamplingConflictError",
     "VisibilitySamplingInProgressError",

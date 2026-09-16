@@ -2,7 +2,7 @@
 
 > - 文档状态：当前实现说明
 > - 适用产品：GEO 智能内容分发平台 Windows 桌面版
-> - 产品版本：`1.2.6`
+> - 产品版本：`1.2.7`
 > - 基线提交：以发布目录 manifest 的 `source.commit` 为准
 > - 更新时间：2026-09-16
 > - 面向读者：产品开发、算法开发、测试、交付、运营和后续接手的 AI Agent
@@ -1097,8 +1097,8 @@ pwsh -NoProfile -File .\scripts\package_source.ps1
 
 | 产物 | 相对路径或文件名 | SHA-256 / 状态 |
 | --- | --- | --- |
-| 内部源码包 | `release/source/GEO-Content-Platform-Source-Internal-1.2.6-<UTC时间>-<提交短SHA>/...zip` | 以同目录 `.sha256.txt` 和 `SOURCE-PACKAGE-RECEIPT.json` 为准 |
-| Windows x64 ZIP | `release/windows/GEO-Content-Platform-1.2.6-authorized-real-<UTC时间>-<提交短SHA>/...windows-x64.zip` | 以同目录 manifest 与 SHA-256 清单为准 |
+| 内部源码包 | `release/source/GEO-Content-Platform-Source-Internal-1.2.7-<UTC时间>-<提交短SHA>/...zip` | 以同目录 `.sha256.txt` 和 `SOURCE-PACKAGE-RECEIPT.json` 为准 |
+| Windows x64 ZIP | `release/windows/GEO-Content-Platform-1.2.7-authorized-real-<UTC时间>-<提交短SHA>/...windows-x64.zip` | 以同目录 manifest 与 SHA-256 清单为准 |
 | Windows EXE | 同一 Windows 目录下的 `GEO-Content-Platform.exe` | 以同目录 `GEO-Content-Platform.manifest.json` 为准 |
 | 代码签名 | 当前 EXE | `NotSigned` |
 
@@ -1202,7 +1202,7 @@ pwsh -NoProfile -File .\scripts\package_source.ps1
 
 ### 21.1 当前已知实现差异
 
-以下是当前 `1.2.6` 源码中已经确认、但尚未在本文档任务中修改的工程问题：
+以下是当前 `1.2.7` 源码中已经确认、但尚未在本文档任务中修改的工程问题：
 
 1. **可见度 prompt 上限不一致**：单模型采样和多模型面板允许 8,000 字符，本机分析器只接受 4,000 字符。4,001–8,000 字符可能在 provider 调用完成后才在本机分析阶段失败。应在联网前统一限制为 4,000，或同步升级分析器并补齐测试。
 2. **临时采样密钥清理文案与 `KeepAlive` 行为不完全一致**：当前页面临时 API Key 在组件卸载时清理，但普通侧栏切换可能只触发停用而不卸载。应在 `onDeactivated` 清理，或把 UI 文案改为“窗口关闭/组件销毁时清除”。

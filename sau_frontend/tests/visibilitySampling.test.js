@@ -12,6 +12,7 @@ import {
   normalizeVisibilityPanelResponse,
   normalizeVisibilitySamplingResponse,
   validateVisibilitySamplingDraft,
+  visibilityPanelMeasurementPresentation,
   visibilityPanelTargetPresentation
 } from '../src/utils/visibilitySampling.js'
 
@@ -233,6 +234,97 @@ test('panel receipt keeps root unknown-outcome recovery instructions', () => {
   assert.equal(receipt.recoveryPolicy.read_only, true)
 })
 
+test('zero valid panel responses are explicitly unquantifiable even if a malformed score flag is true', () => {
+  const receipt = normalizeVisibilityPanelResponse({
+    data: {
+      status: 'need_action',
+      requested_role_count: 3,
+      sampled_role_count: 0,
+      distinct_model_count: 0,
+      comparison_eligible: false,
+      targets: ['writer', 'reviewer', 'evaluator'].map(role => ({
+        role,
+        execution_status: 'failed',
+        requested_sample_count: 1,
+        completed_sample_count: 0,
+        failure: { code: 'provider_protocol_error' }
+      })),
+      measurement_quality: {
+        status: 'quantitative',
+        score_allowed: true,
+        valid_response_count: 0,
+        requested_response_count: 3,
+        valid_response_rate: 0,
+        confidence_level: 'none',
+        consumer_geo_claim_allowed: false,
+        reasons: ['没有取得有效回答']
+      }
+    }
+  })
+  const presentation = visibilityPanelMeasurementPresentation(receipt)
+
+  assert.equal(receipt.measurementQuality.source, 'reported')
+  assert.equal(receipt.measurementQuality.status, 'invalid')
+  assert.equal(receipt.measurementQuality.scoreAllowed, false)
+  assert.equal(presentation.status, 'invalid')
+  assert.equal(presentation.label, '不可量化')
+  assert.equal(presentation.validResponseCount, 0)
+  assert.equal(presentation.requestedResponseCount, 3)
+  assert.equal(presentation.validResponseRate, 0)
+  assert.equal(presentation.confidenceLabel, '不可判定')
+  assert.equal(presentation.overallGeoScoreAllowed, false)
+  assert.equal(presentation.overallGeoScoreLabel, '—')
+  assert.ok(presentation.reasons.some(reason => reason.includes('没有取得有效回答')))
+  assert.ok(presentation.reasons.some(reason => reason.includes('App')))
+})
+
+test('panel quality fallback stays directional below five answers and becomes API-quantitative at five', () => {
+  const directional = normalizeVisibilityPanelResponse({
+    data: {
+      status: 'completed',
+      requested_role_count: 2,
+      sampled_role_count: 2,
+      distinct_model_count: 2,
+      comparison_eligible: true,
+      targets: ['writer', 'reviewer'].map(role => ({
+        role,
+        execution_status: 'executed',
+        requested_sample_count: 1,
+        completed_sample_count: 1,
+        analysis: { samples: [{ text: 'answer' }] }
+      }))
+    }
+  })
+  const directionalPresentation = visibilityPanelMeasurementPresentation(directional)
+  assert.equal(directional.measurementQuality.source, 'derived')
+  assert.equal(directionalPresentation.status, 'directional')
+  assert.equal(directionalPresentation.scoreAllowed, false)
+  assert.equal(directionalPresentation.confidenceLabel, '低')
+
+  const quantitative = normalizeVisibilityPanelResponse({
+    data: {
+      status: 'completed',
+      requested_role_count: 3,
+      sampled_role_count: 3,
+      distinct_model_count: 3,
+      comparison_eligible: true,
+      targets: [2, 2, 1].map((count, index) => ({
+        role: ['writer', 'reviewer', 'evaluator'][index],
+        execution_status: 'executed',
+        requested_sample_count: count,
+        completed_sample_count: count,
+        analysis: { samples: Array.from({ length: count }, () => ({ text: 'answer' })) }
+      }))
+    }
+  })
+  const quantitativePresentation = visibilityPanelMeasurementPresentation(quantitative)
+  assert.equal(quantitativePresentation.status, 'quantitative')
+  assert.equal(quantitativePresentation.validResponseCount, 5)
+  assert.equal(quantitativePresentation.scoreAllowed, true)
+  assert.equal(quantitativePresentation.overallGeoScoreAllowed, false)
+  assert.equal(quantitativePresentation.scopeLabel, 'provider_api · 仅 API 渠道')
+})
+
 test('panel target presentation distinguishes complete, retained partial, unknown and failed outcomes', () => {
   assert.deepEqual(visibilityPanelTargetPresentation({
     completedSampleCount: 3,
@@ -358,6 +450,15 @@ test('EXE visibility view defaults to the unified engine and keeps explicit-call
   assert.match(viewSource, /“取得有效回答数”不是“已配置模型数”/)
   assert.match(viewSource, /panel-target-message/)
   assert.match(viewSource, /target\.presentation\.detail/)
+  assert.match(viewSource, /GEO QUANTIFICATION GATE/)
+  assert.match(viewSource, /样本有效率/)
+  assert.match(viewSource, /证据置信度/)
+  assert.match(viewSource, /总体 GEO 可用分/)
+  assert.match(viewSource, /provider_api 只代表 API 渠道/)
+  assert.match(viewSource, /消费者 App \/ Web/)
+  assert.match(viewSource, /检查原请求状态（不调用模型）/)
+  assert.match(viewSource, /准备重新运行（新请求）/)
+  assert.match(viewSource, /确认配置已修正，创建新请求/)
   assert.match(viewSource, /applyVisibilityPanelReceipt/)
   assert.match(viewSource, /visibilityPanelReceipt\.value = null/)
   assert.match(viewSource, /\.panel-target-identity strong \{[^}]*overflow-wrap: anywhere;[^}]*white-space: normal;/)

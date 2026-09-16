@@ -27,7 +27,11 @@ from services.ai_service import (
 from services.ai_visibility_sampling_service import run_ai_visibility_sample
 
 
-VISIBILITY_PANEL_VERSION = "api-model-visibility-panel-1.1.0"
+VISIBILITY_PANEL_VERSION = "api-model-visibility-panel-1.2.0"
+_LEGACY_VERSIONED_REQUEST_SHAPE_VERSIONS = (
+    "api-model-visibility-panel-1.1.0",
+    "api-model-visibility-panel-1.2.0",
+)
 MAX_PANEL_MODELS = 3
 PANEL_IN_PROGRESS_EXPIRY_SECONDS = 15 * 60
 _PANEL_RECORD_TYPE = "ai_visibility_model_panel"
@@ -172,6 +176,9 @@ def run_ai_visibility_panel(
         request_id=normalized["request_id"],
         idempotency_key=normalized["idempotency_key"],
         request_shape_sha256=normalized["request_shape_sha256"],
+        compatible_request_shape_sha256s=normalized[
+            "compatible_request_shape_sha256s"
+        ],
     )
     if existing is not None:
         return _replay_panel_or_raise(database_path, existing)
@@ -189,6 +196,7 @@ def run_ai_visibility_panel(
         request_id=normalized["request_id"],
         idempotency_key=normalized["idempotency_key"],
         request_shape_sha256=normalized["request_shape_sha256"],
+        requested_sample_count_per_role=normalized["sample_count"],
     )
     fingerprint = _panel_fingerprint(normalized, manifest)
     request_record, replayed = _begin_panel_request(
@@ -198,6 +206,9 @@ def run_ai_visibility_panel(
         idempotency_key=normalized["idempotency_key"],
         request_fingerprint=fingerprint,
         request_shape_sha256=normalized["request_shape_sha256"],
+        compatible_request_shape_sha256s=normalized[
+            "compatible_request_shape_sha256s"
+        ],
         manifest=manifest,
     )
     if replayed:
@@ -326,8 +337,15 @@ def _validate_panel_request(
         "competitors": normalized_competitors,
         "persist": persist,
         "roles": roles,
-        "panel_version": VISIBILITY_PANEL_VERSION,
     }
+    # The idempotency shape describes external-call semantics, not the local
+    # presentation/aggregation implementation.  Older 1.1 releases included
+    # panel_version in this hash, so accept those exact legacy hashes during
+    # replay while storing the stable version-independent hash going forward.
+    compatible_request_shape_sha256s = tuple(
+        _json_digest({**request_shape, "panel_version": legacy_version})
+        for legacy_version in _LEGACY_VERSIONED_REQUEST_SHAPE_VERSIONS
+    )
     return {
         "project_id": project_id,
         "prompt": normalized_prompt,
@@ -341,6 +359,7 @@ def _validate_panel_request(
         "request_id": normalized_request_id,
         "idempotency_key": normalized_key,
         "request_shape_sha256": _json_digest(request_shape),
+        "compatible_request_shape_sha256s": compatible_request_shape_sha256s,
     }
 
 
@@ -390,6 +409,7 @@ def _panel_manifest(
     request_id: str,
     idempotency_key: str,
     request_shape_sha256: str,
+    requested_sample_count_per_role: int,
 ) -> dict[str, Any]:
     entries: list[dict[str, Any]] = []
     for target in targets:
@@ -428,6 +448,7 @@ def _panel_manifest(
         "request_shape_sha256": request_shape_sha256,
         "roles": [entry["role"] for entry in entries],
         "runnable_role_count": sum(1 for entry in entries if entry["runnable"]),
+        "requested_sample_count_per_role": int(requested_sample_count_per_role),
         "targets": entries,
         "frozen": True,
         "automatic_role_expansion": False,
@@ -495,6 +516,15 @@ def _build_panel_result(
         if comparison_eligible
         else ("partial" if sampled else "need_action")
     )
+    measurement_quality = _measurement_quality(
+        executed=executed,
+        sampled=sampled,
+        distinct_model_count=len(distinct_sampled),
+        comparison_eligible=comparison_eligible,
+        requested_sample_count_per_role=int(
+            manifest.get("requested_sample_count_per_role") or 0
+        ),
+    )
     return {
         "status": panel_status,
         "need_action": panel_status != "completed",
@@ -511,6 +541,7 @@ def _build_panel_result(
         "distinct_model_count": len(distinct_sampled),
         "multi_model_executed": len(distinct_sampled) >= 2,
         "comparison_eligible": comparison_eligible,
+        "measurement_quality": measurement_quality,
         "targets": target_results,
         "channel_coverage": [
             {
@@ -550,6 +581,79 @@ def _build_panel_result(
             "completed 仅表示至少两个不同 provider/model 完整返回样本；"
             "不表示消费者入口、联网检索、收录或引用已验证。"
         ),
+    }
+
+
+def _measurement_quality(
+    *,
+    executed: Sequence[Mapping[str, Any]],
+    sampled: Sequence[Mapping[str, Any]],
+    distinct_model_count: int,
+    comparison_eligible: bool,
+    requested_sample_count_per_role: int,
+) -> dict[str, Any]:
+    """Describe whether this panel can support an API-channel GEO metric.
+
+    A numerical score is deliberately withheld for zero/partial evidence.  A
+    complete two-model comparison with fewer than five answers is useful as a
+    directional check, but it is not yet a quantitative measurement.  Consumer
+    app/web claims always remain disallowed because this panel calls provider
+    APIs rather than those user-facing entry points.
+    """
+
+    valid_response_count = sum(
+        max(0, int(item.get("completed_sample_count") or 0)) for item in sampled
+    )
+    requested_response_count = sum(
+        max(0, int(item.get("requested_sample_count") or 0)) for item in executed
+    )
+    if requested_sample_count_per_role > 0:
+        requested_response_count = max(
+            requested_response_count,
+            len(executed) * requested_sample_count_per_role,
+        )
+    requested_response_count = max(requested_response_count, valid_response_count)
+    valid_response_rate = (
+        round(valid_response_count / requested_response_count, 4)
+        if requested_response_count
+        else None
+    )
+
+    if not valid_response_count:
+        status = "invalid"
+        confidence_level = "NONE"
+        reason = "未取得任何有效回答，当前批次不可量化。"
+    elif not comparison_eligible:
+        status = "insufficient"
+        confidence_level = "LOW"
+        reason = "有效模型或完整样本不足，当前结果只能用于排障，不能形成对照分。"
+    elif valid_response_count < 5:
+        status = "directional"
+        confidence_level = "LOW"
+        reason = "至少两个模型完整返回，但有效回答少于 5 条，仅能作方向性判断。"
+    else:
+        status = "quantitative"
+        confidence_level = (
+            "HIGH"
+            if valid_response_count >= 10 and distinct_model_count >= 3
+            else "MEDIUM"
+        )
+        reason = "API 渠道样本达到最低量化门槛；仍不能外推到消费者网页或 App。"
+
+    return {
+        "status": status,
+        "score_allowed": status == "quantitative",
+        "directional_comparison_allowed": bool(comparison_eligible),
+        "api_channel_claim_allowed": status == "quantitative",
+        "consumer_geo_claim_allowed": False,
+        "confidence_level": confidence_level,
+        "valid_response_count": valid_response_count,
+        "requested_response_count": requested_response_count,
+        "valid_response_rate": valid_response_rate,
+        "valid_model_count": int(distinct_model_count),
+        "minimum_distinct_models": 2,
+        "minimum_quantitative_responses": 5,
+        "reason": reason,
     }
 
 
@@ -595,6 +699,17 @@ def _started_panel_result(
             "outcome_unknown": True,
             "automatic_retry": False,
         }
+    measurement_quality = _measurement_quality(
+        executed=observed_executed,
+        sampled=sampled,
+        distinct_model_count=len(distinct_sampled),
+        comparison_eligible=False,
+        requested_sample_count_per_role=int(
+            record.get("manifest", {}).get("requested_sample_count_per_role") or 0
+        )
+        if isinstance(record.get("manifest"), Mapping)
+        else 0,
+    )
     return {
         "status": status,
         "need_action": bool(expired),
@@ -615,6 +730,7 @@ def _started_panel_result(
         "distinct_model_count": len(distinct_sampled),
         "multi_model_executed": len(distinct_sampled) >= 2,
         "comparison_eligible": False,
+        "measurement_quality": measurement_quality,
         "targets": target_results,
         "failure": failure,
         "channel_coverage": [
@@ -663,6 +779,7 @@ def _find_existing_panel(
     request_id: str,
     idempotency_key: str,
     request_shape_sha256: str,
+    compatible_request_shape_sha256s: Sequence[str] = (),
 ) -> dict[str, Any] | None:
     with closing(_connect(database_path)) as conn:
         return _find_existing_panel_on_connection(
@@ -670,6 +787,7 @@ def _find_existing_panel(
             request_id=request_id,
             idempotency_key=idempotency_key,
             request_shape_sha256=request_shape_sha256,
+            compatible_request_shape_sha256s=compatible_request_shape_sha256s,
         )
 
 
@@ -679,6 +797,7 @@ def _find_existing_panel_on_connection(
     request_id: str,
     idempotency_key: str,
     request_shape_sha256: str,
+    compatible_request_shape_sha256s: Sequence[str] = (),
 ) -> dict[str, Any] | None:
     request_row = conn.execute(
         "SELECT * FROM ai_visibility_sample_requests WHERE request_id = ?",
@@ -697,7 +816,12 @@ def _find_existing_panel_on_connection(
         return None
     record = _serialize_panel_row(row)
     stored_shape = str(record["manifest"].get("request_shape_sha256") or "")
-    if stored_shape != request_shape_sha256:
+    accepted_shapes = {
+        str(value)
+        for value in (request_shape_sha256, *compatible_request_shape_sha256s)
+        if str(value)
+    }
+    if stored_shape not in accepted_shapes:
         raise VisibilityPanelConflictError(
             "Idempotency-Key 已绑定到冻结的多模型请求；不能新增角色或修改参数"
         )
@@ -712,6 +836,7 @@ def _begin_panel_request(
     idempotency_key: str,
     request_fingerprint: str,
     request_shape_sha256: str,
+    compatible_request_shape_sha256s: Sequence[str],
     manifest: Mapping[str, Any],
 ) -> tuple[dict[str, Any], bool]:
     with closing(_connect(database_path)) as conn:
@@ -722,6 +847,7 @@ def _begin_panel_request(
                 request_id=request_id,
                 idempotency_key=idempotency_key,
                 request_shape_sha256=request_shape_sha256,
+                compatible_request_shape_sha256s=compatible_request_shape_sha256s,
             )
             if existing is not None:
                 conn.commit()

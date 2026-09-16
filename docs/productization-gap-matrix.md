@@ -18,19 +18,19 @@
 当前结论：
 
 - 从功能代码看，软件已经超过内部验收 MVP：本机登录、媒体账号登录/退出、内容生成、诊断、成本、批量 20、发布预检、发布容错、Bilibili 固定运行时接入、同事算法本机移植和受控模型采样均已有实现。
-- 从成品看，现有 `1.2.5` 构建不包含本轮修改；本轮 `1.2.6` 源码已经通过源码级全量回归，但必须等清洁提交、新 manifest 和成品双冒烟完成后，才能视为可交付 EXE。旧包与新包不得因文件名相近而混用。
+- 从成品看，已有 `1.2.5`/`1.2.6` 构建不包含本轮可见度量化修复；本轮 `1.2.7` 源码已经通过源码级全量回归，但必须等清洁提交、新 manifest 和成品双冒烟完成后，才能视为可交付 EXE。旧包与新包不得因文件名相近而混用。
 - 当前适合在完成本轮清洁构建后作为“内部受控 Beta / 授权真实发布试用版”验收；在代码签名、算法及依赖权利、客户许可文本、Windows 兼容性和真实渠道验收闭环完成前，**不能判定为可对外销售的软件成品**。
 
 ## 2. 当前核验快照
 
 | 核验项 | 结果 | 证据 |
 | --- | --- | --- |
-| 当前分支与版本目标 | `codex/windows-desktop-real-publish`；目标版本 `1.2.6` | 最终提交以新发行 manifest 的 `source_commit` 为准 |
+| 当前分支与版本目标 | `codex/windows-desktop-real-publish`；目标版本 `1.2.7` | 最终提交以新发行 manifest 的 `source_commit` 为准 |
 | 工作树 | 源码级回归已完成；正式成品仍要求清洁发布提交 | `git status --short` 与发行 manifest |
-| 后端回归 | **1189 项通过，跳过 1 项，失败/错误 0** | `python -m unittest discover -s tests`；构建时再次执行并由 manifest 留档 |
-| 前端回归 | **164/164 通过，Vue 生产构建成功** | `npm test`、`npm run build`；构建时再次执行并留档 |
+| 后端回归 | **1201 项通过，跳过 1 项，失败/错误 0** | `python -m unittest discover -s tests`；构建时再次执行并由 manifest 留档 |
+| 前端回归 | **166/166 通过，Vue 生产构建成功** | `npm test`、`npm run build`；构建时再次执行并留档 |
 | UI 参考图核验 | Dashboard 与 AI 可见度页通过 1536×1024 和 1280×800 检查，无开放 P0/P1/P2 视觉问题 | `design-qa.md`、`sau_frontend/tests/dashboardPresentation.test.js` |
-| 最新已有 EXE | `1.2.5 authorized_real`；不包含本轮 `1.2.6` 修改 | 必须以新包 manifest、SHA-256、健康冒烟和 UI 冒烟重新判定 |
+| 最新已有 EXE | 旧版本成品不包含本轮 `1.2.7` 修改 | 必须以新包 manifest、SHA-256、健康冒烟和 UI 冒烟重新判定 |
 | 测试洁净度 | 源码级全量回归通过；日志内 HTTP 404/504、超时、数据库锁和登录异常均来自测试构造的异常分支 | 最终仍以构建脚本再次回归和成品冒烟为准 |
 
 ## 3. P0：可用性、安全与可销售前硬门槛
@@ -51,10 +51,10 @@
 | P0-12 | Bilibili 登录与视频发布 | **部分完成** | 已改为 EXE 外部固定 `biliup 1.2.4` 兼容运行时，并核对文件大小、固定 SHA-256 和离线版本；登录、读取凭据、上传子进程纳入桌面进程树，取消/超时/退出只清理本次进程。证据：`uploader/bilibili_uploader/runtime.py`、`services/media_publisher_adapters.py`、`tests/test_bilibili_runtime.py`、`tests/test_media_publisher_adapters.py`。 | 最新已打包 EXE manifest 仍是 `bilibili_runtime_enabled=false`；当前 Bilibili 账号尚未完成真实登录和视频链路验收；`biliup` 不随 EXE 分发且其商业使用权未获确认。对外 SKU 必须二选一：取得官方开放平台/兼容运行时授权并完成真实验收，或明确关闭 Bilibili，不得宣称已商用可用。 |
 | P0-13 | GEO 客户诊断—优化—复测闭环 | **已完成** | 项目/内容五维诊断、0–100 分、等级、P0/P1/P2 缺口、行动目标、证据、历史和同口径复测已实现；新增基于行业、内容就绪度、可见度基线和本机能力的 10 渠道试验优先级，逐项展示适配分组成、目标、验证口径与风险；临时正文持久化只保存哈希。证据：`services/geo_diagnostic_service.py`、`sau_backend.py` 的 `/api/geo/diagnostics*`、`sau_frontend/src/views/AiVisibility.vue` 及对应测试。 | 无新增开发待办；渠道适配分只用于安排自己的对照试验，不是平台权重、流量预测、收录概率或审核承诺。对外表达必须保留“确定性准备度，不等于模型官方排名或长期收录效果”的边界。 |
 | P0-14 | 同事 GEO 底层算法移植 | **技术完成 / 权利待确认** | 发布后分析已移植为 `ai-visibility-python-port-1.1.0`；本轮又将同事的查询建议、内容结构与证据约束产品化为 `geo-article-compiler-2.3.0`、`ai-citeability-rules-2.2.0` 和 `target-length-score-profile-1.0.0`，形成发布前蓝图、按长度适配的 7 维门禁与发布后复测闭环。证据：`services/ai_visibility_service.py`、`services/geo_article_compiler_service.py`、`docs/GEO算法融合说明.md` 及对应测试。 | 技术移植不应重复开发；但交接 ZIP 无 `LICENSE/NOTICE`，外部分发和商业再许可权仍需书面确认。分布式 worker、自动采集运行时和云端 SaaS 基础设施没有纳入 EXE，不得宣传为已集成。 |
-| P0-15 | 当前配置模型的受控真实采样 | **部分完成** | EXE 后端已有 `POST /api/geo/visibility/sample` 与按 `request_id` 查询原请求的 `GET /api/geo/visibility/sample/{request_id}`；只发送用户确认的 prompt，不发送项目、文章、账号或 Cookie；单次 1–5 个串行样本；幂等、防重复计费、状态未知停机、部分成功、用量与成本回执均已实现。路由切换、页面重载或传输中断后按原 request ID 续查，不创建第二次模型调用；会话存储只保留请求标识和安全表单字段，不保存 API Key。OpenAI-compatible 地址会按 provider 规范化：Ark `/api/v3`、千问 `/compatible-mode/v1`、DeepSeek 根地址分别只补正确的 `/chat/completions`，已经是完整端点时不重复追加。系统设置可保存统一 AI 引擎，Windows 当前用户 DPAPI 保护 API Key。证据：`services/unified_ai_config_service.py`、`services/ai_visibility_sampling_service.py`、`sau_frontend/src/views/SystemSettings.vue`、`sau_frontend/src/views/AiVisibility.vue` 及对应测试。 | 自动化测试只用假响应。本轮未向任何真实模型发送数据，尚无 Qwen、DeepSeek、豆包三家同口径真实样本和供应商账单核对；未完成前只能销售“本机导入分析 + 可配置采样能力”，不能销售“已验证三模型效果”。同事远程内容引擎仍缺正式地址、令牌、镜像摘要和健康契约。 |
+| P0-15 | 当前配置模型的受控真实采样 | **部分完成** | EXE 后端已有 `POST /api/geo/visibility/sample`、多模型面板和按 `request_id` 只读查询原请求的恢复入口；只发送用户确认的 prompt，不发送项目、文章、账号或 Cookie。采样前做零网络本地契约预检，采样输出上限 768 Token、超时上限 120 秒；DeepSeek、GLM 和 Ark Doubao-Seed 采样按支持的协议请求最终答案，推理字段永不计入样本。调用前写入持久化检查点；结果未知时同一幂等键只回放，不自动重发。0 条有效回答不出分，至少 2 个独立完整模型才可做方向性比较，至少 5 条有效回答且对照合格才可量化 API 渠道；消费者 App/Web 仍保持未验证。系统设置可保存统一 AI 引擎，Windows 当前用户 DPAPI 保护 API Key。证据：`services/ai_service.py`、`services/ai_visibility_sampling_service.py`、`services/ai_visibility_panel_service.py`、`sau_frontend/src/views/AiVisibility.vue` 及对应测试。 | 自动化测试使用受控假响应，没有在本轮回归中向真实模型发送新请求。尚无 Qwen、DeepSeek、豆包三家同口径真实样本、供应商账单核对和消费者 App/Web 对照；未完成前只能销售“本机导入分析 + 可配置 API 采样能力”，不能销售“已验证三模型或真实 App GEO 效果”。同事远程内容引擎仍缺正式地址、令牌、镜像摘要和健康契约。 |
 | P0-16 | DongClaw 实例报告与效果声明 | **部分完成** | 已建立固定 7 问题 × 3 provider、基线/复测配对、地区/问题/结果矩阵、失败分母和证据边界；`geo-blackbox-panel-1.0.0` 进一步要求处理/对照组在 0/7/14/30 天按完全相同采样键比较，缺失项不补零、口径漂移不强算。证据：`services/dongclaw_evaluation_service.py`、`services/geo_blackbox_experiment_service.py`、`scripts/run_dongclaw_evaluation.py`、`docs/dongclaw-geo-evaluation-protocol.md` 及对应测试。 | 当前真实报告状态仍为 `NOT_EXECUTED`，无 Qwen/DeepSeek/豆包同口径回答，不能量化 GEO 提升；RanClaw 精确实体也未核验。面板只评估导入证据，不自动抓站或调用模型。需完成基线、处理/对照资产和 7/14/30 天复测，短周期只可证明流程可用，不能宣称因果效果。 |
-| P0-17 | 当前代码形成新的可回滚 EXE | **以发行 manifest 判定** | 源代码不写死“最新”产物目录，避免构建后再修改提交导致 EXE 与 Git SHA 脱钩；只有 `release/windows` 中版本 `1.2.6`、提交一致、健康/UI 双冒烟通过且带 SHA-256 的 `authorized_real` manifest 才是本轮成品，旧 EXE 继续作为回滚件。 | 对每个交付候选运行 `scripts/build_windows_desktop.ps1 -PublishingProfile authorized_real`；保留 EXE、ZIP、SHA-256、manifest 和旧回滚包。若任一探针失败，候选不得交付。 |
-| P0-18 | 发布门禁覆盖全部新增能力 | **源码回归通过，待成品门禁** | 构建脚本已显式纳入统一 AI 角色路由、内容差异化、账号风险、多账号、GEO 编译/可引用性、11 平台预检、登录、队列恢复与既有发布测试，并继续执行成品健康/UI 冒烟。源码级后端 1189 项、前端 164 项及 Vue 生产构建已通过。证据：`scripts/build_windows_desktop.ps1`。 | 最终清洁提交必须由构建脚本再次跑回归、授权 EXE 打包及两个成品冒烟；再把产物哈希、manifest 与签名状态留档。 |
+| P0-17 | 当前代码形成新的可回滚 EXE | **以发行 manifest 判定** | 源代码不写死“最新”产物目录，避免构建后再修改提交导致 EXE 与 Git SHA 脱钩；只有 `release/windows` 中版本 `1.2.7`、提交一致、健康/UI 双冒烟通过且带 SHA-256 的 `authorized_real` manifest 才是本轮成品，旧 EXE 继续作为回滚件。 | 对每个交付候选运行 `scripts/build_windows_desktop.ps1 -PublishingProfile authorized_real`；保留 EXE、ZIP、SHA-256、manifest 和旧回滚包。若任一探针失败，候选不得交付。 |
+| P0-18 | 发布门禁覆盖全部新增能力 | **源码回归通过，待成品门禁** | 构建脚本已显式纳入统一 AI 角色路由、内容差异化、账号风险、多账号、GEO 编译/可引用性、11 平台预检、登录、队列恢复、可见度诚实量化门禁与既有发布测试，并继续执行成品健康/UI 冒烟。源码级后端 1201 项、前端 166 项及 Vue 生产构建已通过。证据：`scripts/build_windows_desktop.ps1`。 | 最终清洁提交必须由构建脚本再次跑回归、授权 EXE 打包及两个成品冒烟；再把产物哈希、manifest 与签名状态留档。 |
 | P0-19 | Authenticode 代码签名与成品来源信任 | **未完成** | 构建会计算 SHA-256，并把签名状态写入 manifest；最新 EXE 为 `NotSigned`。证据：`scripts/build_windows_desktop.ps1`、最新 release manifest。 | 取得公司代码签名证书或合规云签服务；在构建后签名、验证时间戳、再生成最终哈希/ZIP；建立证书轮换与吊销流程。未签名成品不得作为正式商业版宣称“可信发布者”。 |
 | P0-20 | 第三方与同事算法商业权利 | **未完成** | 仓库已有 MIT `LICENSE` 和初步 `THIRD-PARTY-NOTICES.txt`；构建可携带 notice。 | 初步清单明确不是完整 SBOM/法律审核；同事交接包缺许可；`biliup` 不具备随包分发授权结论。对外销售前必须取得同事书面授权、生成完整依赖/SBOM、随包放置所需许可证文本，并完成平台条款、商标和再分发审核。 |
 | P0-21 | 客户商业许可、隐私与操作责任文本 | **未完成** | 软件内已有平台风险提示和“建议量非官方配额”的声明；本机数据边界在 `docs/windows-desktop.md` 有说明。 | 尚无面向客户的 EULA/商业许可、隐私说明、模型数据发送同意、账号授权确认、数据保留/删除政策和支持边界。必须由业务/法务确定后随 EXE 展示并可留存同意版本；“封号概不负责”不能替代技术节流或有效合同条款。 |
@@ -76,7 +76,7 @@
 | P1-09 | 数据删除与敏感记录生命周期 | **部分完成** | 账号解绑、项目级联删除和不保存模式已有局部能力。 | 为可见度原文、诊断、成本台账、日志、备份和 WebView 缓存分别提供可见的保留期与删除入口；删除前说明影响并保留审计摘要。 |
 | P1-10 | 发布规则版本维护 | **部分完成** | 平台限制有统一版本 `2026-09-10.4`，预检与任务冻结保存实际副本。 | 建立离线规则包导入、变更说明、回归样例和回滚；平台 DOM 或字段变化时，应能禁用单一渠道，不需要整体更新所有业务数据。 |
 | P1-11 | 文档一致性 | **已完成（本轮范围）** | `docs/visibility-live-sampling.md`、`docs/windows-desktop.md`、`docs/ai-visibility-integration.md`、`docs/GEO算法融合说明.md` 与 `docs/首次使用.md` 已统一：区分手工导入与受控采样；记录按 request ID 续跑、兼容端点规范化、长度档、一键修复、一次批量确认后连续执行、核验后台直达和未知结果不重发；排除网页部署/服务器迁移。 | 后续每次增加 provider、调度能力或数据字段时同步更新数据披露、失败语义和回滚章节。 |
-| P1-12 | 正式发行版本与数据库迁移治理 | **部分完成** | 本轮桌面发行版本已提升为 `1.2.6`，GEO 编译为 `2.3.0`、可引用性门禁为 `2.2.0`、长度档为 `1.0.0`；表使用幂等创建，构建生成 build-info/manifest/哈希。 | 增加数据库 schema 迁移版本、向前/向后兼容策略、发行说明、已知问题和版本升级测试；仅靠 `CREATE TABLE IF NOT EXISTS` 不足以支撑长期字段变更。 |
+| P1-12 | 正式发行版本与数据库迁移治理 | **部分完成** | 本轮桌面发行版本已提升为 `1.2.7`，可见度采样为 `controlled-live-visibility-sampling-1.2.0`、多模型量化面板为 `api-model-visibility-panel-1.2.0`，GEO 编译为 `2.3.0`、可引用性门禁为 `2.2.0`、长度档为 `1.0.0`；表使用幂等创建，构建生成 build-info/manifest/哈希。 | 增加数据库 schema 迁移版本、向前/向后兼容策略、发行说明、已知问题和版本升级测试；仅靠 `CREATE TABLE IF NOT EXISTS` 不足以支撑长期字段变更。 |
 
 ## 5. P2：规模化与长期差异化
 

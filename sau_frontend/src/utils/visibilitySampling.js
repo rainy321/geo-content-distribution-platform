@@ -6,6 +6,24 @@ const numberOrNull = value => {
   return Number.isFinite(number) ? number : null
 }
 
+const booleanOrNull = value => {
+  if (value === true || value === false) return value
+  return null
+}
+
+const normalizedPercent = value => {
+  const number = numberOrNull(value)
+  if (number == null) return null
+  const percent = number >= 0 && number <= 1 ? number * 100 : number
+  return Math.min(100, Math.max(0, percent))
+}
+
+const measurementReasonText = value => {
+  if (typeof value === 'string') return value.trim()
+  if (!value || typeof value !== 'object') return ''
+  return String(value.message || value.reason || value.detail || '').trim()
+}
+
 // Keep this display contract aligned with the backend sampling policy.  The
 // authoritative value is still returned on every new sampling receipt.
 export const VISIBILITY_SAMPLE_OUTPUT_TOKEN_LIMIT = 768
@@ -236,6 +254,105 @@ export const normalizeVisibilitySamplingResponse = value => {
   }
 }
 
+const normalizePanelMeasurementQuality = (root, targets) => {
+  const rawSource = root.measurement_quality ?? root.measurementQuality
+  const source = rawSource && typeof rawSource === 'object' ? rawSource : {}
+  const requestedFromTargets = targets.reduce((total, target) => total + target.requestedSampleCount, 0)
+  const validFromTargets = targets.reduce((total, target) => total + target.completedSampleCount, 0)
+  const requestedResponseCount = Math.max(
+    0,
+    numberOrNull(source.requested_response_count ?? source.requestedResponseCount)
+      ?? (requestedFromTargets > 0 ? requestedFromTargets : null)
+      ?? numberOrNull(root.requested_role_count)
+      ?? targets.length
+  )
+  const validResponseCount = Math.max(
+    0,
+    numberOrNull(source.valid_response_count ?? source.validResponseCount)
+      ?? (targets.length ? validFromTargets : null)
+      ?? numberOrNull(root.sampled_role_count)
+      ?? 0
+  )
+  const completeTargetCount = targets.filter(target => (
+    target.requestedSampleCount > 0
+    && target.completedSampleCount >= target.requestedSampleCount
+    && !target.failure
+  )).length
+  const distinctModelCount = Math.max(0, numberOrNull(root.distinct_model_count ?? root.distinctModelCount) ?? 0)
+  const comparisonEligible = Boolean(root.comparison_eligible ?? root.comparisonEligible)
+  const minimumDistinctModels = Math.max(
+    2,
+    numberOrNull(source.minimum_distinct_models ?? source.minimumDistinctModels) ?? 2
+  )
+  const minimumQuantitativeResponses = Math.max(
+    1,
+    numberOrNull(source.minimum_quantitative_responses ?? source.minimumQuantitativeResponses) ?? 5
+  )
+
+  let derivedStatus = 'insufficient'
+  if (validResponseCount === 0) derivedStatus = 'invalid'
+  else if (distinctModelCount >= minimumDistinctModels && completeTargetCount >= minimumDistinctModels) {
+    derivedStatus = validResponseCount >= minimumQuantitativeResponses && comparisonEligible ? 'quantitative' : 'directional'
+  }
+  const reportedStatus = String(source.status || '').trim().toLowerCase()
+  let status = ['invalid', 'insufficient', 'directional', 'quantitative'].includes(reportedStatus)
+    ? reportedStatus
+    : derivedStatus
+  if (validResponseCount === 0) status = 'invalid'
+  else if (status === 'quantitative' && (validResponseCount < minimumQuantitativeResponses || !comparisonEligible)) status = derivedStatus
+  else if (status === 'directional' && (distinctModelCount < minimumDistinctModels || completeTargetCount < minimumDistinctModels)) status = 'insufficient'
+
+  const reportedRate = normalizedPercent(source.valid_response_rate ?? source.validResponseRate)
+  const validResponseRate = reportedRate ?? (
+    requestedResponseCount > 0
+      ? Math.min(100, validResponseCount / requestedResponseCount * 100)
+      : null
+  )
+  const reportedScoreAllowed = booleanOrNull(source.score_allowed ?? source.scoreAllowed)
+  const reportedApiClaimAllowed = booleanOrNull(source.api_channel_claim_allowed ?? source.apiChannelClaimAllowed)
+  const reportedConsumerClaimAllowed = booleanOrNull(
+    source.consumer_geo_claim_allowed
+    ?? source.consumerGeoClaimAllowed
+    ?? root.consumer_geo_claim_allowed
+    ?? root.consumerGeoClaimAllowed
+  )
+  const consumerParityClaim = booleanOrNull(root.consumer_parity?.claim_allowed ?? root.consumerParity?.claim_allowed)
+  const confidenceLevel = String(source.confidence_level ?? source.confidenceLevel ?? '').trim().toLowerCase()
+    || (status === 'invalid' ? 'none' : status === 'directional' ? 'low' : status === 'quantitative' ? (validResponseCount >= 10 ? 'high' : 'medium') : 'low')
+  const reportedReasons = [
+    ...asArray(source.reasons),
+    ...asArray(source.blocking_reasons ?? source.blockingReasons),
+    ...asArray(source.unquantifiable_reasons ?? source.unquantifiableReasons)
+  ].map(measurementReasonText).filter(Boolean)
+  const singleReason = measurementReasonText(source.reason)
+  const reasons = [...new Set(singleReason ? [...reportedReasons, singleReason] : reportedReasons)]
+
+  return {
+    status,
+    // A zero-evidence or non-quantitative panel is never scoreable, even if an
+    // older/malformed backend accidentally reports score_allowed=true.
+    scoreAllowed: validResponseCount > 0
+      && status === 'quantitative'
+      && (reportedScoreAllowed ?? derivedStatus === 'quantitative')
+      && (reportedApiClaimAllowed ?? true),
+    validResponseCount,
+    requestedResponseCount,
+    validResponseRate,
+    confidenceLevel,
+    consumerGeoClaimAllowed: reportedConsumerClaimAllowed ?? consumerParityClaim ?? false,
+    completeTargetCount,
+    validModelCount: Math.max(0, numberOrNull(source.valid_model_count ?? source.validModelCount) ?? distinctModelCount),
+    minimumDistinctModels,
+    minimumQuantitativeResponses,
+    directionalComparisonAllowed: booleanOrNull(
+      source.directional_comparison_allowed ?? source.directionalComparisonAllowed
+    ) ?? comparisonEligible,
+    apiChannelClaimAllowed: status === 'quantitative' && (reportedApiClaimAllowed ?? true),
+    reasons,
+    source: Object.keys(source).length ? 'reported' : 'derived'
+  }
+}
+
 export const normalizeVisibilityPanelResponse = value => {
   const root = unwrapSamplingPayload(value)
   const manifest = root.manifest && typeof root.manifest === 'object' ? root.manifest : {}
@@ -268,6 +385,7 @@ export const normalizeVisibilityPanelResponse = value => {
       capturedResponses: asArray(item?.analysis?.samples)
     }
   })
+  const measurementQuality = normalizePanelMeasurementQuality(root, targets)
   return {
     status: ['completed', 'partial', 'need_action'].includes(String(root.status))
       ? String(root.status)
@@ -283,7 +401,14 @@ export const normalizeVisibilityPanelResponse = value => {
     comparisonEligible: Boolean(root.comparison_eligible),
     targets,
     manifest,
-    outcomeUnknown: Boolean(root.outcome_unknown),
+    outcomeUnknown: Boolean(
+      root.outcome_unknown
+      || targets.some(target => (
+        target.executionStatus === 'outcome_unknown'
+        || target.failure?.outcome_unknown
+        || target.failure?.outcomeUnknown
+      ))
+    ),
     failure: root.failure && typeof root.failure === 'object' ? root.failure : null,
     retryPolicy: root.retry_policy && typeof root.retry_policy === 'object' ? root.retry_policy : {},
     recoveryPolicy: root.recovery_policy && typeof root.recovery_policy === 'object' ? root.recovery_policy : {},
@@ -296,7 +421,82 @@ export const normalizeVisibilityPanelResponse = value => {
     consumerParity: root.consumer_parity && typeof root.consumer_parity === 'object'
       ? root.consumer_parity
       : { status: 'unverified', claim_allowed: false },
-    claimBoundary: String(root.claim_boundary || '')
+    claimBoundary: String(root.claim_boundary || ''),
+    measurementQuality
+  }
+}
+
+export const visibilityPanelMeasurementPresentation = value => {
+  const receipt = value && typeof value === 'object' ? value : {}
+  const quality = receipt.measurementQuality && typeof receipt.measurementQuality === 'object'
+    ? receipt.measurementQuality
+    : normalizePanelMeasurementQuality(receipt, asArray(receipt.targets))
+  const status = ['invalid', 'insufficient', 'directional', 'quantitative'].includes(quality.status)
+    ? quality.status
+    : 'insufficient'
+  const confidenceLevel = String(quality.confidenceLevel || 'none').toLowerCase()
+  const confidenceLabel = ({
+    high: '高',
+    medium: '中',
+    low: '低',
+    none: '不可判定',
+    unknown: '不可判定'
+  })[confidenceLevel] || '不可判定'
+  const statusPresentation = {
+    invalid: {
+      label: '不可量化',
+      summary: '没有有效回答，本批次不能计算品牌可见度，更不能生成总体 GEO 可用分。'
+    },
+    insufficient: {
+      label: '证据不足',
+      summary: '有效回答或独立完整模型不足，本批次不生成对照分。'
+    },
+    directional: {
+      label: '仅方向性判断',
+      summary: `已有至少 ${quality.minimumDistinctModels || 2} 个完整独立模型，但有效回答少于 ${quality.minimumQuantitativeResponses || 5} 条，只能观察方向，不能当作稳定分数。`
+    },
+    quantitative: {
+      label: 'API 渠道可量化',
+      summary: '有效回答达到门槛且模型对照合格，可量化本批次 API 渠道表现。'
+    }
+  }[status]
+
+  const reasons = [...asArray(quality.reasons)]
+  if (status === 'invalid' && !reasons.length) {
+    reasons.push('0 条有效回答：品牌提及率、声量份额、推荐位次都没有观察值。')
+  } else if (status === 'insufficient' && !reasons.length) {
+    reasons.push(`仅 ${quality.completeTargetCount || 0} 个调用目标完整返回；至少需要 ${quality.minimumDistinctModels || 2} 个独立完整模型。`)
+  } else if (status === 'directional' && !reasons.length) {
+    reasons.push(`当前只有 ${quality.validResponseCount || 0} 条有效回答；达到 ${quality.minimumQuantitativeResponses || 5} 条且对照合格后才允许量化。`)
+  }
+  if (receipt.comparisonEligible === false && status !== 'invalid') {
+    reasons.push('comparison_eligible=false：模型身份或采样口径尚未形成合格对照。')
+  }
+  if (!quality.consumerGeoClaimAllowed) {
+    reasons.push('缺少消费者网页 / App 入口证据，不能生成总体 GEO 可用分。')
+  }
+
+  return {
+    status,
+    tone: status,
+    label: statusPresentation.label,
+    summary: statusPresentation.summary,
+    scoreAllowed: Boolean(quality.scoreAllowed),
+    overallGeoScoreAllowed: Boolean(quality.scoreAllowed && quality.consumerGeoClaimAllowed),
+    overallGeoScoreLabel: quality.scoreAllowed && quality.consumerGeoClaimAllowed ? '证据允许' : '—',
+    overallGeoScoreHint: !quality.scoreAllowed
+      ? '样本证据不足，不显示数值'
+      : !quality.consumerGeoClaimAllowed
+        ? '仅 API 渠道，缺少 App / Web 证据'
+        : '证据门槛允许出分',
+    validResponseCount: Math.max(0, numberOrNull(quality.validResponseCount) ?? 0),
+    requestedResponseCount: Math.max(0, numberOrNull(quality.requestedResponseCount) ?? 0),
+    validResponseRate: normalizedPercent(quality.validResponseRate),
+    confidenceLevel,
+    confidenceLabel,
+    consumerGeoClaimAllowed: Boolean(quality.consumerGeoClaimAllowed),
+    reasons: [...new Set(reasons.map(measurementReasonText).filter(Boolean))],
+    scopeLabel: 'provider_api · 仅 API 渠道'
   }
 }
 

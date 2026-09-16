@@ -424,6 +424,45 @@
                 <p>{{ visibilityPanelReceipt.failure.message || '多模型请求未完成' }}</p>
                 <small v-if="visibilityPanelReceipt.outcomeUnknown">远端结果未知：先核对模型账单，不要直接重发。</small>
               </div>
+              <section :class="['panel-measurement-gate', `gate-${panelMeasurement.tone}`]" aria-labelledby="panel-measurement-title">
+                <div class="panel-gate-verdict">
+                  <span>GEO QUANTIFICATION GATE</span>
+                  <strong id="panel-measurement-title">{{ panelMeasurement.label }}</strong>
+                  <p>{{ panelMeasurement.summary }}</p>
+                </div>
+                <dl aria-label="多模型样本质量">
+                  <div>
+                    <dt>样本有效率</dt>
+                    <dd>{{ formatPercent(panelMeasurement.validResponseRate) }}</dd>
+                    <small>{{ panelMeasurement.validResponseCount }} / {{ panelMeasurement.requestedResponseCount }} 条有效回答</small>
+                  </div>
+                  <div>
+                    <dt>证据置信度</dt>
+                    <dd>{{ panelMeasurement.confidenceLabel }}</dd>
+                    <small>{{ panelMeasurement.confidenceLevel || 'none' }}</small>
+                  </div>
+                  <div>
+                    <dt>总体 GEO 可用分</dt>
+                    <dd :class="{ withheld: !panelMeasurement.overallGeoScoreAllowed }">{{ panelMeasurement.overallGeoScoreLabel }}</dd>
+                    <small>{{ panelMeasurement.overallGeoScoreHint }}</small>
+                  </div>
+                  <div>
+                    <dt>测量范围</dt>
+                    <dd>API 渠道</dd>
+                    <small>provider_api</small>
+                  </div>
+                </dl>
+                <p class="panel-channel-boundary">
+                  <strong>provider_api 只代表 API 渠道。</strong>
+                  它不代表豆包、千问、DeepSeek 等消费者 App / Web 的实际回答，也不证明联网检索或引用收录。
+                </p>
+                <div v-if="panelMeasurement.reasons.length" class="panel-measurement-reasons">
+                  <strong>{{ panelMeasurement.status === 'quantitative' ? '适用边界' : '不可量化原因' }}</strong>
+                  <ul>
+                    <li v-for="reason in panelMeasurement.reasons" :key="reason">{{ reason }}</li>
+                  </ul>
+                </div>
+              </section>
               <div class="execution-receipts">
                 <article
                   v-for="target in presentedPanelTargets"
@@ -455,8 +494,17 @@
                 <p><strong>真实性边界：</strong>{{ visibilityPanelReceipt.claimBoundary }}</p>
               </div>
               <footer>
-                <el-button @click="router.push('/settings')">检查三个模型配置</el-button>
-                <small>修正模型或网关后请创建新请求；旧请求不会被自动重发或重复计费。</small>
+                <el-button @click="router.push('/settings')">检查模型配置</el-button>
+                <template v-if="visibilityPanelReceipt.outcomeUnknown">
+                  <el-button :loading="samplingRecoveryLoading" @click="checkOriginalPanelStatus">检查原请求状态（不调用模型）</el-button>
+                  <el-button @click="openSamplingCostLedger">核对成本账单</el-button>
+                </template>
+                <el-button v-else type="primary" @click="confirmPanelReplacementRun">准备重新运行（新请求）</el-button>
+                <small>
+                  {{ visibilityPanelReceipt.outcomeUnknown
+                    ? '结果未知时不提供重新运行；先只读查询原请求并核对账单。'
+                    : '不会自动重试。重新运行会先二次确认，并创建新的请求身份，可能产生新费用。' }}
+                </small>
               </footer>
             </article>
           </section>
@@ -563,7 +611,8 @@
       <div v-else class="proof-grid">
         <article class="diagnostic-board">
           <div v-if="diagnostic" class="diagnostic-score">
-            <span>READINESS / 100</span>
+            <span>PROJECT READINESS / 100</span>
+            <p class="score-scope">项目准备度，不是总体 GEO 可用分</p>
             <strong>{{ diagnostic.score }}</strong>
             <em>{{ diagnostic.grade }}</em>
             <p class="diagnostic-delta" :class="{ negative: diagnosticDelta != null && diagnosticDelta < 0 }">
@@ -1148,6 +1197,7 @@ import {
   normalizeVisibilitySamplingResponse,
   samplingStatusLabel,
   validateVisibilitySamplingDraft,
+  visibilityPanelMeasurementPresentation,
   visibilityPanelTargetPresentation,
   visibilityProviderPreset
 } from '@/utils/visibilitySampling'
@@ -1318,6 +1368,9 @@ const presentedPanelTargets = computed(() => (
     ...target,
     presentation: visibilityPanelTargetPresentation(target)
   }))
+))
+const panelMeasurement = computed(() => (
+  visibilityPanelMeasurementPresentation(visibilityPanelReceipt.value)
 ))
 const diagnosticDelta = computed(() => diagnosticRetestDelta(commercialDiagnosticRuns.value))
 
@@ -1817,11 +1870,61 @@ const checkOriginalSamplingStatus = async () => {
   }
 }
 
+const checkOriginalPanelStatus = async () => {
+  const requestId = visibilityPanelReceipt.value?.requestId
+  if (!requestId || samplingRecoveryLoading.value) return
+  samplingRecoveryLoading.value = true
+  samplingError.value = ''
+  try {
+    const response = await diagnosticsApi.getVisibilityPanel(requestId, {
+      suppressGlobalError: true
+    })
+    const status = String(response.data?.status || response.data?.data?.status || '')
+    if (status === 'processing') {
+      samplingResumeMessage.value = '原多模型请求仍在处理；本次只读查询没有创建新的模型调用。'
+      return
+    }
+    finishRestoredPanel(response.data)
+  } catch (error) {
+    const responseData = error?.response?.data
+    const terminalStatus = String(responseData?.data?.status || '')
+    if (['completed', 'partial', 'need_action'].includes(terminalStatus)) {
+      finishRestoredPanel(responseData)
+    } else {
+      samplingError.value = `无法读取原多模型请求：${readableError(error)}；没有创建新的模型调用。`
+    }
+  } finally {
+    samplingRecoveryLoading.value = false
+  }
+}
+
 const openSamplingCostLedger = () => {
   router.push({
     path: '/cost-ledger',
     query: form.projectId ? { project_id: String(form.projectId) } : {}
   })
+}
+
+const confirmPanelReplacementRun = async () => {
+  if (samplingLoading.value || visibilityPanelReceipt.value?.outcomeUnknown) return
+  try {
+    await ElMessageBox.confirm(
+      `这不是重试原请求，而是创建一组新的多模型 API 调用，最多产生 ${sampling.sampleCount * configuredDistinctModelCount.value} 次调用。请先检查模型 ID、Base URL 和输出上限；新请求可能产生费用。`,
+      '准备重新运行多模型对照',
+      {
+        confirmButtonText: '确认配置已修正，创建新请求',
+        cancelButtonText: '先不运行',
+        type: 'warning',
+        distinguishCancelAndClose: true
+      }
+    )
+  } catch {
+    return
+  }
+  sampling.useUnifiedEngine = true
+  sampling.multiModel = true
+  sampling.confirmed = true
+  await startLiveSampling()
 }
 
 const confirmSingleReplacementSample = async () => {
@@ -2657,6 +2760,50 @@ onBeforeUnmount(() => {
   > span { color: #4c4e52; font: 700 9px/1.2 "Microsoft YaHei UI", sans-serif; letter-spacing: 0; }
   > small { color: var(--muted); font: 8px/1.35 "Cascadia Mono", monospace; }
 }
+.panel-measurement-gate {
+  display: grid;
+  grid-template-columns: minmax(190px, .62fr) minmax(0, 1.38fr);
+  gap: 13px 18px;
+  margin-top: 13px;
+  padding: 14px;
+  border: 1px solid #d8d9d6;
+  border-top: 3px solid #8a8c91;
+  background: #f8f8f5;
+
+  &.gate-invalid { border-top-color: var(--red); background: #fff8f7; }
+  &.gate-insufficient, &.gate-directional { border-top-color: var(--amber); background: #fffbf3; }
+  &.gate-quantitative { border-top-color: #527c60; background: #f5faf6; }
+  .panel-gate-verdict > span { color: #6f7176; font: 700 8px/1 "Cascadia Mono", monospace; letter-spacing: .09em; }
+  .panel-gate-verdict > strong { display: block; margin-top: 7px; color: var(--ink); font-size: 17px; }
+  .panel-gate-verdict > p { margin: 7px 0 0; color: #5f6166; font-size: 9px; line-height: 1.6; }
+  > dl { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0; border: 1px solid #dcddd9; background: rgba(255, 255, 255, .82); }
+  > dl > div { min-width: 0; padding: 10px; border-right: 1px solid #e2e3df; }
+  > dl > div:last-child { border-right: 0; }
+  dt { color: #77797d; font-size: 8px; }
+  dd { margin: 7px 0 0; color: var(--ink); font: 800 14px/1 "Cascadia Mono", "Microsoft YaHei UI", monospace; overflow-wrap: anywhere; }
+  dd.withheld { color: var(--red); }
+  dl small { display: block; margin-top: 6px; color: var(--muted); font-size: 7px; line-height: 1.45; }
+}
+.panel-channel-boundary {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 10px 11px;
+  border-left: 3px solid #5d7774;
+  background: #fff;
+  color: #5e6266;
+  font-size: 9px;
+  line-height: 1.6;
+  strong { color: var(--ink); }
+}
+.panel-measurement-reasons {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: 112px minmax(0, 1fr);
+  gap: 12px;
+  padding-top: 2px;
+  > strong { color: #54565a; font-size: 9px; }
+  ul { margin: 0; padding-left: 16px; color: #6a5e50; font-size: 8px; line-height: 1.6; }
+}
 .sampling-failure { margin: 12px 0 0; padding: 11px 12px; border: 1px solid #dfb6b2; background: #fff4f3; color: #8f4640; font-size: 10px; line-height: 1.55; p { margin: 4px 0 0; } small { display: block; margin-top: 6px; font-weight: 700; } }
 .sampling-recovery-rail {
   margin-top: 12px;
@@ -2776,7 +2923,8 @@ onBeforeUnmount(() => {
   background: var(--harbor);
   color: #eff9f7;
   > span { color: #bfc0c3; font: 700 8px/1.3 "Cascadia Mono", monospace; letter-spacing: 0.08em; }
-  > strong { margin-top: 34px; font: 700 58px/0.82 "Bahnschrift SemiCondensed", sans-serif; letter-spacing: -0.06em; }
+  .score-scope { margin: 7px 0 0; color: rgba(232, 246, 243, .62); font-size: 8px; line-height: 1.45; }
+  > strong { margin-top: 25px; font: 700 58px/0.82 "Bahnschrift SemiCondensed", sans-serif; letter-spacing: -0.06em; }
   > em { display: grid; width: 38px; height: 38px; margin-top: 14px; place-items: center; border: 1px solid #737477; color: #fff; font: 700 15px/1 "Cascadia Mono", monospace; font-style: normal; }
   .diagnostic-delta { margin: 15px 0 0; color: #c7c8ca; font-size: 8px; line-height: 1.55; }
   .diagnostic-delta.negative { color: #f0aaa5; }
@@ -3284,6 +3432,10 @@ onBeforeUnmount(() => {
   .dispatch-confirm :deep(.el-button) { width: 100%; }
   .sampling-receipt > header { align-items: flex-start; flex-direction: column; }
   .sampling-receipt > header .panel-coverage-count { text-align: left; }
+  .panel-measurement-gate { grid-template-columns: 1fr; }
+  .panel-measurement-gate > dl { grid-template-columns: 1fr 1fr; }
+  .panel-measurement-gate > dl > div:nth-child(2) { border-right: 0; }
+  .panel-measurement-gate > dl > div:nth-child(-n + 2) { border-bottom: 1px solid #e2e3df; }
   .execution-receipts > article { grid-template-columns: 58px minmax(0, 1fr); }
   .execution-receipts .panel-target-state,
   .execution-receipts .panel-target-message,

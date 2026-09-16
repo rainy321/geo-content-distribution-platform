@@ -167,6 +167,7 @@ test('AI visibility view exposes diagnostic and cost endpoints with explicit bou
   assert.match(apiSource, /\/api\/geo\/diagnostics/)
   assert.match(apiSource, /\/api\/ai-usage\/projects\//)
   assert.match(viewSource, /客户诊断/)
+  assert.match(viewSource, /项目准备度，不是总体 GEO 可用分/)
   assert.match(viewSource, /发布自动化不产生模型 Token/)
   assert.match(viewSource, /未提供 Token ≠ 0 Token/)
   assert.match(viewSource, /逐次调用明细/)

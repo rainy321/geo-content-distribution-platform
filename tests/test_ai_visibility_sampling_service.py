@@ -17,6 +17,7 @@ from services.ai_service import (
 from services.ai_visibility_sampling_service import (
     IN_PROGRESS_EXPIRY_SECONDS,
     VISIBILITY_SAMPLE_MAX_OUTPUT_TOKENS,
+    VISIBILITY_SAMPLE_MAX_TIMEOUT_SECONDS,
     VisibilitySamplingConflictError,
     VisibilitySamplingInProgressError,
     VisibilitySamplingValidationError,
@@ -258,6 +259,28 @@ class AIVisibilitySamplingServiceTests(unittest.TestCase):
             "sequential_stop_on_first_failure",
         )
         self.assertFalse(data["request_policy"]["connection_test_equivalent"])
+        self.assertEqual(
+            data["request_policy"]["max_timeout_seconds"],
+            VISIBILITY_SAMPLE_MAX_TIMEOUT_SECONDS,
+        )
+        self.assertEqual(data["provider_attempt_count"], 2)
+        self.assertEqual(data["unknown_outcome_count"], 0)
+        self.assertEqual(
+            [item["phase"] for item in data["attempts"]],
+            ["contract_probe", "measurement"],
+        )
+        self.assertEqual(
+            [item["state"] for item in data["attempts"]],
+            ["succeeded", "succeeded"],
+        )
+        self.assertEqual(data["contract_preflight"]["status"], "passed")
+        self.assertEqual(data["contract_preflight"]["network_requests"], 0)
+        self.assertFalse(
+            data["contract_preflight"]["provider_capabilities_verified"]
+        )
+        self.assertEqual(data["contract_probe"]["status"], "passed")
+        self.assertTrue(data["contract_probe"]["reuses_requested_sample"])
+        self.assertEqual(data["contract_probe"]["extra_provider_requests"], 0)
         self.assertEqual([set(item) for item in calls], [{"prompt", "settings"}] * 2)
         self.assertTrue(
             all(
@@ -684,8 +707,25 @@ class AIVisibilitySamplingServiceTests(unittest.TestCase):
             first["payload"]["data"]["configured_model"],
             "sample-model",
         )
+        timeout_data = first["payload"]["data"]
+        self.assertEqual(timeout_data["provider_attempt_count"], 1)
+        self.assertEqual(timeout_data["unknown_outcome_count"], 1)
+        self.assertEqual(timeout_data["attempts"][0]["state"], "outcome_unknown")
+        self.assertEqual(
+            timeout_data["attempts"][0]["ai_usage"]["usage_status"],
+            "unknown",
+        )
+        self.assertEqual(timeout_data["contract_probe"]["status"], "outcome_unknown")
         self.assertTrue(replay["replayed"])
         self.assertEqual(replay["payload"], first["payload"])
+        with closing(sqlite3.connect(self.database_path)) as conn:
+            ledger_rows = conn.execute(
+                """
+                SELECT usage_status, reference_id FROM ai_usage_ledger
+                WHERE operation = 'visibility_sample'
+                """
+            ).fetchall()
+        self.assertEqual(ledger_rows, [("unknown", "1:1")])
 
     def test_upstream_504_is_an_unknown_outcome_with_status_preserved(self):
         calls = []
@@ -737,6 +777,84 @@ class AIVisibilitySamplingServiceTests(unittest.TestCase):
                 request_id="retry-after-crash",
                 idempotency_key="crash-key",
             )
+
+    def test_transport_contract_preflight_rejects_before_row_or_provider_call(self):
+        calls = []
+
+        def sampler(**_kwargs):
+            calls.append(1)
+
+        invalid_settings = [
+            AISettings(
+                base_url="https://api.example.test/v1",
+                api_key="secret",
+                model="sample-model",
+                timeout_seconds=0,
+            ),
+            AISettings(
+                base_url="https://api.example.test/v1",
+                api_key="secret",
+                model="sample-model",
+                max_tokens=0,
+            ),
+            AISettings(
+                base_url="http://localhost:8080/v1",
+                api_key="secret",
+                model="sample-model",
+            ),
+        ]
+        for invalid in invalid_settings:
+            with self.subTest(settings=repr(invalid)):
+                with self.assertRaisesRegex(
+                    VisibilitySamplingValidationError,
+                    "采样前契约检测失败",
+                ):
+                    self.run_sample(
+                        sampler,
+                        settings=invalid,
+                        sample_count=1,
+                        persist=False,
+                    )
+
+        self.assertEqual(calls, [])
+        with closing(sqlite3.connect(self.database_path)) as conn:
+            self.assertEqual(
+                conn.execute(
+                    "SELECT COUNT(*) FROM ai_visibility_sample_requests"
+                ).fetchone()[0],
+                0,
+            )
+
+    def test_in_flight_checkpoint_marks_provider_outcome_unknown(self):
+        observed = {}
+
+        def sampler(**_kwargs):
+            observed.update(
+                get_ai_visibility_sample_request(
+                    self.database_path,
+                    "sampling-request-1",
+                )
+            )
+            return AICompletionResult(
+                content="DongClaw 小龙虾值得考虑。",
+                model="sample-model",
+                provider_request_id="provider-one",
+                elapsed_ms=1,
+                usage=None,
+            )
+
+        result = self.run_sample(sampler, sample_count=1, persist=False)
+
+        self.assertEqual(result["http_status"], 200)
+        self.assertEqual(observed["status"], "started")
+        checkpoint = observed["result"]["data"]
+        self.assertEqual(checkpoint["status"], "processing")
+        self.assertTrue(checkpoint["outcome_unknown"])
+        self.assertEqual(
+            checkpoint["active_attempt"]["state"],
+            "dispatching_or_in_flight",
+        )
+        self.assertFalse(checkpoint["retry_policy"]["automatic_retry"])
 
     def test_invalid_confirmation_and_aliases_fail_before_model_call(self):
         calls = []

@@ -404,6 +404,7 @@ def sample_ai_prompt_detailed(
         temperature=0.2,
         http_post=http_post or requests.post,
         system_prompt=None,
+        prefer_final_answer=True,
     )
 
 
@@ -437,6 +438,7 @@ def _request_chat_completion_detailed(
     temperature: float,
     http_post,
     system_prompt: str | None = "你是一名 GEO / AEO 内容优化专家。",
+    prefer_final_answer: bool = False,
 ) -> AICompletionResult:
     """Call the provider and retain non-secret response metadata."""
 
@@ -460,6 +462,17 @@ def _request_chat_completion_detailed(
         # Qwen 3.8 enables hybrid thinking by default. For synchronous content
         # generation this can delay the first response beyond serverless limits.
         request_body["enable_thinking"] = False
+    if prefer_final_answer and _supports_disabled_thinking_for_sampling(settings):
+        # Visibility sampling measures the provider's answer, not its private
+        # chain of thought. These model families document Chat Completions'
+        # ``thinking.type=disabled`` option. Scope it to sampling so article
+        # generation/optimization keep their existing quality characteristics.
+        request_body["thinking"] = {"type": "disabled"}
+
+    thinking_disabled = (
+        request_body.get("enable_thinking") is False
+        or request_body.get("thinking") == {"type": "disabled"}
+    )
 
     started_at = time.perf_counter()
     _log_ai_provider_event(
@@ -468,7 +481,7 @@ def _request_chat_completion_detailed(
         model=settings.model,
         timeout_seconds=settings.timeout_seconds,
         max_tokens=settings.max_tokens,
-        thinking_disabled=request_body.get("enable_thinking") is False,
+        thinking_disabled=thinking_disabled,
     )
 
     try:
@@ -916,6 +929,19 @@ def _should_disable_dashscope_thinking(settings: AISettings) -> bool:
         return False
     model = settings.model.strip().lower()
     return hostname.endswith(".aliyuncs.com") and model.startswith("qwen3.8")
+
+
+def _supports_disabled_thinking_for_sampling(settings: AISettings) -> bool:
+    """Return true only for sampled model families with this request option."""
+
+    model = settings.model.strip().casefold()
+    if "deepseek" in model or "glm" in model:
+        return True
+    try:
+        hostname = (urlsplit(settings.base_url).hostname or "").casefold()
+    except ValueError:
+        return False
+    return hostname == "ark.cn-beijing.volces.com" and "doubao-seed" in model
 
 
 def _validate_custom_base_url(base_url: str) -> None:
@@ -1402,28 +1428,84 @@ def _parse_evaluation_output(raw_content: str) -> dict[str, Any]:
     }
 
 
+_CHAT_ENVELOPE_KEYS = ("data", "result", "response")
+_FINAL_ANSWER_FIELDS = ("final", "answer", "final_content", "final_answer")
+_REASONING_FIELDS = ("reasoning_content", "thinking", "analysis")
+_REASONING_PART_TYPES = frozenset(
+    {"analysis", "reasoning", "reasoning_text", "thinking", "thought"}
+)
+_FINAL_TEXT_PART_TYPES = frozenset({"", "text", "output_text"})
+_REASONING_MARKUP_RE = re.compile(
+    r"(?is)<\s*/?\s*(?:think|thinking|analysis|reasoning)\b|"
+    r"<\|(?:channel\|>\s*)?(?:analysis|reasoning|thinking)\b"
+)
+
+
+def _extract_text_value(value: Any, *, depth: int = 0) -> str:
+    """Return text from one final-answer value without reading reasoning fields."""
+
+    if depth > 4:
+        return ""
+    if isinstance(value, str):
+        # Preserve token boundaries. Streaming providers commonly emit chunks
+        # such as ``"Hello"`` followed by ``" world"``.
+        return value
+    if isinstance(value, Mapping):
+        part_type = str(value.get("type") or "").strip().lower()
+        if part_type in _REASONING_PART_TYPES:
+            return ""
+        if part_type not in _FINAL_TEXT_PART_TYPES:
+            return ""
+        for key in ("text", "value", "content"):
+            text = _extract_text_value(value.get(key), depth=depth + 1)
+            if text:
+                return text
+        return ""
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        return "".join(
+            text
+            for item in value
+            if (text := _extract_text_value(item, depth=depth + 1))
+        )
+    return ""
+
+
+def _contains_reasoning_markup(value: str) -> bool:
+    return bool(value and _REASONING_MARKUP_RE.search(value))
+
+
+def _extract_explicit_final_text(container: Mapping[str, Any]) -> str:
+    for field_name in _FINAL_ANSWER_FIELDS:
+        text = _extract_text_value(container.get(field_name))
+        if text.strip() and not _contains_reasoning_markup(text):
+            return text.strip()
+    return ""
+
+
 def _extract_message_content(payload: Mapping[str, Any]) -> str:
     choices = payload.get("choices")
     if not isinstance(choices, list) or not choices:
         raise KeyError("choices")
-    first_choice = choices[0]
-    if not isinstance(first_choice, Mapping):
-        raise KeyError("choices[0]")
-    message = first_choice.get("message")
-    if not isinstance(message, Mapping):
-        raise KeyError("message")
-    content = message.get("content")
-    if isinstance(content, str) and content.strip():
-        return content.strip()
-    if isinstance(content, list):
-        text = "".join(
-            str(part.get("text", ""))
-            for part in content
-            if isinstance(part, Mapping)
-        ).strip()
-        if text:
-            return text
-    raise ValueError("message.content")
+
+    # ``n`` is not set by this client, but some gateways still return an empty
+    # leading choice. Select the first choice that carries an explicit final
+    # answer instead of failing solely because choices[0] is empty.
+    for choice in choices:
+        if not isinstance(choice, Mapping):
+            continue
+        message = choice.get("message")
+        if isinstance(message, Mapping):
+            content = _extract_text_value(message.get("content"))
+            if content.strip() and not _contains_reasoning_markup(content):
+                return content.strip()
+            final_text = _extract_explicit_final_text(message)
+            if final_text:
+                return final_text
+
+        final_text = _extract_explicit_final_text(choice)
+        if final_text:
+            return final_text
+    raise ValueError("choices[].message.content")
 
 
 def _decode_chat_completion_response(response: Any) -> tuple[Mapping[str, Any], str]:
@@ -1436,6 +1518,7 @@ def _decode_chat_completion_response(response: Any) -> tuple[Mapping[str, Any], 
     treating private reasoning fields as the provider's final answer.
     """
 
+    raw_response_text = str(getattr(response, "text", "") or "")
     payload: Any = None
     json_error: BaseException | None = None
     try:
@@ -1443,63 +1526,141 @@ def _decode_chat_completion_response(response: Any) -> tuple[Mapping[str, Any], 
     except (TypeError, ValueError) as exc:
         json_error = exc
 
+    # A few proxies return a JSON string as the decoded body, or advertise an
+    # incorrect content type that makes a custom response adapter skip JSON.
+    # Decode one bounded document before trying SSE, without echoing it later.
+    if isinstance(payload, str):
+        payload = _decode_embedded_mapping(payload)
+    if not isinstance(payload, Mapping) and len(raw_response_text) <= 4_000_000:
+        decoded_text_payload = _decode_embedded_mapping(raw_response_text)
+        if decoded_text_payload is not None:
+            payload = decoded_text_payload
+
     if isinstance(payload, Mapping):
-        for candidate in _chat_payload_candidates(payload):
+        candidates = _chat_payload_candidates(payload)
+        for _, candidate, ancestors in candidates:
             try:
-                return candidate, _extract_message_content(candidate)
+                content = _extract_message_content(candidate)
+                return (
+                    _normalized_completion_payload(
+                        candidate,
+                        content,
+                        fallback_payloads=ancestors,
+                    ),
+                    content,
+                )
             except (TypeError, ValueError, KeyError):
                 compatible_text = _extract_compatible_output_text(candidate)
                 if compatible_text:
-                    return _normalized_completion_payload(candidate, compatible_text), compatible_text
+                    return (
+                        _normalized_completion_payload(
+                            candidate,
+                            compatible_text,
+                            fallback_payloads=ancestors,
+                        ),
+                        compatible_text,
+                    )
 
         protocol_hint = _chat_protocol_hint(payload)
         if protocol_hint:
             raise AIProtocolError(protocol_hint)
 
-    sse_payload = _parse_complete_sse_chat_response(str(getattr(response, "text", "") or ""))
+    sse_payload = _parse_complete_sse_chat_response(raw_response_text)
     if sse_payload is not None:
         return sse_payload, _extract_message_content(sse_payload)
 
+    response_headers = getattr(response, "headers", {}) or {}
     content_type = str(
-        (getattr(response, "headers", {}) or {}).get("Content-Type") or ""
+        response_headers.get("Content-Type")
+        or response_headers.get("content-type")
+        or ""
     ).lower()
     transport_hint = (
         "；网关返回了 SSE，但流中没有可用的最终正文"
         if "text/event-stream" in content_type
         else ""
     )
+    shape_hint = (
+        f"；协议形状：{_chat_protocol_shape(payload)}"
+        if isinstance(payload, Mapping)
+        else ""
+    )
     raise AIProtocolError(
         "AI 服务返回格式无效：未取得 choices[0].message.content、"
         "兼容文本字段或完整 SSE 正文；请核对模型接口类型与网关协议"
         + transport_hint
+        + shape_hint
     ) from json_error
 
 
-def _chat_payload_candidates(payload: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-    candidates = [payload]
-    for key in ("data", "result", "response"):
-        nested = payload.get(key)
-        if isinstance(nested, Mapping) and nested not in candidates:
-            candidates.append(nested)
+def _decode_embedded_mapping(value: Any) -> Mapping[str, Any] | None:
+    if isinstance(value, Mapping):
+        return value
+    if not isinstance(value, str) or not value.strip() or len(value) > 4_000_000:
+        return None
+    try:
+        decoded = json.loads(value)
+    except (TypeError, ValueError):
+        return None
+    return decoded if isinstance(decoded, Mapping) else None
+
+
+def _chat_payload_candidates(
+    payload: Mapping[str, Any],
+) -> list[tuple[str, Mapping[str, Any], tuple[Mapping[str, Any], ...]]]:
+    """Walk known gateway envelopes recursively with strict work bounds."""
+
+    candidates: list[
+        tuple[str, Mapping[str, Any], tuple[Mapping[str, Any], ...]]
+    ] = []
+    pending: list[
+        tuple[str, Mapping[str, Any], tuple[Mapping[str, Any], ...], int]
+    ] = [("root", payload, (), 0)]
+    seen: set[int] = set()
+
+    while pending and len(candidates) < 32:
+        path, candidate, ancestors, depth = pending.pop(0)
+        if id(candidate) in seen:
+            continue
+        seen.add(id(candidate))
+        candidates.append((path, candidate, ancestors))
+        if depth >= 6:
+            continue
+        for key in _CHAT_ENVELOPE_KEYS:
+            nested = _decode_embedded_mapping(candidate.get(key))
+            if nested is not None:
+                pending.append(
+                    (f"{path}.{key}", nested, (candidate, *ancestors), depth + 1)
+                )
     return candidates
 
 
 def _extract_compatible_output_text(payload: Mapping[str, Any]) -> str:
-    output_text = payload.get("output_text")
-    if isinstance(output_text, str) and output_text.strip():
+    output_text = _extract_text_value(payload.get("output_text"))
+    if output_text.strip() and not _contains_reasoning_markup(output_text):
         return output_text.strip()
 
+    final_text = _extract_explicit_final_text(payload)
+    if final_text:
+        return final_text
+
     choices = payload.get("choices")
-    if isinstance(choices, list) and choices and isinstance(choices[0], Mapping):
-        legacy_text = choices[0].get("text")
-        if isinstance(legacy_text, str) and legacy_text.strip():
-            return legacy_text.strip()
+    if isinstance(choices, list):
+        for choice in choices:
+            if not isinstance(choice, Mapping):
+                continue
+            legacy_text = _extract_text_value(choice.get("text"))
+            if legacy_text.strip() and not _contains_reasoning_markup(legacy_text):
+                return legacy_text.strip()
 
     output = payload.get("output")
     if isinstance(output, list):
         parts: list[str] = []
         for item in output:
             if not isinstance(item, Mapping):
+                continue
+            item_type = str(item.get("type") or "").strip().lower()
+            if item_type in _REASONING_PART_TYPES:
                 continue
             content = item.get("content")
             if not isinstance(content, list):
@@ -1511,8 +1672,9 @@ def _extract_compatible_output_text(payload: Mapping[str, Any]) -> str:
                 text = part.get("text")
                 if part_type not in {"output_text", "text"}:
                     continue
-                if isinstance(text, str) and text.strip():
-                    parts.append(text.strip())
+                normalized_text = _extract_text_value(text)
+                if normalized_text and not _contains_reasoning_markup(normalized_text):
+                    parts.append(normalized_text)
         return "".join(parts).strip()
     return ""
 
@@ -1520,93 +1682,332 @@ def _extract_compatible_output_text(payload: Mapping[str, Any]) -> str:
 def _normalized_completion_payload(
     payload: Mapping[str, Any],
     content: str,
+    *,
+    fallback_payloads: Sequence[Mapping[str, Any]] = (),
 ) -> Mapping[str, Any]:
+    sources = (payload, *fallback_payloads)
+
+    def first_value(*names: str) -> Any:
+        for source in sources:
+            for name in names:
+                value = source.get(name)
+                if value not in (None, ""):
+                    return value
+        return None
+
+    usage = next(
+        (
+            source.get("usage")
+            for source in sources
+            if isinstance(source.get("usage"), Mapping) and source.get("usage")
+        ),
+        None,
+    )
+
     return {
-        "id": payload.get("id"),
-        "model": payload.get("model"),
-        "usage": payload.get("usage"),
+        "id": first_value("id", "request_id", "response_id"),
+        "model": first_value("model"),
+        "usage": usage,
         "choices": [{"message": {"content": content}}],
     }
 
 
 def _chat_protocol_hint(payload: Mapping[str, Any]) -> str:
-    choices = payload.get("choices")
-    if isinstance(choices, list) and choices and isinstance(choices[0], Mapping):
-        choice = choices[0]
-        message = choice.get("message")
-        if isinstance(message, Mapping):
-            reasoning = message.get("reasoning_content")
-            if isinstance(reasoning, str) and reasoning.strip():
+    reasoning_seen = False
+    reasoning_markup_seen = False
+    length_reached = False
+    error_seen = False
+    for _, candidate, _ in _chat_payload_candidates(payload):
+        error_seen = error_seen or isinstance(candidate.get("error"), Mapping)
+        choices = candidate.get("choices")
+        if isinstance(choices, list):
+            for choice in choices:
+                if not isinstance(choice, Mapping):
+                    continue
                 finish_reason = str(choice.get("finish_reason") or "").strip().lower()
-                if finish_reason == "length":
-                    return (
-                        "AI 服务只返回推理字段，并在最终回答前达到输出 Token 上限；"
-                        "系统不会把内部推理当成答案。请改用低推理模型，或提高该角色的输出上限"
+                length_reached = length_reached or finish_reason in {
+                    "length",
+                    "max_tokens",
+                    "max_output_tokens",
+                    "token_limit",
+                }
+                message = choice.get("message")
+                if isinstance(message, Mapping):
+                    reasoning_seen = reasoning_seen or _has_reasoning_value(message)
+                    raw_content = _extract_text_value(message.get("content"))
+                    reasoning_markup_seen = reasoning_markup_seen or (
+                        bool(raw_content) and _contains_reasoning_markup(raw_content)
                     )
-                return (
-                    "AI 服务只返回 reasoning_content、没有最终 content；"
-                    "系统不会把内部推理当成答案。请关闭该模型的深度推理或改用标准对话模型"
-                )
-    if isinstance(payload.get("error"), Mapping):
+                reasoning_seen = reasoning_seen or _has_reasoning_value(choice)
+        reasoning_seen = reasoning_seen or _has_reasoning_value(candidate)
+
+    shape = _chat_protocol_shape(payload)
+    if reasoning_seen or reasoning_markup_seen:
+        return _reasoning_only_protocol_message(
+            length_reached=length_reached,
+            shape=shape,
+        )
+    if error_seen:
         return (
             "AI 网关以成功状态返回了错误封装，而不是模型回答；"
             "请在网关侧核对模型权限、额度和上游状态"
+            f"；协议形状：{shape}"
         )
     return ""
 
 
+def _has_reasoning_value(container: Mapping[str, Any]) -> bool:
+    for field_name in _REASONING_FIELDS:
+        value = container.get(field_name)
+        if isinstance(value, str) and value.strip():
+            return True
+        if isinstance(value, (Mapping, list)) and value:
+            return True
+    return False
+
+
+def _reasoning_only_protocol_message(*, length_reached: bool, shape: str) -> str:
+    if length_reached:
+        message = (
+            "AI 服务只返回推理字段，并在最终回答前达到输出 Token 上限；"
+            "系统不会把内部推理当成答案。请改用低推理模型，或提高该角色的输出上限"
+        )
+    else:
+        message = (
+            "AI 服务只返回 reasoning_content/thinking/analysis、没有明确的最终回答；"
+            "系统不会把内部推理当成答案。请关闭该模型的深度推理，"
+            "或改用能返回 content/final/answer 的标准对话接口"
+        )
+    return f"{message}；协议形状：{shape}"
+
+
+def _value_shape(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, Mapping):
+        return "object"
+    if isinstance(value, list):
+        return "list"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    return "other"
+
+
+def _chat_protocol_shape(payload: Mapping[str, Any]) -> str:
+    """Describe only allowlisted field names/types, never provider values."""
+
+    facts: list[str] = []
+
+    def add(fact: str) -> None:
+        if fact not in facts and len(facts) < 16:
+            facts.append(fact)
+
+    for path, candidate, _ in _chat_payload_candidates(payload):
+        choices = candidate.get("choices")
+        if "choices" in candidate:
+            add(f"{path}.choices={_value_shape(choices)}")
+        if isinstance(choices, list):
+            for choice in choices[:2]:
+                if not isinstance(choice, Mapping):
+                    continue
+                if "finish_reason" in choice:
+                    add(
+                        f"{path}.choices[].finish_reason="
+                        f"{_value_shape(choice.get('finish_reason'))}"
+                    )
+                message = choice.get("message")
+                if "message" in choice:
+                    add(f"{path}.choices[].message={_value_shape(message)}")
+                if isinstance(message, Mapping):
+                    for field_name in (
+                        "content",
+                        *_FINAL_ANSWER_FIELDS,
+                        *_REASONING_FIELDS,
+                    ):
+                        if field_name in message:
+                            add(
+                                f"{path}.choices[].message.{field_name}="
+                                f"{_value_shape(message.get(field_name))}"
+                            )
+                for field_name in ("text", *_FINAL_ANSWER_FIELDS, *_REASONING_FIELDS):
+                    if field_name in choice:
+                        add(
+                            f"{path}.choices[].{field_name}="
+                            f"{_value_shape(choice.get(field_name))}"
+                        )
+        for field_name in (
+            "output_text",
+            "output",
+            *_FINAL_ANSWER_FIELDS,
+            *_REASONING_FIELDS,
+            "error",
+        ):
+            if field_name in candidate:
+                add(f"{path}.{field_name}={_value_shape(candidate.get(field_name))}")
+    return ", ".join(facts) or "unknown"
+
+
 def _parse_complete_sse_chat_response(text: str) -> Mapping[str, Any] | None:
-    if not text or "data:" not in text[:1024]:
+    if not text or not re.search(r"(?im)^\ufeff?\s*data\s*:", text[:4096]):
         return None
     # A forced streaming response is already buffered by ``requests`` here.
     # Bound parsing work and never include the body in diagnostics.
     if len(text) > 4_000_000:
         return None
-    parts: list[str] = []
+
+    chat_delta_parts: list[str] = []
+    message_parts: list[str] = []
+    responses_delta_parts: list[str] = []
+    responses_done_parts: list[str] = []
+    full_output_parts: list[str] = []
     response_id = ""
     model = ""
     usage: Mapping[str, Any] | None = None
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line.startswith("data:"):
-            continue
-        value = line[5:].strip()
-        if not value or value == "[DONE]":
-            continue
-        try:
-            chunk = json.loads(value)
-        except (TypeError, ValueError):
-            continue
-        if not isinstance(chunk, Mapping):
-            continue
-        response_id = str(chunk.get("id") or response_id).strip()
-        model = str(chunk.get("model") or model).strip()
-        if isinstance(chunk.get("usage"), Mapping):
-            usage = chunk["usage"]
-        choices = chunk.get("choices")
-        if not isinstance(choices, list):
-            continue
-        for choice in choices:
-            if not isinstance(choice, Mapping):
-                continue
-            container = choice.get("delta")
-            if not isinstance(container, Mapping):
-                container = choice.get("message")
-            if isinstance(container, Mapping):
-                content = container.get("content")
-                if isinstance(content, str) and content:
-                    parts.append(content)
-                elif isinstance(content, list):
-                    parts.extend(
-                        str(part.get("text") or "")
-                        for part in content
-                        if isinstance(part, Mapping) and part.get("text")
+    reasoning_seen = False
+    reasoning_markup_seen = False
+    length_reached = False
+    event_count = 0
+    json_event_count = 0
+    shape_facts: list[str] = ["transport=sse"]
+
+    def add_shape(fact: str) -> None:
+        if fact not in shape_facts and len(shape_facts) < 12:
+            shape_facts.append(fact)
+
+    for event_name, chunk in _iter_sse_json_events(text):
+        event_count += 1
+        json_event_count += 1
+        event_type = str(chunk.get("type") or event_name or "").strip().lower()
+        if event_type in {"response.output_text.delta", "output_text.delta"}:
+            delta_text = _extract_text_value(chunk.get("delta"))
+            if delta_text and not _contains_reasoning_markup(delta_text):
+                responses_delta_parts.append(delta_text)
+                add_shape("response.output_text.delta=string")
+            elif delta_text:
+                reasoning_markup_seen = True
+        elif event_type in {"response.output_text.done", "output_text.done"}:
+            done_text = _extract_text_value(chunk.get("text"))
+            if done_text and not _contains_reasoning_markup(done_text):
+                responses_done_parts.append(done_text)
+                add_shape("response.output_text.done=string")
+            elif done_text:
+                reasoning_markup_seen = True
+        elif "reasoning" in event_type or "analysis" in event_type:
+            reasoning_seen = True
+            add_shape("reasoning_event=present")
+
+        for _, candidate, ancestors in _chat_payload_candidates(chunk):
+            sources = (candidate, *ancestors)
+            if not response_id:
+                for source in sources:
+                    candidate_id = (
+                        source.get("id")
+                        or source.get("request_id")
+                        or source.get("response_id")
                     )
-            legacy_text = choice.get("text")
-            if isinstance(legacy_text, str) and legacy_text:
-                parts.append(legacy_text)
-    content = "".join(parts).strip()
+                    if candidate_id not in (None, ""):
+                        response_id = str(candidate_id).strip()
+                        break
+            if not model:
+                for source in sources:
+                    candidate_model = source.get("model")
+                    if candidate_model not in (None, ""):
+                        model = str(candidate_model).strip()
+                        break
+            for source in sources:
+                if isinstance(source.get("usage"), Mapping):
+                    usage = source["usage"]
+                    break
+
+            reasoning_seen = reasoning_seen or _has_reasoning_value(candidate)
+            choices = candidate.get("choices")
+            if isinstance(choices, list):
+                add_shape("choices=list")
+                for choice in choices:
+                    if not isinstance(choice, Mapping):
+                        continue
+                    finish_reason = (
+                        str(choice.get("finish_reason") or "").strip().lower()
+                    )
+                    length_reached = length_reached or finish_reason in {
+                        "length",
+                        "max_tokens",
+                        "max_output_tokens",
+                        "token_limit",
+                    }
+                    delta = choice.get("delta")
+                    if isinstance(delta, Mapping):
+                        reasoning_seen = reasoning_seen or _has_reasoning_value(delta)
+                        delta_text = _extract_text_value(delta.get("content"))
+                        if delta_text and not _contains_reasoning_markup(delta_text):
+                            chat_delta_parts.append(delta_text)
+                            add_shape("choices[].delta.content=string")
+                        elif delta_text:
+                            reasoning_markup_seen = True
+                        delta_final = _extract_explicit_final_text(delta)
+                        if delta_final:
+                            chat_delta_parts.append(delta_final)
+                            add_shape("choices[].delta.final=string")
+                    message = choice.get("message")
+                    if isinstance(message, Mapping):
+                        reasoning_seen = reasoning_seen or _has_reasoning_value(message)
+                        message_text = _extract_text_value(message.get("content"))
+                        if message_text and not _contains_reasoning_markup(message_text):
+                            message_parts.append(message_text)
+                            add_shape("choices[].message.content=string")
+                        elif message_text:
+                            reasoning_markup_seen = True
+                        message_final = _extract_explicit_final_text(message)
+                        if message_final:
+                            message_parts.append(message_final)
+                            add_shape("choices[].message.final=string")
+                    legacy_text = _extract_text_value(choice.get("text"))
+                    if legacy_text and not _contains_reasoning_markup(legacy_text):
+                        message_parts.append(legacy_text)
+                        add_shape("choices[].text=string")
+                    elif legacy_text:
+                        reasoning_markup_seen = True
+
+            # A completed Responses event can carry the full response object.
+            # Keep it only as a fallback so delta + done does not duplicate text.
+            if not isinstance(choices, list):
+                compatible_text = _extract_compatible_output_text(candidate)
+                if compatible_text:
+                    full_output_parts.append(compatible_text)
+                    add_shape("responses.output=final_text")
+
+    if chat_delta_parts:
+        content = "".join(chat_delta_parts).strip()
+    elif responses_delta_parts:
+        content = "".join(responses_delta_parts).strip()
+    elif message_parts:
+        content = "".join(message_parts).strip()
+    elif responses_done_parts:
+        content = responses_done_parts[-1].strip()
+    elif full_output_parts:
+        content = full_output_parts[-1].strip()
+    else:
+        content = ""
+
     if not content:
+        if event_count and (reasoning_seen or reasoning_markup_seen):
+            raise AIProtocolError(
+                _reasoning_only_protocol_message(
+                    length_reached=length_reached,
+                    shape=", ".join(shape_facts),
+                )
+            )
+        if event_count:
+            add_shape(f"json_events={'present' if json_event_count else 'missing'}")
+            raise AIProtocolError(
+                "AI 网关返回了 SSE，但流中没有可用的最终正文；"
+                "请核对流式接口是否返回 content/final/answer 或 Responses output_text 事件"
+                f"；协议形状：{', '.join(shape_facts)}"
+            )
         return None
     return {
         "id": response_id,
@@ -1614,6 +2015,78 @@ def _parse_complete_sse_chat_response(text: str) -> Mapping[str, Any] | None:
         "usage": usage,
         "choices": [{"message": {"content": content}}],
     }
+
+
+def _iter_sse_json_events(text: str):
+    """Yield JSON SSE events, including valid multi-line ``data:`` fields."""
+
+    event_name = ""
+    data_lines: list[str] = []
+    yielded = 0
+
+    def decode_event():
+        nonlocal yielded
+        if not data_lines or yielded >= 20_000:
+            return []
+        joined = "\n".join(data_lines).strip()
+        if not joined or joined.upper() == "[DONE]":
+            return []
+        values = [joined]
+        try:
+            decoded = json.loads(joined)
+        except (TypeError, ValueError):
+            # Some nominal SSE gateways omit blank event separators. Their
+            # individual data lines are still complete JSON documents.
+            values = [line.strip() for line in data_lines if line.strip()]
+        else:
+            if isinstance(decoded, Mapping):
+                yielded += 1
+                return [(event_name, decoded)]
+            return []
+
+        events: list[tuple[str, Mapping[str, Any]]] = []
+        for value in values:
+            if value.upper() == "[DONE]" or yielded >= 20_000:
+                continue
+            try:
+                decoded = json.loads(value)
+            except (TypeError, ValueError):
+                continue
+            if isinstance(decoded, Mapping):
+                events.append((event_name, decoded))
+                yielded += 1
+        return events
+
+    for raw_line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+        if not raw_line.strip():
+            for item in decode_event():
+                yield item
+            event_name = ""
+            data_lines = []
+            continue
+        line = raw_line.lstrip("\ufeff")
+        if line.startswith(":"):
+            continue
+        field, separator, raw_value = line.partition(":")
+        normalized_field = field.strip().lower()
+        value = raw_value[1:] if separator and raw_value.startswith(" ") else raw_value
+        if normalized_field == "event":
+            if data_lines:
+                for item in decode_event():
+                    yield item
+                data_lines = []
+            event_name = value.strip()
+        elif normalized_field == "data" and separator:
+            if value.strip().upper() == "[DONE]":
+                for item in decode_event():
+                    yield item
+                event_name = ""
+                data_lines = []
+                continue
+            data_lines.append(value)
+
+    for item in decode_event():
+        yield item
 
 
 def _normalize_ai_usage(value: Any) -> dict[str, int] | None:
