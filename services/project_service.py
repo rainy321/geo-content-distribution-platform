@@ -15,6 +15,10 @@ class ProjectHasArticlesError(RuntimeError):
     """Raised when deleting a project would also remove articles."""
 
 
+class ProjectHasActiveAutomationError(RuntimeError):
+    """Raised when deleting a project would erase an active automation ledger."""
+
+
 def create_project(
     database_path: str | Path,
     *,
@@ -53,7 +57,12 @@ def list_projects(database_path: str | Path) -> list[dict[str, Any]]:
     with closing(_connect(database_path)) as conn:
         rows = conn.execute(
             """
-            SELECT p.*, COUNT(a.id) AS article_count
+            SELECT p.*, COUNT(a.id) AS article_count,
+                   (
+                       SELECT COUNT(*) FROM geo_automation_runs AS r
+                       WHERE r.project_id = p.id
+                         AND r.status IN ('queued', 'running', 'paused')
+                   ) AS active_automation_count
             FROM projects AS p
             LEFT JOIN articles AS a ON a.project_id = p.id
             GROUP BY p.id
@@ -67,7 +76,12 @@ def get_project(database_path: str | Path, project_id: int) -> dict[str, Any]:
     with closing(_connect(database_path)) as conn:
         row = conn.execute(
             """
-            SELECT p.*, COUNT(a.id) AS article_count
+            SELECT p.*, COUNT(a.id) AS article_count,
+                   (
+                       SELECT COUNT(*) FROM geo_automation_runs AS r
+                       WHERE r.project_id = p.id
+                         AND r.status IN ('queued', 'running', 'paused')
+                   ) AS active_automation_count
             FROM projects AS p
             LEFT JOIN articles AS a ON a.project_id = p.id
             WHERE p.id = ?
@@ -125,6 +139,7 @@ def update_project(
 
 def delete_project(database_path: str | Path, project_id: int) -> None:
     with closing(_connect(database_path)) as conn:
+        conn.execute("BEGIN IMMEDIATE")
         with conn:
             row = _fetch_project(conn, project_id)
             if row is None:
@@ -135,6 +150,18 @@ def delete_project(database_path: str | Path, project_id: int) -> None:
             ).fetchone()[0]
             if article_count:
                 raise ProjectHasArticlesError("项目下仍有文章，不能删除")
+            active_automation_count = conn.execute(
+                """
+                SELECT COUNT(*) FROM geo_automation_runs
+                WHERE project_id = ?
+                  AND status IN ('queued', 'running', 'paused')
+                """,
+                (project_id,),
+            ).fetchone()[0]
+            if active_automation_count:
+                raise ProjectHasActiveAutomationError(
+                    "项目仍有进行中的一键 GEO 运行，不能删除"
+                )
             conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
 
 
@@ -150,7 +177,12 @@ def _fetch_project(conn: sqlite3.Connection, project_id: int):
         """
         SELECT p.*,
                (SELECT COUNT(*) FROM articles AS a WHERE a.project_id = p.id)
-                   AS article_count
+                   AS article_count,
+               (
+                   SELECT COUNT(*) FROM geo_automation_runs AS r
+                   WHERE r.project_id = p.id
+                     AND r.status IN ('queued', 'running', 'paused')
+               ) AS active_automation_count
         FROM projects AS p
         WHERE p.id = ?
         """,

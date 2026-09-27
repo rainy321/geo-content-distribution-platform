@@ -139,6 +139,12 @@
             <small>品牌主名来自项目底稿，避免同批次口径漂移</small>
           </div>
 
+          <SiteAuditPanel
+            :project-id="form.projectId"
+            :website="selectedProject?.website || ''"
+            :project-name="selectedProject?.name || ''"
+          />
+
           <el-form-item label="监测问题" prop="prompt" class="prompt-field">
             <el-input
               v-model="form.prompt"
@@ -1282,6 +1288,7 @@ import { projectApi } from '@/api/project'
 import { visibilityApi } from '@/api/visibility'
 import { diagnosticsApi } from '@/api/diagnostics'
 import { aiConfigApi } from '@/api/aiConfig'
+import SiteAuditPanel from '@/components/SiteAuditPanel.vue'
 import { normalizeUnifiedAIStatus } from '@/utils/aiConfig'
 import {
   normalizeCommercialDiagnostic,

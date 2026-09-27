@@ -6,6 +6,7 @@ import {
   buildCostLedgerCsv,
   formatMoney,
   normalizeCostBill,
+  normalizePriceCatalog,
   operationLabel
 } from '../src/utils/costLedger.js'
 
@@ -97,6 +98,41 @@ test('money formatter never merges currencies or turns unknown cost into zero', 
   assert.equal(formatMoney(null, 'CNY'), '待核算')
 })
 
+test('price catalog normalizer preserves exact decimal prices and pending model counts', () => {
+  const catalog = normalizePriceCatalog({
+    code: 200,
+    data: {
+      catalog_version: 'ai-price-catalog-1.0.0',
+      unit: 'per_million_tokens',
+      entries: [{
+        id: 7,
+        provider: 'qwen',
+        model: 'qwen3.8-max',
+        input_price_per_million: '0.12345678',
+        output_price_per_million: '9',
+        currency: 'CNY',
+        source_note: '官网价格'
+      }],
+      detected_models: [{
+        provider: 'qwen',
+        model: 'qwen3.8-max',
+        receipt_count: 20,
+        unpriced_receipt_count: 12,
+        known_total_tokens: 40301,
+        price_entry_id: 7,
+        priced: true,
+        input_price_per_million: '0.12345678',
+        output_price_per_million: '9',
+        currency: 'CNY'
+      }]
+    }
+  })
+
+  assert.equal(catalog.entries[0].inputPricePerMillion, '0.12345678')
+  assert.equal(catalog.detectedModels[0].unpricedReceiptCount, 12)
+  assert.equal(catalog.detectedModels[0].knownTotalTokens, 40301)
+})
+
 test('CSV export contains the displayed receipt window and neutralizes spreadsheet formulas', () => {
   const bill = normalizeCostBill(response)
   const csv = buildCostLedgerCsv(bill.records)
@@ -119,7 +155,11 @@ test('desktop shell contains a dedicated cost ledger route and audit language', 
   assert.match(appSource, /成本账单/)
   assert.match(routerSource, /path: '\/cost-ledger'/)
   assert.match(apiSource, /\/api\/ai-usage\/billing/)
+  assert.match(apiSource, /\/api\/ai-usage\/prices/)
   assert.match(viewSource, /全部筛选结果参与汇总/)
+  assert.match(viewSource, /单价设置/)
+  assert.match(viewSource, /每百万 Token/)
+  assert.match(viewSource, /已核算凭证永不改写/)
   assert.match(viewSource, /登录、上传与平台发布/)
   assert.match(viewSource, /不适用，不是 0/)
 })

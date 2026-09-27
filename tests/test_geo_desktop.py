@@ -22,6 +22,7 @@ from geo_desktop import (
     apply_desktop_environment,
     inspect_bilibili_runtime,
     inspect_publishing_runtime,
+    inspect_weibo_runtime,
     load_build_info,
     main,
     publishing_profile_allows_real,
@@ -591,6 +592,22 @@ class DesktopApiTests(unittest.TestCase):
         self.assertTrue(result["enabled"])
         self.assertFalse(result["packaged"])
         inspect_runtime.assert_called_once_with(probe=True)
+
+    def test_weibo_runtime_probe_requires_the_pinned_official_version(self):
+        runtime = Mock(
+            command_prefix=(r"C:\runtime\node.exe", r"C:\runtime\index.js"),
+            source="packaged",
+        )
+        completed = Mock(returncode=0, stdout="0.9.4\n", stderr="")
+        with patch(
+            "services.weibo_official_connector.resolve_weibo_cli_runtime",
+            return_value=runtime,
+        ), patch("geo_desktop.subprocess.run", return_value=completed) as run:
+            result = inspect_weibo_runtime(enabled=True)
+
+        self.assertTrue(result["ready"])
+        self.assertEqual(result["version"], "0.9.4")
+        run.assert_called_once()
 
     def test_desktop_scheduler_never_loads_or_enables_real_publishers(self):
         with tempfile.TemporaryDirectory() as directory:

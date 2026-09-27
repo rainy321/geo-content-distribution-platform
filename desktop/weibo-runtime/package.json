@@ -1,0 +1,9 @@
+{
+  "name": "geo-weibo-official-runtime",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Pinned runtime payload for the official Weibo Open Platform CLI.",
+  "dependencies": {
+    "@weibo-ai/weibo-cli": "0.9.4"
+  }
+}

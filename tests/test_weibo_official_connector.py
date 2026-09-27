@@ -15,6 +15,7 @@ from services.weibo_official_connector import (
     WeiboPublishUncertainError,
     is_weibo_public_status_url,
     resolve_weibo_cli,
+    resolve_weibo_cli_runtime,
 )
 
 
@@ -58,6 +59,54 @@ class WeiboOfficialConnectorTests(unittest.TestCase):
             with self.assertRaises(WeiboConnectorUnavailableError):
                 resolve_weibo_cli()
         is_file.assert_not_called()
+
+    def test_frozen_desktop_prefers_packaged_node_and_official_cli(self):
+        runtime_root = self.root / "weibo_cli_runtime"
+        node = runtime_root / "node.exe"
+        script = (
+            runtime_root
+            / "node_modules"
+            / "@weibo-ai"
+            / "weibo-cli"
+            / "dist"
+            / "index.js"
+        )
+        script.parent.mkdir(parents=True)
+        node.write_bytes(b"node")
+        script.write_text("// official cli", encoding="utf-8")
+        with patch("services.weibo_official_connector.sys.frozen", True, create=True), patch(
+            "services.weibo_official_connector.sys._MEIPASS",
+            str(self.root),
+            create=True,
+        ), patch.dict("os.environ", {"WEIBO_OFFICIAL_CLI_PATH": ""}, clear=False):
+            runtime = resolve_weibo_cli_runtime()
+
+        self.assertEqual(runtime.source, "packaged")
+        self.assertEqual(runtime.command_prefix, (str(node.resolve()), str(script.resolve())))
+
+    def test_windows_npm_command_resolves_to_node_without_shell(self):
+        npm_root = self.root / "npm"
+        command = npm_root / "weibo-cli.cmd"
+        script = (
+            npm_root
+            / "node_modules"
+            / "@weibo-ai"
+            / "weibo-cli"
+            / "dist"
+            / "index.js"
+        )
+        node = self.root / "node.exe"
+        script.parent.mkdir(parents=True)
+        command.write_text("placeholder", encoding="utf-8")
+        script.write_text("// official cli", encoding="utf-8")
+        node.write_bytes(b"node")
+        with patch("services.weibo_official_connector.shutil.which") as which, patch.dict(
+            "os.environ", {"WEIBO_OFFICIAL_CLI_PATH": ""}, clear=False
+        ):
+            which.side_effect = lambda name: str(node) if name == "node" else str(command)
+            runtime = resolve_weibo_cli_runtime()
+
+        self.assertEqual(runtime.command_prefix, (str(node.resolve()), str(script.resolve())))
 
     def test_write_action_and_ai_flag_must_come_from_runtime_catalog(self):
         commands = []

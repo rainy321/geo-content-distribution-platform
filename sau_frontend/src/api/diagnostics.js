@@ -25,6 +25,32 @@ export const diagnosticsApi = {
     }, config)
   },
 
+  runSiteAudit(data, { requestId, idempotencyKey, ...config } = {}) {
+    return http.post('/api/geo/site-audits', data, {
+      ...config,
+      headers: {
+        ...(config.headers || {}),
+        'X-Request-ID': requestId,
+        'Idempotency-Key': idempotencyKey
+      }
+    })
+  },
+
+  getSiteAuditRuns(projectId, limit = 5, config = {}) {
+    return http.get('/api/geo/site-audits/runs', {
+      project_id: projectId,
+      limit
+    }, config)
+  },
+
+  getSiteAuditRun(runId, config = {}) {
+    return http.get(
+      `/api/geo/site-audits/runs/${encodeURIComponent(runId)}`,
+      undefined,
+      config
+    )
+  },
+
   sampleVisibility(data, { requestId, idempotencyKey, ...config } = {}) {
     return http.post('/api/geo/visibility/sample', data, {
       ...config,

@@ -44,11 +44,14 @@ from services.ai_service import (
 )
 from services.ai_cost_ledger_service import (
     AIUsageLedgerError,
+    delete_ai_price,
+    get_ai_price_catalog,
     get_ai_usage_bill,
     get_ai_usage_records_by_references,
     get_project_ai_cost_summary,
     record_ai_usage,
     summarize_ai_usage_records,
+    upsert_ai_price,
 )
 from services.ai_image_generation_service import (
     AIImageGenerationError,
@@ -86,6 +89,7 @@ from services.ai_visibility_panel_service import (
 )
 from services.article_service import (
     ARTICLE_STATUSES,
+    ArticleConflictError,
     ArticleNotFoundError,
     create_article,
     create_articles_bulk,
@@ -133,10 +137,39 @@ from services.geo_diagnostic_service import (
     get_geo_diagnostic_run,
     list_geo_diagnostic_runs,
 )
+from services.geo_site_audit_service import (
+    GEOSiteAuditConflictError,
+    GEOSiteAuditError,
+    GEOSiteAuditNotFoundError,
+    GEOSiteAuditTimeoutError,
+    get_geo_site_audit_run,
+    list_geo_site_audit_runs,
+    run_geo_site_audit,
+)
 from services.geo_blackbox_experiment_service import (
     GEOBlackboxExperimentError,
     build_geo_blackbox_truth_matrix,
     evaluate_geo_blackbox_panel,
+)
+from services.geo_automation_service import (
+    GEOAutomationAttemptUnknownError,
+    GEOAutomationConflictError,
+    GEOAutomationCredentialChangedError,
+    GEOAutomationLeaseBusyError,
+    GEOAutomationNotFoundError,
+    GEOAutomationValidationError,
+    acquire_geo_automation_item_lease,
+    assert_geo_automation_item_lease,
+    checkpoint_geo_automation_item,
+    create_geo_automation_run,
+    geo_automation_project_snapshot,
+    get_geo_automation_run,
+    list_geo_automation_runs,
+    normalize_geo_automation_config,
+    release_geo_automation_item_lease,
+    replay_geo_automation_run,
+    renew_geo_automation_item_lease,
+    set_geo_automation_pause,
 )
 from services.dashboard_service import get_dashboard_overview
 from services.demo_seed_service import seed_demo_data
@@ -221,6 +254,7 @@ from services.content_hygiene_service import (
     sanitize_generated_content,
 )
 from services.project_service import (
+    ProjectHasActiveAutomationError,
     ProjectHasArticlesError,
     ProjectNotFoundError,
     create_project,
@@ -236,6 +270,7 @@ from services.publish_job_executor import (
 from services.publish_job_service import (
     PUBLISH_JOB_STATUSES,
     InvalidPublishJobTransitionError,
+    PublishJobIdempotencyConflictError,
     PublishJobNotFoundError,
     UnsupportedPublishPlatformError,
     build_publish_confirmation_fingerprint,
@@ -245,6 +280,7 @@ from services.publish_job_service import (
     list_publish_jobs,
     normalize_publish_images,
     normalize_publish_video,
+    replay_publish_job,
     reconcile_publish_job_failure,
     reconcile_publish_job_platform_success,
     retry_publish_job,
@@ -719,6 +755,16 @@ app.config.update(
         0,
         minimum=0,
         maximum=10000,
+    ),
+    SITE_AUDIT_RATE_LIMIT_PER_MINUTE=_environment_integer(
+        "SITE_AUDIT_RATE_LIMIT_PER_MINUTE",
+        3,
+        minimum=0,
+        maximum=60,
+    ),
+    SITE_AUDIT_ALLOW_PROXY_FAKE_IP=_environment_flag(
+        "SITE_AUDIT_ALLOW_PROXY_FAKE_IP",
+        default=False,
     ),
     AUTH_LOGIN_ATTEMPTS_PER_MINUTE=_environment_integer(
         "AUTH_LOGIN_ATTEMPTS_PER_MINUTE",
@@ -1228,6 +1274,69 @@ def _enforce_ai_rate_limit(*, cost=1):
     return response, 429
 
 
+def _enforce_site_audit_rate_limit():
+    limit = int(app.config.get("SITE_AUDIT_RATE_LIMIT_PER_MINUTE", 0))
+    if limit <= 0:
+        return None
+    decision = app.config["AI_RATE_LIMITER"].consume(
+        f"site-audit:{_client_rate_key()}",
+        limit=limit,
+        cost=1,
+    )
+    if decision.allowed:
+        return None
+    response = jsonify(
+        {
+            "code": 429,
+            "msg": "站点审计请求过于频繁，请稍后再试",
+            "data": None,
+        }
+    )
+    response.headers["Retry-After"] = str(decision.retry_after_seconds)
+    response.headers["X-RateLimit-Limit"] = str(limit)
+    response.headers["X-RateLimit-Remaining"] = "0"
+    return response, 429
+
+
+def _assert_automation_model_context(
+    data,
+    *,
+    stage,
+    generation_request_id=None,
+    article_id=None,
+):
+    """Validate the optional one-click worker lease at the provider-call boundary."""
+
+    if "automation_context" not in data:
+        return None
+    context = data.get("automation_context")
+    if not isinstance(context, dict):
+        return jsonify(
+            {"code": 400, "msg": "automation_context 必须是对象", "data": None}
+        ), 400
+    try:
+        run_id = int(context.get("run_id"))
+        item_id = int(context.get("item_id"))
+        assert_geo_automation_item_lease(
+            app.config["DATABASE_PATH"],
+            run_id=run_id,
+            item_id=item_id,
+            worker_id=context.get("worker_id"),
+            stage=stage,
+            lease_token=context.get("lease_token"),
+            lease_epoch=context.get("lease_epoch"),
+            generation_request_id=generation_request_id,
+            article_id=article_id,
+        )
+    except (TypeError, ValueError, GEOAutomationValidationError) as exc:
+        return _geo_automation_error_response(exc, 400)
+    except GEOAutomationNotFoundError as exc:
+        return _geo_automation_error_response(exc, 404)
+    except GEOAutomationConflictError as exc:
+        return _geo_automation_error_response(exc, 409)
+    return None
+
+
 @app.route('/api/articles/generate', methods=['POST'])
 def generate_article():
     data = request.get_json(silent=True)
@@ -1241,6 +1350,13 @@ def generate_article():
     request_id, idempotency_key, identity_error = _generation_request_identity(data)
     if identity_error is not None:
         return identity_error
+    automation_error = _assert_automation_model_context(
+        data,
+        stage="generating",
+        generation_request_id=request_id,
+    )
+    if automation_error is not None:
+        return automation_error
     try:
         diversity_profile, diversity_instruction = _generation_diversity(
             data,
@@ -1720,6 +1836,9 @@ def _prepare_generation_request(data):
     project = _get_project(project_id)
     if project is None:
         return None, (jsonify({"code": 404, "msg": "品牌项目不存在", "data": None}), 404)
+    project, project_snapshot_error = _resolve_request_project_snapshot(data, project)
+    if project_snapshot_error is not None:
+        return None, project_snapshot_error
     visibility_guidance = _get_latest_visibility_guidance(project_id)
     if visibility_guidance is not None:
         project = {
@@ -1743,6 +1862,40 @@ def _prepare_generation_request(data):
             )["instruction"]
         except ContentTemplateNotFoundError as exc:
             return None, (jsonify({"code": 404, "msg": str(exc), "data": None}), 404)
+    optimization_direction = data.get("optimization_direction", "")
+    if not isinstance(optimization_direction, str):
+        return None, (
+            jsonify(
+                {
+                    "code": 400,
+                    "msg": "optimization_direction 必须是字符串",
+                    "data": None,
+                }
+            ),
+            400,
+        )
+    optimization_direction = optimization_direction.strip()
+    if len(optimization_direction) > 2000:
+        return None, (
+            jsonify(
+                {
+                    "code": 400,
+                    "msg": "optimization_direction 不能超过 2000 个字符",
+                    "data": None,
+                }
+            ),
+            400,
+        )
+    if optimization_direction:
+        template_instruction = "\n\n".join(
+            item
+            for item in (
+                template_instruction,
+                "本次 GEO 优化方向（必须服从项目事实和证据边界）："
+                + optimization_direction,
+            )
+            if item
+        )
     try:
         ai_settings = _request_ai_settings(data, role="writer")
     except AIConfigurationError as exc:
@@ -2589,6 +2742,336 @@ def _content_generation_run_response(run):
     return jsonify({"code": 200, "msg": "success", "data": public_fields}), 200
 
 
+def _geo_automation_error_response(exc, status_code):
+    return jsonify(
+        {
+            "code": status_code,
+            "msg": str(exc),
+            "data": {
+                "error_code": str(
+                    getattr(exc, "error_code", "automation_state_conflict")
+                ),
+                "state_unknown": bool(getattr(exc, "state_unknown", False)),
+            },
+        }
+    ), status_code
+
+
+def _geo_automation_run_response(run, request_id, idempotency_key):
+    replayed = bool(run.pop("replayed", False))
+    status_code = 200 if replayed else 201
+    response = jsonify(
+        {
+            "code": status_code,
+            "msg": "已恢复原运行" if replayed else "一键 GEO 运行已创建",
+            "data": run,
+        }
+    )
+    response.headers["X-Request-ID"] = request_id
+    response.headers["Idempotency-Key"] = idempotency_key
+    response.headers["Idempotency-Replayed"] = "true" if replayed else "false"
+    return response, status_code
+
+
+@app.route('/api/geo/automation-runs', methods=['POST'])
+def create_geo_automation_run_api():
+    """Freeze one confirmed workflow manifest without calling external systems."""
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
+    config = data.get("config")
+    if not isinstance(config, dict):
+        return jsonify({"code": 400, "msg": "config 必须是对象", "data": None}), 400
+    try:
+        project_id = int(data.get("project_id"))
+    except (TypeError, ValueError):
+        return jsonify({"code": 400, "msg": "project_id 必须是正整数", "data": None}), 400
+    if project_id <= 0:
+        return jsonify({"code": 400, "msg": "project_id 必须是正整数", "data": None}), 400
+    request_id = str(
+        request.headers.get("X-Request-ID")
+        or data.get("request_id")
+        or f"geo-auto-{uuid.uuid4()}"
+    ).strip()
+    idempotency_key = str(
+        request.headers.get("Idempotency-Key")
+        or data.get("idempotency_key")
+        or f"geo-auto-{uuid.uuid4()}"
+    ).strip()
+    authorization = data.get("authorization")
+    try:
+        replayed_run = replay_geo_automation_run(
+            app.config["DATABASE_PATH"],
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+            project_id=project_id,
+            config=config,
+            authorization_scope=authorization,
+        )
+    except GEOAutomationValidationError as exc:
+        return _geo_automation_error_response(exc, 400)
+    except GEOAutomationConflictError as exc:
+        return _geo_automation_error_response(exc, 409)
+    if replayed_run is not None:
+        return _geo_automation_run_response(
+            replayed_run, request_id, idempotency_key
+        )
+    try:
+        project = get_project(app.config["DATABASE_PATH"], project_id)
+        normalized_config = normalize_geo_automation_config(config, project=project)
+    except ProjectNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except GEOAutomationValidationError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+
+    expected_authorization = {
+        "confirmed": True,
+        "project_id": project_id,
+        "topic_count": len(normalized_config["topics"]),
+        "publish_mode": normalized_config["publish_mode"],
+        "channels": normalized_config["channels"],
+        "project_snapshot": geo_automation_project_snapshot(project),
+    }
+    if authorization != expected_authorization:
+        return jsonify(
+            {"code": 409, "msg": "执行范围已变化，请重新核对后启动", "data": None}
+        ), 409
+
+    publish_mode = normalized_config["publish_mode"]
+    if publish_mode == "demo" and not app.config.get("DEMO_MODE", False):
+        return jsonify(
+            {"code": 409, "msg": "当前不是演示环境，不能创建演示自动发布运行", "data": None}
+        ), 409
+    if publish_mode == "real":
+        if app.config.get("DEMO_MODE", False):
+            return jsonify(
+                {"code": 403, "msg": "Demo Mode 不允许真实发布", "data": None}
+            ), 403
+        if not _real_publishing_authorized():
+            return jsonify(
+                {"code": 403, "msg": "当前桌面构建未授权真实发布", "data": None}
+            ), 403
+        if not app.config.get("PUBLISHING_RUNTIME_READY", False):
+            return jsonify(
+                {
+                    "code": 503,
+                    "msg": "本机发布运行时未就绪，不能启动真实发布全流程",
+                    "data": None,
+                }
+            ), 503
+        if not app.config.get("ALLOW_REAL_PUBLISHING", False):
+            return jsonify(
+                {"code": 403, "msg": "真实发布运行开关未开启", "data": None}
+            ), 403
+        for channel in normalized_config["channels"]:
+            platform = channel["platform"]
+            if platform not in REAL_PUBLISH_PLATFORMS:
+                return jsonify(
+                    {
+                        "code": 409,
+                        "msg": f"{platform} 尚未接入真实发布器",
+                        "data": None,
+                    }
+                ), 409
+            try:
+                _assert_connected_platform_account(
+                    channel["account_id"],
+                    platform,
+                    expected_credential_epoch=channel["credential_epoch"],
+                )
+            except GEOAutomationCredentialChangedError as exc:
+                return _geo_automation_error_response(exc, 409)
+            except PublishContentLimitError as exc:
+                return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+
+    try:
+        run = create_geo_automation_run(
+            app.config["DATABASE_PATH"],
+            request_id=request_id,
+            idempotency_key=idempotency_key,
+            project_id=project_id,
+            config=normalized_config,
+            authorization_scope=authorization,
+        )
+    except GEOAutomationValidationError as exc:
+        return _geo_automation_error_response(exc, 400)
+    except GEOAutomationConflictError as exc:
+        return _geo_automation_error_response(exc, 409)
+    return _geo_automation_run_response(run, request_id, idempotency_key)
+
+
+@app.route('/api/geo/automation-runs', methods=['GET'])
+def list_geo_automation_runs_api():
+    raw_project_id = request.args.get("project_id")
+    try:
+        project_id = int(raw_project_id) if raw_project_id not in (None, "") else None
+        limit = int(request.args.get("limit", 20))
+        runs = list_geo_automation_runs(
+            app.config["DATABASE_PATH"],
+            project_id=project_id,
+            limit=limit,
+        )
+    except (TypeError, ValueError, GEOAutomationValidationError) as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    return jsonify({"code": 200, "msg": "success", "data": runs}), 200
+
+
+@app.route('/api/geo/automation-runs/<int:run_id>', methods=['GET'])
+def get_geo_automation_run_api(run_id):
+    try:
+        run = get_geo_automation_run(app.config["DATABASE_PATH"], run_id)
+    except GEOAutomationNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    return jsonify({"code": 200, "msg": "success", "data": run}), 200
+
+
+@app.route(
+    '/api/geo/automation-runs/<int:run_id>/items/<int:item_id>/checkpoint',
+    methods=['POST'],
+)
+def checkpoint_geo_automation_item_api(run_id, item_id):
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "检查点数据不能为空", "data": None}), 400
+    try:
+        run = checkpoint_geo_automation_item(
+            app.config["DATABASE_PATH"],
+            run_id=run_id,
+            item_id=item_id,
+            expected_state_version=data.get("expected_state_version"),
+            status=data.get("status"),
+            stage=data.get("stage"),
+            message=data.get("message", ""),
+            article_id=data.get("article_id"),
+            generation_request_id=data.get("generation_request_id"),
+            generation_run_id=data.get("generation_run_id"),
+            publish_jobs=data.get("publish_jobs"),
+            result=data.get("result"),
+            error=data.get("error"),
+            preflight_article_fingerprint=data.get(
+                "preflight_article_fingerprint"
+            ),
+            worker_id=data.get("worker_id"),
+            lease_token=data.get("lease_token"),
+            lease_epoch=data.get("lease_epoch"),
+        )
+    except GEOAutomationValidationError as exc:
+        return _geo_automation_error_response(exc, 400)
+    except GEOAutomationNotFoundError as exc:
+        return _geo_automation_error_response(exc, 404)
+    except GEOAutomationConflictError as exc:
+        return _geo_automation_error_response(exc, 409)
+    return jsonify({"code": 200, "msg": "检查点已保存", "data": run}), 200
+
+
+@app.route(
+    '/api/geo/automation-runs/<int:run_id>/items/<int:item_id>/lease',
+    methods=['POST'],
+)
+def acquire_geo_automation_item_lease_api(run_id, item_id):
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "工作租约请求不能为空", "data": None}), 400
+    try:
+        lease = acquire_geo_automation_item_lease(
+            app.config["DATABASE_PATH"],
+            run_id=run_id,
+            item_id=item_id,
+            expected_state_version=data.get("expected_state_version"),
+            worker_id=data.get("worker_id"),
+            stage=data.get("stage"),
+        )
+    except GEOAutomationValidationError as exc:
+        return _geo_automation_error_response(exc, 400)
+    except GEOAutomationNotFoundError as exc:
+        return _geo_automation_error_response(exc, 404)
+    except GEOAutomationConflictError as exc:
+        return _geo_automation_error_response(exc, 409)
+    return jsonify({"code": 200, "msg": "工作租约已领取", "data": lease}), 200
+
+
+@app.route(
+    '/api/geo/automation-runs/<int:run_id>/items/<int:item_id>/lease/renew',
+    methods=['POST'],
+)
+def renew_geo_automation_item_lease_api(run_id, item_id):
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "续租请求不能为空", "data": None}), 400
+    try:
+        lease = renew_geo_automation_item_lease(
+            app.config["DATABASE_PATH"],
+            run_id=run_id,
+            item_id=item_id,
+            worker_id=data.get("worker_id"),
+            stage=data.get("stage"),
+            lease_token=data.get("lease_token"),
+            lease_epoch=data.get("lease_epoch"),
+        )
+    except GEOAutomationValidationError as exc:
+        return _geo_automation_error_response(exc, 400)
+    except GEOAutomationNotFoundError as exc:
+        return _geo_automation_error_response(exc, 404)
+    except GEOAutomationConflictError as exc:
+        return _geo_automation_error_response(exc, 409)
+    return jsonify({"code": 200, "msg": "工作租约已续期", "data": lease}), 200
+
+
+@app.route(
+    '/api/geo/automation-runs/<int:run_id>/items/<int:item_id>/lease/release',
+    methods=['POST'],
+)
+def release_geo_automation_item_lease_api(run_id, item_id):
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "释放请求不能为空", "data": None}), 400
+    try:
+        lease = release_geo_automation_item_lease(
+            app.config["DATABASE_PATH"],
+            run_id=run_id,
+            item_id=item_id,
+            worker_id=data.get("worker_id"),
+            stage=data.get("stage"),
+            lease_token=data.get("lease_token"),
+            lease_epoch=data.get("lease_epoch"),
+        )
+    except GEOAutomationValidationError as exc:
+        return _geo_automation_error_response(exc, 400)
+    except GEOAutomationNotFoundError as exc:
+        return _geo_automation_error_response(exc, 404)
+    except GEOAutomationConflictError as exc:
+        return _geo_automation_error_response(exc, 409)
+    return jsonify({"code": 200, "msg": "工作租约已释放", "data": lease}), 200
+
+
+@app.route('/api/geo/automation-runs/<int:run_id>/pause', methods=['POST'])
+def set_geo_automation_pause_api(run_id):
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "暂停请求不能为空", "data": None}), 400
+    try:
+        run = set_geo_automation_pause(
+            app.config["DATABASE_PATH"],
+            run_id=run_id,
+            paused=data.get("paused"),
+            expected_state_version=data.get("expected_state_version"),
+        )
+    except GEOAutomationValidationError as exc:
+        return _geo_automation_error_response(exc, 400)
+    except GEOAutomationNotFoundError as exc:
+        return _geo_automation_error_response(exc, 404)
+    except GEOAutomationConflictError as exc:
+        return _geo_automation_error_response(exc, 409)
+    return jsonify(
+        {
+            "code": 200,
+            "msg": "已请求在安全检查点暂停" if data.get("paused") else "运行已恢复",
+            "data": run,
+        }
+    ), 200
+
+
 @app.route('/api/ai-usage/projects/<int:project_id>/summary', methods=['GET'])
 def get_project_ai_usage_summary(project_id):
     """Return model-only token/cost totals; publishing is explicitly excluded."""
@@ -2626,6 +3109,65 @@ def get_ai_usage_billing():
         status = 404 if "不存在" in str(exc) else 400
         return jsonify({"code": status, "msg": str(exc), "data": None}), status
     response = jsonify({"code": 200, "msg": "success", "data": bill})
+    response.headers["Cache-Control"] = "no-store"
+    return response, 200
+
+
+@app.route('/api/ai-usage/prices', methods=['GET'])
+def get_ai_usage_prices():
+    """Return the local administrator-managed per-model price catalog."""
+
+    try:
+        catalog = get_ai_price_catalog(app.config["DATABASE_PATH"])
+    except (AIUsageLedgerError, sqlite3.Error) as exc:
+        return jsonify({"code": 500, "msg": str(exc), "data": None}), 500
+    response = jsonify({"code": 200, "msg": "success", "data": catalog})
+    response.headers["Cache-Control"] = "no-store"
+    return response, 200
+
+
+@app.route('/api/ai-usage/prices', methods=['PUT'])
+def put_ai_usage_price():
+    """Upsert one exact model price; historical backfill is explicit only."""
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求体必须是 JSON 对象", "data": None}), 400
+    try:
+        result = upsert_ai_price(
+            app.config["DATABASE_PATH"],
+            provider=data.get("provider"),
+            model=data.get("model"),
+            input_price_per_million=data.get("input_price_per_million"),
+            output_price_per_million=data.get("output_price_per_million"),
+            currency=data.get("currency"),
+            source_note=data.get("source_note", ""),
+            apply_to_unpriced=data.get("apply_to_unpriced", False),
+        )
+    except AIUsageLedgerError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    except sqlite3.Error:
+        return jsonify({"code": 500, "msg": "单价保存失败", "data": None}), 500
+    response = jsonify({"code": 200, "msg": "单价已保存", "data": result})
+    response.headers["Cache-Control"] = "no-store"
+    return response, 200
+
+
+@app.route('/api/ai-usage/prices/<int:price_id>', methods=['DELETE'])
+def delete_ai_usage_price(price_id):
+    """Stop using a local price for future calls without rewriting receipts."""
+
+    try:
+        deleted = delete_ai_price(
+            app.config["DATABASE_PATH"],
+            price_id=price_id,
+        )
+    except AIUsageLedgerError as exc:
+        status = 404 if "不存在" in str(exc) else 400
+        return jsonify({"code": status, "msg": str(exc), "data": None}), status
+    except sqlite3.Error:
+        return jsonify({"code": 500, "msg": "单价删除失败", "data": None}), 500
+    response = jsonify({"code": 200, "msg": "单价已删除", "data": deleted})
     response.headers["Cache-Control"] = "no-store"
     return response, 200
 
@@ -2889,6 +3431,38 @@ def _get_project(project_id):
     project["keywords"] = _decode_json_list(project.get("keywords"))
     project["competitors"] = _decode_json_list(project.get("competitors"))
     return project
+
+
+def _resolve_request_project_snapshot(data, project):
+    """Use a confirmed automation snapshot while rejecting stale live facts."""
+
+    if "project_snapshot" not in data:
+        return project, None
+    supplied = data.get("project_snapshot")
+    if not isinstance(supplied, dict):
+        return None, (
+            jsonify(
+                {"code": 400, "msg": "project_snapshot 必须是对象", "data": None}
+            ),
+            400,
+        )
+    expected = geo_automation_project_snapshot(supplied)
+    current = geo_automation_project_snapshot(project)
+    if expected != current:
+        return None, (
+            jsonify(
+                {
+                    "code": 409,
+                    "msg": "品牌项目底稿已变化，未发起新的模型调用",
+                    "data": {
+                        "error_code": "automation_project_snapshot_changed",
+                        "state_unknown": False,
+                    },
+                }
+            ),
+            409,
+        )
+    return {**project, **expected}, None
 
 
 def _get_latest_visibility_guidance(project_id):
@@ -3811,6 +4385,64 @@ def get_geo_visibility_run(run_id):
     return jsonify({"code": 200, "msg": "success", "data": row}), 200
 
 
+@app.route('/api/geo/site-audits', methods=['POST'])
+def create_geo_site_audit():
+    """Fetch public site signals without claiming index or citation status."""
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请求数据不能为空", "data": None}), 400
+    rate_limit_response = _enforce_site_audit_rate_limit()
+    if rate_limit_response is not None:
+        return rate_limit_response
+    try:
+        result = run_geo_site_audit(
+            app.config["DATABASE_PATH"],
+            project_id=data.get("project_id"),
+            url=data.get("url"),
+            persist=data.get("persist", True),
+            confirm_external_fetch=data.get("confirm_external_fetch", False),
+            request_id=request.headers.get("X-Request-ID", ""),
+            idempotency_key=request.headers.get("Idempotency-Key", ""),
+            allow_proxy_fake_ip=bool(
+                app.config.get("SITE_AUDIT_ALLOW_PROXY_FAKE_IP", False)
+            ),
+        )
+    except GEOSiteAuditConflictError as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+    except GEOSiteAuditTimeoutError as exc:
+        return jsonify({"code": 504, "msg": str(exc), "data": None}), 504
+    except GEOSiteAuditError as exc:
+        status = 404 if "品牌项目不存在" in str(exc) else 400
+        return jsonify({"code": status, "msg": str(exc), "data": None}), status
+    return jsonify({"code": 200, "msg": "站点技术审计完成", "data": result}), 200
+
+
+@app.route('/api/geo/site-audits/runs', methods=['GET'])
+def get_geo_site_audit_runs():
+    try:
+        rows = list_geo_site_audit_runs(
+            app.config["DATABASE_PATH"],
+            project_id=request.args.get("project_id"),
+            limit=request.args.get("limit", 10),
+        )
+    except GEOSiteAuditError as exc:
+        status = 404 if "品牌项目不存在" in str(exc) else 400
+        return jsonify({"code": status, "msg": str(exc), "data": None}), status
+    return jsonify({"code": 200, "msg": "success", "data": rows}), 200
+
+
+@app.route('/api/geo/site-audits/runs/<int:run_id>', methods=['GET'])
+def get_geo_site_audit_run_detail(run_id):
+    try:
+        result = get_geo_site_audit_run(app.config["DATABASE_PATH"], run_id)
+    except GEOSiteAuditNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except GEOSiteAuditError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    return jsonify({"code": 200, "msg": "success", "data": result}), 200
+
+
 @app.route('/api/geo/diagnostics', methods=['POST'])
 def create_geo_diagnostic():
     """Measure a project's foundation or one content item without model calls."""
@@ -4497,7 +5129,21 @@ def edit_article(article_id):
     if "project_id" in data:
         return jsonify({"code": 400, "msg": "project_id 不支持修改", "data": None}), 400
 
-    article_data, validation_error = _parse_article_fields(data, partial=True)
+    expected_content_fingerprint = data.get("expected_content_fingerprint")
+    if "expected_content_fingerprint" in data and (
+        not isinstance(expected_content_fingerprint, str)
+        or re.fullmatch(r"[0-9a-f]{64}", expected_content_fingerprint) is None
+    ):
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "expected_content_fingerprint 格式无效",
+                "data": None,
+            }
+        ), 400
+    editable_data = dict(data)
+    editable_data.pop("expected_content_fingerprint", None)
+    article_data, validation_error = _parse_article_fields(editable_data, partial=True)
     if validation_error:
         return jsonify({"code": 400, "msg": validation_error, "data": None}), 400
     if not article_data:
@@ -4508,7 +5154,10 @@ def edit_article(article_id):
             app.config["DATABASE_PATH"],
             article_id,
             article_data,
+            expected_content_fingerprint=expected_content_fingerprint,
         )
+    except ArticleConflictError as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
     except ArticleNotFoundError as exc:
         return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
     except ProjectNotFoundError as exc:
@@ -4533,6 +5182,16 @@ def optimize_article(article_id):
     project = _get_project(article["project_id"])
     if project is None:
         return jsonify({"code": 409, "msg": "文章关联的品牌项目不存在", "data": None}), 409
+    project, project_snapshot_error = _resolve_request_project_snapshot(data, project)
+    if project_snapshot_error is not None:
+        return project_snapshot_error
+    automation_error = _assert_automation_model_context(
+        data,
+        stage="optimizing",
+        article_id=article_id,
+    )
+    if automation_error is not None:
+        return automation_error
 
     raw_target_platforms = data.get("target_platforms", [])
     if raw_target_platforms is None:
@@ -4674,7 +5333,25 @@ def optimize_article(article_id):
                 "issues": normalized_issues,
             }
         )
-    if platform_optimization_context:
+    optimization_direction = data.get("optimization_direction", "")
+    if not isinstance(optimization_direction, str):
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "optimization_direction 必须是字符串",
+                "data": None,
+            }
+        ), 400
+    optimization_direction = optimization_direction.strip()
+    if len(optimization_direction) > 2000:
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "optimization_direction 不能超过 2000 个字符",
+                "data": None,
+            }
+        ), 400
+    if platform_optimization_context or optimization_direction:
         before_score = dict(before_score)
         before_score["suggestions"] = [
             *(
@@ -4687,6 +5364,14 @@ def optimize_article(article_id):
                 for item in platform_optimization_context
                 for issue in item["issues"]
             ],
+            *(
+                [
+                    "用户为本轮指定的 GEO 优化方向："
+                    f"{optimization_direction}。不得虚构事实、来源或平台结果。"
+                ]
+                if optimization_direction
+                else []
+            ),
         ]
     try:
         ai_settings = _request_ai_settings(data, role="reviewer")
@@ -5056,22 +5741,35 @@ def _parse_optional_positive_integer_value(raw_value, name):
     return value, None
 
 
-def _assert_connected_platform_account(account_id, platform):
+def _assert_connected_platform_account(
+    account_id,
+    platform,
+    *,
+    expected_credential_epoch=None,
+):
     capability = get_platform_capability(platform)
     if capability is None:
         raise PublishContentLimitError(f"暂不支持发布平台：{platform}")
     with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
         row = conn.execute(
-            "SELECT type, status FROM user_info WHERE id = ?",
+            "SELECT type, status, credential_epoch FROM user_info WHERE id = ?",
             (int(account_id),),
         ).fetchone()
     if (
         row is None
         or int(row[0]) != int(capability["account_type"])
         or int(row[1]) != 1
+        or (
+            expected_credential_epoch is not None
+            and int(row[2]) != int(expected_credential_epoch)
+        )
     ):
+        if expected_credential_epoch is not None:
+            raise GEOAutomationCredentialChangedError(
+                f"{platform} 账号凭证已变化或当前不可用，请重新选择账号并确认"
+            )
         raise PublishContentLimitError(
-            f"{platform} account_id 不存在、平台不匹配或当前不可用"
+            f"{platform} account_id 不存在、平台不匹配、凭证已变化或当前不可用"
         )
 
 
@@ -5352,6 +6050,25 @@ def create_publish_task():
         return jsonify(
             {"code": 400, "msg": account_error, "data": None}
         ), 400
+    automation_item_id, automation_item_error = _parse_optional_positive_integer_value(
+        data.get("automation_item_id"),
+        "automation_item_id",
+    )
+    if automation_item_error:
+        return jsonify(
+            {"code": 400, "msg": automation_item_error, "data": None}
+        ), 400
+    publish_idempotency_key = request.headers.get("Idempotency-Key") or data.get(
+        "idempotency_key"
+    )
+    if automation_item_id is not None and not publish_idempotency_key:
+        return jsonify(
+            {
+                "code": 400,
+                "msg": "一键 GEO 发布任务必须提供 Idempotency-Key",
+                "data": None,
+            }
+        ), 400
 
     platform = str(data.get("platform") or "").strip().lower()
     if not platform:
@@ -5375,9 +6092,60 @@ def create_publish_task():
             {"code": 400, "msg": "publish_title 必须是字符串", "data": None}
         ), 400
 
+    auto_execute = data.get("auto_execute", False)
+    if not isinstance(auto_execute, bool):
+        return jsonify(
+            {"code": 400, "msg": "auto_execute 必须是布尔值", "data": None}
+        ), 400
+    auto_image = data.get("auto_image", False)
+    if not isinstance(auto_image, bool):
+        return jsonify(
+            {"code": 400, "msg": "auto_image 必须是布尔值", "data": None}
+        ), 400
+
     capability = get_platform_capability(platform)
     if capability is None:
         return jsonify({"code": 400, "msg": "暂不支持该发布平台", "data": None}), 400
+
+    # Recover a committed task before evaluating mutable connector, runtime,
+    # authorization or automation-stage gates.  A lost 201 response must remain
+    # recoverable after the item has completed or the local runtime has changed.
+    if publish_idempotency_key:
+        try:
+            replayed_job = replay_publish_job(
+                app.config["DATABASE_PATH"],
+                article_id=article_id,
+                platform=platform,
+                images=images,
+                video=video,
+                publish_at=data.get("publish_at"),
+                auto_execute=auto_execute,
+                account_id=account_id,
+                publish_title=publish_title,
+                publish_content=publish_content,
+                idempotency_key=publish_idempotency_key,
+                automation_item_id=automation_item_id,
+                allow_generated_images=auto_image,
+            )
+        except ArticleNotFoundError as exc:
+            return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+        except PublishJobIdempotencyConflictError as exc:
+            return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+        except (UnsupportedPublishPlatformError, ValueError) as exc:
+            return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+        if replayed_job is not None:
+            replayed_job.pop("idempotency_replayed", None)
+            response = jsonify(
+                {
+                    "code": 200,
+                    "msg": "已恢复原发布任务",
+                    "data": _publish_job_payload(replayed_job),
+                }
+            )
+            response.headers["Idempotency-Key"] = str(publish_idempotency_key)
+            response.headers["Idempotency-Replayed"] = "true"
+            return response, 200
+
     if platform == "sohu":
         try:
             current_article = get_article(app.config["DATABASE_PATH"], article_id)
@@ -5439,11 +6207,6 @@ def create_publish_task():
                     },
                 }
             ), 503
-    auto_execute = data.get("auto_execute", False)
-    if not isinstance(auto_execute, bool):
-        return jsonify(
-            {"code": 400, "msg": "auto_execute 必须是布尔值", "data": None}
-        ), 400
     if auto_execute and not data.get("publish_at"):
         return jsonify(
             {
@@ -5522,9 +6285,6 @@ def create_publish_task():
             }
         ), 409
 
-    auto_image = data.get("auto_image", False)
-    if not isinstance(auto_image, bool):
-        return jsonify({"code": 400, "msg": "auto_image 必须是布尔值", "data": None}), 400
     if auto_image and not images and platform in {
         "baijiahao",
         "xiaohongshu",
@@ -5687,6 +6447,8 @@ def create_publish_task():
             account_id=account_id,
             publish_title=publish_title,
             publish_content=publish_content,
+            idempotency_key=publish_idempotency_key,
+            automation_item_id=automation_item_id,
         )
     except ArticleNotFoundError as exc:
         return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
@@ -5702,12 +6464,36 @@ def create_publish_task():
                 },
             }
         ), 409
+    except PublishJobIdempotencyConflictError as exc:
+        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+    except InvalidPublishJobTransitionError as exc:
+        return jsonify(
+            {
+                "code": 409,
+                "msg": str(exc),
+                "data": {
+                    "error_code": getattr(
+                        exc, "error_code", "publish_job_state_conflict"
+                    ),
+                    "state_unknown": False,
+                },
+            }
+        ), 409
     except (UnsupportedPublishPlatformError, ValueError) as exc:
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
 
-    return jsonify(
-        {"code": 201, "msg": "发布任务已创建", "data": _publish_job_payload(job)}
-    ), 201
+    replayed = bool(job.pop("idempotency_replayed", False))
+    response = jsonify(
+        {
+            "code": 200 if replayed else 201,
+            "msg": "已恢复原发布任务" if replayed else "发布任务已创建",
+            "data": _publish_job_payload(job),
+        }
+    )
+    if publish_idempotency_key:
+        response.headers["Idempotency-Key"] = str(publish_idempotency_key)
+        response.headers["Idempotency-Replayed"] = "true" if replayed else "false"
+    return response, 200 if replayed else 201
 
 
 @app.route('/api/publish/jobs', methods=['GET'])
@@ -5727,6 +6513,14 @@ def get_publish_task_list():
         if error:
             return jsonify({"code": 400, "msg": error, "data": None}), 400
 
+    automation_item_id = None
+    if "automation_item_id" in request.args:
+        automation_item_id, error = _parse_positive_query_integer(
+            "automation_item_id"
+        )
+        if error:
+            return jsonify({"code": 400, "msg": error, "data": None}), 400
+
     status = request.args.get("status")
     if status is not None and status not in PUBLISH_JOB_STATUSES:
         return jsonify({"code": 400, "msg": "不支持的发布任务状态", "data": None}), 400
@@ -5735,6 +6529,7 @@ def get_publish_task_list():
         result = list_publish_jobs(
             app.config["DATABASE_PATH"],
             article_id=article_id,
+            automation_item_id=automation_item_id,
             platform=request.args.get("platform"),
             status=status,
             page=page,
@@ -5934,7 +6729,18 @@ def auto_repair_publish_task(job_id):
             expected_state_version=expected_state_version,
         )
     except InvalidPublishJobTransitionError as exc:
-        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+        return jsonify(
+            {
+                "code": 409,
+                "msg": str(exc),
+                "data": {
+                    "error_code": getattr(
+                        exc, "error_code", "publish_job_state_conflict"
+                    ),
+                    "state_unknown": False,
+                },
+            }
+        ), 409
     return jsonify(
         {
             "code": 200,
@@ -6068,7 +6874,18 @@ def reconcile_publish_task(job_id):
     except ValueError as exc:
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
     except InvalidPublishJobTransitionError as exc:
-        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+        return jsonify(
+            {
+                "code": 409,
+                "msg": str(exc),
+                "data": {
+                    "error_code": getattr(
+                        exc, "error_code", "publish_job_state_conflict"
+                    ),
+                    "state_unknown": False,
+                },
+            }
+        ), 409
 
     return jsonify(
         {
@@ -6101,7 +6918,18 @@ def execute_demo_publish_task(job_id):
             media_root=app.config["MEDIA_ROOT"],
         )
     except InvalidPublishJobTransitionError as exc:
-        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+        return jsonify(
+            {
+                "code": 409,
+                "msg": str(exc),
+                "data": {
+                    "error_code": getattr(
+                        exc, "error_code", "publish_job_state_conflict"
+                    ),
+                    "state_unknown": False,
+                },
+            }
+        ), 409
     return jsonify(
         {"code": 200, "msg": "演示发布任务执行完成", "data": _publish_job_payload(job)}
     ), 200
@@ -6255,7 +7083,18 @@ def execute_real_publish_task(job_id):
     except PublishConfirmationMismatchError as exc:
         return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
     except InvalidPublishJobTransitionError as exc:
-        return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
+        return jsonify(
+            {
+                "code": 409,
+                "msg": str(exc),
+                "data": {
+                    "error_code": getattr(
+                        exc, "error_code", "publish_job_state_conflict"
+                    ),
+                    "state_unknown": False,
+                },
+            }
+        ), 409
     return jsonify(
         {
             "code": 200,
@@ -6323,6 +7162,7 @@ def _publish_job_payload(
     payload = {
         "job_id": job["id"],
         "article_id": job["article_id"],
+        "automation_item_id": job.get("automation_item_id"),
         "account_id": job.get("account_id"),
         "account_name": str(job.get("account_name") or ""),
         "state_version": int(job.get("state_version", 0)),
@@ -6705,7 +7545,7 @@ def remove_project(project_id):
         delete_project(app.config["DATABASE_PATH"], project_id)
     except ProjectNotFoundError as exc:
         return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
-    except ProjectHasArticlesError as exc:
+    except (ProjectHasArticlesError, ProjectHasActiveAutomationError) as exc:
         return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
     return jsonify({"code": 200, "msg": "项目已删除", "data": {"id": project_id}}), 200
 

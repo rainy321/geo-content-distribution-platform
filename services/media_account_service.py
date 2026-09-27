@@ -593,6 +593,7 @@ def _serialize_account(
         "platform_name": definition["name"],
         "priority": definition["priority"],
         "account_name": row["userName"],
+        "credential_epoch": int(row["credential_epoch"]),
         "status": status,
         "cookie_present": cookie_present,
         "last_checked_at": row["last_checked_at"],

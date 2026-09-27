@@ -81,6 +81,7 @@ class MediaAccountServiceTests(unittest.IsolatedAsyncioTestCase):
         toutiao = next(item for item in overview["platforms"] if item["key"] == "toutiao")
         self.assertEqual(zhihu["connected_count"], 1)
         self.assertEqual(zhihu["accounts"][0]["status"], "connected")
+        self.assertEqual(zhihu["accounts"][0]["credential_epoch"], 1)
         self.assertEqual(toutiao["accounts"][0]["status"], "missing_cookie")
         self.assertNotIn("file_path", zhihu["accounts"][0])
 

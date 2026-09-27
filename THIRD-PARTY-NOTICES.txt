@@ -18,12 +18,23 @@ exhaustive dependency notice:
   https://pywebview.flowrl.com/
 - PyInstaller - GPL-2.0-or-later with the PyInstaller bootloader exception
   https://pyinstaller.org/
+- Node.js 24.14.1 - MIT License and bundled third-party notices
+  https://nodejs.org/
+- Weibo Open Platform official CLI 0.9.4 (@weibo-ai/weibo-cli) - MIT License
+  https://open.weibo.com/cli/quickstart
+- undici 6.28.1 - MIT License
+  https://github.com/nodejs/undici
 
 Playwright and Patchright driver license and third-party notice files are
 included inside their packaged driver directories. This file identifies the
 other packages above but does not assert that their full license texts are
 embedded by PyInstaller. The executable uses an independently installed Google
 Chrome browser for publishing; Chrome is not redistributed in this release.
+Authorized-real builds embed the pinned Node.js runtime and official Weibo CLI.
+Their package and runtime license files remain inside the extracted executable
+payload, and their exact versions and hashes/integrity are recorded in the
+release manifest. Weibo account authorization, developer verification, service
+activation, Credits and platform limits remain the operator's responsibility.
 
 Bilibili's biliup executable is not included, downloaded, updated, or
 redistributed by the desktop package.  An authorized-real build can recognize

@@ -322,6 +322,32 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
             )
             cursor.execute(
                 '''
+                CREATE TABLE IF NOT EXISTS ai_price_catalog (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    provider TEXT NOT NULL COLLATE NOCASE,
+                    model TEXT NOT NULL COLLATE NOCASE,
+                    input_price_per_million TEXT NOT NULL,
+                    output_price_per_million TEXT NOT NULL,
+                    currency TEXT NOT NULL,
+                    source_note TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL DEFAULT (
+                        strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                    ),
+                    updated_at TEXT NOT NULL DEFAULT (
+                        strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                    ),
+                    UNIQUE(provider, model)
+                )
+                '''
+            )
+            cursor.execute(
+                '''
+                CREATE INDEX IF NOT EXISTS idx_ai_price_catalog_provider_model
+                ON ai_price_catalog(provider, model)
+                '''
+            )
+            cursor.execute(
+                '''
                 CREATE TABLE IF NOT EXISTS ai_visibility_sample_requests (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     project_id INTEGER NOT NULL,
@@ -376,6 +402,41 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                 '''
                 CREATE INDEX IF NOT EXISTS idx_geo_diagnostic_project_created
                 ON geo_diagnostic_runs(project_id, created_at DESC, id DESC)
+                '''
+            )
+            cursor.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS geo_site_audit_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL,
+                    request_id TEXT NOT NULL UNIQUE,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    request_fingerprint TEXT NOT NULL,
+                    requested_url TEXT NOT NULL
+                        CHECK (length(trim(requested_url)) > 0),
+                    final_url TEXT NOT NULL
+                        CHECK (length(trim(final_url)) > 0),
+                    status TEXT NOT NULL DEFAULT 'started'
+                        CHECK (status IN (
+                            'started', 'completed', 'partial', 'need_action'
+                        )),
+                    result_json TEXT,
+                    audit_version TEXT NOT NULL
+                        CHECK (length(trim(audit_version)) > 0),
+                    created_at TEXT NOT NULL DEFAULT (
+                        strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                    ),
+                    updated_at TEXT NOT NULL DEFAULT (
+                        strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+                    ),
+                    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+                )
+                '''
+            )
+            cursor.execute(
+                '''
+                CREATE INDEX IF NOT EXISTS idx_geo_site_audit_project_created
+                ON geo_site_audit_runs(project_id, created_at DESC, id DESC)
                 '''
             )
             cursor.execute(
@@ -435,7 +496,15 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                 CREATE TABLE IF NOT EXISTS publish_jobs (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     article_id INTEGER NOT NULL,
+                    automation_item_id INTEGER,
+                    idempotency_key TEXT,
+                    request_fingerprint TEXT NOT NULL DEFAULT '',
                     account_id INTEGER,
+                    account_credential_epoch INTEGER
+                        CHECK (
+                            account_credential_epoch IS NULL
+                            OR account_credential_epoch >= 1
+                        ),
                     platform TEXT NOT NULL,
                     status TEXT NOT NULL DEFAULT 'queued'
                         CHECK (status IN (
@@ -463,7 +532,9 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                     started_at DATETIME,
                     finished_at DATETIME,
                     FOREIGN KEY (article_id) REFERENCES articles(id) ON DELETE CASCADE,
-                    FOREIGN KEY (account_id) REFERENCES user_info(id) ON DELETE SET NULL
+                    FOREIGN KEY (account_id) REFERENCES user_info(id) ON DELETE SET NULL,
+                    FOREIGN KEY (automation_item_id)
+                        REFERENCES geo_automation_items(id) ON DELETE SET NULL
                 )
                 '''
             )
@@ -522,6 +593,26 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                 cursor.execute(
                     "ALTER TABLE publish_jobs ADD COLUMN account_id INTEGER"
                 )
+            if "account_credential_epoch" not in publish_job_columns:
+                cursor.execute(
+                    "ALTER TABLE publish_jobs "
+                    "ADD COLUMN account_credential_epoch INTEGER "
+                    "CHECK (account_credential_epoch IS NULL "
+                    "OR account_credential_epoch >= 1)"
+                )
+            if "automation_item_id" not in publish_job_columns:
+                cursor.execute(
+                    "ALTER TABLE publish_jobs ADD COLUMN automation_item_id INTEGER"
+                )
+            if "idempotency_key" not in publish_job_columns:
+                cursor.execute(
+                    "ALTER TABLE publish_jobs ADD COLUMN idempotency_key TEXT"
+                )
+            if "request_fingerprint" not in publish_job_columns:
+                cursor.execute(
+                    "ALTER TABLE publish_jobs "
+                    "ADD COLUMN request_fingerprint TEXT NOT NULL DEFAULT ''"
+                )
             cursor.execute(
                 '''
                 CREATE INDEX IF NOT EXISTS idx_publish_jobs_article_id
@@ -538,6 +629,148 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                 '''
                 CREATE INDEX IF NOT EXISTS idx_publish_jobs_account_id
                 ON publish_jobs(account_id)
+                '''
+            )
+            cursor.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS geo_automation_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    request_id TEXT NOT NULL UNIQUE,
+                    idempotency_key TEXT NOT NULL UNIQUE,
+                    request_fingerprint TEXT NOT NULL,
+                    project_id INTEGER NOT NULL,
+                    project_snapshot TEXT NOT NULL,
+                    config_json TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'queued'
+                        CHECK (status IN (
+                            'queued', 'running', 'paused', 'completed',
+                            'completed_with_issues', 'cancelled'
+                        )),
+                    message TEXT NOT NULL DEFAULT '',
+                    total_items INTEGER NOT NULL CHECK (total_items > 0),
+                    completed_items INTEGER NOT NULL DEFAULT 0
+                        CHECK (completed_items >= 0),
+                    issue_items INTEGER NOT NULL DEFAULT 0
+                        CHECK (issue_items >= 0),
+                    pause_requested INTEGER NOT NULL DEFAULT 0
+                        CHECK (pause_requested IN (0, 1)),
+                    state_version INTEGER NOT NULL DEFAULT 0
+                        CHECK (state_version >= 0),
+                    created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    started_at DATETIME,
+                    finished_at DATETIME,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+                )
+                '''
+            )
+            cursor.execute(
+                '''
+                CREATE INDEX IF NOT EXISTS idx_geo_automation_runs_project_created
+                ON geo_automation_runs(project_id, created_at DESC, id DESC)
+                '''
+            )
+            cursor.execute(
+                '''
+                CREATE INDEX IF NOT EXISTS idx_geo_automation_runs_status
+                ON geo_automation_runs(status, updated_at DESC)
+                '''
+            )
+            cursor.execute(
+                '''
+                CREATE TABLE IF NOT EXISTS geo_automation_items (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    run_id INTEGER NOT NULL,
+                    position INTEGER NOT NULL CHECK (position > 0),
+                    topic TEXT NOT NULL CHECK (length(trim(topic)) > 0),
+                    status TEXT NOT NULL DEFAULT 'queued'
+                        CHECK (status IN (
+                            'queued', 'generating', 'optimizing',
+                            'preflighting', 'publishing', 'completed',
+                            'need_action', 'failed', 'skipped'
+                        )),
+                    stage TEXT NOT NULL DEFAULT 'queued',
+                    message TEXT NOT NULL DEFAULT '',
+                    article_id INTEGER,
+                    generation_request_id TEXT NOT NULL DEFAULT '',
+                    generation_run_id INTEGER,
+                    publish_jobs_json TEXT NOT NULL DEFAULT '[]',
+                    result_json TEXT NOT NULL DEFAULT '{}',
+                    error_json TEXT NOT NULL DEFAULT '{}',
+                    worker_lease_owner TEXT NOT NULL DEFAULT '',
+                    worker_lease_stage TEXT NOT NULL DEFAULT '',
+                    worker_lease_token TEXT NOT NULL DEFAULT '',
+                    worker_lease_epoch INTEGER NOT NULL DEFAULT 0
+                        CHECK (worker_lease_epoch >= 0),
+                    worker_lease_expires_at DATETIME,
+                    state_version INTEGER NOT NULL DEFAULT 0
+                        CHECK (state_version >= 0),
+                    started_at DATETIME,
+                    finished_at DATETIME,
+                    updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE (run_id, position),
+                    FOREIGN KEY (run_id) REFERENCES geo_automation_runs(id)
+                        ON DELETE CASCADE,
+                    FOREIGN KEY (article_id) REFERENCES articles(id)
+                        ON DELETE SET NULL,
+                    FOREIGN KEY (generation_run_id)
+                        REFERENCES content_generation_runs(id) ON DELETE SET NULL
+                )
+                '''
+            )
+            geo_automation_item_columns = {
+                row[1]
+                for row in cursor.execute("PRAGMA table_info(geo_automation_items)")
+            }
+            if "worker_lease_owner" not in geo_automation_item_columns:
+                cursor.execute(
+                    "ALTER TABLE geo_automation_items "
+                    "ADD COLUMN worker_lease_owner TEXT NOT NULL DEFAULT ''"
+                )
+            if "worker_lease_stage" not in geo_automation_item_columns:
+                cursor.execute(
+                    "ALTER TABLE geo_automation_items "
+                    "ADD COLUMN worker_lease_stage TEXT NOT NULL DEFAULT ''"
+                )
+            if "worker_lease_token" not in geo_automation_item_columns:
+                cursor.execute(
+                    "ALTER TABLE geo_automation_items "
+                    "ADD COLUMN worker_lease_token TEXT NOT NULL DEFAULT ''"
+                )
+            if "worker_lease_epoch" not in geo_automation_item_columns:
+                cursor.execute(
+                    "ALTER TABLE geo_automation_items "
+                    "ADD COLUMN worker_lease_epoch INTEGER NOT NULL DEFAULT 0"
+                )
+            if "worker_lease_expires_at" not in geo_automation_item_columns:
+                cursor.execute(
+                    "ALTER TABLE geo_automation_items "
+                    "ADD COLUMN worker_lease_expires_at DATETIME"
+                )
+            cursor.execute(
+                '''
+                CREATE INDEX IF NOT EXISTS idx_geo_automation_items_run_position
+                ON geo_automation_items(run_id, position)
+                '''
+            )
+            cursor.execute(
+                '''
+                CREATE INDEX IF NOT EXISTS idx_geo_automation_items_status
+                ON geo_automation_items(status, updated_at DESC)
+                '''
+            )
+            cursor.execute(
+                '''
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_publish_jobs_idempotency_key
+                ON publish_jobs(idempotency_key)
+                WHERE idempotency_key IS NOT NULL
+                '''
+            )
+            cursor.execute(
+                '''
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_publish_jobs_automation_channel
+                ON publish_jobs(automation_item_id, platform)
+                WHERE automation_item_id IS NOT NULL
                 '''
             )
 

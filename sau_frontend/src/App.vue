@@ -46,6 +46,10 @@
               <el-icon><CollectionTag /></el-icon>
               <span>品牌项目</span>
             </el-menu-item>
+            <el-menu-item index="/geo-automation">
+              <el-icon><SetUp /></el-icon>
+              <span>一键 GEO</span>
+            </el-menu-item>
             <el-menu-item index="/content-create">
               <el-icon><MagicStick /></el-icon>
               <span>AI 内容创作</span>
@@ -163,7 +167,7 @@
             </p>
           </section>
           <router-view v-slot="{ Component }">
-            <KeepAlive include="AiVisibility,ContentCreation">
+            <KeepAlive include="AiVisibility,ContentCreation,GeoAutomation">
               <component :is="Component" />
             </KeepAlive>
           </router-view>
@@ -229,7 +233,7 @@ import { publishApi } from '@/api/publish'
 import {
   HomeFilled, User, DataAnalysis,
   Fold, Picture, Upload, CollectionTag, MagicStick, DocumentCopy, Aim, Setting,
-  View, Tickets, UserFilled, ArrowDown
+  View, Tickets, UserFilled, ArrowDown, SetUp
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
@@ -275,6 +279,7 @@ const pageTitles = {
   '/': '品牌可见度工作台',
   '/account-management': '媒体账号',
   '/projects': '品牌项目',
+  '/geo-automation': '一键 GEO',
   '/content-create': 'AI 内容创作',
   '/content-library': '内容库',
   '/geo-optimize': 'GEO 优化',

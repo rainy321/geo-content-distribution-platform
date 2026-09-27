@@ -69,7 +69,7 @@ _TOUTIAO_LOGIN_ERROR_ACTIONS = {
 }
 
 _WEIBO_LOGIN_ERROR_MESSAGES = {
-    "connector_required": "需安装/授权官方连接器：请安装 @weibo-ai/weibo-cli 后重试",
+    "connector_required": "微博官方连接器不可用：请重新安装软件或安装 @weibo-ai/weibo-cli 后重试",
     "authorization_failed": "微博官方连接器授权未完成或授权已失效",
     "single_session_conflict": "微博官方 CLI 当前仅支持一个默认授权会话，请重新连接已有微博账号",
     "login_timeout": "等待微博官方连接器授权超时",
@@ -1647,7 +1647,7 @@ async def weibo_cookie_gen(
         WeiboAuthorizationError,
         WeiboConnectorUnavailableError,
         WeiboOfficialConnector,
-        resolve_weibo_cli,
+        resolve_weibo_cli_runtime,
     )
 
     process = None
@@ -1659,7 +1659,7 @@ async def weibo_cookie_gen(
             _queue_login_cancelled(status_queue, "weibo")
             return None
         try:
-            executable = resolve_weibo_cli()
+            runtime = resolve_weibo_cli_runtime()
         except WeiboConnectorUnavailableError:
             _queue_weibo_login_error(status_queue, "connector_required")
             return None
@@ -1673,7 +1673,7 @@ async def weibo_cookie_gen(
         if hasattr(subprocess, "CREATE_NO_WINDOW"):
             options["creationflags"] = subprocess.CREATE_NO_WINDOW
         process = subprocess.Popen(
-            [executable, "auth", "login", "--browser"],
+            [*runtime.command_prefix, "auth", "login", "--browser"],
             **options,
         )
         returncode = await _wait_for_owned_login_process(
@@ -1691,7 +1691,7 @@ async def weibo_cookie_gen(
             _queue_weibo_login_error(status_queue, "authorization_failed")
             return None
 
-        connector = WeiboOfficialConnector(executable=executable)
+        connector = WeiboOfficialConnector()
         try:
             identity = await asyncio.to_thread(connector.read_identity)
             await asyncio.to_thread(connector.doctor)

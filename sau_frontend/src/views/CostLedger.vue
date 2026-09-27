@@ -65,6 +65,9 @@
           <el-icon><Download /></el-icon>
           导出明细
         </el-button>
+        <el-button type="primary" plain @click="openPriceSettings">
+          单价设置
+        </el-button>
       </div>
     </section>
 
@@ -138,7 +141,7 @@
             <strong>本账期仍有 {{ bill.summary.unknownCostCount }} 条费用无法计算</strong>
             <p>先核对模型用量回执与单价配置，再用于客户结算；系统不会用 0 填补未知值。</p>
           </div>
-          <button type="button" @click="goToSettings">查看模型设置</button>
+          <button type="button" @click="openPriceSettings">设置模型单价</button>
         </div>
 
         <section class="operation-strip" aria-labelledby="operation-title">
@@ -285,13 +288,112 @@
       </div>
       <p>{{ bill.pricingMessage || '账单为本机估算凭证，最终以模型供应商账单为准。' }}</p>
     </section>
+
+    <el-drawer
+      v-model="priceDrawerOpen"
+      title="模型单价设置"
+      size="620px"
+      class="price-drawer"
+      :close-on-click-modal="!priceSaving"
+    >
+      <div class="price-drawer-body" :aria-busy="priceLoading || priceSaving">
+        <div class="price-unit-note">
+          <strong>统一单位：每百万 Token</strong>
+          <p>输入、输出分别计价，币种不会跨币种相加。新价格默认只用于后续调用；已核算历史快照不会被改写。</p>
+        </div>
+
+        <div class="price-toolbar">
+          <div>
+            <span>LOCAL PRICE CATALOG</span>
+            <strong>{{ priceRows.length }} 个模型口径</strong>
+          </div>
+          <el-button type="primary" @click="startPriceEdit()">新增单价</el-button>
+        </div>
+
+        <section v-if="priceEditorVisible" class="price-editor" aria-label="单价编辑器">
+          <header>
+            <div>
+              <span>PRICE ENTRY</span>
+              <h3>{{ priceForm.id ? '修改模型单价' : '新增模型单价' }}</h3>
+            </div>
+            <button type="button" aria-label="关闭单价编辑器" @click="priceEditorVisible = false">×</button>
+          </header>
+          <div class="price-form-grid">
+            <label>
+              <span>服务商标识</span>
+              <el-input v-model="priceForm.provider" maxlength="120" placeholder="例如 qwen / custom" />
+            </label>
+            <label>
+              <span>模型标识</span>
+              <el-input v-model="priceForm.model" maxlength="200" placeholder="必须与调用回执完全一致" />
+            </label>
+            <label>
+              <span>输入单价 / 百万 Token</span>
+              <el-input v-model="priceForm.inputPricePerMillion" inputmode="decimal" placeholder="例如 2 或 0.15" />
+            </label>
+            <label>
+              <span>输出单价 / 百万 Token</span>
+              <el-input v-model="priceForm.outputPricePerMillion" inputmode="decimal" placeholder="例如 6 或 0.6" />
+            </label>
+            <label>
+              <span>币种</span>
+              <el-select v-model="priceForm.currency" filterable allow-create default-first-option placeholder="CNY / USD">
+                <el-option label="人民币 CNY" value="CNY" />
+                <el-option label="美元 USD" value="USD" />
+              </el-select>
+            </label>
+            <label>
+              <span>价格来源备注</span>
+              <el-input v-model="priceForm.sourceNote" maxlength="240" placeholder="例如：供应商官网 2026-09-17" />
+            </label>
+          </div>
+          <label class="backfill-switch">
+            <el-switch v-model="priceForm.applyToUnpriced" />
+            <span>
+              <strong>补算历史未定价记录</strong>
+              <small>仅处理该模型仍为“未配置单价”的凭证；已核算凭证永不改写。</small>
+            </span>
+          </label>
+          <div class="price-editor-actions">
+            <el-button @click="priceEditorVisible = false">取消</el-button>
+            <el-button type="primary" :loading="priceSaving" @click="savePrice">保存单价</el-button>
+          </div>
+        </section>
+
+        <div v-if="priceLoading" class="price-empty">正在读取本机价格目录…</div>
+        <div v-else-if="priceRows.length" class="price-list">
+          <article v-for="row in priceRows" :key="`${row.provider}/${row.model}`">
+            <div class="price-model-mark">{{ providerInitial(row.provider) }}</div>
+            <div class="price-model-copy">
+              <strong>{{ row.provider }} / {{ row.model }}</strong>
+              <small>
+                {{ row.receiptCount }} 次调用 · {{ formatTokenCount(row.knownTotalTokens) }} Token
+                <template v-if="row.unpricedReceiptCount"> · {{ row.unpricedReceiptCount }} 条待补单价</template>
+              </small>
+              <p v-if="row.priceEntryId">
+                输入 {{ formatMoney(row.inputPricePerMillion, row.currency) }} / 输出 {{ formatMoney(row.outputPricePerMillion, row.currency) }}
+                <span>每百万 Token</span>
+              </p>
+              <p v-else class="unpriced-row">尚未设置单价</p>
+            </div>
+            <div class="price-row-actions">
+              <el-button size="small" @click="startPriceEdit(row)">{{ row.priceEntryId ? '修改' : '设置' }}</el-button>
+              <el-button v-if="row.priceEntryId" size="small" type="danger" plain @click="removePrice(row)">删除</el-button>
+            </div>
+          </article>
+        </div>
+        <div v-else class="price-empty">
+          尚无模型调用记录。可以手动新增服务商和模型单价，后续调用会自动冻结价格快照。
+        </div>
+      </div>
+    </el-drawer>
   </main>
 </template>
 
 <script setup>
 import { computed, onMounted, reactive, ref } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { useRoute } from 'vue-router'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { Download, Refresh } from '@element-plus/icons-vue'
 import { billingApi } from '@/api/billing'
 import { projectApi } from '@/api/project'
@@ -301,17 +403,33 @@ import {
   formatMoney,
   formatTokenCount,
   normalizeCostBill,
+  normalizePriceCatalog,
   operationLabel,
   usageStatusLabel
 } from '@/utils/costLedger'
 
 const route = useRoute()
-const router = useRouter()
 const projects = ref([])
 const loading = ref(false)
 const loadError = ref('')
 const bill = ref(normalizeCostBill({}))
+const priceCatalog = ref(normalizePriceCatalog({}))
+const priceDrawerOpen = ref(false)
+const priceEditorVisible = ref(false)
+const priceLoading = ref(false)
+const priceSaving = ref(false)
 const filters = reactive({ projectId: '', days: 30, operation: '', costStatus: '' })
+const priceForm = reactive({
+  id: null,
+  provider: '',
+  model: '',
+  inputPricePerMillion: '',
+  outputPricePerMillion: '',
+  currency: 'CNY',
+  sourceNote: '',
+  applyToUnpriced: true,
+  unpricedReceiptCount: 0
+})
 let requestSequence = 0
 
 const periodOptions = [
@@ -348,6 +466,34 @@ const operationRows = computed(() => {
   return operationOptions.map(option => rows.get(option.value)).filter(Boolean)
 })
 const maximumOperationTokens = computed(() => Math.max(1, ...operationRows.value.map(item => item.knownTotalTokens || 0)))
+const priceRows = computed(() => {
+  const rows = new Map(priceCatalog.value.detectedModels.map(item => [
+    `${item.provider.toLocaleLowerCase()}/${item.model.toLocaleLowerCase()}`,
+    { ...item, sourceNote: '' }
+  ]))
+  for (const entry of priceCatalog.value.entries) {
+    const key = `${entry.provider.toLocaleLowerCase()}/${entry.model.toLocaleLowerCase()}`
+    rows.set(key, {
+      provider: entry.provider,
+      model: entry.model,
+      receiptCount: rows.get(key)?.receiptCount || 0,
+      unpricedReceiptCount: rows.get(key)?.unpricedReceiptCount || 0,
+      knownTotalTokens: rows.get(key)?.knownTotalTokens ?? null,
+      knownTokenReceiptCount: rows.get(key)?.knownTokenReceiptCount || 0,
+      priceEntryId: entry.id,
+      priced: true,
+      inputPricePerMillion: entry.inputPricePerMillion,
+      outputPricePerMillion: entry.outputPricePerMillion,
+      currency: entry.currency,
+      sourceNote: entry.sourceNote
+    })
+  }
+  return [...rows.values()].sort((left, right) => (
+    right.unpricedReceiptCount - left.unpricedReceiptCount
+    || right.receiptCount - left.receiptCount
+    || `${left.provider}/${left.model}`.localeCompare(`${right.provider}/${right.model}`, 'zh-CN')
+  ))
+})
 
 const setDays = value => {
   if (filters.days === value) return
@@ -387,6 +533,112 @@ const loadBill = async () => {
     loadError.value = error?.response?.data?.msg || error?.message || '无法读取本机成本台账'
   } finally {
     if (sequence === requestSequence) loading.value = false
+  }
+}
+
+const loadPrices = async () => {
+  priceLoading.value = true
+  try {
+    const response = await billingApi.getPrices({ suppressGlobalError: true })
+    priceCatalog.value = normalizePriceCatalog(response)
+  } catch (error) {
+    ElMessage.error(error?.response?.data?.msg || error?.message || '无法读取本机价格目录')
+  } finally {
+    priceLoading.value = false
+  }
+}
+
+const openPriceSettings = async () => {
+  priceDrawerOpen.value = true
+  priceEditorVisible.value = false
+  await loadPrices()
+}
+
+const startPriceEdit = (row = null) => {
+  Object.assign(priceForm, {
+    id: row?.priceEntryId || null,
+    provider: row?.provider || '',
+    model: row?.model || '',
+    inputPricePerMillion: row?.inputPricePerMillion ?? '',
+    outputPricePerMillion: row?.outputPricePerMillion ?? '',
+    currency: row?.currency || 'CNY',
+    sourceNote: row?.sourceNote || '',
+    applyToUnpriced: Boolean(row?.unpricedReceiptCount),
+    unpricedReceiptCount: row?.unpricedReceiptCount || 0
+  })
+  priceEditorVisible.value = true
+}
+
+const validPrice = value => /^(?:0|[1-9]\d{0,9})(?:\.\d{1,8})?$/.test(String(value ?? '').trim())
+
+const savePrice = async () => {
+  const provider = priceForm.provider.trim()
+  const model = priceForm.model.trim()
+  const currency = priceForm.currency.trim().toUpperCase()
+  if (!provider || !model) {
+    ElMessage.warning('请填写服务商标识和模型标识')
+    return
+  }
+  if (!validPrice(priceForm.inputPricePerMillion) || !validPrice(priceForm.outputPricePerMillion)) {
+    ElMessage.warning('输入、输出单价必须是非负数字，最多保留 8 位小数')
+    return
+  }
+  if (!/^[A-Z][A-Z0-9]{2,7}$/.test(currency)) {
+    ElMessage.warning('币种请输入 3 到 8 位大写字母或数字，例如 CNY、USD')
+    return
+  }
+  if (priceForm.applyToUnpriced && priceForm.unpricedReceiptCount > 0) {
+    try {
+      await ElMessageBox.confirm(
+        `将使用当前单价补算 ${priceForm.unpricedReceiptCount} 条历史未定价凭证；已核算凭证不会改动。是否继续？`,
+        '确认补算历史未定价记录',
+        { confirmButtonText: '保存并补算', cancelButtonText: '取消', type: 'warning' }
+      )
+    } catch {
+      return
+    }
+  }
+  priceSaving.value = true
+  try {
+    const response = await billingApi.savePrice({
+      provider,
+      model,
+      input_price_per_million: String(priceForm.inputPricePerMillion).trim(),
+      output_price_per_million: String(priceForm.outputPricePerMillion).trim(),
+      currency,
+      source_note: priceForm.sourceNote.trim(),
+      apply_to_unpriced: priceForm.applyToUnpriced
+    }, { suppressGlobalError: true })
+    const calculated = Number(response?.data?.calculated_receipt_count || 0)
+    ElMessage.success(calculated ? `单价已保存，已补算 ${calculated} 条凭证` : '单价已保存')
+    priceEditorVisible.value = false
+    await Promise.all([loadPrices(), loadBill()])
+  } catch (error) {
+    ElMessage.error(error?.response?.data?.msg || error?.message || '单价保存失败')
+  } finally {
+    priceSaving.value = false
+  }
+}
+
+const removePrice = async row => {
+  try {
+    await ElMessageBox.confirm(
+      `删除 ${row.provider} / ${row.model} 的本机单价？历史凭证中的价格快照不会删除。`,
+      '删除单价',
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return
+  }
+  priceSaving.value = true
+  try {
+    await billingApi.deletePrice(row.priceEntryId, { suppressGlobalError: true })
+    ElMessage.success('单价已删除；历史价格快照保持不变')
+    await loadPrices()
+  } catch (error) {
+    ElMessage.error(error?.response?.data?.msg || error?.message || '单价删除失败')
+  } finally {
+    priceSaving.value = false
   }
 }
 
@@ -436,8 +688,6 @@ const exportCsv = () => {
   URL.revokeObjectURL(url)
   ElMessage.success(`已导出当前明细窗口 ${bill.value.records.length} 条`)
 }
-
-const goToSettings = () => router.push('/settings')
 
 onMounted(async () => {
   await loadProjects()
@@ -930,6 +1180,119 @@ onMounted(async () => {
   > p { margin-top: 0; text-align: right; }
 }
 
+.price-drawer-body {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  padding: 0 4px 28px;
+  color: #111214;
+}
+
+.price-unit-note {
+  padding: 15px 16px;
+  border-left: 3px solid #0f8f86;
+  background: #eef8f6;
+
+  strong { font-size: 13px; }
+  p { margin-top: 6px; color: #4f6764; font-size: 12px; line-height: 1.55; }
+}
+
+.price-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #111214;
+
+  div { display: flex; flex-direction: column; gap: 4px; }
+  span { color: #6e7075; font: 700 10px/1.2 "Cascadia Mono", monospace; letter-spacing: .12em; }
+  strong { font-size: 17px; }
+}
+
+.price-editor {
+  padding: 18px;
+  border: 1px solid #cfd1cd;
+  background: #fafaf8;
+
+  > header {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 15px;
+    margin-bottom: 16px;
+
+    span { color: #6e7075; font: 700 10px/1.2 "Cascadia Mono", monospace; letter-spacing: .12em; }
+    h3 { margin-top: 5px; font-size: 20px; }
+    button { border: 0; background: transparent; color: #6e7075; cursor: pointer; font-size: 25px; line-height: 1; }
+  }
+}
+
+.price-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+
+  label { display: flex; min-width: 0; flex-direction: column; gap: 7px; }
+  label > span { color: #5e6065; font-size: 11px; }
+}
+
+.backfill-switch {
+  display: flex;
+  align-items: flex-start;
+  gap: 11px;
+  margin-top: 16px;
+
+  > span { display: flex; flex-direction: column; gap: 4px; }
+  strong { font-size: 12px; }
+  small { color: #6e7075; font-size: 11px; line-height: 1.45; }
+}
+
+.price-editor-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.price-list {
+  border-top: 1px solid #d9dad7;
+
+  article {
+    display: grid;
+    grid-template-columns: 36px minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 13px;
+    padding: 15px 0;
+    border-bottom: 1px solid #d9dad7;
+  }
+}
+
+.price-model-mark {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  background: #111214;
+  color: #fff;
+  font: 750 13px/1 "Cascadia Mono", monospace;
+}
+
+.price-model-copy {
+  min-width: 0;
+
+  > strong,
+  > small { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  > strong { font-size: 13px; }
+  > small { margin-top: 5px; color: #6e7075; font-size: 11px; }
+  p { margin-top: 8px; font: 650 12px/1.4 "Cascadia Mono", monospace; }
+  p span { color: #6e7075; font: 400 10px/1.4 "Segoe UI", sans-serif; }
+  .unpriced-row { color: #a85a25; font-family: "Segoe UI", sans-serif; }
+}
+
+.price-row-actions { display: flex; flex-direction: column; gap: 7px; }
+.price-empty { padding: 30px 15px; color: #6e7075; font-size: 12px; line-height: 1.6; text-align: center; }
+
 @media (max-width: 1200px) {
   .filter-rail { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .filter-actions { justify-content: flex-end; }
@@ -963,6 +1326,9 @@ onMounted(async () => {
   .reconcile-alert { grid-template-columns: 1fr; }
   .breakdown-list > div { grid-template-columns: 34px minmax(0, 1fr); padding: 12px 0; }
   .breakdown-cost { grid-column: 2; text-align: left; }
+  .price-form-grid { grid-template-columns: 1fr; }
+  .price-list article { grid-template-columns: 34px minmax(0, 1fr); }
+  .price-row-actions { grid-column: 2; flex-direction: row; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 from contextlib import closing, nullcontext
 from datetime import datetime, timedelta, timezone
@@ -17,7 +18,8 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 
-AI_COST_LEDGER_VERSION = "ai-cost-ledger-1.4.0"
+AI_COST_LEDGER_VERSION = "ai-cost-ledger-1.5.0"
+AI_PRICE_CATALOG_VERSION = "ai-price-catalog-1.0.0"
 AI_PRICE_CATALOG_ENV = "AI_PRICE_CATALOG_JSON"
 AI_USAGE_OPERATIONS = frozenset(
     {
@@ -87,12 +89,15 @@ def record_ai_usage(
     if normalized_usage_status == "unknown":
         tokens = {}
 
-    price = resolve_price_snapshot(
-        provider=normalized_provider,
-        model=normalized_model,
-        pricing_catalog=pricing_catalog,
+    price = (
+        resolve_price_snapshot(
+            provider=normalized_provider,
+            model=normalized_model,
+            pricing_catalog=pricing_catalog,
+        )
+        if pricing_catalog is not None
+        else None
     )
-    cost = _calculate_cost(tokens=tokens, usage_status=normalized_usage_status, price=price)
     safe_metadata = _normalize_metadata(metadata)
 
     own_connection = connection is None
@@ -102,6 +107,17 @@ def record_ai_usage(
         with transaction:
             if own_connection:
                 conn.execute("BEGIN IMMEDIATE")
+            if price is None:
+                price = _resolve_effective_price_snapshot(
+                    conn,
+                    provider=normalized_provider,
+                    model=normalized_model,
+                )
+            cost = _calculate_cost(
+                tokens=tokens,
+                usage_status=normalized_usage_status,
+                price=price,
+            )
             try:
                 cursor = conn.execute(
                     """
@@ -271,10 +287,184 @@ def get_project_ai_cost_summary(
             "message": "发布到媒体平台若未调用模型，不产生也不记录 Token；浏览器上传成本不能伪装成模型成本。",
         },
         "pricing": {
-            "configuration": AI_PRICE_CATALOG_ENV,
+            "configuration": "local_ai_price_catalog",
+            "fallback_configuration": AI_PRICE_CATALOG_ENV,
+            "management_endpoint": "/api/ai-usage/prices",
             "semantics": "每条记录保存调用当时的单价快照；未配置价格时成本保持未知，不按 0 处理。",
         },
     }
+
+
+def get_ai_price_catalog(database_path: str | Path) -> dict[str, Any]:
+    """Return editable local prices and model identities observed by the ledger."""
+
+    with closing(_connect(database_path)) as conn:
+        entry_rows = conn.execute(
+            """
+            SELECT * FROM ai_price_catalog
+            ORDER BY provider COLLATE NOCASE, model COLLATE NOCASE, id
+            """
+        ).fetchall()
+        receipt_rows = conn.execute(
+            """
+            SELECT provider, model, cost_status, total_tokens
+            FROM ai_usage_ledger
+            ORDER BY created_at DESC, id DESC
+            """
+        ).fetchall()
+
+    entries = [_serialize_price_entry(row) for row in entry_rows]
+    entry_by_key = {
+        (entry["provider"].casefold(), entry["model"].casefold()): entry
+        for entry in entries
+    }
+    detected: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in receipt_rows:
+        model = str(row["model"] or "unknown").strip() or "unknown"
+        provider = canonicalize_provider(str(row["provider"] or "unknown"), model)
+        key = (provider.casefold(), model.casefold())
+        item = detected.setdefault(
+            key,
+            {
+                "provider": provider,
+                "model": model,
+                "receipt_count": 0,
+                "unpriced_receipt_count": 0,
+                "known_total_tokens": 0,
+                "known_token_receipt_count": 0,
+            },
+        )
+        item["receipt_count"] += 1
+        if str(row["cost_status"] or "") == "unpriced":
+            item["unpriced_receipt_count"] += 1
+        if row["total_tokens"] is not None:
+            item["known_total_tokens"] += int(row["total_tokens"])
+            item["known_token_receipt_count"] += 1
+
+    detected_models = []
+    for key, item in detected.items():
+        entry = entry_by_key.get(key)
+        detected_models.append(
+            {
+                **item,
+                "price_entry_id": entry["id"] if entry else None,
+                "priced": entry is not None,
+                "input_price_per_million": (
+                    entry["input_price_per_million"] if entry else None
+                ),
+                "output_price_per_million": (
+                    entry["output_price_per_million"] if entry else None
+                ),
+                "currency": entry["currency"] if entry else "",
+            }
+        )
+    detected_models.sort(
+        key=lambda item: (
+            -int(item["unpriced_receipt_count"]),
+            -int(item["receipt_count"]),
+            item["provider"].casefold(),
+            item["model"].casefold(),
+        )
+    )
+    return {
+        "catalog_version": AI_PRICE_CATALOG_VERSION,
+        "unit": "per_million_tokens",
+        "entries": entries,
+        "detected_models": detected_models,
+        "semantics": (
+            "本机目录只影响后续模型调用；只有明确选择补算时，才会为历史未定价凭证冻结当前单价。"
+            "已经核算的历史价格快照永不改写。"
+        ),
+    }
+
+
+def upsert_ai_price(
+    database_path: str | Path,
+    *,
+    provider: Any,
+    model: Any,
+    input_price_per_million: Any,
+    output_price_per_million: Any,
+    currency: Any,
+    source_note: Any = "",
+    apply_to_unpriced: bool = False,
+) -> dict[str, Any]:
+    """Save one exact provider/model price and optionally price pending receipts."""
+
+    normalized_model = _bounded_text(model, "model", 200, fallback="unknown")
+    normalized_provider = canonicalize_provider(
+        _bounded_text(provider, "provider", 120, fallback="unknown"),
+        normalized_model,
+    )
+    input_price = _bounded_price(input_price_per_million)
+    output_price = _bounded_price(output_price_per_million)
+    normalized_currency = _normalize_currency(currency)
+    normalized_note = _bounded_optional_text(source_note, "source_note", 240)
+    if not isinstance(apply_to_unpriced, bool):
+        raise AIUsageLedgerError("apply_to_unpriced 必须是布尔值")
+
+    with closing(_connect(database_path)) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        conn.execute(
+            """
+            INSERT INTO ai_price_catalog (
+                provider, model, input_price_per_million,
+                output_price_per_million, currency, source_note
+            ) VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(provider, model) DO UPDATE SET
+                input_price_per_million = excluded.input_price_per_million,
+                output_price_per_million = excluded.output_price_per_million,
+                currency = excluded.currency,
+                source_note = excluded.source_note,
+                updated_at = strftime('%Y-%m-%dT%H:%M:%SZ', 'now')
+            """,
+            (
+                normalized_provider,
+                normalized_model,
+                _decimal_text(input_price),
+                _decimal_text(output_price),
+                normalized_currency,
+                normalized_note,
+            ),
+        )
+        row = conn.execute(
+            """
+            SELECT * FROM ai_price_catalog
+            WHERE provider = ? COLLATE NOCASE AND model = ? COLLATE NOCASE
+            """,
+            (normalized_provider, normalized_model),
+        ).fetchone()
+        if row is None:
+            raise sqlite3.IntegrityError("价格目录写入后无法读取")
+        updated_receipts = 0
+        calculated_receipts = 0
+        if apply_to_unpriced:
+            updated_receipts, calculated_receipts = _backfill_unpriced_receipts(
+                conn,
+                provider=normalized_provider,
+                model=normalized_model,
+                price_entry=row,
+            )
+    return {
+        "entry": _serialize_price_entry(row),
+        "updated_receipt_count": updated_receipts,
+        "calculated_receipt_count": calculated_receipts,
+    }
+
+
+def delete_ai_price(database_path: str | Path, *, price_id: int) -> dict[str, Any]:
+    """Delete a future-use catalog entry without rewriting receipt snapshots."""
+
+    normalized_id = _optional_positive_int(price_id, "price_id")
+    with closing(_connect(database_path)) as conn, conn:
+        conn.execute("BEGIN IMMEDIATE")
+        row = conn.execute(
+            "SELECT * FROM ai_price_catalog WHERE id = ?", (normalized_id,)
+        ).fetchone()
+        if row is None:
+            raise AIUsageLedgerError("单价记录不存在")
+        conn.execute("DELETE FROM ai_price_catalog WHERE id = ?", (normalized_id,))
+    return _serialize_price_entry(row)
 
 
 def get_ai_usage_bill(
@@ -395,7 +585,9 @@ def get_ai_usage_bill(
             "message": "登录、上传与发布若未调用模型，Token 和模型费用均为不适用，不记作 0。",
         },
         "pricing": {
-            "configuration": AI_PRICE_CATALOG_ENV,
+            "configuration": "local_ai_price_catalog",
+            "fallback_configuration": AI_PRICE_CATALOG_ENV,
+            "management_endpoint": "/api/ai-usage/prices",
             "semantics": "金额是调用时单价快照的估算值；未知用量或未定价记录不计入已知金额，最终以供应商账单为准。",
         },
     }
@@ -628,6 +820,114 @@ def canonicalize_provider(provider: str, model: str) -> str:
     if provider_key in {"qwen", "dashscope"} and model_key.startswith("qwen"):
         return "qwen"
     return provider_text
+
+
+def _resolve_effective_price_snapshot(
+    conn: sqlite3.Connection,
+    *,
+    provider: str,
+    model: str,
+) -> dict[str, str]:
+    canonical_provider = canonicalize_provider(provider, model)
+    row = conn.execute(
+        """
+        SELECT * FROM ai_price_catalog
+        WHERE provider = ? COLLATE NOCASE AND model = ? COLLATE NOCASE
+        """,
+        (canonical_provider, str(model or "unknown").strip() or "unknown"),
+    ).fetchone()
+    if row is not None:
+        return _price_snapshot_from_entry(row)
+    return resolve_price_snapshot(provider=provider, model=model)
+
+
+def _price_snapshot_from_entry(row: Mapping[str, Any]) -> dict[str, str]:
+    return {
+        "input_price_per_million": str(row["input_price_per_million"]),
+        "output_price_per_million": str(row["output_price_per_million"]),
+        "currency": str(row["currency"]),
+        "pricing_source": (
+            f"local_catalog:{int(row['id'])}@{str(row['updated_at'] or row['created_at'])}"
+        ),
+    }
+
+
+def _serialize_price_entry(row: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "id": int(row["id"]),
+        "provider": str(row["provider"]),
+        "model": str(row["model"]),
+        "input_price_per_million": str(row["input_price_per_million"]),
+        "output_price_per_million": str(row["output_price_per_million"]),
+        "currency": str(row["currency"]),
+        "source_note": str(row["source_note"] or ""),
+        "created_at": str(row["created_at"]),
+        "updated_at": str(row["updated_at"]),
+    }
+
+
+def _backfill_unpriced_receipts(
+    conn: sqlite3.Connection,
+    *,
+    provider: str,
+    model: str,
+    price_entry: Mapping[str, Any],
+) -> tuple[int, int]:
+    price = _price_snapshot_from_entry(price_entry)
+    rows = conn.execute(
+        """
+        SELECT * FROM ai_usage_ledger
+        WHERE cost_status = 'unpriced'
+        ORDER BY id
+        """
+    ).fetchall()
+    updated = 0
+    calculated = 0
+    target_provider = provider.casefold()
+    target_model = model.casefold()
+    for row in rows:
+        row_model = str(row["model"] or "unknown")
+        if row_model.casefold() != target_model:
+            continue
+        if canonicalize_provider(str(row["provider"] or "unknown"), row_model).casefold() != target_provider:
+            continue
+        tokens = {
+            key: int(row[key])
+            for key in (
+                "input_tokens",
+                "output_tokens",
+                "total_tokens",
+                "cached_tokens",
+                "reasoning_tokens",
+            )
+            if row[key] is not None
+        }
+        cost = _calculate_cost(
+            tokens=tokens,
+            usage_status=str(row["usage_status"] or "unknown"),
+            price=price,
+        )
+        conn.execute(
+            """
+            UPDATE ai_usage_ledger
+            SET input_price_per_million = ?, output_price_per_million = ?,
+                estimated_cost = ?, currency = ?, cost_status = ?, pricing_source = ?
+            WHERE id = ? AND cost_status = 'unpriced'
+            """,
+            (
+                price["input_price_per_million"],
+                price["output_price_per_million"],
+                cost.get("estimated_cost"),
+                price["currency"],
+                cost["cost_status"],
+                price["pricing_source"],
+                int(row["id"]),
+            ),
+        )
+        updated += 1
+        if cost["cost_status"] == "calculated":
+            calculated += 1
+    return updated, calculated
 
 
 def resolve_price_snapshot(
@@ -936,6 +1236,23 @@ def _nonnegative_decimal(value: Any) -> Decimal:
     return number
 
 
+def _bounded_price(value: Any) -> Decimal:
+    number = _nonnegative_decimal(value)
+    if number > Decimal("1000000000"):
+        raise AIUsageLedgerError("价格不能超过每百万 Token 1000000000")
+    decimal_places = max(0, -number.as_tuple().exponent)
+    if decimal_places > 8:
+        raise AIUsageLedgerError("价格最多保留 8 位小数")
+    return number
+
+
+def _normalize_currency(value: Any) -> str:
+    currency = str(value or "").strip().upper()
+    if not re.fullmatch(r"[A-Z][A-Z0-9]{2,7}", currency):
+        raise AIUsageLedgerError("currency 必须是 3 到 8 位大写字母或数字")
+    return currency
+
+
 def _decimal_text(value: Decimal) -> str:
     normalized = format(value, "f")
     if "." in normalized:
@@ -958,10 +1275,13 @@ def _connect(database_path: str | Path) -> sqlite3.Connection:
 __all__ = [
     "AI_COST_LEDGER_VERSION",
     "AI_PRICE_CATALOG_ENV",
+    "AI_PRICE_CATALOG_VERSION",
     "AI_USAGE_OPERATIONS",
     "AIUsageLedgerError",
     "attach_article_to_usage",
     "canonicalize_provider",
+    "delete_ai_price",
+    "get_ai_price_catalog",
     "get_ai_usage_bill",
     "get_ai_usage_records_by_references",
     "get_project_ai_cost_summary",
@@ -969,4 +1289,5 @@ __all__ = [
     "record_ai_usage",
     "resolve_price_snapshot",
     "summarize_ai_usage_records",
+    "upsert_ai_price",
 ]

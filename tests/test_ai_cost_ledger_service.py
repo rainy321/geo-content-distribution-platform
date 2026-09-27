@@ -8,11 +8,14 @@ from db.createTable import initialize_database
 from services.ai_cost_ledger_service import (
     AIUsageLedgerError,
     canonicalize_provider,
+    delete_ai_price,
+    get_ai_price_catalog,
     get_ai_usage_bill,
     get_ai_usage_records_by_references,
     get_project_ai_cost_summary,
     record_ai_usage,
     summarize_ai_usage_records,
+    upsert_ai_price,
 )
 from services.content_engine_contract import ContentGenerationRequest, ContentGenerationResult
 from services.content_generation_run_service import begin_or_replay, mark_succeeded
@@ -113,6 +116,117 @@ class AIUsageLedgerServiceTests(unittest.TestCase):
         self.assertEqual(summary["summary"]["unknown_usage_count"], 1)
         self.assertEqual(summary["summary"]["unpriced_count"], 1)
         self.assertFalse(summary["publishing"]["token_usage_applicable"])
+
+    def test_local_price_catalog_applies_to_future_calls_and_explicit_backfill(self):
+        pending = record_ai_usage(
+            self.database_path,
+            operation="generate",
+            provider="dashscope",
+            model="qwen-plus",
+            usage={"input_tokens": 1000, "output_tokens": 500},
+            project_id=self.project_id,
+            pricing_catalog={},
+        )
+        saved = upsert_ai_price(
+            self.database_path,
+            provider="qwen",
+            model="qwen-plus",
+            input_price_per_million="2",
+            output_price_per_million="6",
+            currency="cny",
+            source_note="供应商官网 2026-09-17",
+            apply_to_unpriced=False,
+        )
+        self.assertEqual(saved["updated_receipt_count"], 0)
+        bill = get_ai_usage_bill(self.database_path, days=0)
+        first = next(item for item in bill["records"] if item["id"] == pending["id"])
+        self.assertEqual(first["cost_status"], "unpriced")
+
+        future = record_ai_usage(
+            self.database_path,
+            operation="optimize",
+            provider="dashscope",
+            model="qwen-plus",
+            usage={"input_tokens": 200, "output_tokens": 100},
+            project_id=self.project_id,
+        )
+        self.assertEqual(future["cost_status"], "calculated")
+        self.assertEqual(future["estimated_cost"], "0.001")
+        self.assertTrue(future["pricing_source"].startswith("local_catalog:"))
+
+        backfilled = upsert_ai_price(
+            self.database_path,
+            provider="dashscope",
+            model="qwen-plus",
+            input_price_per_million="2",
+            output_price_per_million="6",
+            currency="CNY",
+            apply_to_unpriced=True,
+        )
+        self.assertEqual(backfilled["updated_receipt_count"], 1)
+        self.assertEqual(backfilled["calculated_receipt_count"], 1)
+        bill = get_ai_usage_bill(self.database_path, days=0)
+        historical = next(item for item in bill["records"] if item["id"] == pending["id"])
+        self.assertEqual(historical["estimated_cost"], "0.005")
+        self.assertEqual(bill["summary"]["calculated_cost_count"], 2)
+
+        catalog = get_ai_price_catalog(self.database_path)
+        self.assertEqual(catalog["unit"], "per_million_tokens")
+        self.assertEqual(catalog["entries"][0]["currency"], "CNY")
+        self.assertEqual(catalog["detected_models"][0]["unpriced_receipt_count"], 0)
+
+    def test_price_updates_never_rewrite_already_calculated_receipts(self):
+        saved = upsert_ai_price(
+            self.database_path,
+            provider="qwen",
+            model="qwen-plus",
+            input_price_per_million="1",
+            output_price_per_million="1",
+            currency="CNY",
+        )
+        first = record_ai_usage(
+            self.database_path,
+            operation="generate",
+            provider="qwen",
+            model="qwen-plus",
+            usage={"input_tokens": 500, "output_tokens": 500},
+            project_id=self.project_id,
+        )
+        upsert_ai_price(
+            self.database_path,
+            provider="qwen",
+            model="qwen-plus",
+            input_price_per_million="10",
+            output_price_per_million="20",
+            currency="USD",
+            apply_to_unpriced=True,
+        )
+        bill = get_ai_usage_bill(self.database_path, days=0)
+        frozen = next(item for item in bill["records"] if item["id"] == first["id"])
+        self.assertEqual(frozen["estimated_cost"], "0.001")
+        self.assertEqual(frozen["currency"], "CNY")
+
+        deleted = delete_ai_price(
+            self.database_path,
+            price_id=saved["entry"]["id"],
+        )
+        self.assertEqual(deleted["model"], "qwen-plus")
+        self.assertEqual(get_ai_price_catalog(self.database_path)["entries"], [])
+
+    def test_price_catalog_rejects_invalid_values(self):
+        invalid = (
+            {"input_price_per_million": "-1", "output_price_per_million": "1", "currency": "CNY"},
+            {"input_price_per_million": "1.123456789", "output_price_per_million": "1", "currency": "CNY"},
+            {"input_price_per_million": "1", "output_price_per_million": "1", "currency": "人民币"},
+        )
+        for values in invalid:
+            with self.subTest(values=values), self.assertRaises(AIUsageLedgerError):
+                upsert_ai_price(
+                    self.database_path,
+                    provider="qwen",
+                    model="qwen-plus",
+                    **values,
+                )
 
     def test_rejects_publishing_as_fake_model_token_operation(self):
         with self.assertRaisesRegex(AIUsageLedgerError, "平台发布本身不计 Token"):

@@ -66,7 +66,7 @@ test('content creation stays alive across routes and refresh recovery is read-on
   )
   const apiSource = readFileSync(new URL('../src/api/article.js', import.meta.url), 'utf8')
 
-  assert.match(appSource, /<KeepAlive include="AiVisibility,ContentCreation">/)
+  assert.match(appSource, /<KeepAlive include="AiVisibility,ContentCreation,GeoAutomation">/)
   assert.match(viewSource, /defineOptions\(\{ name: 'ContentCreation' \}\)/)
   assert.match(viewSource, /savePendingContentGeneration\(\{[\s\S]*?requestId:[\s\S]*?startedAt:/)
   assert.match(viewSource, /getContentGenerationRunByRequestId\(/)

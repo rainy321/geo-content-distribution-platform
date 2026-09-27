@@ -11,6 +11,7 @@ import GeoOptimization from '../views/GeoOptimization.vue'
 import SystemSettings from '../views/SystemSettings.vue'
 import AiVisibility from '../views/AiVisibility.vue'
 import CostLedger from '../views/CostLedger.vue'
+import GeoAutomation from '../views/GeoAutomation.vue'
 
 const routes = [
   {
@@ -27,6 +28,11 @@ const routes = [
     path: '/projects',
     name: 'ProjectManagement',
     component: ProjectManagement
+  },
+  {
+    path: '/geo-automation',
+    name: 'GeoAutomation',
+    component: GeoAutomation
   },
   {
     path: '/content-create',

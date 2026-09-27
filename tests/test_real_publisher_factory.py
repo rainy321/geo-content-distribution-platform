@@ -37,6 +37,14 @@ class RealPublisherFactoryTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
+    @staticmethod
+    def _bound_job(platform, account_id, credential_epoch=1):
+        return {
+            "platform": platform,
+            "account_id": account_id,
+            "_account_credential_epoch": credential_epoch,
+        }
+
     def _insert_account(
         self,
         file_path,
@@ -67,7 +75,7 @@ class RealPublisherFactoryTests(unittest.TestCase):
             cookies_directory=self.cookies_dir,
         )
 
-        publisher = factory({"platform": "zhihu", "account_id": account_id})
+        publisher = factory(self._bound_job("zhihu", account_id))
 
         self.assertIsInstance(publisher, ZhihuPublisherAdapter)
         self.assertEqual(Path(publisher.account_file), cookie_file)
@@ -86,7 +94,7 @@ class RealPublisherFactoryTests(unittest.TestCase):
             cookies_directory=self.cookies_dir,
         )
 
-        publisher = factory({"platform": "toutiao", "account_id": account_id})
+        publisher = factory(self._bound_job("toutiao", account_id))
 
         self.assertIsInstance(publisher, ToutiaoPublisherAdapter)
         self.assertEqual(Path(publisher.account_file), cookie_file)
@@ -105,7 +113,7 @@ class RealPublisherFactoryTests(unittest.TestCase):
             cookies_directory=self.cookies_dir,
         )
 
-        publisher = factory({"platform": "sohu", "account_id": account_id})
+        publisher = factory(self._bound_job("sohu", account_id))
 
         self.assertIsInstance(publisher, SohuPublisherAdapter)
         self.assertEqual(Path(publisher.account_file), cookie_file)
@@ -117,7 +125,7 @@ class RealPublisherFactoryTests(unittest.TestCase):
         publisher = RealPublisherFactory(
             self.db_path,
             cookies_directory=self.cookies_dir,
-        )({"platform": "baijiahao", "account_id": account_id})
+        )(self._bound_job("baijiahao", account_id))
 
         self.assertIsInstance(publisher, BaijiahaoPublisherAdapter)
 
@@ -128,7 +136,7 @@ class RealPublisherFactoryTests(unittest.TestCase):
         publisher = RealPublisherFactory(
             self.db_path,
             cookies_directory=self.cookies_dir,
-        )({"platform": "xiaohongshu", "account_id": account_id})
+        )(self._bound_job("xiaohongshu", account_id))
 
         self.assertIsInstance(publisher, XiaohongshuPublisherAdapter)
 
@@ -151,7 +159,7 @@ class RealPublisherFactoryTests(unittest.TestCase):
                 (self.cookies_dir / filename).write_text("{}", encoding="utf-8")
                 account_id = self._insert_account(filename, account_type=account_type)
                 self.assertIsInstance(
-                    factory({"platform": platform, "account_id": account_id}),
+                    factory(self._bound_job(platform, account_id)),
                     expected_class,
                 )
 
@@ -190,13 +198,13 @@ class RealPublisherFactoryTests(unittest.TestCase):
             PublisherNotConfiguredError,
             "需安装/授权官方连接器",
         ):
-            factory({"platform": "weibo", "account_id": account_id})
+            factory(self._bound_job("weibo", account_id))
 
         with patch(
             "services.real_publisher_factory.WeiboOfficialConnector.is_available",
             return_value=True,
         ):
-            publisher = factory({"platform": "weibo", "account_id": account_id})
+            publisher = factory(self._bound_job("weibo", account_id))
         self.assertIsInstance(publisher, WeiboPublisherAdapter)
         self.assertEqual(publisher.account_file, marker.resolve())
 
@@ -245,7 +253,7 @@ class RealPublisherFactoryTests(unittest.TestCase):
         publisher = RealPublisherFactory(
             self.db_path,
             cookies_directory=self.cookies_dir,
-        )({"platform": "channels", "account_id": old_account_id})
+        )(self._bound_job("channels", old_account_id))
 
         self.assertEqual(Path(publisher.account_file), old_cookie)
 
@@ -272,7 +280,24 @@ class RealPublisherFactoryTests(unittest.TestCase):
         )
 
         with self.assertRaisesRegex(PublisherNotConfiguredError, "当前不可用"):
-            factory({"platform": "zhihu", "account_id": missing_id})
+            factory(self._bound_job("zhihu", missing_id))
+
+    def test_rejects_credential_epoch_drift_before_loading_adapter(self):
+        cookie_file = self.cookies_dir / "zhihu.json"
+        cookie_file.write_text("{}", encoding="utf-8")
+        account_id = self._insert_account("zhihu.json")
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                conn.execute(
+                    "UPDATE user_info SET credential_epoch = 2 WHERE id = ?",
+                    (account_id,),
+                )
+        factory = RealPublisherFactory(
+            self.db_path,
+            cookies_directory=self.cookies_dir,
+        )
+        with self.assertRaisesRegex(PublisherNotConfiguredError, "凭证已变化"):
+            factory(self._bound_job("zhihu", account_id, credential_epoch=1))
 
 
 if __name__ == "__main__":

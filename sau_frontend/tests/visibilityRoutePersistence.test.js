@@ -8,7 +8,7 @@ const visibilitySource = readFileSync(new URL('../src/views/AiVisibility.vue', i
 test('AI visibility keeps its in-memory sampling session across route switches', () => {
   assert.match(
     appSource,
-    /<router-view\s+v-slot="\{ Component \}">\s*<KeepAlive\s+include="AiVisibility,ContentCreation">\s*<component\s+:is="Component"\s*\/>\s*<\/KeepAlive>\s*<\/router-view>/s
+    /<router-view\s+v-slot="\{ Component \}">\s*<KeepAlive\s+include="AiVisibility,ContentCreation,GeoAutomation">\s*<component\s+:is="Component"\s*\/>\s*<\/KeepAlive>\s*<\/router-view>/s
   )
   assert.match(visibilitySource, /defineOptions\(\{ name: 'AiVisibility' \}\)/)
 })

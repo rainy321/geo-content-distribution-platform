@@ -16,6 +16,7 @@ import logging
 import os
 import shutil
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -27,7 +28,7 @@ from pathlib import Path
 from typing import Any, Mapping, MutableMapping, Sequence
 
 
-APP_VERSION = "1.2.8"
+APP_VERSION = "1.3.1"
 BUILD_INFO_SCHEMA_VERSION = 1
 APP_TITLE = "GEO 智能内容分发平台"
 APP_DIRECTORY_NAME = "GEOContentPlatform"
@@ -476,6 +477,15 @@ class DesktopApi:
         )
         bilibili_runtime["ready"] = bilibili_runtime_enabled
         publishing_runtime["bilibili_runtime"] = bilibili_runtime
+        weibo_runtime = dict(
+            publishing_runtime.get("weibo_runtime")
+            or inspect_weibo_runtime(enabled=real_publishing_authorized)
+        )
+        weibo_runtime_enabled = bool(
+            real_publishing_enabled and weibo_runtime.get("ready")
+        )
+        weibo_runtime["ready"] = weibo_runtime_enabled
+        publishing_runtime["weibo_runtime"] = weibo_runtime
         return {
             "desktop": True,
             "version": APP_VERSION,
@@ -490,6 +500,7 @@ class DesktopApi:
             "real_publishing_enabled": real_publishing_enabled,
             "scheduled_real_publishing_enabled": False,
             "bilibili_runtime_enabled": bilibili_runtime_enabled,
+            "weibo_runtime_enabled": weibo_runtime_enabled,
             "publishing_runtime": publishing_runtime,
             "authentication_required": True,
             "setup_required": auth_status.setup_required,
@@ -693,6 +704,58 @@ def inspect_bilibili_runtime(
         }
     report["enabled"] = True
     return report
+
+
+def inspect_weibo_runtime(*, enabled: bool) -> dict[str, Any]:
+    """Probe the packaged official Weibo CLI without network or account access."""
+
+    if not enabled:
+        return {
+            "ready": False,
+            "enabled": False,
+            "source": "packaged_official_cli",
+            "version": "",
+            "reason": "当前桌面构建未授权真实发布",
+        }
+    try:
+        from services.weibo_official_connector import (
+            WEIBO_OFFICIAL_CLI_VERSION,
+            resolve_weibo_cli_runtime,
+        )
+
+        runtime = resolve_weibo_cli_runtime()
+        options: dict[str, Any] = {
+            "capture_output": True,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "timeout": 15,
+            "check": False,
+            "shell": False,
+        }
+        if hasattr(subprocess, "CREATE_NO_WINDOW"):
+            options["creationflags"] = subprocess.CREATE_NO_WINDOW
+        result = subprocess.run([*runtime.command_prefix, "version"], **options)
+        version = str(result.stdout or "").strip().splitlines()[-1:] or [""]
+        version_text = version[0].strip()
+        ready = result.returncode == 0 and version_text == WEIBO_OFFICIAL_CLI_VERSION
+        return {
+            "ready": ready,
+            "enabled": True,
+            "source": runtime.source,
+            "version": version_text,
+            "expected_version": WEIBO_OFFICIAL_CLI_VERSION,
+            "reason": "微博官方 CLI 运行时已就绪" if ready else "微博官方 CLI 版本探针失败",
+        }
+    except Exception as exc:
+        return {
+            "ready": False,
+            "enabled": True,
+            "source": "packaged_official_cli",
+            "version": "",
+            "reason": "微博官方 CLI 运行时探针失败",
+            "error": str(exc).strip() or exc.__class__.__name__,
+        }
 
 
 def _probe_browser_automation(browser_executable: Path | None) -> None:
@@ -1057,6 +1120,10 @@ def run(argv: Sequence[str] | None = None) -> int:
             probe=publishing_profile_allows_real(publishing_profile),
         )
         publishing_runtime["bilibili_runtime"] = bilibili_runtime
+        weibo_runtime = inspect_weibo_runtime(
+            enabled=publishing_profile_allows_real(publishing_profile),
+        )
+        publishing_runtime["weibo_runtime"] = weibo_runtime
         runtime_ready = bool(publishing_runtime["ready"])
         os.environ["GEO_PUBLISHING_RUNTIME_READY"] = (
             "true" if runtime_ready else "false"
@@ -1075,11 +1142,12 @@ def run(argv: Sequence[str] | None = None) -> int:
             os.environ.pop("GEO_BILIUP_BINARY", None)
             os.environ.pop("GEO_BILIUP_SHA256", None)
         logger.info(
-            "starting version=%s profile=%s publishing_ready=%s bilibili_ready=%s data_root=%s port=%s",
+            "starting version=%s profile=%s publishing_ready=%s bilibili_ready=%s weibo_ready=%s data_root=%s port=%s",
             APP_VERSION,
             publishing_profile,
             runtime_ready,
             bilibili_runtime_ready,
+            bool(runtime_ready and weibo_runtime.get("ready")),
             paths.root,
             port,
         )

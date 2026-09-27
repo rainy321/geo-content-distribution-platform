@@ -147,6 +147,70 @@ class GEODiagnosticAndCostApiTests(unittest.TestCase):
         )
         self.assertEqual([response.status_code for response in responses], [400, 400, 400])
 
+    def test_price_catalog_api_saves_lists_backfills_and_deletes(self):
+        pending = record_ai_usage(
+            self.database_path,
+            operation="generate",
+            provider="qwen",
+            model="synthetic-model",
+            usage={"input_tokens": 100, "output_tokens": 50},
+            project_id=self.project_id,
+            pricing_catalog={},
+        )
+        saved_response = self.client.put(
+            "/api/ai-usage/prices",
+            json={
+                "provider": "qwen",
+                "model": "synthetic-model",
+                "input_price_per_million": "2",
+                "output_price_per_million": "6",
+                "currency": "CNY",
+                "source_note": "Synthetic official price",
+                "apply_to_unpriced": True,
+            },
+        )
+        self.assertEqual(saved_response.status_code, 200)
+        saved = saved_response.get_json()["data"]
+        self.assertEqual(saved["calculated_receipt_count"], 1)
+
+        catalog_response = self.client.get("/api/ai-usage/prices")
+        self.assertEqual(catalog_response.status_code, 200)
+        self.assertEqual(catalog_response.headers["Cache-Control"], "no-store")
+        catalog = catalog_response.get_json()["data"]
+        self.assertEqual(catalog["entries"][0]["model"], "synthetic-model")
+        self.assertEqual(catalog["detected_models"][0]["unpriced_receipt_count"], 0)
+
+        bill = self.client.get(
+            "/api/ai-usage/billing", query_string={"days": 0}
+        ).get_json()["data"]
+        receipt = next(item for item in bill["records"] if item["id"] == pending["id"])
+        self.assertEqual(receipt["cost_status"], "calculated")
+
+        price_id = saved["entry"]["id"]
+        deleted = self.client.delete(f"/api/ai-usage/prices/{price_id}")
+        self.assertEqual(deleted.status_code, 200)
+        self.assertEqual(
+            self.client.get("/api/ai-usage/prices").get_json()["data"]["entries"],
+            [],
+        )
+
+    def test_price_catalog_api_rejects_invalid_payload(self):
+        responses = (
+            self.client.put("/api/ai-usage/prices", data="not-json"),
+            self.client.put(
+                "/api/ai-usage/prices",
+                json={
+                    "provider": "qwen",
+                    "model": "synthetic-model",
+                    "input_price_per_million": -1,
+                    "output_price_per_million": 2,
+                    "currency": "CNY",
+                },
+            ),
+            self.client.delete("/api/ai-usage/prices/999999"),
+        )
+        self.assertEqual([response.status_code for response in responses], [400, 400, 404])
+
     @patch("sau_backend.optimize_geo_content")
     def test_optimization_provider_usage_is_recorded(self, mock_optimize):
         mock_optimize.return_value = AIOptimizationResult(

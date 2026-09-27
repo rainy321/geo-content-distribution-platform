@@ -122,6 +122,48 @@ class ArticlesApiTests(unittest.TestCase):
         self.assertEqual(json.loads(stored[1]), ["AI Agent", "企业智能体"])
         self.assertEqual(stored[2:], (100, "ready"))
 
+    def test_article_update_fingerprint_prevents_stale_overwrite(self):
+        article = self._create_article()
+        original_fingerprint = article["content_fingerprint"]
+
+        first = self.client.put(
+            f"/api/articles/{article['id']}",
+            json={
+                "summary": "人工先保存的版本",
+                "expected_content_fingerprint": original_fingerprint,
+            },
+        )
+        self.assertEqual(first.status_code, 200)
+        first_article = first.get_json()["data"]
+        self.assertNotEqual(
+            first_article["content_fingerprint"],
+            original_fingerprint,
+        )
+
+        stale = self.client.put(
+            f"/api/articles/{article['id']}",
+            json={
+                "summary": "自动化的过期结果",
+                "expected_content_fingerprint": original_fingerprint,
+            },
+        )
+        self.assertEqual(stale.status_code, 409)
+        current = self.client.get(f"/api/articles/{article['id']}").get_json()["data"]
+        self.assertEqual(current["summary"], "人工先保存的版本")
+        self.assertEqual(
+            current["content_fingerprint"],
+            first_article["content_fingerprint"],
+        )
+
+        invalid = self.client.put(
+            f"/api/articles/{article['id']}",
+            json={
+                "summary": "不会写入",
+                "expected_content_fingerprint": "not-a-sha256",
+            },
+        )
+        self.assertEqual(invalid.status_code, 400)
+
     def test_manual_article_persists_target_length_profile_across_edits(self):
         content = (
             "XX科技 AI Agent 面向需要梳理业务流程的企业团队，"

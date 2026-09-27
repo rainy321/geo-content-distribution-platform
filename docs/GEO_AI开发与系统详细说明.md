@@ -2,9 +2,9 @@
 
 > - 文档状态：当前实现说明
 > - 适用产品：GEO 智能内容分发平台 Windows 桌面版
-> - 产品版本：`1.2.8`
+> - 产品版本：`1.3.1`
 > - 基线提交：以发布目录 manifest 的 `source.commit` 为准
-> - 更新时间：2026-09-16
+> - 更新时间：2026-09-17
 > - 面向读者：产品开发、算法开发、测试、交付、运营和后续接手的 AI Agent
 
 本文把仓库中分散的 AI 配置、文章生成、GEO 编译、可引用性门禁、AI 可见度、黑盒回测、成本台账、平台发布和审核监测说明合并为一份开发总览。本文以当前代码为准；历史 Web、候选服务器架构和上游交接包只在说明来源或扩展方向时出现。
@@ -561,6 +561,26 @@ Content-Type: application/json
 2. 消费者 App/网页由人工或合规连接器取得回答、截图、时间、入口、账号类型、搜索开关和模型标签，再手工导入本机分析。
 3. 两类数据分开标识，不能直接合并成一个“平台真实可见度”。
 
+### 7.6 公开站点技术准备度审计
+
+`1.2.9` 增加 `POST /api/geo/site-audits`、`GET /api/geo/site-audits/runs` 和详情回放接口。它补齐的是“公开页面在技术上是否具备被抓取、解析和发现的前置条件”，不是新的 AI 排名算法。
+
+执行前必须满足：
+
+- 操作员显式确认 `confirm_external_fetch=true`；
+- 请求携带 `X-Request-ID` 与 `Idempotency-Key`，同键同参数只回放原结果；
+- URL 必须属于项目已保存官网的同一站点，只允许标准 HTTP/HTTPS 端口；
+- 每次重定向重新执行公网与同站校验，拒绝私网、保留地址、IP 映射域名、HTTPS 降级和跨站跳转；TLS SNI/Host 仍使用原域名，同一审计固定并复用已校验 DNS 结果，socket 只连接这些 IP，避免 DNS 重绑定；
+- 最多读取目标页、robots.txt、同站 Sitemap 和 llms.txt，单响应限制为 2 MiB，整次审计限制为 45 秒且每次连接最多尝试 4 个已校验 IP；不执行 JavaScript，不携带 Cookie、项目正文或 AI Key。
+
+默认拒绝域名解析到 `198.18.0.0/15`。只有本机明确使用受信的 Clash 类 Fake-IP DNS/TUN 时，才可由运维设置 `SITE_AUDIT_ALLOW_PROXY_FAKE_IP=true`；该例外会写入审计方法与边界，且仍使用 IP 固定连接。普通部署和服务端部署必须保持默认关闭。
+
+请求开始前会写入 `started` 检查点。若进程在写回结果前退出，15 分钟内历史显示“处理中”；超过 15 分钟显示“结果未知”。旧请求身份保留为幂等墓碑且绝不自动重新访问站点，操作员核对后只能用新的 `request_id` 与幂等键重新发起。
+
+审计检查公开响应、`noindex`、主要搜索/引用爬虫的 robots 规则（含 RFC 9309 URI 编码归一化）、无需 JavaScript 的正文、唯一且合法的同站 canonical、真实 schema.org context 的 JSON-LD、Sitemap 和基础元数据。`llms.txt` 仍是提案，只作为建议项展示，权重为 0。完整网页正文不会写入 SQLite，历史只保留结构化结果、资源摘要和 SHA-256 证据。
+
+该审计无法证明 WAF/CDN 已按官方 IP 放行爬虫，也无法证明爬虫实际访问、搜索索引、模型检索或消费者 App/Web 引用；这些仍需服务器日志、站长平台和真实回答样本分别验证。
+
 ---
 
 ## 8. 黑盒回测与诊断闭环
@@ -585,7 +605,7 @@ Content-Type: application/json
 | 指标 | 含义 | 当前可观测性 |
 | --- | --- | --- |
 | PublicRate | 内容是否取得公开 URL | 发布任务与人工核验可观测 |
-| CrawlEligibleRate | 页面是否允许通用抓取 | 需站点/robots/响应检查，当前非完整站点审计 |
+| CrawlEligibleRate | 页面是否允许通用抓取 | 当前可做单页 HTTP/robots 技术审计；不等于全站覆盖或官方爬虫 IP 实际放行 |
 | IndexRate | 是否进入相关搜索索引 | 当前未自动测量 |
 | RetrievalRate | 是否进入 AI 回答候选来源池 | 大多数供应商不直接暴露，当前不可可靠测量 |
 | CitationRate | AI 是否显式引用目标 URL | 回答含显式 URL 时可测 |
@@ -674,7 +694,7 @@ IMAGE 角色和文本角色分开配置，原因是许多文本模型不提供 `
 
 ### 10.3 单价目录
 
-通过 `AI_PRICE_CATALOG_JSON` 配置：
+桌面端优先使用 SQLite 中的本机价格目录，管理员可在“成本账单 → 单价设置”维护精确的 `provider/model` 输入价、输出价、币种和来源备注。`AI_PRICE_CATALOG_JSON` 仅作为没有本机精确价格时的兼容回退：
 
 ```json
 {
@@ -686,12 +706,15 @@ IMAGE 角色和文本角色分开配置，原因是许多文本模型不提供 `
 }
 ```
 
-匹配顺序为 `provider/model`、`*/model`、`provider/*`、`*/*`。每条记录保存当时单价快照，后续改价不会篡改历史。
+环境变量目录的匹配顺序为 `provider/model`、`*/model`、`provider/*`、`*/*`；本机目录使用精确 `provider/model`。每条记录保存当时单价快照，后续改价不会篡改历史。只有管理员明确选择补算时，才会把当前价格冻结到仍为 `unpriced` 的历史凭证中。
 
 主要接口：
 
 - `GET /api/ai-usage/projects/{project_id}/summary`
 - `GET /api/ai-usage/billing?project_id=&days=30&operation=&cost_status=&limit=200`
+- `GET /api/ai-usage/prices`
+- `PUT /api/ai-usage/prices`
+- `DELETE /api/ai-usage/prices/{id}`
 
 当前账单总览覆盖全部筛选结果，但明细和 CSV 是有上限的最新窗口；游标翻页、预算预警和供应商账单自动对账仍是后续项。
 
@@ -741,6 +764,21 @@ IMAGE 角色和文本角色分开配置，原因是许多文本模型不提供 `
 预检能确定：标题长度、正文长度、标签数量、素材类型、未完成占位符、Markdown 兼容、危险主张和公网 URL 格式。
 
 预检不能确定：平台当天审核策略、账号权重、实名状态、机器风控、人工审核结论或内容后续限流。因此 UI 必须使用“离线预检通过”，不能显示“保证平台通过”。
+
+### 11.5 一键 GEO 自动化边界
+
+`1.3.0` 增加 `/geo-automation` 工作台和 `/api/geo/automation-runs*` 持久化接口。用户先选择品牌项目、优化方向、数量与发布目标，再由桌面 App 按“写稿 → 优化 → 离线预检 → 准备/发布”严格串行推进。每个运行和条目都有数据库状态、检查点与错误回执；单项失败会暂存后继续下一项，暂停只在安全检查点生效。
+
+这条链路遵守以下恢复与并发规则：
+
+- 同一幂等身份、同一参数只回放原运行或原发布任务；参数变化时拒绝复用。
+- 模型请求或平台提交结果未知时停止该项并要求人工处理，不自动重试。
+- worker 用带 token 和 epoch 的租约认领条目；过期执行者不能覆盖新执行者状态。
+- 同一文章同一时刻只允许一个自动化发布创建区间，避免多页面重复发送。
+- 项目与渠道在运行创建时冻结；真实渠道同时冻结账号 ID 和 `credential_epoch`。
+- 新运行、发布任务创建、任务认领和发布器构造都会核对实时账号。重新登录、解绑、换号或凭据版本变化时失败关闭，必须重新选择账号并建立新授权；精确幂等回放只返回已经存在的记录，不再次发送。
+
+当前执行循环由已打开的一键 GEO 页面驱动，不是 Windows 服务或无人值守后台 worker。关闭 App 不会删除状态，但需要重新打开该页面才能继续未完成运行。自动化减少操作步骤，不改变底层 GEO 规则版本，也不保证平台审核、搜索索引、AI 抓取、检索引用或采样率提升。
 
 ---
 
@@ -846,7 +884,7 @@ stateDiagram-v2
 
 风险识别基于平台页面或发布错误中可审计的文本证据，并处理“账号未被封禁”等否定表达。它不是万能风控预测器，也不能在发布前保证账号不会被处罚。
 
-账号凭据使用 `credential_epoch`，发布任务使用 `state_version`。审核结果只有在两个版本仍匹配时才能收口，防止旧登录会话或旧发布尝试覆盖新状态。
+账号凭据使用 `credential_epoch`，发布任务使用 `state_version`。一键 GEO 真实渠道会把当时的账号 epoch 冻结到运行授权和发布任务，并在平台访问前再次核对；审核结果也只有在凭据与任务版本仍匹配时才能收口，防止旧登录会话或旧发布尝试覆盖新状态。
 
 主要接口：
 
@@ -887,6 +925,7 @@ stateDiagram-v2
 | `ai_visibility_sample_requests` | 真实采样幂等记录、进度和原结果 |
 | `ai_visibility_runs` | 选择持久化的回答、分析结果和算法版本 |
 | `geo_diagnostic_runs` | 项目/内容诊断和输入摘要 |
+| `geo_site_audit_runs` | 官网技术审计的幂等身份、结构化检查、资源摘要和证据哈希；不保存完整网页正文 |
 | `publish_jobs` | 平台独立任务、冻结副本、状态、版本和公开证据 |
 | `publish_review_monitors` | 审核监测状态、退避和观察版本 |
 | `publish_review_alerts` | 审核完成、退回、风险或人工核验提醒 |
@@ -1101,8 +1140,8 @@ pwsh -NoProfile -File .\scripts\package_source.ps1
 
 | 产物 | 相对路径或文件名 | SHA-256 / 状态 |
 | --- | --- | --- |
-| 内部源码包 | `release/source/GEO-Content-Platform-Source-Internal-1.2.8-<UTC时间>-<提交短SHA>/...zip` | 以同目录 `.sha256.txt` 和 `SOURCE-PACKAGE-RECEIPT.json` 为准 |
-| Windows x64 ZIP | `release/windows/GEO-Content-Platform-1.2.8-authorized-real-<UTC时间>-<提交短SHA>/...windows-x64.zip` | 以同目录 manifest 与 SHA-256 清单为准 |
+| 内部源码包 | `release/source/GEO-Content-Platform-Source-Internal-1.2.9-<UTC时间>-<提交短SHA>/...zip` | 以同目录 `.sha256.txt` 和 `SOURCE-PACKAGE-RECEIPT.json` 为准 |
+| Windows x64 ZIP | `release/windows/GEO-Content-Platform-1.2.9-authorized-real-<UTC时间>-<提交短SHA>/...windows-x64.zip` | 以同目录 manifest 与 SHA-256 清单为准 |
 | Windows EXE | 同一 Windows 目录下的 `GEO-Content-Platform.exe` | 以同目录 `GEO-Content-Platform.manifest.json` 为准 |
 | 代码签名 | 当前 EXE | `NotSigned` |
 
@@ -1197,6 +1236,7 @@ pwsh -NoProfile -File .\scripts\package_source.ps1
 | 发布结果证据 | `publish-outcome-1.0.0` / `publication-evidence-1.0.0` |
 | 审核监测 | `publish-review-monitor-1.0.0` |
 | 媒体账号风险 | `media-account-risk-1.1.0` |
+| 一键 GEO 自动化 | `geo-automation-1.1.0` |
 
 版本号是历史可比性的组成部分。修改解析规则、权重、平台安全线或采样协议时必须升级相应版本，并保留旧记录的原版本。
 
@@ -1206,7 +1246,7 @@ pwsh -NoProfile -File .\scripts\package_source.ps1
 
 ### 21.1 当前已知实现差异
 
-以下是当前 `1.2.8` 源码中已经确认、但尚未在本文档任务中修改的工程问题：
+以下是当前 `1.3.1` 源码中已经确认、但尚未在本文档任务中修改的工程问题：
 
 1. **可见度 prompt 上限不一致**：单模型采样和多模型面板允许 8,000 字符，本机分析器只接受 4,000 字符。4,001–8,000 字符可能在 provider 调用完成后才在本机分析阶段失败。应在联网前统一限制为 4,000，或同步升级分析器并补齐测试。
 2. **临时采样密钥清理文案与 `KeepAlive` 行为不完全一致**：当前页面临时 API Key 在组件卸载时清理，但普通侧栏切换可能只触发停用而不卸载。应在 `onDeactivated` 清理，或把 UI 文案改为“窗口关闭/组件销毁时清除”。

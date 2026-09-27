@@ -18,19 +18,19 @@
 当前结论：
 
 - 从功能代码看，软件已经超过内部验收 MVP：本机登录、媒体账号登录/退出、内容生成、诊断、成本、批量 20、发布预检、发布容错、Bilibili 固定运行时接入、同事算法本机移植和受控模型采样均已有实现。
-- 从成品看，已有 `1.2.5`/`1.2.6`/`1.2.7` 构建不包含本轮量化采样规划与 API 聚合指标；本轮 `1.2.8` 必须在清洁提交上通过全量回归、新 manifest 和成品双冒烟后，才能视为可交付 EXE。旧包与新包不得因文件名相近而混用。
+- 从成品看，已有 `1.2.5`/`1.2.6`/`1.2.7` 构建不包含后续量化采样规划、API 聚合指标、公开站点技术审计和一键 GEO；`1.3.0` 也不包含本轮本地单价目录与随包微博 CLI 运行时修复。当前 `1.3.1` 源码必须通过全量回归、新 manifest 和成品双冒烟后，才能视为可交付 EXE。旧包与新包不得因文件名相近而混用。
 - 当前适合在完成本轮清洁构建后作为“内部受控 Beta / 授权真实发布试用版”验收；在代码签名、算法及依赖权利、客户许可文本、Windows 兼容性和真实渠道验收闭环完成前，**不能判定为可对外销售的软件成品**。
 
 ## 2. 当前核验快照
 
 | 核验项 | 结果 | 证据 |
 | --- | --- | --- |
-| 当前分支与版本目标 | `codex/windows-desktop-real-publish`；目标版本 `1.2.8` | 最终提交以新发行 manifest 的 `source_commit` 为准 |
+| 当前分支与版本目标 | `codex/windows-desktop-real-publish`；目标版本 `1.3.1` | 最终提交以新发行 manifest 的 `source_commit` 为准；允许内部候选显式记录 `source_dirty=true`，但不得伪称清洁发行版 |
 | 工作树 | 源码级回归已完成；正式成品仍要求清洁发布提交 | `git status --short` 与发行 manifest |
-| 后端回归 | **1206 项通过，跳过 1 项，失败/错误 0** | `python -m unittest discover -s tests`；构建时再次执行并由 manifest 留档 |
-| 前端回归 | **171/171 通过，Vue 生产构建成功** | `npm test`、`npm run build`；构建时再次执行并留档 |
+| 后端回归 | **1272 项通过，跳过 1 项，失败/错误 0** | `python -m unittest discover -s tests`；构建时再次执行并由 manifest 留档 |
+| 前端回归 | **189/189 通过，Vue 生产构建成功** | `npm test`、`npm run build`；构建时再次执行并留档 |
 | UI 参考图核验 | Dashboard 与 AI 可见度页通过 1536×1024 和 1280×800 检查，无开放 P0/P1/P2 视觉问题 | `design-qa.md`、`sau_frontend/tests/dashboardPresentation.test.js` |
-| 最新已有 EXE | `1.2.7` 已有清洁成品，但不包含本轮 `1.2.8` 的量化调用前规划与聚合指标 | `1.2.8` 必须以新包 manifest、SHA-256、健康冒烟和 UI 冒烟重新判定 |
+| 最新已有 EXE | 旧成品不包含 `1.3.1` 的本地单价目录和随包微博 CLI 运行时 | `1.3.1` 必须以新包 manifest、SHA-256、健康冒烟和 UI 冒烟重新判定；构建结果只按对应 manifest 判定 |
 | 测试洁净度 | 源码级全量回归通过；日志内 HTTP 404/504、超时、数据库锁和登录异常均来自测试构造的异常分支 | 最终仍以构建脚本再次回归和成品冒烟为准 |
 
 ## 3. P0：可用性、安全与可销售前硬门槛
@@ -44,7 +44,7 @@
 | P0-05 | 内容引擎统一契约、品牌快照、本地评分与可回滚适配 | **已完成** | `ContentGenerationService` 在 Qwen 与同事内容引擎适配器之间路由；请求携带项目快照；同事分数保留为 `provider_geo_score`，不覆盖本地 GEO 分；Trace、引擎、版本、耗时、警告和回退标识可追踪。证据：`services/content_engine_contract.py`、`services/content_engine_adapters.py`、`services/content_generation_service.py`、`tests/test_content_engine_*`、`tests/test_three_run_main_flow_acceptance.py`。 | 无新增开发待办；同事远程内容服务的实际地址、令牌、镜像和协议验收另见 P0-15。 |
 | P0-06 | 生成幂等、状态未知保护与运行回执 | **已完成** | 生成记录持久化，幂等回放不重复调用模型；超时/状态未知不自动重试，不静默切换另一个付费模型；缺失用量保持“未知”而不是 0。证据：`services/content_generation_run_service.py`、`services/content_generation_service.py`、`tests/test_content_generation_service.py`、`tests/test_articles_generate_api.py`。 | 无新增开发待办。 |
 | P0-07 | 批量生成 20 篇、逐项继续与逐篇成本 | **已完成** | 单批上限已从旧值扩大为 20；串行执行；单项失败不会中断后续项；幂等回放不会再次生成或重复计费；响应和界面均展示批次汇总及逐篇 Token/成本。证据：`sau_backend.py` 的 `BATCH_GENERATION_LIMIT=20` 与 `/api/articles/generate-batch`、`sau_frontend/src/utils/batchGeneration.js`、`sau_frontend/src/views/ContentCreation.vue`、`tests/test_p2_content_workflows.py`、`sau_frontend/tests/batchGeneration.test.js`。 | 无新增开发待办；需进入本轮新 EXE 后做一次成品批量冒烟。 |
-| P0-08 | Token、价格快照与成本账单 | **已完成** | 独立“成本账单”界面可按项目、时间、操作和核算状态筛选，并展示全部匹配汇总、按操作/模型/项目/日期拆分和逐笔回执；`generate`、`optimize`、真实发生的 `platform_adapt` 和 `visibility_sample` 可记录 provider/model、输入/输出/总 Token、usage 状态、单价快照、币种和估算成本。未知用量或未配置价格不会显示为 0；纯登录/上传/发布明确为 Token 不适用。证据：`services/ai_cost_ledger_service.py`、`sau_frontend/src/views/CostLedger.vue`、`docs/geo-diagnostic-cost-ledger.md` 及对应测试。 | P0 已完成；每次商业发布仍要填入并核对当日 `AI_PRICE_CATALOG_JSON`，否则只能如实显示“未定价”。明细游标、价格目录、预算和供应商账单对账见 P1-06。 |
+| P0-08 | Token、价格快照与成本账单 | **已完成** | 独立“成本账单”界面可按项目、时间、操作和核算状态筛选，并展示全部匹配汇总、按操作/模型/项目/日期拆分和逐笔回执；管理员可直接维护本机服务商/模型输入价、输出价、币种和来源备注，并在明确确认后补算历史未定价凭证。未知用量或未配置价格不会显示为 0；纯登录/上传/发布明确为 Token 不适用；已核算历史快照永不改写。 | 每次商业交付仍要人工核对供应商当日价目和来源日期。明细游标、预算和供应商账单对账见 P1-06。 |
 | P0-09 | 平台字数、标题、验证、账号频率与可引用性预检 | **已完成** | 抖音正文硬上限 1000/产品安全线 800、标题 20/18；快手正文 500/380；Bilibili 简介 2000/1800；小红书正文 1000/800；其他未核验限额保持未知。内容生成和评分按 200/600/1000/1500 字四个常用档位切换适用结构，平台副本仍以各渠道安全线为最终约束。创建任务前展示平台副本，并对实际待发送标题和正文重算 `ai-citeability-rules-2.2.0` 与 `2026-09-10.4` 离线预检；低于 75 分只提示优化，只有确定性平台错误或 P0 风险项硬阻断。发布控制台提供“一键修复并重检”，可安全处理标题、结构、长度与不兼容格式，但不会编造证据或无依据地改写事实；修复后仍有 P0 项时保持阻断并指出原因。头条话题只尝试首选匹配一次；百家号默认跳过非必填话题；小红书、抖音和 TikTok 产品侧最多使用 5 个标签。证据：`services/publish_preflight_service.py`、`services/platform_publish_policy_service.py`、`sau_frontend/src/utils/publishPreflight.js`、`sau_frontend/src/views/DistributionCenter.vue` 及对应测试。 | 平台规则和动态审核会变化，软件只保证确定性本地约束，不保证平台审核通过；未知额度不得冒充官方硬上限，门禁通过也不代表模型必然采纳。 |
 | P0-10 | 真实发布强确认、失败继续、状态更新与防重复发送 | **已完成** | 任务绑定明确账号和不可变内容指纹。对尚未建任务的即时发布批次，操作员只需做一次批量强确认，软件随后为所选文章 × 平台创建独立任务并按本机顺序连续执行；一项失败、需验证或待核验不阻塞后续渠道。既有任务仍可单项或显式勾选批次确认。发布器无法证明成功时转 `need_action`，不会自动重发；核验弹窗提供对应平台内容管理页/创作者后台直达入口，可再登记公开链接，核验 API 本身不重新发送；异常退出后的 `processing` 恢复为待核验。证据：`services/publish_job_service.py`、`services/publish_job_executor.py`、`sau_frontend/src/views/DistributionCenter.vue`、`sau_frontend/src/utils/platformVerification.js` 及对应测试。 | 无新增开发待办；必须在本轮新 EXE 中用授权测试内容验证状态能从执行窗口回写到界面，并逐项核对旧的模糊任务，不能自动续发。 |
 | P0-11 | 十渠道能力清单与真实发布器 | **部分完成** | 知乎、头条、百家号、搜狐号、小红书、抖音、快手、Bilibili、视频号、TikTok 均有能力声明和账号类型；工厂可创建对应发布器。证据：`services/platform_capability_service.py`、`services/real_publisher_factory.py`、`tests/test_real_publisher_factory.py`、各 `uploader/*` 与发布流测试。 | 代码级覆盖不等于平台级可售承诺。抖音/快手仍标为 `experimental`，Bilibili/视频号为 `review_required`；本轮新 EXE 需要按实际 SKU 对承诺渠道逐一完成“登录—预检—提交—验证/核验—状态回写”的受控实测，未通过的渠道必须在界面和销售材料中保持实验/需人工核验标签。 |
@@ -53,13 +53,15 @@
 | P0-14 | 同事 GEO 底层算法移植 | **技术完成 / 权利待确认** | 发布后分析已移植为 `ai-visibility-python-port-1.1.0`；本轮又将同事的查询建议、内容结构与证据约束产品化为 `geo-article-compiler-2.3.0`、`ai-citeability-rules-2.2.0` 和 `target-length-score-profile-1.0.0`，形成发布前蓝图、按长度适配的 7 维门禁与发布后复测闭环。证据：`services/ai_visibility_service.py`、`services/geo_article_compiler_service.py`、`docs/GEO算法融合说明.md` 及对应测试。 | 技术移植不应重复开发；但交接 ZIP 无 `LICENSE/NOTICE`，外部分发和商业再许可权仍需书面确认。分布式 worker、自动采集运行时和云端 SaaS 基础设施没有纳入 EXE，不得宣传为已集成。 |
 | P0-15 | 当前配置模型的受控真实采样 | **部分完成** | EXE 后端已有 `POST /api/geo/visibility/sample`、多模型面板和按 `request_id` 只读查询原请求的恢复入口；只发送用户确认的 prompt，不发送项目、文章、账号或 Cookie。采样前做零网络本地契约预检；普通模型输出上限 768 Token，兼容网关中的 DeepSeek / GLM 推理模型有界提升到 2048 Token，若角色配置更低则取较低值；超时上限 120 秒。DeepSeek、GLM 和 Ark Doubao-Seed 采样按支持的协议请求最终答案，推理字段永不计入样本。调用前写入持久化检查点；结果未知时同一幂等键只回放，不自动重发。0 条有效回答不出分，至少 2 个独立完整模型才可做方向性比较，至少 5 条有效回答且对照合格才可量化 API 渠道；消费者 App/Web 仍保持未验证。系统设置可保存统一 AI 引擎，Windows 当前用户 DPAPI 保护 API Key。证据：`services/ai_service.py`、`services/ai_visibility_sampling_service.py`、`services/ai_visibility_panel_service.py`、`sau_frontend/src/views/AiVisibility.vue` 及对应测试。 | 自动化测试使用受控假响应，没有在本轮回归中向真实模型发送新请求。尚无 Qwen、DeepSeek、豆包三家同口径真实样本、供应商账单核对和消费者 App/Web 对照；未完成前只能销售“本机导入分析 + 可配置 API 采样能力”，不能销售“已验证三模型或真实 App GEO 效果”。同事远程内容引擎仍缺正式地址、令牌、镜像摘要和健康契约。 |
 | P0-16 | DongClaw 实例报告与效果声明 | **部分完成** | 已建立固定 7 问题 × 3 provider、基线/复测配对、地区/问题/结果矩阵、失败分母和证据边界；`geo-blackbox-panel-1.0.0` 进一步要求处理/对照组在 0/7/14/30 天按完全相同采样键比较，缺失项不补零、口径漂移不强算。证据：`services/dongclaw_evaluation_service.py`、`services/geo_blackbox_experiment_service.py`、`scripts/run_dongclaw_evaluation.py`、`docs/dongclaw-geo-evaluation-protocol.md` 及对应测试。 | 当前真实报告状态仍为 `NOT_EXECUTED`，无 Qwen/DeepSeek/豆包同口径回答，不能量化 GEO 提升；RanClaw 精确实体也未核验。面板只评估导入证据，不自动抓站或调用模型。需完成基线、处理/对照资产和 7/14/30 天复测，短周期只可证明流程可用，不能宣称因果效果。 |
-| P0-17 | 当前代码形成新的可回滚 EXE | **以发行 manifest 判定** | 源代码不写死“最新”产物目录，避免构建后再修改提交导致 EXE 与 Git SHA 脱钩；只有 `release/windows` 中版本 `1.2.8`、提交一致、健康/UI 双冒烟通过且带 SHA-256 的 `authorized_real` manifest 才是本轮成品，旧 EXE 继续作为回滚件。 | 对每个交付候选运行 `scripts/build_windows_desktop.ps1 -PublishingProfile authorized_real`；保留 EXE、ZIP、SHA-256、manifest 和旧回滚包。若任一探针失败，候选不得交付。 |
-| P0-18 | 发布门禁覆盖全部新增能力 | **源码回归通过，待成品门禁** | 构建脚本已显式纳入统一 AI 角色路由、内容差异化、账号风险、多账号、GEO 编译/可引用性、11 平台预检、登录、队列恢复、可见度诚实量化门禁与既有发布测试，并继续执行成品健康/UI 冒烟。源码级后端 1206 项、前端 171 项及 Vue 生产构建已通过。证据：`scripts/build_windows_desktop.ps1`。 | 最终清洁提交必须由构建脚本再次跑回归、授权 EXE 打包及两个成品冒烟；再把产物哈希、manifest 与签名状态留档。 |
+| P0-17 | 当前代码形成新的可回滚 EXE | **以发行 manifest 判定** | 源代码不写死“最新”产物目录，避免构建后再修改提交导致 EXE 与 Git SHA 脱钩；只有 `release/windows` 中版本 `1.3.1`、健康/UI 双冒烟通过且带 SHA-256 的 `authorized_real` manifest 才是本轮成品，旧 EXE 继续作为回滚件。若使用脏工作树构建内部候选，manifest 必须如实记录 `source_dirty=true`，不得当成清洁发行版。 | 对每个交付候选运行 `scripts/build_windows_desktop.ps1 -PublishingProfile authorized_real`；保留 EXE、ZIP、SHA-256、manifest 和旧回滚包。若任一探针失败，候选不得交付。 |
+| P0-18 | 发布门禁覆盖全部新增能力 | **源码回归通过，待成品门禁** | 构建脚本已显式纳入统一 AI 角色路由、内容差异化、账号风险、多账号、GEO 编译/可引用性、11 平台预检、登录、队列恢复、可见度诚实量化门禁与既有发布测试，并继续执行成品健康/UI 冒烟。源码级后端 1272 项、前端 189 项及 Vue 生产构建已通过。证据：`scripts/build_windows_desktop.ps1`。 | 最终清洁提交必须由构建脚本再次跑回归、授权 EXE 打包及两个成品冒烟；再把产物哈希、manifest 与签名状态留档。 |
 | P0-19 | Authenticode 代码签名与成品来源信任 | **未完成** | 构建会计算 SHA-256，并把签名状态写入 manifest；最新 EXE 为 `NotSigned`。证据：`scripts/build_windows_desktop.ps1`、最新 release manifest。 | 取得公司代码签名证书或合规云签服务；在构建后签名、验证时间戳、再生成最终哈希/ZIP；建立证书轮换与吊销流程。未签名成品不得作为正式商业版宣称“可信发布者”。 |
 | P0-20 | 第三方与同事算法商业权利 | **未完成** | 仓库已有 MIT `LICENSE` 和初步 `THIRD-PARTY-NOTICES.txt`；构建可携带 notice。 | 初步清单明确不是完整 SBOM/法律审核；同事交接包缺许可；`biliup` 不具备随包分发授权结论。对外销售前必须取得同事书面授权、生成完整依赖/SBOM、随包放置所需许可证文本，并完成平台条款、商标和再分发审核。 |
 | P0-21 | 客户商业许可、隐私与操作责任文本 | **未完成** | 软件内已有平台风险提示和“建议量非官方配额”的声明；本机数据边界在 `docs/windows-desktop.md` 有说明。 | 尚无面向客户的 EULA/商业许可、隐私说明、模型数据发送同意、账号授权确认、数据保留/删除政策和支持边界。必须由业务/法务确定后随 EXE 展示并可留存同意版本；“封号概不负责”不能替代技术节流或有效合同条款。 |
 | P0-22 | 凭据与本机敏感数据保护 | **部分完成** | 统一 AI API Key 已由 Windows 当前用户 DPAPI 加密并原子保存，状态接口不回显密钥；仅本次覆盖仍只在页面内存。日志/成本凭据有字段白名单；账号文件放入独立本机目录；应用登录不保存明文口令。 | SQLite、媒体账号 Cookie、WebView 状态和普通本机文件仍未做静态加密。对外客户版需要继续保护媒体凭据，并提供敏感数据清理/导出控制。 |
 | P0-23 | Windows 支持矩阵与前置运行时 | **部分完成** | 旧授权构建已在当前机器通过 Edge WebView2、系统 Chrome、Playwright/Patchright 纯本地探针；缺前提时健康检查会阻断真实发布。 | 尚无 Windows 10/11、不同 DPI、普通用户权限、无 Chrome、无/旧 WebView2、中文路径、杀毒软件和离线环境的正式兼容矩阵。正式商业放行前应在干净虚拟机至少覆盖支持的 OS/架构，并明确最低版本和失败提示。 |
+| P0-24 | 公开站点技术准备度审计 | **源码完成 / 待成品与真实站点矩阵** | `1.2.9` 已提供操作员显式确认、同站与私网保护、IP 固定连接、HTTPS 降级/跨站重定向拒绝、2 MiB 响应上限、45 秒总预算、最多 4 个已校验 IP 尝试、频率限制和幂等回放；检查公开页面、noindex/none、robots 最长路径/同长度 Allow 优先/URI 编码归一化、搜索/引用爬虫策略、服务端正文、唯一合法 canonical、真实 schema.org context、Sitemap 与 llms.txt，并只保存结构化证据。Fake-IP 兼容默认关闭。 | 该结果只证明本次 HTTP 技术条件，不证明 WAF 官方 IP 放行、爬虫到访、索引、模型检索或引用。正式交付前需用多类真实站点覆盖 2xx/403/超时/JS-only/robots 分组/重定向/超大响应，并完成新 EXE UI 冒烟。 |
+| P0-25 | 一键 GEO 持久化串行自动化 | **源码完成 / 待成品与真实账号验收** | `1.3.0` 已提供项目与优化方向配置、写稿→优化→预检→准备/发布串行状态机、逐项失败暂存后继续、幂等回放、发布互斥、token+epoch 租约、未知结果不自动重试和安全点暂停。真实渠道冻结账号 ID 与 `credential_epoch`，并在运行创建、任务创建、认领和发布器构造四层拦截凭据漂移。页面关闭后状态保留，重开页面可恢复。证据：`services/geo_automation_service.py`、`services/publish_job_service.py`、`sau_frontend/src/views/GeoAutomation.vue` 及对应测试。 | 当前驱动依赖桌面 App 页面，不是后台服务；本轮未调用付费 AI、未访问平台、未生成 EXE。正式放行需在授权构建中验证 App 关闭/重开恢复，并按承诺渠道用受控账号逐一核对登录、预检、提交、未知结果和状态回写。自动化完成不等于索引、AI 引用或采样率提升。 |
 
 ## 4. P1：完成 P0 后的商业可运营能力
 
@@ -70,13 +72,13 @@
 | P1-03 | 软件授权 / 激活 / 到期控制 | **未完成** | 当前只有本机管理员认证，没有客户许可证、席位或设备授权。 | 决定永久授权/订阅/试用模式；实现离线宽限、设备迁移、吊销、时钟回拨处理和不影响客户数据导出的到期策略。若首批采用合同 + 人工交付，也应在 manifest 中记录客户、授权范围和版本。 |
 | P1-04 | 全软件 UI 一致性与可访问性验收 | **部分完成** | Dashboard、AI 可见度页和全局黑白设计已按参考图完成并通过两种窗口宽度 QA；真实数据为空时不伪造趋势。证据：`design-qa.md`、`sau_frontend/src/views/Dashboard.vue`、`AiVisibility.vue`。 | 当前视觉证据没有逐页覆盖项目、创作、内容库、素材、账号、发布、设置和关于页的所有状态。需完成全路由截图矩阵、键盘焦点、缩放 125%/150%、高对比度、空/错/长文本状态和中文截断检查。 |
 | P1-05 | 客户报告导出 | **部分完成** | DongClaw 评估器可生成结构化 JSON/Markdown；诊断和可见度历史可回放。 | 增加 EXE 内一键导出 PDF/Excel，包含口径版本、样本/失败分母、地区与问题矩阵、成本、发布证据、前后变化和免责声明；禁止在无样本时生成伪效果数值。 |
-| P1-06 | 账单游标、价格目录、预算与对账 | **部分完成** | 后端支持版本化 `AI_PRICE_CATALOG_JSON` 和历史价格快照；独立成本账单已区分全部匹配汇总与有限明细窗口。 | 为明细增加稳定游标翻页；增加仅管理员可编辑的本机价格目录、导入/导出、币种、预算预警和供应商账单对账。价格更新必须由人确认来源与日期，不能静默修改历史成本。 |
+| P1-06 | 账单游标、价格目录、预算与对账 | **部分完成** | 已有管理员可编辑的本机价格目录、币种、来源备注、精确模型匹配和显式历史未定价补算；环境变量目录保留为回退；独立成本账单已区分全部匹配汇总与有限明细窗口。 | 为价格目录增加批量导入/导出，为明细增加稳定游标翻页，并增加预算预警和供应商账单对账。 |
 | P1-07 | 备份、恢复与数据迁移向导 | **部分完成** | 启动和手工 SQLite 备份带完整性检查；文档说明整目录迁移。 | 增加 EXE 内恢复前预检、全目录导出、加密备份、恢复演练和版本兼容提示；当前“复制目录/替换数据库”仍偏运维操作。 |
 | P1-08 | 一键支持包与崩溃诊断 | **部分完成** | 有 `logs/desktop.log`、健康报告和错误码；发布任务保留 Trace 与状态。 | 增加脱敏支持包导出、崩溃钩子、版本/manifest/运行时探针汇总、可选择附加数据库结构信息；默认不得打包 Cookie、API Key、正文或客户回答。 |
 | P1-09 | 数据删除与敏感记录生命周期 | **部分完成** | 账号解绑、项目级联删除和不保存模式已有局部能力。 | 为可见度原文、诊断、成本台账、日志、备份和 WebView 缓存分别提供可见的保留期与删除入口；删除前说明影响并保留审计摘要。 |
 | P1-10 | 发布规则版本维护 | **部分完成** | 平台限制有统一版本 `2026-09-10.4`，预检与任务冻结保存实际副本。 | 建立离线规则包导入、变更说明、回归样例和回滚；平台 DOM 或字段变化时，应能禁用单一渠道，不需要整体更新所有业务数据。 |
 | P1-11 | 文档一致性 | **已完成（本轮范围）** | `docs/visibility-live-sampling.md`、`docs/windows-desktop.md`、`docs/ai-visibility-integration.md`、`docs/GEO算法融合说明.md` 与 `docs/首次使用.md` 已统一：区分手工导入与受控采样；记录按 request ID 续跑、兼容端点规范化、长度档、一键修复、一次批量确认后连续执行、核验后台直达和未知结果不重发；排除网页部署/服务器迁移。 | 后续每次增加 provider、调度能力或数据字段时同步更新数据披露、失败语义和回滚章节。 |
-| P1-12 | 正式发行版本与数据库迁移治理 | **部分完成** | 本轮桌面发行版本已提升为 `1.2.8`，可见度采样为 `controlled-live-visibility-sampling-1.3.0`、多模型量化面板为 `api-model-visibility-panel-1.2.0`，GEO 编译为 `2.3.0`、可引用性门禁为 `2.2.0`、长度档为 `1.0.0`；表使用幂等创建，构建生成 build-info/manifest/哈希。 | 增加数据库 schema 迁移版本、向前/向后兼容策略、发行说明、已知问题和版本升级测试；仅靠 `CREATE TABLE IF NOT EXISTS` 不足以支撑长期字段变更。 |
+| P1-12 | 正式发行版本与数据库迁移治理 | **部分完成** | 当前桌面源码版本已提升为 `1.3.1`，一键 GEO 为 `geo-automation-1.1.0`，站点审计为 `geo-site-audit-1.0.0`，可见度采样为 `controlled-live-visibility-sampling-1.3.0`、多模型量化面板为 `api-model-visibility-panel-1.2.0`，成本账单为 `ai-cost-ledger-1.5.0`，GEO 编译为 `2.3.0`、可引用性门禁为 `2.2.0`、长度档为 `1.0.0`；数据库初始化迁移会幂等补齐自动化表、租约字段、发布账号 epoch 和本地单价目录，构建生成 build-info/manifest/哈希。 | 增加正式数据库 schema 版本表、向前/向后兼容策略、发行说明、已知问题和版本升级测试；当前幂等列迁移仍不足以支撑长期复杂结构变更。 |
 
 ## 5. P2：规模化与长期差异化
 

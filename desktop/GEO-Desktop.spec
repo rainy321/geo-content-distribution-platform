@@ -10,6 +10,7 @@ root = Path(SPECPATH).resolve().parent
 frontend = root / "sau_frontend" / "dist"
 icon_path = root / "desktop" / "geo-icon.png"
 build_info_path = root / ".build" / "desktop-build-info.json"
+weibo_runtime_root = root / ".build" / "weibo-cli-runtime"
 if not (frontend / "index.html").is_file():
     raise SystemExit("缺少 sau_frontend/dist，请先构建 Vue 前端")
 if not icon_path.is_file():
@@ -41,6 +42,22 @@ excludes = [
     "tkinter",
 ]
 if real_publish_build:
+    weibo_node = weibo_runtime_root / "node.exe"
+    weibo_entry = (
+        weibo_runtime_root
+        / "node_modules"
+        / "@weibo-ai"
+        / "weibo-cli"
+        / "dist"
+        / "index.js"
+    )
+    weibo_node_license = weibo_runtime_root / "LICENSE"
+    if not weibo_node.is_file() or not weibo_entry.is_file() or not weibo_node_license.is_file():
+        raise SystemExit("微博官方 CLI 桌面运行时未完整准备")
+    binaries.append((str(weibo_node), "weibo_cli_runtime"))
+    datas.append((str(weibo_runtime_root / "node_modules"), "weibo_cli_runtime/node_modules"))
+    datas.append((str(weibo_node_license), "weibo_cli_runtime"))
+    datas.append((str(weibo_runtime_root / "runtime-manifest.json"), "weibo_cli_runtime"))
     for package_name in ("playwright", "patchright"):
         package_datas, package_binaries, package_hiddenimports = collect_all(
             package_name

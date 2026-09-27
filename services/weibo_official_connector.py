@@ -6,6 +6,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -16,9 +17,10 @@ from urllib.parse import urlsplit, urlunsplit
 
 
 WEIBO_OFFICIAL_PACKAGE = "@weibo-ai/weibo-cli"
+WEIBO_OFFICIAL_CLI_VERSION = "0.9.4"
 WEIBO_OFFICIAL_CONNECTOR_REQUIRED_MESSAGE = (
     "需安装/授权官方连接器：请安装 @weibo-ai/weibo-cli，并运行 "
-    "`weibo auth login --browser` 或 `weibo auth login --device` 完成授权"
+    "`weibo-cli auth login` 或 `weibo-cli auth login --device` 完成授权"
 )
 WEIBO_SINGLE_SESSION_MESSAGE = (
     "微博官方 CLI 当前仅支持一个默认授权会话，请重新连接已有微博账号"
@@ -80,8 +82,22 @@ class WeiboIdentity:
     username: str
 
 
-def resolve_weibo_cli(explicit: str | os.PathLike[str] | None = None) -> str:
-    """Resolve an already-installed official CLI without downloading anything."""
+@dataclass(frozen=True)
+class WeiboCliRuntime:
+    executable: str
+    script: str = ""
+    source: str = "external"
+    version: str = ""
+
+    @property
+    def command_prefix(self) -> tuple[str, ...]:
+        return (self.executable, self.script) if self.script else (self.executable,)
+
+
+def resolve_weibo_cli_runtime(
+    explicit: str | os.PathLike[str] | None = None,
+) -> WeiboCliRuntime:
+    """Resolve a packaged or explicitly installed official CLI safely."""
 
     configured_candidates: list[str] = []
     if explicit is not None and str(explicit).strip():
@@ -93,15 +109,75 @@ def resolve_weibo_cli(explicit: str | os.PathLike[str] | None = None) -> str:
     for candidate in configured_candidates:
         path = Path(candidate).expanduser()
         if (path.is_absolute() or path.parent != Path(".")) and path.is_file():
-            return str(path.resolve())
+            runtime = _runtime_from_path(path.resolve(), source="configured")
+            if runtime is not None:
+                return runtime
         resolved = shutil.which(candidate)
         if resolved:
-            return str(Path(resolved).resolve())
-    for candidate in ("weibo", "weibo-cli"):
+            runtime = _runtime_from_path(Path(resolved).resolve(), source="configured")
+            if runtime is not None:
+                return runtime
+
+    packaged = _packaged_weibo_runtime()
+    if packaged is not None:
+        return packaged
+
+    for candidate in ("weibo-cli", "weibo", "wb"):
         resolved = shutil.which(candidate)
         if resolved:
-            return str(Path(resolved).resolve())
+            runtime = _runtime_from_path(Path(resolved).resolve(), source="external")
+            if runtime is not None:
+                return runtime
     raise WeiboConnectorUnavailableError(WEIBO_OFFICIAL_CONNECTOR_REQUIRED_MESSAGE)
+
+
+def resolve_weibo_cli(explicit: str | os.PathLike[str] | None = None) -> str:
+    """Return the resolved process executable for compatibility probes."""
+
+    return resolve_weibo_cli_runtime(explicit).executable
+
+
+def _packaged_weibo_runtime() -> WeiboCliRuntime | None:
+    if not bool(getattr(sys, "frozen", False)):
+        return None
+    root = Path(str(getattr(sys, "_MEIPASS", "") or "")) / "weibo_cli_runtime"
+    node = root / "node.exe"
+    script = root / "node_modules" / "@weibo-ai" / "weibo-cli" / "dist" / "index.js"
+    if node.is_file() and script.is_file():
+        return WeiboCliRuntime(
+            executable=str(node.resolve()),
+            script=str(script.resolve()),
+            source="packaged",
+            version=WEIBO_OFFICIAL_CLI_VERSION,
+        )
+    return None
+
+
+def _runtime_from_path(path: Path, *, source: str) -> WeiboCliRuntime | None:
+    suffix = path.suffix.casefold()
+    if suffix in {".js", ".mjs", ".cjs"}:
+        node = shutil.which("node")
+        if node:
+            return WeiboCliRuntime(str(Path(node).resolve()), str(path), source=source)
+        return None
+    if suffix in {".cmd", ".bat"}:
+        script = (
+            path.parent
+            / "node_modules"
+            / "@weibo-ai"
+            / "weibo-cli"
+            / "dist"
+            / "index.js"
+        )
+        node = shutil.which("node")
+        if node and script.is_file():
+            return WeiboCliRuntime(
+                str(Path(node).resolve()),
+                str(script.resolve()),
+                source=source,
+            )
+        return None
+    return WeiboCliRuntime(str(path), source=source)
 
 
 def is_weibo_public_status_url(value: Any) -> bool:
@@ -185,7 +261,11 @@ class WeiboOfficialConnector:
 
     @property
     def executable(self) -> str:
-        return resolve_weibo_cli(self._configured_executable)
+        return resolve_weibo_cli_runtime(self._configured_executable).executable
+
+    @property
+    def command_prefix(self) -> tuple[str, ...]:
+        return resolve_weibo_cli_runtime(self._configured_executable).command_prefix
 
     def is_available(self) -> bool:
         try:
@@ -422,7 +502,7 @@ class WeiboOfficialConnector:
         error_type: type[WeiboConnectorError],
         error_message: str,
     ) -> Any:
-        command = [self.executable, *[str(item) for item in arguments]]
+        command = [*self.command_prefix, *[str(item) for item in arguments]]
         try:
             result = self._runner(
                 command,
@@ -716,6 +796,7 @@ def _status_time_intervals(status: Mapping[str, Any]) -> list[tuple[str, str]]:
 __all__ = [
     "WEIBO_MARKER_CONNECTOR",
     "WEIBO_OFFICIAL_CONNECTOR_REQUIRED_MESSAGE",
+    "WEIBO_OFFICIAL_CLI_VERSION",
     "WEIBO_OFFICIAL_PACKAGE",
     "WEIBO_PRODUCT_TEXT_SAFE_LIMIT",
     "WEIBO_SINGLE_SESSION_MESSAGE",
@@ -724,10 +805,12 @@ __all__ = [
     "WeiboConnectorError",
     "WeiboConnectorUnavailableError",
     "WeiboIdentity",
+    "WeiboCliRuntime",
     "WeiboOfficialConnector",
     "WeiboPublishUncertainError",
     "build_weibo_status_text",
     "is_weibo_public_status_url",
     "normalize_weibo_public_status_url",
     "resolve_weibo_cli",
+    "resolve_weibo_cli_runtime",
 ]

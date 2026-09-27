@@ -73,7 +73,7 @@ export const usageStatusLabel = value => ({
 export const normalizeCostBill = response => {
   const root = unwrap(response)
   const summary = normalizeAggregate(root.summary || {})
-  const validOperations = new Set(['generate', 'optimize', 'platform_adapt', 'visibility_sample', 'image_generate', 'connection_test'])
+  const validOperations = new Set(['generate', 'optimize', 'evaluate', 'platform_adapt', 'visibility_sample', 'image_generate', 'connection_test'])
   const records = array(root.records).filter(item => validOperations.has(String(item?.operation))).map(item => ({
     id: item?.id ?? null,
     projectId: numberOrNull(item?.project_id),
@@ -137,6 +137,40 @@ export const normalizeCostBill = response => {
     publishingNonModel: root.publishing?.token_usage_applicable === false,
     publishingMessage: String(root.publishing?.message || ''),
     pricingMessage: String(root.pricing?.semantics || '')
+  }
+}
+
+export const normalizePriceCatalog = response => {
+  const root = unwrap(response)
+  const normalizeEntry = item => ({
+    id: numberOrNull(item?.id),
+    provider: String(item?.provider || 'unknown'),
+    model: String(item?.model || 'unknown'),
+    inputPricePerMillion: decimalOrNull(item?.input_price_per_million),
+    outputPricePerMillion: decimalOrNull(item?.output_price_per_million),
+    currency: String(item?.currency || '').toUpperCase(),
+    sourceNote: String(item?.source_note || ''),
+    createdAt: String(item?.created_at || ''),
+    updatedAt: String(item?.updated_at || '')
+  })
+  return {
+    catalogVersion: String(root.catalog_version || ''),
+    unit: String(root.unit || 'per_million_tokens'),
+    semantics: String(root.semantics || ''),
+    entries: array(root.entries).map(normalizeEntry).filter(item => item.id != null),
+    detectedModels: array(root.detected_models).map(item => ({
+      provider: String(item?.provider || 'unknown'),
+      model: String(item?.model || 'unknown'),
+      receiptCount: nonnegative(item?.receipt_count),
+      unpricedReceiptCount: nonnegative(item?.unpriced_receipt_count),
+      knownTotalTokens: numberOrNull(item?.known_total_tokens),
+      knownTokenReceiptCount: nonnegative(item?.known_token_receipt_count),
+      priceEntryId: numberOrNull(item?.price_entry_id),
+      priced: Boolean(item?.priced),
+      inputPricePerMillion: decimalOrNull(item?.input_price_per_million),
+      outputPricePerMillion: decimalOrNull(item?.output_price_per_million),
+      currency: String(item?.currency || '').toUpperCase()
+    }))
   }
 }
 

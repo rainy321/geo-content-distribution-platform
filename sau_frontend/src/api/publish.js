@@ -9,8 +9,8 @@ export const publishApi = {
     return http.post('/api/publish/preflight', data)
   },
 
-  createJob(data) {
-    return http.post('/api/publish', data)
+  createJob(data, config = {}) {
+    return http.post('/api/publish', data, config)
   },
 
   getJobs(params = {}) {

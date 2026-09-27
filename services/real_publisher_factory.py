@@ -80,16 +80,34 @@ class RealPublisherFactory:
             raise PublisherNotConfiguredError("发布任务绑定的账号 ID 无效") from exc
         if bound_account_id <= 0:
             raise PublisherNotConfiguredError("发布任务绑定的账号 ID 无效")
+        raw_credential_epoch = job.get("_account_credential_epoch")
+        if raw_credential_epoch in {None, ""} or isinstance(
+            raw_credential_epoch, bool
+        ):
+            raise PublisherNotConfiguredError(
+                "发布任务缺少账号凭证版本；未加载发布器、未访问平台"
+            )
+        try:
+            expected_credential_epoch = int(raw_credential_epoch)
+        except (TypeError, ValueError) as exc:
+            raise PublisherNotConfiguredError(
+                "发布任务绑定的账号凭证版本无效；未访问平台"
+            ) from exc
+        if expected_credential_epoch <= 0:
+            raise PublisherNotConfiguredError(
+                "发布任务绑定的账号凭证版本无效；未访问平台"
+            )
 
         with closing(sqlite3.connect(self.database_path)) as conn:
             conn.row_factory = sqlite3.Row
             rows = conn.execute(
                 """
-                SELECT id, filePath, userName
+                SELECT id, filePath, userName, credential_epoch
                 FROM user_info
                 WHERE id = ? AND type = ? AND status = 1
+                  AND credential_epoch = ?
                 """,
-                (bound_account_id, account_type),
+                (bound_account_id, account_type, expected_credential_epoch),
             ).fetchall()
 
         for row in rows:
@@ -127,8 +145,8 @@ class RealPublisherFactory:
                     )
 
         raise PublisherNotConfiguredError(
-            f"{platform} 任务绑定的账号 {bound_account_id} 当前不可用，"
-            "请重新登录该账号或创建绑定新账号的任务"
+            f"{platform} 任务绑定的账号 {bound_account_id} 当前不可用或凭证已变化，"
+            "未加载发布器、未访问平台；请重新确认并创建任务"
         )
 
     def _safe_cookie_path(self, value: str) -> Path | None:

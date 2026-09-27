@@ -14,6 +14,9 @@ $releaseBaseRoot = Join-Path $projectRoot "release\windows"
 $buildRoot = Join-Path $projectRoot ".build\pyinstaller"
 $specPath = Join-Path $projectRoot "desktop\GEO-Desktop.spec"
 $buildInfoPath = Join-Path $projectRoot ".build\desktop-build-info.json"
+$weiboRuntimeDefinitionRoot = Join-Path $projectRoot "desktop\weibo-runtime"
+$weiboRuntimeRoot = Join-Path $projectRoot ".build\weibo-cli-runtime"
+$weiboRuntimeMetadata = $null
 $stagingRoot = $null
 $releaseVersionRegistry = $null
 
@@ -27,6 +30,109 @@ function Assert-NativeSuccess {
 
     if ($ExitCode -ne 0) {
         throw "$Operation failed with exit code $ExitCode"
+    }
+}
+
+function Assert-PathWithinProjectBuild {
+    param([Parameter(Mandatory = $true)][string]$Path)
+    $projectBuildRoot = [System.IO.Path]::GetFullPath((Join-Path $projectRoot ".build"))
+    $resolved = [System.IO.Path]::GetFullPath($Path)
+    $prefix = $projectBuildRoot.TrimEnd('\') + '\'
+    if (-not $resolved.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to modify a path outside the project build directory: $resolved"
+    }
+    return $resolved
+}
+
+function Install-WeiboOfficialRuntime {
+    $definitionPath = Join-Path $weiboRuntimeDefinitionRoot "runtime-manifest.json"
+    $packagePath = Join-Path $weiboRuntimeDefinitionRoot "package.json"
+    $lockPath = Join-Path $weiboRuntimeDefinitionRoot "package-lock.json"
+    foreach ($required in @($definitionPath, $packagePath, $lockPath)) {
+        if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+            throw "Missing pinned Weibo runtime input: $required"
+        }
+    }
+    $definition = Get-Content -Raw -LiteralPath $definitionPath | ConvertFrom-Json
+    if ($definition.schema_version -ne 1) {
+        throw "Unsupported Weibo runtime manifest schema"
+    }
+    $expectedNodeHash = ([string]$definition.node.sha256).ToUpperInvariant()
+    $cacheRoot = Assert-PathWithinProjectBuild (Join-Path $projectRoot ".build\downloads")
+    New-Item -ItemType Directory -Path $cacheRoot -Force | Out-Null
+    $archivePath = Join-Path $cacheRoot ([string]$definition.node.archive)
+    $archiveReady = $false
+    if (Test-Path -LiteralPath $archivePath -PathType Leaf) {
+        $archiveReady = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash -eq $expectedNodeHash
+    }
+    if (-not $archiveReady) {
+        $downloadPath = $archivePath + ".download"
+        Remove-Item -LiteralPath $downloadPath -Force -ErrorAction SilentlyContinue
+        Invoke-WebRequest -Uri ([string]$definition.node.download_url) -OutFile $downloadPath -TimeoutSec 180
+        $downloadHash = (Get-FileHash -LiteralPath $downloadPath -Algorithm SHA256).Hash
+        if ($downloadHash -ne $expectedNodeHash) {
+            Remove-Item -LiteralPath $downloadPath -Force -ErrorAction SilentlyContinue
+            throw "Downloaded Node runtime SHA-256 mismatch"
+        }
+        Move-Item -LiteralPath $downloadPath -Destination $archivePath -Force
+    }
+
+    $resolvedRuntimeRoot = Assert-PathWithinProjectBuild $weiboRuntimeRoot
+    if (Test-Path -LiteralPath $resolvedRuntimeRoot) {
+        Remove-Item -LiteralPath $resolvedRuntimeRoot -Recurse -Force
+    }
+    New-Item -ItemType Directory -Path $resolvedRuntimeRoot -Force | Out-Null
+    $extractRoot = Assert-PathWithinProjectBuild (
+        Join-Path $projectRoot (".build\weibo-node-extract-" + [guid]::NewGuid().ToString("N"))
+    )
+    try {
+        Expand-Archive -LiteralPath $archivePath -DestinationPath $extractRoot -Force
+        $nodeRoot = Get-ChildItem -LiteralPath $extractRoot -Directory | Select-Object -First 1
+        if ($null -eq $nodeRoot) {
+            throw "Node runtime archive has no root directory"
+        }
+        foreach ($name in @("node.exe", "LICENSE")) {
+            $source = Join-Path $nodeRoot.FullName $name
+            if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {
+                throw "Node runtime archive is missing $name"
+            }
+            Copy-Item -LiteralPath $source -Destination (Join-Path $resolvedRuntimeRoot $name) -Force
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $extractRoot) {
+            Remove-Item -LiteralPath $extractRoot -Recurse -Force
+        }
+    }
+    Copy-Item -LiteralPath $packagePath -Destination (Join-Path $resolvedRuntimeRoot "package.json") -Force
+    Copy-Item -LiteralPath $lockPath -Destination (Join-Path $resolvedRuntimeRoot "package-lock.json") -Force
+    Copy-Item -LiteralPath $definitionPath -Destination (Join-Path $resolvedRuntimeRoot "runtime-manifest.json") -Force
+    npm ci --prefix $resolvedRuntimeRoot --omit=dev --ignore-scripts --no-audit --no-fund | Out-Host
+    Assert-NativeSuccess -Operation "Installing pinned official Weibo CLI runtime" -ExitCode $LASTEXITCODE
+
+    $nodePath = Join-Path $resolvedRuntimeRoot "node.exe"
+    $entryPath = Join-Path $resolvedRuntimeRoot "node_modules\@weibo-ai\weibo-cli\dist\index.js"
+    $installedPackagePath = Join-Path $resolvedRuntimeRoot "node_modules\@weibo-ai\weibo-cli\package.json"
+    if (-not (Test-Path -LiteralPath $entryPath -PathType Leaf)) {
+        throw "Pinned official Weibo CLI entry point is missing"
+    }
+    $installedPackage = Get-Content -Raw -LiteralPath $installedPackagePath | ConvertFrom-Json
+    if ([string]$installedPackage.version -ne [string]$definition.weibo_cli.version) {
+        throw "Installed official Weibo CLI version does not match the pinned manifest"
+    }
+    $reportedVersion = (& $nodePath $entryPath version | Out-String).Trim()
+    Assert-NativeSuccess -Operation "Probing pinned official Weibo CLI runtime" -ExitCode $LASTEXITCODE
+    if ($reportedVersion -ne [string]$definition.weibo_cli.version) {
+        throw "Official Weibo CLI version probe returned $reportedVersion"
+    }
+    return [ordered]@{
+        packaged = $true
+        node_version = [string]$definition.node.version
+        node_archive_sha256 = $expectedNodeHash.ToLowerInvariant()
+        cli_package = [string]$definition.weibo_cli.package
+        cli_version = [string]$definition.weibo_cli.version
+        cli_integrity = [string]$definition.weibo_cli.integrity
+        license = [string]$definition.weibo_cli.license
     }
 }
 
@@ -162,6 +268,10 @@ try {
     if (-not $releaseVersionRegistry.algorithm -or -not $releaseVersionRegistry.product_features) {
         throw "Runtime release version registry is incomplete"
     }
+    if ($isRealPublishBuild) {
+        Write-Host "Preparing pinned official Weibo CLI runtime"
+        $weiboRuntimeMetadata = Install-WeiboOfficialRuntime
+    }
 
     Write-Host "[2/7] Building the Vue desktop interface"
     Push-Location $frontendRoot
@@ -252,6 +362,10 @@ try {
             $isRealPublishBuild -and
             $report.publishing_runtime_probe.bilibili_runtime.ready
         )
+        $expectedWeiboRuntime = [bool](
+            $isRealPublishBuild -and
+            $report.publishing_runtime_probe.weibo_runtime.ready
+        )
         if (
             -not $report.ok -or
             -not $report.frontend -or
@@ -263,6 +377,7 @@ try {
             $report.desktop.real_publishing_authorized -ne $isRealPublishBuild -or
             $report.desktop.real_publishing_enabled -ne $isRealPublishBuild -or
             $report.desktop.bilibili_runtime_enabled -ne $expectedBilibiliRuntime -or
+            $report.desktop.weibo_runtime_enabled -ne $expectedWeiboRuntime -or
             $report.desktop.publishing_profile -ne $PublishingProfile -or
             -not $report.auth.required -or
             -not $report.auth.setup_required -or
@@ -279,6 +394,8 @@ try {
                 -not $report.publishing_runtime_probe.ready -or
                 $report.publishing_runtime_probe.browser_probe -ne "passed" -or
                 $report.publishing_runtime_probe.missing_modules.Count -ne 0 -or
+                -not $report.publishing_runtime_probe.weibo_runtime.ready -or
+                $report.publishing_runtime_probe.weibo_runtime.version -ne $weiboRuntimeMetadata.cli_version -or
                 [string]::IsNullOrWhiteSpace(
                     [string]$report.publishing_runtime_probe.browser_executable
                 )
@@ -419,6 +536,7 @@ try {
         safety = [ordered]@{
             real_publishing_enabled = [bool]$report.health.real_publishing_enabled
             bilibili_runtime_enabled = [bool]$report.health.bilibili_runtime_enabled
+            weibo_runtime_enabled = [bool]$report.desktop.weibo_runtime_enabled
             legacy_direct_publishing_enabled = [bool]$report.health.legacy_direct_publishing_enabled
             scheduled_real_publishing_enabled = [bool]$report.health.scheduled_real_publishing_enabled
             browser_runtime_probe = $browserProbeStatus
@@ -438,6 +556,22 @@ try {
             playwright_packaged = [bool]$isRealPublishBuild
             patchright_packaged = [bool]$isRealPublishBuild
             playwright_and_patchright_offline_probe = $browserProbeStatus
+            weibo_cli_packaged = [bool]($isRealPublishBuild -and $weiboRuntimeMetadata.packaged)
+            weibo_cli_version = if ($isRealPublishBuild) { [string]$weiboRuntimeMetadata.cli_version } else { "" }
+            weibo_cli_integrity = if ($isRealPublishBuild) { [string]$weiboRuntimeMetadata.cli_integrity } else { "" }
+            weibo_node_version = if ($isRealPublishBuild) { [string]$weiboRuntimeMetadata.node_version } else { "" }
+            weibo_node_archive_sha256 = if ($isRealPublishBuild) { [string]$weiboRuntimeMetadata.node_archive_sha256 } else { "" }
+            weibo_runtime_probe = if ($report.publishing_runtime_probe.weibo_runtime) {
+                [ordered]@{
+                    ready = [bool]$report.publishing_runtime_probe.weibo_runtime.ready
+                    source = [string]$report.publishing_runtime_probe.weibo_runtime.source
+                    version = [string]$report.publishing_runtime_probe.weibo_runtime.version
+                    reason = [string]$report.publishing_runtime_probe.weibo_runtime.reason
+                }
+            }
+            else {
+                $null
+            }
             biliup_binary_packaged = $false
             bilibili_runtime_mode = if ($report.health.bilibili_runtime_enabled) {
                 "external_fixed_version_sha256"
@@ -476,6 +610,10 @@ try {
 
     Copy-Item -LiteralPath (Join-Path $projectRoot "docs\首次使用.md") `
         -Destination (Join-Path $stagingRoot "首次使用.md") -Force
+    Copy-Item -LiteralPath (Join-Path $projectRoot "docs\GEO完整使用手册.md") `
+        -Destination (Join-Path $stagingRoot "GEO完整使用手册.md") -Force
+    Copy-Item -LiteralPath (Join-Path $projectRoot "docs\一键GEO使用手册.md") `
+        -Destination (Join-Path $stagingRoot "一键GEO使用手册.md") -Force
     Copy-Item -LiteralPath (Join-Path $projectRoot "docs\ai-visibility-integration.md") `
         -Destination (Join-Path $stagingRoot "AI可见度接口契约.md") -Force
     Copy-Item -LiteralPath (Join-Path $projectRoot "docs\windows-desktop.md") `
@@ -498,6 +636,8 @@ try {
         (Join-Path $stagingRoot "GEO-Content-Platform.sha256.txt"),
         $manifestPath,
         (Join-Path $stagingRoot "首次使用.md"),
+        (Join-Path $stagingRoot "GEO完整使用手册.md"),
+        (Join-Path $stagingRoot "一键GEO使用手册.md"),
         (Join-Path $stagingRoot "AI可见度接口契约.md"),
         (Join-Path $stagingRoot "Windows桌面技术说明.md"),
         (Join-Path $stagingRoot "GEO诊断与成本台账.md"),

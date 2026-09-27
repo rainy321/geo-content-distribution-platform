@@ -195,6 +195,9 @@ class DatabaseInitializationTests(unittest.TestCase):
                 {
                     "id",
                     "article_id",
+                    "automation_item_id",
+                    "idempotency_key",
+                    "request_fingerprint",
                     "account_id",
                     "platform",
                     "status",
@@ -208,6 +211,7 @@ class DatabaseInitializationTests(unittest.TestCase):
                     "reconciliation_required",
                     "publish_at",
                     "authorization_fingerprint",
+                    "account_credential_epoch",
                     "auto_execute",
                     "demo",
                     "state_version",
@@ -300,6 +304,9 @@ class DatabaseInitializationTests(unittest.TestCase):
             self.assertIn("authorization_fingerprint", columns)
             self.assertIn("account_id", columns)
             self.assertIn("state_version", columns)
+            self.assertIn("automation_item_id", columns)
+            self.assertIn("idempotency_key", columns)
+            self.assertIn("request_fingerprint", columns)
             self.assertEqual(images, "[]")
             self.assertEqual(video, "")
             self.assertEqual(publish_title, "")
@@ -350,6 +357,97 @@ class DatabaseInitializationTests(unittest.TestCase):
                         """,
                         (article_id, "zhihu", 2),
                     )
+
+    def test_geo_site_audit_runs_schema_defaults_and_constraints(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "database.db"
+            initialize_database(db_path)
+
+            with closing(sqlite3.connect(db_path)) as conn:
+                conn.execute("PRAGMA foreign_keys = ON")
+                columns = {
+                    row[1]: row
+                    for row in conn.execute("PRAGMA table_info(geo_site_audit_runs)")
+                }
+                indexes = {
+                    row[1]
+                    for row in conn.execute("PRAGMA index_list(geo_site_audit_runs)")
+                }
+                project_id = conn.execute(
+                    "INSERT INTO projects (name, website) VALUES (?, ?)",
+                    ("站点审计品牌", "https://brand.example/"),
+                ).lastrowid
+                conn.execute(
+                    """
+                    INSERT INTO geo_site_audit_runs (
+                        project_id, request_id, idempotency_key,
+                        request_fingerprint, requested_url, final_url,
+                        audit_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        project_id,
+                        "request-1",
+                        "key-1",
+                        "f" * 64,
+                        "https://brand.example/",
+                        "https://brand.example/",
+                        "geo-site-audit-1.0.0",
+                    ),
+                )
+                stored = conn.execute(
+                    """
+                    SELECT status, result_json, created_at, updated_at
+                    FROM geo_site_audit_runs
+                    """
+                ).fetchone()
+                with self.assertRaises(sqlite3.IntegrityError):
+                    conn.execute(
+                        """
+                        INSERT INTO geo_site_audit_runs (
+                            project_id, request_id, idempotency_key,
+                            request_fingerprint, requested_url, final_url,
+                            status, audit_version
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            project_id,
+                            "request-2",
+                            "key-2",
+                            "e" * 64,
+                            "https://brand.example/",
+                            "https://brand.example/",
+                            "unknown",
+                            "geo-site-audit-1.0.0",
+                        ),
+                    )
+                conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+                remaining = conn.execute(
+                    "SELECT COUNT(*) FROM geo_site_audit_runs"
+                ).fetchone()[0]
+
+            self.assertEqual(
+                set(columns),
+                {
+                    "id",
+                    "project_id",
+                    "request_id",
+                    "idempotency_key",
+                    "request_fingerprint",
+                    "requested_url",
+                    "final_url",
+                    "status",
+                    "result_json",
+                    "audit_version",
+                    "created_at",
+                    "updated_at",
+                },
+            )
+            self.assertIn("idx_geo_site_audit_project_created", indexes)
+            self.assertEqual(stored[:2], ("started", None))
+            self.assertTrue(stored[2])
+            self.assertTrue(stored[3])
+            self.assertEqual(remaining, 0)
 
     def test_initialization_is_idempotent(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -474,6 +572,54 @@ class DatabaseInitializationTests(unittest.TestCase):
                     """
                 ).fetchone()
             self.assertEqual(job, ("zhihu", "failed", "平台暂不可用", 1))
+
+    def test_geo_automation_schema_has_durable_run_item_and_publish_identity(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "database.db"
+            initialize_database(db_path)
+
+            with closing(sqlite3.connect(db_path)) as conn:
+                run_columns = {
+                    row[1] for row in conn.execute(
+                        "PRAGMA table_info(geo_automation_runs)"
+                    )
+                }
+                item_columns = {
+                    row[1] for row in conn.execute(
+                        "PRAGMA table_info(geo_automation_items)"
+                    )
+                }
+                publish_indexes = {
+                    row[1] for row in conn.execute("PRAGMA index_list(publish_jobs)")
+                }
+
+            self.assertTrue(
+                {
+                    "request_id",
+                    "idempotency_key",
+                    "request_fingerprint",
+                    "project_snapshot",
+                    "config_json",
+                    "pause_requested",
+                    "state_version",
+                }.issubset(run_columns)
+            )
+            self.assertTrue(
+                {
+                    "run_id",
+                    "position",
+                    "article_id",
+                    "generation_request_id",
+                    "generation_run_id",
+                    "publish_jobs_json",
+                    "worker_lease_owner",
+                    "worker_lease_stage",
+                    "worker_lease_expires_at",
+                    "state_version",
+                }.issubset(item_columns)
+            )
+            self.assertIn("idx_publish_jobs_idempotency_key", publish_indexes)
+            self.assertIn("idx_publish_jobs_automation_channel", publish_indexes)
 
 
 if __name__ == "__main__":

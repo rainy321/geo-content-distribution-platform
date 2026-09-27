@@ -6,6 +6,10 @@ from pathlib import Path
 
 from db.createTable import initialize_database
 from sau_backend import app
+from services.geo_automation_service import (
+    create_geo_automation_run,
+    geo_automation_project_snapshot,
+)
 
 
 class ProjectsApiTests(unittest.TestCase):
@@ -126,6 +130,47 @@ class ProjectsApiTests(unittest.TestCase):
                 (article_id,),
             ).fetchone()[0]
         self.assertEqual((project_count, article_count), (1, 1))
+
+    def test_refuses_to_delete_project_with_active_geo_automation(self):
+        project = self._create_project()
+        config = {
+            "name": "删除保护测试",
+            "topics": ["AI Agent 落地"],
+            "keywords": ["AI Agent"],
+            "optimization_direction": "说明适用边界",
+            "target_length": 800,
+            "content_type": "行业科普",
+            "target_platform": "zhihu",
+            "channels": [{"platform": "zhihu", "account_id": None}],
+            "publish_mode": "prepare",
+            "optimize": True,
+            "continue_on_error": True,
+        }
+        create_geo_automation_run(
+            self.db_path,
+            request_id="project-delete-guard-request",
+            idempotency_key="project-delete-guard-key",
+            project_id=project["id"],
+            config=config,
+            authorization_scope={
+                "confirmed": True,
+                "project_id": project["id"],
+                "topic_count": 1,
+                "publish_mode": "prepare",
+                "channels": config["channels"],
+                "project_snapshot": geo_automation_project_snapshot(project),
+            },
+        )
+
+        listing = self.client.get("/api/projects").get_json()["data"]
+        self.assertEqual(listing[0]["active_automation_count"], 1)
+        response = self.client.delete(f"/api/projects/{project['id']}")
+        self.assertEqual(response.status_code, 409)
+        self.assertIn("一键 GEO", response.get_json()["msg"])
+        self.assertEqual(
+            self.client.get(f"/api/projects/{project['id']}").status_code,
+            200,
+        )
 
     def test_validates_fields_and_unknown_projects(self):
         invalid_requests = [

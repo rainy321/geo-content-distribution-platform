@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
+import re
 import sqlite3
 from contextlib import closing
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from services.geo_score_service import GEO_SCORE_VERSION, score_geo_content
 from services.geo_article_compiler_service import (
@@ -25,6 +28,10 @@ ARTICLE_STATUSES = frozenset({"draft", "ready", "publishing", "published"})
 
 class ArticleNotFoundError(LookupError):
     """Raised when an article id does not exist."""
+
+
+class ArticleConflictError(RuntimeError):
+    """Raised when an article changed after a caller read its snapshot."""
 
 
 def create_article(
@@ -194,13 +201,29 @@ def update_article(
     database_path: str | Path,
     article_id: int,
     changes: dict[str, Any],
+    *,
+    expected_content_fingerprint: str | None = None,
 ) -> dict[str, Any]:
+    normalized_expected_fingerprint = _normalize_expected_content_fingerprint(
+        expected_content_fingerprint
+    )
     with closing(_connect(database_path)) as conn:
-        with conn:
+        conn.execute("BEGIN IMMEDIATE")
+        try:
             current_row = _fetch_article(conn, article_id)
             if current_row is None:
                 raise ArticleNotFoundError("文章不存在")
             current = _serialize_article(current_row)
+            if (
+                normalized_expected_fingerprint is not None
+                and not hmac.compare_digest(
+                    normalized_expected_fingerprint,
+                    current["content_fingerprint"],
+                )
+            ):
+                raise ArticleConflictError(
+                    "文章已在读取后发生变化，未覆盖当前版本"
+                )
             project = _fetch_project(conn, current["project_id"])
             if project is None:
                 raise ProjectNotFoundError("品牌项目不存在")
@@ -253,7 +276,55 @@ def update_article(
                 ),
             )
             updated_row = _fetch_article(conn, article_id)
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
     return _serialize_article(updated_row)
+
+
+def article_content_fingerprint(article: Mapping[str, Any]) -> str:
+    """Return a stable digest for fields that affect an article's publish body."""
+
+    canonical = _article_publish_payload(article)
+    canonical["status"] = str(article.get("status") or "")
+    return _fingerprint_article_payload(canonical)
+
+
+def article_publish_payload_fingerprint(article: Mapping[str, Any]) -> str:
+    """Digest immutable publish content while excluding lifecycle status."""
+
+    return _fingerprint_article_payload(_article_publish_payload(article))
+
+
+def _article_publish_payload(article: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "id": int(article["id"]),
+        "project_id": int(article["project_id"]),
+        "title": str(article.get("title") or ""),
+        "summary": str(article.get("summary") or ""),
+        "content": str(article.get("content") or ""),
+        "tags": _decode_string_list(article.get("tags")),
+    }
+
+
+def _fingerprint_article_payload(canonical: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        canonical,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def _normalize_expected_content_fingerprint(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
+        raise ValueError("expected_content_fingerprint 格式无效")
+    return value
 
 
 def _connect(database_path: str | Path) -> sqlite3.Connection:
@@ -420,6 +491,7 @@ def _serialize_article(row: sqlite3.Row) -> dict[str, Any]:
     article = dict(row)
     article["tags"] = _decode_string_list(article.get("tags"))
     article["geo_analysis"] = _decode_json_object(article.get("geo_analysis"))
+    article["content_fingerprint"] = article_content_fingerprint(article)
     generation_run_id = article.get("generation_run_id")
     if generation_run_id is not None:
         generation_result = _decode_json_object(

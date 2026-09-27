@@ -120,29 +120,35 @@
             <div class="article-count">
               <el-icon><DocumentCopy /></el-icon>
               <span><strong>{{ project.article_count }}</strong> 篇文章</span>
+              <span v-if="project.active_automation_count"><strong>{{ project.active_automation_count }}</strong> 个运行中批次</span>
             </div>
             <time :datetime="project.updated_at">更新于 {{ formatDate(project.updated_at) }}</time>
           </div>
 
           <div class="card-actions">
-            <el-button :icon="EditPen" @click="openEditDialog(project)">编辑底稿</el-button>
-            <el-tooltip
-              :disabled="project.article_count === 0"
-              content="项目下已有文章，不能删除"
-              placement="top"
-            >
-              <span>
-                <el-button
-                  type="danger"
-                  plain
-                  :icon="Delete"
-                  :disabled="project.article_count > 0"
-                  @click="confirmDelete(project)"
-                >
-                  删除
-                </el-button>
-              </span>
-            </el-tooltip>
+            <el-button type="primary" :icon="MagicStick" @click="openGeoAutomation(project)">
+              一键 GEO
+            </el-button>
+            <div class="secondary-actions">
+              <el-button :icon="EditPen" @click="openEditDialog(project)">编辑底稿</el-button>
+              <el-tooltip
+                :disabled="project.article_count === 0 && project.active_automation_count === 0"
+                :content="project.active_automation_count > 0 ? '项目仍有进行中的一键 GEO 运行，不能删除' : '项目下已有文章，不能删除'"
+                placement="top"
+              >
+                <span>
+                  <el-button
+                    type="danger"
+                    plain
+                    :icon="Delete"
+                    :disabled="project.article_count > 0 || project.active_automation_count > 0"
+                    @click="confirmDelete(project)"
+                  >
+                    删除
+                  </el-button>
+                </span>
+              </el-tooltip>
+            </div>
           </div>
         </article>
       </div>
@@ -268,12 +274,14 @@
 
 <script setup>
 import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Delete,
   DocumentCopy,
   EditPen,
   Link,
+  MagicStick,
   Plus,
   Refresh,
   Search,
@@ -282,6 +290,7 @@ import {
 } from '@element-plus/icons-vue'
 import { projectApi } from '@/api/project'
 
+const router = useRouter()
 const projects = ref([])
 const loading = ref(false)
 const loadError = ref(false)
@@ -303,6 +312,10 @@ const emptyProject = () => ({
 })
 
 const projectForm = reactive(emptyProject())
+
+const openGeoAutomation = (project) => {
+  router.push({ path: '/geo-automation', query: { project_id: String(project.id) } })
+}
 
 const validateWebsite = (rule, value, callback) => {
   if (!value) {
@@ -422,6 +435,10 @@ const submitProject = async () => {
 }
 
 const confirmDelete = async (project) => {
+  if (project.active_automation_count > 0) {
+    ElMessage.warning('项目仍有进行中的一键 GEO 运行，不能删除')
+    return
+  }
   if (project.article_count > 0) {
     ElMessage.warning('项目下已有文章，不能删除')
     return
@@ -859,9 +876,31 @@ onMounted(fetchProjects)
 
 .card-actions {
   display: flex;
-  justify-content: space-between;
+  flex-direction: column;
+  gap: 10px;
   padding: 14px 0 20px;
   border-top: 1px solid #e4ebeb;
+
+  > .el-button {
+    width: 100%;
+    margin: 0;
+  }
+}
+
+.secondary-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+
+  > .el-button,
+  > span {
+    flex: 1;
+  }
+
+  .el-button {
+    width: 100%;
+    margin: 0;
+  }
 }
 
 .state-panel {
