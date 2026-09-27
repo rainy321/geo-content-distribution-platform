@@ -134,6 +134,14 @@ class DeliverySafetyTests(unittest.TestCase):
         self.assertIn("geo_cookies:/app/cookiesFile", compose)
         self.assertIn("HEALTHCHECK", dockerfile)
         self.assertIn("/api/health", dockerfile)
+        self.assertIn("https://mirrors.aliyun.com/debian", dockerfile)
+        self.assertIn("Acquire::Retries=3", dockerfile)
+        self.assertIn("PATCHRIGHT_CHROMIUM_REVISION=1208", dockerfile)
+        self.assertIn("chrome-for-testing/145.0.7632.6", dockerfile)
+        self.assertIn("LOCAL_CHROME_PATH=/opt/playwright/chromium-1208", dockerfile)
+        self.assertIn("fonts-noto-cjk", dockerfile)
+        self.assertIn("fc-match 'Noto Sans CJK SC'", dockerfile)
+        self.assertNotIn("RUN patchright install chromium", dockerfile)
         self.assertIn(
             "COPY --from=builder /app/dist/geo-favicon.svg /app/geo-favicon.svg",
             dockerfile,
@@ -144,16 +152,59 @@ class DeliverySafetyTests(unittest.TestCase):
         env_example = (
             ROOT / "deploy" / "production" / "app.env.example"
         ).read_text(encoding="utf-8")
+        nginx_bootstrap = (
+            ROOT / "deploy" / "nginx" / "geo.bootstrap.conf.example"
+        ).read_text(encoding="utf-8")
+        nginx_config = (
+            ROOT / "deploy" / "nginx" / "geo.conf.example"
+        ).read_text(encoding="utf-8")
+        backup_script = (
+            ROOT / "deploy" / "production" / "geo-platform-scheduled-backup"
+        ).read_text(encoding="utf-8")
+        backup_service = (
+            ROOT / "deploy" / "production" / "geo-platform-backup.service"
+        ).read_text(encoding="utf-8")
+        backup_timer = (
+            ROOT / "deploy" / "production" / "geo-platform-backup.timer"
+        ).read_text(encoding="utf-8")
         dockerignore = (ROOT / ".dockerignore").read_text(encoding="utf-8")
         gitignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
 
         self.assertIn("name: geo-platform", compose)
         self.assertIn("${GEO_BIND_ADDRESS:-127.0.0.1}", compose)
+        self.assertIn("GEO_NODE_IMAGE", compose)
+        self.assertIn("GEO_PYTHON_IMAGE", compose)
+        self.assertIn("GEO_PATCHRIGHT_CHROMIUM_URL", compose)
+        self.assertIn("@sha256:", compose)
         self.assertIn("RUN_PUBLISH_SCHEDULER: \"false\"", compose)
         self.assertIn('command: ["sau-worker"]', compose)
+        self.assertIn('test: ["CMD", "sau-worker", "--check"]', compose)
         self.assertIn("ALLOW_REAL_PUBLISHING=false", env_example)
         self.assertNotIn("AI_API_KEY=sk-", env_example)
+        self.assertIn("/.well-known/acme-challenge/", nginx_bootstrap)
+        self.assertIn("proxy_pass http://127.0.0.1:5409", nginx_bootstrap)
+        self.assertIn("location ~ (^|/)\\.(?!well-known/)", nginx_bootstrap)
+        self.assertIn("return 308 https://$host$request_uri", nginx_config)
+        self.assertIn("/etc/letsencrypt/live/geo.example.com", nginx_config)
+        self.assertIn("client_max_body_size 512m", nginx_config)
+        self.assertIn("location ~ (^|/)\\.(?!well-known/)", nginx_config)
+        self.assertIn('container="geo-platform-web-1"', backup_script)
+        self.assertIn("PRAGMA quick_check", backup_script)
+        self.assertIn("source.backup(target)", backup_script)
+        self.assertIn("chmod 0600", backup_script)
+        self.assertIn("-mtime +14 -delete", backup_script)
+        self.assertIn(
+            "ExecStart=/usr/local/sbin/geo-platform-scheduled-backup",
+            backup_service,
+        )
+        self.assertIn("OnCalendar=*-*-* 03:10:00 Asia/Shanghai", backup_timer)
+        self.assertIn("Persistent=true", backup_timer)
         self.assertIn("deploy/production/app.env", dockerignore)
+        self.assertTrue(
+            {"Dockerfile*", "compose*.yaml", "deploy", "docs", "tests"}.issubset(
+                set(dockerignore.splitlines())
+            )
+        )
         self.assertIn("deploy/production/app.env", gitignore)
 
     def test_source_server_defaults_to_loopback(self):

@@ -51,6 +51,18 @@ class P2ContentWorkflowApiTests(unittest.TestCase):
                         json.dumps(["AI Agent", "企业智能体"], ensure_ascii=False),
                     ),
                 ).lastrowid
+                self.xiaohongshu_account_id = conn.execute(
+                    """
+                    INSERT INTO user_info (type, filePath, userName, status)
+                    VALUES (1, 'xiaohongshu-policy.json', '小红书测试号', 1)
+                    """
+                ).lastrowid
+                self.bilibili_account_id = conn.execute(
+                    """
+                    INSERT INTO user_info (type, filePath, userName, status)
+                    VALUES (6, 'bilibili-policy.json', 'B站测试号', 1)
+                    """
+                ).lastrowid
 
         self.original = {
             "DATABASE_PATH": app.config["DATABASE_PATH"],
@@ -218,7 +230,23 @@ class P2ContentWorkflowApiTests(unittest.TestCase):
         self.assertEqual(created.status_code, 201)
         self.assertEqual(created.get_json()["data"]["video"], "demo.mp4")
 
-    def test_auto_image_creates_portable_cover_for_image_channel(self):
+    def test_auto_image_creates_portable_cover_for_assisted_image_channel(self):
+        app.config["DEMO_MODE"] = False
+        response = self.client.post(
+            "/api/publish",
+            json={
+                "article_id": self.article_id,
+                "platform": "xiaohongshu",
+                "auto_image": True,
+                "account_id": self.xiaohongshu_account_id,
+            },
+        )
+        self.assertEqual(response.status_code, 201)
+        images = response.get_json()["data"]["images"]
+        self.assertEqual(len(images), 1)
+        self.assertTrue((self.media_root / images[0]).is_file())
+
+    def test_paused_douyin_delivery_does_not_generate_or_publish(self):
         app.config["DEMO_MODE"] = False
         response = self.client.post(
             "/api/publish",
@@ -228,10 +256,12 @@ class P2ContentWorkflowApiTests(unittest.TestCase):
                 "auto_image": True,
             },
         )
-        self.assertEqual(response.status_code, 201)
-        images = response.get_json()["data"]["images"]
-        self.assertEqual(len(images), 1)
-        self.assertTrue((self.media_root / images[0]).is_file())
+
+        self.assertEqual(response.status_code, 409)
+        self.assertEqual(
+            response.get_json()["data"]["reason_code"],
+            "platform_delivery_paused",
+        )
 
 
 if __name__ == "__main__":

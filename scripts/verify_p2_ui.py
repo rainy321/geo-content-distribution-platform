@@ -2,17 +2,24 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
 
-def verify(base_url: str, screenshot_path: str | Path) -> dict:
+def verify(
+    base_url: str,
+    screenshot_path: str | Path,
+    *,
+    access_password: str = "",
+) -> dict:
     errors: list[str] = []
     checks: dict[str, bool] = {}
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
-        page = browser.new_page(viewport={"width": 1440, "height": 1000})
+        context = browser.new_context(viewport={"width": 1440, "height": 1000})
+        page = context.new_page()
         page.on(
             "console",
             lambda message: errors.append(message.text)
@@ -20,6 +27,19 @@ def verify(base_url: str, screenshot_path: str | Path) -> dict:
             else None,
         )
         page.on("pageerror", lambda error: errors.append(str(error)))
+
+        if access_password:
+            response = context.request.post(
+                f"{base_url}/api/auth/login",
+                data={"password": access_password},
+            )
+            payload = response.json() if response.ok else {}
+            if not response.ok or not (payload.get("data") or {}).get(
+                "authenticated"
+            ):
+                raise RuntimeError(
+                    f"运营访问门登录失败：HTTP {response.status}"
+                )
 
         page.goto(f"{base_url}/#/content-create", wait_until="domcontentloaded")
         page.wait_for_timeout(1200)
@@ -54,6 +74,7 @@ def verify(base_url: str, screenshot_path: str | Path) -> dict:
             ".vite-error-overlay, #webpack-dev-server-client-overlay"
         ).count() == 0
         checks["page_not_blank"] = bool(page.locator("body").inner_text().strip())
+        context.close()
         browser.close()
 
     return {"ok": all(checks.values()) and not errors, "checks": checks, "errors": errors}
@@ -74,6 +95,11 @@ def _parse_args():
         default=Path(__file__).resolve().parent.parent / ".tmp" / "p2-ui.png",
         help="发布中心验收截图保存位置",
     )
+    parser.add_argument(
+        "--access-password-env",
+        default="APP_ACCESS_PASSWORD",
+        help="从哪个环境变量读取运营访问口令；未设置时按无访问门环境验收",
+    )
     return parser.parse_args()
 
 
@@ -82,6 +108,11 @@ if __name__ == "__main__":
     target = args.base_url
     screenshot = args.screenshot
     screenshot.parent.mkdir(parents=True, exist_ok=True)
-    result = verify(target.rstrip("/"), screenshot)
+    access_password = str(os.getenv(args.access_password_env, "")).strip()
+    result = verify(
+        target.rstrip("/"),
+        screenshot,
+        access_password=access_password,
+    )
     print(json.dumps(result, ensure_ascii=False, indent=2))
     raise SystemExit(0 if result["ok"] else 1)

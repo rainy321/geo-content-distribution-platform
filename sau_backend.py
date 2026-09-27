@@ -71,6 +71,7 @@ from services.media_account_service import (
 from services.platform_capability_service import (
     get_platform_capability,
     list_platform_capabilities,
+    list_planned_platforms,
 )
 from services.project_service import (
     ProjectHasArticlesError,
@@ -94,6 +95,7 @@ from services.publish_job_service import (
     normalize_publish_video,
     retry_publish_job,
 )
+from services.publish_policy_service import PublishPolicyViolation
 from services.publish_scheduler_runtime import create_publish_scheduler
 from services.real_publisher_factory import (
     REAL_PUBLISH_PLATFORMS,
@@ -192,6 +194,14 @@ app.config["SEED_DEMO_DATA"] = str(
 }
 app.config["ALLOW_REAL_PUBLISHING"] = str(
     os.getenv("ALLOW_REAL_PUBLISHING", "false")
+).strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+app.config["ALLOW_LEGACY_DIRECT_PUBLISHING"] = str(
+    os.getenv("ALLOW_LEGACY_DIRECT_PUBLISHING", "false")
 ).strip().lower() in {
     "1",
     "true",
@@ -1240,6 +1250,24 @@ def create_publish_task():
     capability = get_platform_capability(platform)
     if capability is None:
         return jsonify({"code": 400, "msg": "暂不支持该发布平台", "data": None}), 400
+    if (
+        capability.get("delivery_state") == "paused"
+        and not app.config.get("DEMO_MODE", False)
+    ):
+        return jsonify(
+            {
+                "code": 409,
+                "msg": (
+                    f"{capability['name']}真实自动发布当前暂停；"
+                    "可先生成平台稿并由账号持有人手工发布"
+                ),
+                "data": {
+                    "reason_code": "platform_delivery_paused",
+                    "platform": platform,
+                    "policy": capability,
+                },
+            }
+        ), 409
 
     auto_image = data.get("auto_image", False)
     if not isinstance(auto_image, bool):
@@ -1307,6 +1335,25 @@ def create_publish_task():
     if (
         auto_execute
         and not app.config.get("DEMO_MODE", False)
+        and not capability.get("supports_auto_execute", False)
+    ):
+        return jsonify(
+            {
+                "code": 409,
+                "msg": (
+                    f"{capability['name']}当前只支持到点转人工确认，"
+                    "不支持无人值守自动发布"
+                ),
+                "data": {
+                    "reason_code": "auto_execute_not_allowed",
+                    "platform": platform,
+                    "policy": capability,
+                },
+            }
+        ), 409
+    if (
+        auto_execute
+        and not app.config.get("DEMO_MODE", False)
         and not app.config.get("ALLOW_REAL_PUBLISHING", False)
     ):
         return jsonify(
@@ -1327,9 +1374,20 @@ def create_publish_task():
             publish_at=data.get("publish_at"),
             auto_execute=auto_execute,
             demo=bool(app.config.get("DEMO_MODE", False)),
+            account_id=data.get("account_id"),
+            require_account=not bool(app.config.get("DEMO_MODE", False)),
+            enforce_publish_policy=not bool(app.config.get("DEMO_MODE", False)),
         )
     except ArticleNotFoundError as exc:
         return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except PublishPolicyViolation as exc:
+        return jsonify(
+            {
+                "code": 429,
+                "msg": str(exc),
+                "data": exc.decision,
+            }
+        ), 429
     except (UnsupportedPublishPlatformError, ValueError) as exc:
         return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
 
@@ -1463,6 +1521,22 @@ def execute_real_publish_task(job_id):
                 "data": None,
             }
         ), 409
+    capability = get_platform_capability(current["platform"])
+    if capability and capability.get("delivery_state") == "paused":
+        return jsonify(
+            {
+                "code": 409,
+                "msg": (
+                    f"{capability['name']}真实自动发布当前暂停，"
+                    "本次不会访问平台"
+                ),
+                "data": {
+                    "reason_code": "platform_delivery_paused",
+                    "platform": current["platform"],
+                    "policy": capability,
+                },
+            }
+        ), 409
 
     publisher_factory = create_real_publisher_factory(
         app.config["DATABASE_PATH"],
@@ -1493,6 +1567,7 @@ def _publish_job_payload(job):
     payload = {
         "job_id": job["id"],
         "article_id": job["article_id"],
+        "account_id": job.get("account_id"),
         "platform": job["platform"],
         "status": job["status"],
         "message": job["message"],
@@ -1512,10 +1587,18 @@ def _publish_job_payload(job):
             and app.config.get("ALLOW_REAL_PUBLISHING", False)
             and job["platform"] in REAL_PUBLISH_PLATFORMS
             and job["status"] == "queued"
+            and (get_platform_capability(job["platform"]) or {}).get(
+                "delivery_state"
+            ) != "paused"
+        ),
+        "public_url_recorded": bool(
+            job["status"] == "success" and str(job.get("result_url") or "").strip()
         ),
     }
     if "article_title" in job:
         payload["article_title"] = job["article_title"]
+    if "account_name" in job:
+        payload["account_name"] = job.get("account_name")
     return payload
 
 
@@ -1557,6 +1640,13 @@ def _validate_publish_video(value):
 def get_publish_platforms():
     return jsonify(
         {"code": 200, "msg": "success", "data": list_platform_capabilities()}
+    ), 200
+
+
+@app.route('/api/publish/platform-roadmap', methods=['GET'])
+def get_publish_platform_roadmap():
+    return jsonify(
+        {"code": 200, "msg": "success", "data": list_planned_platforms()}
     ), 200
 
 
@@ -2137,6 +2227,20 @@ def postVideo():
     is_draft = data.get('isDraft', False)  # 新增参数：是否保存为草稿
     ai_generated = data.get('aiGenerated', False)  # 抖音/快手/小红书 AI 内容声明
     dry_run = data.get('dryRun', False)  # 仅预览不发布：填完表后不点发布
+    if (
+        dry_run is not True
+        and not app.config.get("ALLOW_LEGACY_DIRECT_PUBLISHING", False)
+    ):
+        return jsonify(
+            {
+                "code": 410,
+                "msg": (
+                    "旧版直发入口已停用，请在发布中心创建可审计的渠道任务；"
+                    "仅预览 dryRun 仍可使用"
+                ),
+                "data": {"reason_code": "legacy_direct_publish_disabled"},
+            }
+        ), 410
     # B站创作声明 id：-1/1/2/3/4；None 表示不传
     bilibili_creation_statement = data.get('bilibiliCreationStatement', None)
     # 今日头条内容类型：video（默认）| article
@@ -2418,6 +2522,23 @@ def postVideoBatch():
 
     if not isinstance(data_list, list):
         return jsonify({"code": 400, "msg": "Expected a JSON array", "data": None}), 400
+    if (
+        any(
+            isinstance(item, dict) and item.get("dryRun") is not True
+            for item in data_list
+        )
+        and not app.config.get("ALLOW_LEGACY_DIRECT_PUBLISHING", False)
+    ):
+        return jsonify(
+            {
+                "code": 410,
+                "msg": (
+                    "旧版批量直发入口已停用，请在发布中心逐平台创建任务；"
+                    "仅全部为 dryRun 时允许预览"
+                ),
+                "data": {"reason_code": "legacy_direct_publish_disabled"},
+            }
+        ), 410
 
     from myUtils.postVideo import (
         post_article_baijiahao,

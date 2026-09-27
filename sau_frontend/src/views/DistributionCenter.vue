@@ -79,17 +79,59 @@
               v-for="platform in platforms"
               :key="platform.key"
               type="button"
-              :class="['platform-option', { selected: selectedPlatforms.includes(platform.key) }]"
+              :class="['platform-option', platform.delivery_state, { selected: selectedPlatforms.includes(platform.key) }]"
               :aria-pressed="selectedPlatforms.includes(platform.key)"
+              :aria-disabled="platform.delivery_state === 'paused'"
+              :disabled="platform.delivery_state === 'paused'"
               @click="togglePlatform(platform.key)"
             >
               <span class="platform-code">{{ platform.code }}</span>
               <span class="platform-name">{{ platform.name }}</span>
-              <small>{{ platform.note }}</small>
+              <small>{{ platform.delivery_label }}</small>
+              <em>建议 {{ platform.safe_daily_new }}→{{ platform.safe_daily_stable }}/24h · 间隔≥{{ platform.min_interval_hours }}h</em>
               <span class="selection-mark" aria-hidden="true">
                 {{ selectedPlatforms.includes(platform.key) ? '✓' : '+' }}
               </span>
             </button>
+          </div>
+
+          <div v-if="manifestPlatforms.length" class="policy-checklist" aria-label="所选渠道发布前检查">
+            <article v-for="platform in manifestPlatforms" :key="platform.key">
+              <div class="policy-platform">
+                <span>{{ platform.code }}</span>
+                <div>
+                  <strong>{{ platform.name }}</strong>
+                  <small>{{ platform.channel_role_label }} · {{ platform.crawl_label }}</small>
+                </div>
+              </div>
+              <el-select
+                :model-value="accountSelections[platform.key] || null"
+                placeholder="选择已连接账号"
+                clearable
+                @update:model-value="value => setAccountSelection(platform.key, value)"
+              >
+                <el-option
+                  v-for="account in connectedAccountsFor(platform.key)"
+                  :key="account.id"
+                  :label="account.account_name"
+                  :value="account.id"
+                />
+              </el-select>
+              <div class="quota-copy" :class="quotaTone(selectedAccountFor(platform.key))">
+                <template v-if="selectedAccountFor(platform.key)?.publish_policy">
+                  <strong>
+                    24h {{ selectedAccountFor(platform.key).publish_policy.reserved_24h }} /
+                    {{ selectedAccountFor(platform.key).publish_policy.safe_daily_new }}
+                  </strong>
+                  <small>当前剩余 {{ selectedAccountFor(platform.key).publish_policy.remaining_new }}</small>
+                </template>
+                <template v-else>
+                  <strong>未绑定账号</strong>
+                  <small>Demo 可继续；真实任务会被服务端阻断</small>
+                </template>
+              </div>
+            </article>
+            <p>额度只统计本系统滚动 24 小时内的真实任务；平台后台手工发布量无法读取，请发布前自行核对。</p>
           </div>
         </fieldset>
 
@@ -216,11 +258,20 @@
             :disabled-date="disablePastDate"
           />
           <div v-if="scheduleEnabled" class="schedule-auto-execute">
-            <el-checkbox v-model="autoExecuteAtDue">到点自动执行</el-checkbox>
+            <el-checkbox v-model="autoExecuteAtDue" :disabled="!autoExecuteAvailable">到点自动执行</el-checkbox>
             <p>
-              默认关闭。开启后，创建任务前还会要求一次明确确认；真实执行仍受服务端总开关、账号状态和平台风控保护。
+              {{ autoExecuteAvailable
+                ? '默认关闭。开启后仍需明确确认，并受服务端风控保护。'
+                : '当前所选渠道仅支持到点转人工确认，不开放无人值守发布。' }}
             </p>
           </div>
+        </div>
+
+        <div class="risk-confirmation">
+          <el-checkbox v-model="riskAcknowledged">
+            我已核对账号后台，并理解建议量不等同于平台官方剩余额度
+          </el-checkbox>
+          <p>超过建议频率会提高审核、限流或账号受限风险。系统不会绕过验证码或平台风控，也不承诺账号安全、AI 收录、引用或排名。</p>
         </div>
 
         <div class="dispatch-actions">
@@ -356,10 +407,13 @@
           <div class="job-identity">
             <span>JOB-{{ String(job.job_id).padStart(5, '0') }}</span>
             <strong>{{ platformName(job.platform) }}</strong>
+            <small v-if="job.account_name" class="account-mark">{{ job.account_name }}</small>
             <small v-if="job.demo" class="demo-mark">DEMO / 演示任务</small>
             <small v-if="job.images?.length" class="asset-mark">{{ job.images.length }} IMG / 已附素材</small>
             <small v-if="job.video" class="asset-mark">01 VIDEO / 已附素材</small>
             <small v-if="job.auto_execute" class="schedule-mark">AUTO@TIME / 已授权</small>
+            <small v-if="job.status === 'success' && job.public_url_recorded" class="public-mark">PUBLIC URL / 可进入抓取验证</small>
+            <small v-else-if="job.status === 'success'" class="private-mark">仅平台后台证据 / 不计 AI 可抓取</small>
           </div>
 
           <div class="job-article">
@@ -436,6 +490,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Link, Lock, MagicStick, Picture, Promotion, Refresh, Upload, VideoCamera } from '@element-plus/icons-vue'
 import { articleApi } from '@/api/article'
+import { accountApi } from '@/api/account'
 import { materialApi } from '@/api/material'
 import { publishApi } from '@/api/publish'
 
@@ -448,6 +503,8 @@ const platformCodes = {
 }
 const modeNames = { article: '文章', image_article: '图文', image_note: '图片笔记', video: '视频' }
 const platforms = ref([])
+const accountOverview = ref({ platforms: [], accounts: [] })
+const accountSelections = reactive({})
 
 const statusOptions = [
   { value: 'queued', label: '排队中' },
@@ -466,6 +523,7 @@ const selectedPlatforms = ref(['zhihu'])
 const scheduleEnabled = ref(false)
 const publishAt = ref('')
 const autoExecuteAtDue = ref(false)
+const riskAcknowledged = ref(false)
 const dispatching = ref(false)
 const imageInput = ref(null)
 const selectedImage = ref(null)
@@ -507,6 +565,14 @@ const videoPlatforms = computed(() => (
   manifestPlatforms.value.filter(platform => platform.requires_video)
 ))
 const videoRequired = computed(() => videoPlatforms.value.length > 0)
+const autoExecuteAvailable = computed(() => Boolean(
+  manifestPlatforms.value.length
+  && manifestPlatforms.value.every(platform => platform.supports_auto_execute)
+))
+const hasExhaustedQuota = computed(() => manifestPlatforms.value.some(platform => {
+  const account = selectedAccountFor(platform.key)
+  return account?.publish_policy && account.publish_policy.remaining_new <= 0
+}))
 
 const assetSummary = computed(() => {
   const parts = []
@@ -522,6 +588,8 @@ const canDispatch = computed(() => Boolean(
   && (!imageRequired.value || selectedImage.value || autoImage.value)
   && (!videoRequired.value || selectedVideo.value)
   && (!scheduleEnabled.value || publishAt.value)
+  && riskAcknowledged.value
+  && !hasExhaustedQuota.value
   && !imageUploading.value
   && !dispatching.value
 ))
@@ -529,6 +597,8 @@ const canDispatch = computed(() => Boolean(
 const dispatchButtonLabel = computed(() => {
   if (!selectedArticleId.value) return '先选择就绪稿件'
   if (!selectedPlatforms.value.length) return '至少选择一个渠道'
+  if (hasExhaustedQuota.value) return '所选账号已达到 24h 建议上限'
+  if (!riskAcknowledged.value) return '先确认发布风险边界'
   if (imageUploading.value) return '图片上传中'
   if (videoUploading.value) return '视频上传中'
   if (imageRequired.value && !selectedImage.value && !autoImage.value) return '先补齐渠道图片'
@@ -586,8 +656,19 @@ const fetchPlatforms = async () => {
       code: platformCodes[item.key] || item.key.slice(0, 2).toUpperCase(),
       note: `${item.priority} · ${modeNames[item.content_mode] || item.content_mode}`
     }))
+    syncDefaultAccountSelections()
   } catch (error) {
     console.error('加载平台能力失败:', error)
+  }
+}
+
+const fetchAccounts = async () => {
+  try {
+    const response = await accountApi.getMediaAccounts()
+    accountOverview.value = response.data || { platforms: [], accounts: [] }
+    syncDefaultAccountSelections()
+  } catch (error) {
+    console.error('加载账号额度失败:', error)
   }
 }
 
@@ -621,9 +702,47 @@ const fetchJobs = async (pageOrSilent = false) => {
 }
 
 const togglePlatform = (key) => {
+  const platform = platforms.value.find(item => item.key === key)
+  if (platform?.delivery_state === 'paused') {
+    ElMessage.warning(`${platform.name}真实自动发布当前暂停，可在内容创作中生成平台稿后手工发布`)
+    return
+  }
   selectedPlatforms.value = selectedPlatforms.value.includes(key)
     ? selectedPlatforms.value.filter(item => item !== key)
     : [...selectedPlatforms.value, key]
+}
+
+const connectedAccountsFor = (platformKey) => (
+  (accountOverview.value.accounts || [])
+    .filter(account => account.platform_key === platformKey && account.status === 'connected')
+    .sort((left, right) => {
+      const checked = String(right.last_checked_at || '').localeCompare(String(left.last_checked_at || ''))
+      return checked || right.id - left.id
+    })
+)
+
+const selectedAccountFor = (platformKey) => {
+  const accountId = accountSelections[platformKey]
+  return connectedAccountsFor(platformKey).find(account => account.id === accountId) || null
+}
+
+const setAccountSelection = (platformKey, accountId) => {
+  accountSelections[platformKey] = accountId || null
+  riskAcknowledged.value = false
+}
+
+const syncDefaultAccountSelections = () => {
+  for (const platform of platforms.value) {
+    const accounts = connectedAccountsFor(platform.key)
+    if (!accounts.some(account => account.id === accountSelections[platform.key])) {
+      accountSelections[platform.key] = accounts[0]?.id || null
+    }
+  }
+}
+
+const quotaTone = account => {
+  if (!account?.publish_policy) return 'unbound'
+  return account.publish_policy.remaining_new > 0 ? 'safe' : 'blocked'
 }
 
 const handleScheduleToggle = (enabled) => {
@@ -631,6 +750,7 @@ const handleScheduleToggle = (enabled) => {
     publishAt.value = ''
     autoExecuteAtDue.value = false
   }
+  if (!autoExecuteAvailable.value) autoExecuteAtDue.value = false
 }
 
 const openImagePicker = () => {
@@ -798,6 +918,7 @@ const dispatchArticle = async () => {
   for (const platform of selectedPlatforms.value) {
     try {
       const capability = platforms.value.find(item => item.key === platform)
+      const account = selectedAccountFor(platform)
       const response = await publishApi.createJob({
         article_id: selectedArticleId.value,
         platform,
@@ -805,7 +926,8 @@ const dispatchArticle = async () => {
         video: capability?.requires_video ? (selectedVideo.value?.filename || '') : '',
         auto_image: autoImage.value,
         publish_at: scheduleEnabled.value ? publishAt.value : null,
-        auto_execute: confirmedAutoExecute
+        auto_execute: confirmedAutoExecute,
+        account_id: account?.id || null
       })
       let job = response.data
       createdCount += 1
@@ -820,7 +942,7 @@ const dispatchArticle = async () => {
     }
   }
 
-  await fetchJobs(true)
+  await Promise.allSettled([fetchJobs(true), fetchAccounts()])
   dispatching.value = false
   if (createdCount && !failedCount) {
     ElMessage.success(
@@ -847,9 +969,10 @@ const executeDemoJob = async (job) => {
 }
 
 const executeRealJob = async (job) => {
+  const policy = platforms.value.find(platform => platform.key === job.platform)
   try {
     await ElMessageBox.confirm(
-      `将使用已连接的${platformName(job.platform)}账号真实发布《${job.article_title || `文章 #${job.article_id}`}》。平台可能要求扫码、验证码或人工确认，是否继续？`,
+      `将使用已连接的${platformName(job.platform)}账号真实发布《${job.article_title || `文章 #${job.article_id}`}》。本系统建议每个新账号滚动 24 小时不超过 ${policy?.safe_daily_new || 1} 条，间隔至少 ${policy?.min_interval_hours || 6} 小时；平台后台手工发布量未知。平台可能要求扫码、验证码或人工确认，且无法承诺账号安全或 AI 收录。是否继续？`,
       '确认真实发布',
       {
         confirmButtonText: '确认并执行',
@@ -983,8 +1106,13 @@ const scheduleJobPoll = () => {
 
 onMounted(async () => {
   pollingStopped = false
-  await Promise.allSettled([fetchPlatforms(), fetchArticles(), fetchJobs()])
+  await Promise.allSettled([fetchPlatforms(), fetchAccounts(), fetchArticles(), fetchJobs()])
   scheduleJobPoll()
+})
+
+watch(selectedPlatforms, () => {
+  riskAcknowledged.value = false
+  if (!autoExecuteAvailable.value) autoExecuteAtDue.value = false
 })
 
 watch(selectedArticleId, async value => {
@@ -1224,13 +1352,13 @@ onBeforeUnmount(() => {
 
 .platform-grid {
   display: grid;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
 }
 
 .platform-option {
   position: relative;
-  min-height: 102px;
+  min-height: 122px;
   padding: 13px 11px;
   border: 1px solid var(--rule);
   border-radius: 3px;
@@ -1243,6 +1371,7 @@ onBeforeUnmount(() => {
   &:hover { transform: translateY(-2px); border-color: #81bebb; }
   &:focus-visible { outline: 3px solid rgba(57, 184, 178, 0.3); outline-offset: 2px; }
   &.selected { border-color: var(--signal); background: #eff9f7; box-shadow: inset 0 -3px var(--signal); }
+  &:disabled { transform: none; border-style: dashed; border-color: #d7c3c3; background: #faf5f5; cursor: not-allowed; opacity: .82; }
 
   .platform-code {
     display: block;
@@ -1253,7 +1382,51 @@ onBeforeUnmount(() => {
 
   .platform-name { display: block; margin-top: 11px; font-size: 15px; font-weight: 700; }
   small { display: block; margin-top: 5px; color: var(--muted); font-size: 10px; }
+  em { display: block; margin-top: 9px; color: #45696d; font-size: 9px; font-style: normal; line-height: 1.45; }
+  &.paused em, &.paused small { color: #9a5757; }
   .selection-mark { position: absolute; top: 10px; right: 10px; color: #338e89; font-size: 14px; }
+}
+
+.policy-checklist {
+  margin-top: 12px;
+  border: 1px solid var(--rule);
+  background: #f7faf9;
+
+  > article {
+    display: grid;
+    grid-template-columns: minmax(180px, 1fr) minmax(170px, .8fr) minmax(140px, .55fr);
+    gap: 14px;
+    align-items: center;
+    padding: 12px 14px;
+    border-bottom: 1px solid #dfe7e4;
+  }
+
+  > p { margin: 0; padding: 10px 14px; color: #7b7060; background: #fbf6ee; font-size: 10px; line-height: 1.55; }
+  :deep(.el-select) { width: 100%; }
+}
+
+.policy-platform {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+
+  > span { display: grid; place-items: center; width: 34px; height: 34px; color: #fff; background: var(--harbor); font: 700 9px "Cascadia Mono", monospace; }
+  > div { display: flex; min-width: 0; flex-direction: column; gap: 3px; }
+  strong { font-size: 12px; }
+  small { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+}
+
+.quota-copy {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding-left: 11px;
+  border-left: 3px solid #8fa19f;
+
+  strong { font-size: 11px; }
+  small { color: var(--muted); font-size: 9px; line-height: 1.4; }
+  &.safe { border-left-color: var(--signal); }
+  &.blocked { border-left-color: var(--danger); color: var(--danger); }
 }
 
 .asset-panel {
@@ -1420,6 +1593,16 @@ onBeforeUnmount(() => {
   :deep(.el-checkbox) { grid-row: 1 / 3; margin-right: 0; }
   :deep(.el-checkbox__label) { color: #4c4b3f; font-size: 12px; font-weight: 700; }
   p { margin: 0; color: #7d7768; font-size: 10px; line-height: 1.55; }
+}
+
+.risk-confirmation {
+  margin-top: 14px;
+  padding: 12px 14px;
+  border: 1px solid #e2c79f;
+  background: #fff9ef;
+
+  :deep(.el-checkbox__label) { color: #4f4b42; font-size: 12px; font-weight: 700; white-space: normal; }
+  p { margin: 5px 0 0 24px; color: #7a6d59; font-size: 10px; line-height: 1.55; }
 }
 
 .dispatch-actions {
@@ -1631,11 +1814,26 @@ onBeforeUnmount(() => {
   font: 700 8px/1 "Cascadia Mono", monospace !important;
 }
 
+.account-mark {
+  align-self: flex-start;
+  color: #506d73 !important;
+  font-size: 9px !important;
+}
+
 .schedule-mark {
   align-self: flex-start;
   color: #a36724 !important;
   font: 700 8px/1 "Cascadia Mono", monospace !important;
 }
+
+.public-mark,
+.private-mark {
+  align-self: flex-start;
+  font: 700 8px/1.3 "Cascadia Mono", monospace !important;
+}
+
+.public-mark { color: #1e7c67 !important; }
+.private-mark { color: #a06628 !important; }
 
 .job-article {
   span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; }
@@ -1732,6 +1930,8 @@ onBeforeUnmount(() => {
   .page-heading, .board-toolbar { align-items: flex-start; flex-direction: column; }
   .job-filters { width: 100%; flex-wrap: wrap; }
   .job-filters :deep(.el-select) { flex: 1; min-width: 150px; }
+  .policy-checklist > article { grid-template-columns: 1fr 1fr; }
+  .quota-copy { grid-column: 1 / -1; }
 }
 
 @media (max-width: 680px) {
@@ -1739,6 +1939,8 @@ onBeforeUnmount(() => {
   .live-indicator { width: 100%; box-sizing: border-box; }
   .dispatch-form, .route-manifest { padding: 20px; }
   .platform-grid { grid-template-columns: repeat(2, 1fr); }
+  .policy-checklist > article { grid-template-columns: 1fr; }
+  .quota-copy { grid-column: auto; }
   .asset-heading { grid-template-columns: 1fr auto; }
   .asset-heading .asset-code { grid-column: 1 / -1; }
   .asset-empty, .asset-record { grid-template-columns: auto 1fr; }

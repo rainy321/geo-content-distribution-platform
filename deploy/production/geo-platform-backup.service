@@ -1,0 +1,10 @@
+[Unit]
+Description=GEO Platform verified SQLite backup
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/geo-platform-scheduled-backup
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=read-only

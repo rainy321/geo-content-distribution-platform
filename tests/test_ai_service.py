@@ -91,6 +91,8 @@ class AIServiceTests(unittest.TestCase):
         self.assertIn("企业 AI Agent 落地", prompt)
         self.assertIn("正文约 1000 字", prompt)
         self.assertIn("目标平台：知乎", prompt)
+        self.assertIn("问题先行", prompt)
+        self.assertIn("不得暗示内容一定会被搜索引擎或生成式 AI 收录", prompt)
         self.assertEqual(result["title"], "企业 AI Agent 如何落地")
         self.assertEqual(result["tags"], ["AI Agent", "企业智能体"])
         self.assertEqual(

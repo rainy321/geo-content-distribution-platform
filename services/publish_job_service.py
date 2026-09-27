@@ -14,6 +14,7 @@ from services.platform_capability_service import (
     PLATFORM_BY_KEY,
     SUPPORTED_PUBLISH_PLATFORMS,
 )
+from services.publish_policy_service import assert_can_reserve_publish
 
 
 PUBLISH_JOB_STATUSES = frozenset(
@@ -56,6 +57,8 @@ def create_publish_job(
     auto_execute: bool = False,
     demo: bool = False,
     account_id: int | None = None,
+    require_account: bool = False,
+    enforce_publish_policy: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(auto_execute, bool):
         raise ValueError("auto_execute 必须是布尔值")
@@ -79,6 +82,15 @@ def create_publish_job(
                 requested_account_id=account_id,
                 demo=demo,
             )
+            if require_account and not demo and resolved_account_id is None:
+                raise ValueError("真实发布任务必须绑定一个已连接的对应平台账号")
+            if enforce_publish_policy and not demo and resolved_account_id is not None:
+                assert_can_reserve_publish(
+                    conn,
+                    account_id=resolved_account_id,
+                    platform=normalized_platform,
+                    publish_at=normalized_publish_at,
+                )
             authorization_fingerprint = (
                 build_publish_authorization_fingerprint(
                     article=dict(article_row),
@@ -186,6 +198,7 @@ def claim_publish_job(
 
     with closing(_connect(database_path)) as conn:
         with conn:
+            conn.execute("BEGIN IMMEDIATE")
             current_row = _fetch_job(conn, job_id)
             if current_row is None:
                 raise PublishJobNotFoundError("发布任务不存在")
@@ -193,6 +206,25 @@ def claim_publish_job(
                 raise InvalidPublishJobTransitionError(
                     f"状态为 {current_row['status']} 的发布任务不能开始执行"
                 )
+            if not bool(current_row["demo"]) and current_row["account_id"] is not None:
+                account_busy = conn.execute(
+                    """
+                    SELECT 1
+                    FROM publish_jobs
+                    WHERE account_id = ? AND platform = ? AND status = 'processing'
+                      AND id <> ?
+                    LIMIT 1
+                    """,
+                    (
+                        current_row["account_id"],
+                        current_row["platform"],
+                        job_id,
+                    ),
+                ).fetchone()
+                if account_busy is not None:
+                    raise InvalidPublishJobTransitionError(
+                        "同一账号在该平台已有发布任务处理中，请等待完成后再试"
+                    )
             cursor = conn.execute(
                 """
                 UPDATE publish_jobs
@@ -243,9 +275,11 @@ def list_publish_jobs(
         ).fetchone()[0]
         rows = conn.execute(
             f"""
-            SELECT j.*, a.title AS article_title
+            SELECT j.*, a.title AS article_title,
+                   u.userName AS account_name
             FROM publish_jobs AS j
             JOIN articles AS a ON a.id = j.article_id
+            LEFT JOIN user_info AS u ON u.id = j.account_id
             {where_clause}
             ORDER BY j.created_at DESC, j.id DESC
             LIMIT ? OFFSET ?
@@ -539,9 +573,11 @@ def _normalize_authorization_tags(value: Any) -> list[str]:
 def _fetch_job(conn: sqlite3.Connection, job_id: int):
     return conn.execute(
         """
-        SELECT j.*, a.title AS article_title
+        SELECT j.*, a.title AS article_title,
+               u.userName AS account_name
         FROM publish_jobs AS j
         JOIN articles AS a ON a.id = j.article_id
+        LEFT JOIN user_info AS u ON u.id = j.account_id
         WHERE j.id = ?
         """,
         (job_id,),

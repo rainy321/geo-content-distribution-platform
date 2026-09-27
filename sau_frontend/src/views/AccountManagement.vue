@@ -34,8 +34,8 @@
     <section class="safety-note" aria-label="账号检测说明">
       <div class="note-icon"><el-icon><Connection /></el-icon></div>
       <div>
-        <strong>平台检测采用显式触发</strong>
-        <p>“刷新本地状态”不联网；只有点击某个账号的“检测登录”，才会打开无头浏览器访问该平台并更新最后检查时间。</p>
+        <strong>账号在线 ≠ 发布链路可用 ≠ AI 会采纳</strong>
+        <p>“刷新本地状态”不联网；只有显式检测才访问平台。真实发布还受渠道验证状态、滚动 24 小时建议量和最小间隔保护，公开链接也只代表进入后续抓取验证。</p>
       </div>
     </section>
 
@@ -85,6 +85,32 @@
             @check="checkAccount"
             @login="openLogin"
           />
+        </div>
+      </section>
+
+      <section v-if="overview.planned_platforms.length" class="platform-section roadmap" aria-labelledby="roadmap-platforms">
+        <div class="section-heading">
+          <div>
+            <span>CHANNEL ROADMAP / 03</span>
+            <h2 id="roadmap-platforms">经典平台缺口</h2>
+            <p>以下渠道尚未接入真实发布，不提供登录按钮；优先级按 GEO 证据价值与官方接入条件排序。</p>
+          </div>
+          <small>{{ overview.planned_platforms.length }} 个候选</small>
+        </div>
+        <div class="roadmap-grid">
+          <article v-for="platform in overview.planned_platforms" :key="platform.key" class="roadmap-card">
+            <header>
+              <span>{{ platform.priority }}</span>
+              <strong>{{ platform.name }}</strong>
+              <i>规划中</i>
+            </header>
+            <p>{{ platform.channel_role_label }}</p>
+            <dl>
+              <div><dt>AI / 搜索价值</dt><dd>{{ platform.crawl_label }}</dd></div>
+              <div><dt>接入路径</dt><dd>{{ platform.integration_path }}</dd></div>
+            </dl>
+            <small>{{ platform.release_note }}</small>
+          </article>
         </div>
       </section>
     </template>
@@ -168,6 +194,7 @@ import { apiUrl } from '@/config/api'
 const emptyOverview = () => ({
   summary: { total: 0, connected: 0, needs_action: 0, checking: 0 },
   platforms: [],
+  planned_platforms: [],
   accounts: []
 })
 
@@ -199,7 +226,7 @@ const PlatformCard = defineComponent({
       }).format(date)
     }
 
-    return () => h('article', { class: ['platform-card', { online: props.platform.connected_count > 0 }] }, [
+    return () => h('article', { class: ['platform-card', props.platform.delivery_state, { online: props.platform.connected_count > 0 }] }, [
       h('header', { class: 'platform-card-head' }, [
         h('div', { class: 'platform-code' }, props.platform.name.slice(0, 1)),
         h('div', [
@@ -207,6 +234,19 @@ const PlatformCard = defineComponent({
           h('h3', props.platform.name)
         ]),
         h('small', props.platform.connected_count ? `${props.platform.connected_count} ONLINE` : 'OFFLINE')
+      ]),
+      h('div', { class: 'platform-policy' }, [
+        h('div', { class: 'policy-title' }, [
+          h('span', { class: ['delivery-chip', props.platform.delivery_state] }, props.platform.delivery_label),
+          h('strong', props.platform.channel_role_label)
+        ]),
+        h('div', { class: 'policy-metrics' }, [
+          h('span', [h('b', `${props.platform.safe_daily_new} → ${props.platform.safe_daily_stable}`), ' 建议篇/24h']),
+          h('span', [h('b', `≥ ${props.platform.min_interval_hours}h`), ' 最小间隔']),
+          h('span', [h('b', props.platform.crawl_label), ' AI 可见性'])
+        ]),
+        h('p', props.platform.content_focus),
+        h('small', `风险提示：${props.platform.risk_note}`)
       ]),
       props.platform.accounts.length
         ? h('div', { class: 'account-stack' }, props.platform.accounts.map(account => {
@@ -216,7 +256,14 @@ const PlatformCard = defineComponent({
                 h('strong', account.account_name),
                 h('span', { class: ['status-chip', account.status] }, copy.label),
                 h('p', copy.note),
-                h('time', `最后检查：${formatCheckedAt(account.last_checked_at)}`)
+                h('time', `最后检查：${formatCheckedAt(account.last_checked_at)}`),
+                account.publish_policy
+                  ? h('div', { class: 'account-quota' }, [
+                      h('span', `滚动 24h 已占用 ${account.publish_policy.reserved_24h} / ${account.publish_policy.safe_daily_new}`),
+                      h('b', `剩余 ${account.publish_policy.remaining_new}`),
+                      h('small', '仅统计本系统任务；平台后台手工发布量未知')
+                    ])
+                  : null
               ]),
               h('div', { class: 'account-actions' }, [
                 h(ElButton, {
@@ -430,14 +477,26 @@ onBeforeUnmount(closeEventSource)
 .section-heading p { margin: 0; color: var(--muted); font-size: 12px; }
 .section-heading > small { color: var(--muted); font: 10px "Cascadia Mono", monospace; }
 
-.platform-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; }
+.platform-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; align-items: start; }
 .platform-grid.compact { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 :deep(.platform-card) { min-width: 0; border: 1px solid var(--rule); background: var(--paper); }
 :deep(.platform-card.online) { border-top-color: var(--teal); }
+:deep(.platform-card.paused) { border-top-color: #bd594f; }
 :deep(.platform-card-head) { display: grid; grid-template-columns: 42px 1fr auto; gap: 12px; align-items: center; padding: 16px 18px; border-bottom: 1px solid var(--rule); }
 :deep(.platform-code) { display: grid; place-items: center; width: 40px; height: 40px; color: white; background: var(--ink); font-weight: 800; }
 :deep(.platform-card-head h3) { margin: 3px 0 0; font-size: 18px; }
-:deep(.platform-card-head small) { color: #719093; font: 700 9px "Cascadia Mono", monospace; }
+:deep(.platform-card-head small) { color: #719093; font: 700 10px "Cascadia Mono", monospace; }
+:deep(.platform-policy) { padding: 14px 18px; border-bottom: 1px solid var(--rule); background: #f7faf9; }
+:deep(.policy-title) { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+:deep(.policy-title strong) { font-size: 13px; }
+:deep(.delivery-chip) { display: inline-flex; padding: 4px 7px; color: #176d68; background: #dff2ef; font-size: 10px; font-weight: 700; }
+:deep(.delivery-chip.assisted) { color: #80591f; background: #f7ead6; }
+:deep(.delivery-chip.paused) { color: #963f3f; background: #f7dede; }
+:deep(.policy-metrics) { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; margin-top: 11px; }
+:deep(.policy-metrics span) { min-width: 0; color: #6a7b7f; font-size: 10px; line-height: 1.45; }
+:deep(.policy-metrics b) { display: block; overflow: hidden; color: #24474e; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+:deep(.platform-policy > p) { margin: 11px 0 5px; color: #536a70; font-size: 11px; line-height: 1.6; }
+:deep(.platform-policy > small) { color: #8a5b2c; font-size: 10px; line-height: 1.5; }
 :deep(.account-stack) { padding: 0 18px; }
 :deep(.account-entry) { display: flex; justify-content: space-between; gap: 16px; padding: 15px 0; border-bottom: 1px solid #e1e8e6; }
 :deep(.account-entry:last-child) { border-bottom: 0; }
@@ -445,8 +504,12 @@ onBeforeUnmount(closeEventSource)
 :deep(.status-chip) { display: inline-flex; padding: 3px 6px; color: #637578; background: #e8eeec; font-size: 9px; font-weight: 700; }
 :deep(.status-chip.connected) { color: #08746f; background: #d9f2ee; }
 :deep(.status-chip.expired), :deep(.status-chip.missing_cookie) { color: #a06119; background: #f8ead7; }
-:deep(.account-identity p) { margin: 7px 0 2px; color: #5e7378; font-size: 11px; }
-:deep(.account-identity time) { color: #839194; font: 9px "Cascadia Mono", monospace; }
+:deep(.account-identity p) { margin: 7px 0 2px; color: #5e7378; font-size: 12px; }
+:deep(.account-identity time) { color: #839194; font: 10px "Cascadia Mono", monospace; }
+:deep(.account-quota) { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 9px; padding-top: 8px; border-top: 1px dashed #d7e1de; }
+:deep(.account-quota span) { color: #4f696e; font-size: 11px; }
+:deep(.account-quota b) { color: #08746f; font-size: 11px; }
+:deep(.account-quota small) { width: 100%; color: #879497; font-size: 9px; }
 :deep(.account-actions) { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; }
 :deep(.platform-empty) { display: flex; align-items: center; justify-content: space-between; gap: 14px; min-height: 62px; padding: 13px 18px; }
 :deep(.platform-empty p) { margin: 0; color: var(--muted); font-size: 12px; }
@@ -465,11 +528,25 @@ onBeforeUnmount(closeEventSource)
 .progress-symbol.success { background: #168f87; font-size: 34px; }
 .progress-symbol.failed { background: #bd594f; font-size: 34px; }
 
+.roadmap-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; }
+.roadmap-card { min-width: 0; padding: 16px; border: 1px dashed #afbfbc; background: rgba(255, 255, 255, .65); }
+.roadmap-card header { display: grid; grid-template-columns: auto 1fr auto; align-items: center; gap: 9px; }
+.roadmap-card header span { color: #087f81; font: 700 9px "Cascadia Mono", monospace; }
+.roadmap-card header strong { font-size: 14px; }
+.roadmap-card header i { padding: 3px 6px; color: #68797d; background: #e8eeec; font-size: 9px; font-style: normal; }
+.roadmap-card > p { min-height: 36px; margin: 12px 0; color: #405f65; font-size: 12px; line-height: 1.55; }
+.roadmap-card dl { margin: 0; }
+.roadmap-card dl div { display: grid; grid-template-columns: 88px 1fr; gap: 8px; padding: 6px 0; border-top: 1px solid #e0e7e5; }
+.roadmap-card dt { color: #7b898c; font-size: 10px; }
+.roadmap-card dd { margin: 0; color: #3f5b61; font-size: 10px; line-height: 1.45; }
+.roadmap-card > small { display: block; margin-top: 10px; color: #7a6b58; font-size: 9px; line-height: 1.5; }
+
 @media (max-width: 860px) {
   .page-hero { align-items: flex-start; flex-direction: column; }
   .hero-actions { justify-content: flex-start; }
   .hero-actions > span { text-align: left; }
   .platform-grid, .platform-grid.compact { grid-template-columns: 1fr; }
+  .roadmap-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
 @media (max-width: 560px) {
@@ -487,5 +564,7 @@ onBeforeUnmount(closeEventSource)
   :deep(.account-entry) { align-items: flex-start; flex-direction: column; }
   :deep(.account-actions) { width: 100%; }
   :deep(.account-actions .el-button) { flex: 1; }
+  :deep(.policy-metrics) { grid-template-columns: 1fr; }
+  .roadmap-grid { grid-template-columns: 1fr; }
 }
 </style>

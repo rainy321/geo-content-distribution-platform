@@ -78,9 +78,21 @@ class MediaAccountServiceTests(unittest.IsolatedAsyncioTestCase):
         zhihu = next(item for item in overview["platforms"] if item["key"] == "zhihu")
         toutiao = next(item for item in overview["platforms"] if item["key"] == "toutiao")
         self.assertEqual(zhihu["connected_count"], 1)
+        self.assertEqual(zhihu["safe_daily_new"], 1)
+        self.assertEqual(zhihu["safe_daily_stable"], 2)
         self.assertEqual(zhihu["accounts"][0]["status"], "connected")
+        self.assertEqual(
+            zhihu["accounts"][0]["publish_policy"]["remaining_new"],
+            1,
+        )
         self.assertEqual(toutiao["accounts"][0]["status"], "missing_cookie")
         self.assertNotIn("file_path", zhihu["accounts"][0])
+        self.assertTrue(
+            any(
+                item["key"] == "owned_web"
+                for item in overview["planned_platforms"]
+            )
+        )
 
     async def test_check_updates_status_and_last_checked_time(self):
         (self.cookies_dir / "zhihu.json").write_text("{}", encoding="utf-8")

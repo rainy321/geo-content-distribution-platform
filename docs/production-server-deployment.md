@@ -20,10 +20,10 @@ Internet -> Nginx :443 -> 127.0.0.1:5409 -> geo-platform-web
 
 ## 服务器目录
 
-推荐使用以下独立目录：
+当前正式服务器使用以下独立目录：
 
 ```text
-/opt/geo-platform/
+/srv/geo-platform/
   app/                 # 代码和 compose.production.yaml
   runtime/
     data/               # SQLite
@@ -41,7 +41,7 @@ Internet -> Nginx :443 -> 127.0.0.1:5409 -> geo-platform-web
    和主机防火墙。
 2. 确认 `5409` 未占用，并从现有 `server_name` 选择同一根域名下未使用的 GEO
    子域名；先完成 DNS 解析。
-3. 在 `/opt/geo-platform` 创建隔离目录，复制代码和运行时数据。迁移 SQLite 前先
+3. 在 `/srv/geo-platform` 创建隔离目录，复制代码和运行时数据。迁移 SQLite 前先
    备份并校验文件摘要；Cookie 只通过 SSH 传输。
 4. 从 `app.env.example` 创建服务器 Secret 文件。首次启动保持
    `ALLOW_REAL_PUBLISHING=false`。
@@ -52,6 +52,16 @@ Internet -> Nginx :443 -> 127.0.0.1:5409 -> geo-platform-web
 7. 配置 TLS 后验收登录、AI 生成、数据库持久化、素材上传和 Worker readiness。
 8. 平台 Cookie 逐个做只读登录检测；失效账号通过 VNC 人工登录。只有验收完成且
    项目所有者明确开启时，才把 `ALLOW_REAL_PUBLISHING` 改为 `true`。
+
+## 当前正式环境
+
+- HTTPS 入口：`https://geo.tongyuye.com`
+- Compose 项目：`geo-platform`
+- Web：仅绑定宿主机 `127.0.0.1:5409`
+- Worker：独立容器，使用 `sau-worker --check` 健康探针
+- 持久数据：`/srv/geo-platform/runtime/{data,cookies,media}`
+- 每日 SQLite 热备：`geo-platform-backup.timer`，校验后压缩并保留 14 天
+- 真实发布总开关：首次上线保持关闭，启用前必须完成服务器出口 IP 下的账号检查
 
 ## 回滚
 

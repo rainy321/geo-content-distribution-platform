@@ -30,6 +30,12 @@ class PublishJobsApiTests(unittest.TestCase):
                     """,
                     (project_id, "AI Agent 指南", "文章正文", '["AI"]', "ready"),
                 ).lastrowid
+                self.zhihu_account_id = conn.execute(
+                    """
+                    INSERT INTO user_info (type, filePath, userName, status)
+                    VALUES (9, 'zhihu-policy-test.json', '知乎风控测试号', 1)
+                    """
+                ).lastrowid
 
         self.original_database_path = app.config["DATABASE_PATH"]
         self.original_demo_mode = app.config["DEMO_MODE"]
@@ -200,6 +206,26 @@ class PublishJobsApiTests(unittest.TestCase):
         detail = self.client.get(f"/api/publish/jobs/{job['job_id']}").get_json()["data"]
         self.assertEqual(detail["status"], "queued")
         self.assertFalse(detail["demo"])
+
+    def test_real_job_binds_account_and_blocks_unsafe_repeat_reservation(self):
+        app.config["DEMO_MODE"] = False
+        payload = {
+            "article_id": self.article_id,
+            "platform": "zhihu",
+            "account_id": self.zhihu_account_id,
+        }
+
+        first = self.client.post("/api/publish", json=payload)
+        second = self.client.post("/api/publish", json=payload)
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(first.get_json()["data"]["account_id"], self.zhihu_account_id)
+        self.assertEqual(second.status_code, 429)
+        self.assertIn(
+            second.get_json()["data"]["reason_code"],
+            {"minimum_interval", "rolling_limit_reached"},
+        )
+        self.assertTrue(second.get_json()["data"]["manual_activity_unknown"])
 
     def test_scheduled_job_waits_instead_of_executing_early(self):
         response = self.client.post(

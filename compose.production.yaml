@@ -4,6 +4,10 @@ x-geo-runtime: &geo-runtime
   image: ${GEO_IMAGE:-geo-platform:production}
   build:
     context: .
+    args:
+      NODE_IMAGE: ${GEO_NODE_IMAGE:-dockerproxy.net/library/node:22.21.1@sha256:b84d52cd45bfe261096ccbf886955d431b8b9ed01b72eaef588e8886bda09e78}
+      PYTHON_IMAGE: ${GEO_PYTHON_IMAGE:-dockerproxy.net/library/python@sha256:04adf975cd21078f4ce5a7b1a7b6d8f83a7773428ae66268595869c2f990c21c}
+      PATCHRIGHT_CHROMIUM_URL: ${GEO_PATCHRIGHT_CHROMIUM_URL:-https://cdn.npmmirror.com/binaries/chrome-for-testing/145.0.7632.6/linux64/chrome-linux64.zip}
   env_file:
     - ./deploy/production/app.env
   environment:
@@ -43,6 +47,12 @@ services:
   worker:
     <<: *geo-runtime
     command: ["sau-worker"]
+    healthcheck:
+      test: ["CMD", "sau-worker", "--check"]
+      interval: 60s
+      timeout: 15s
+      start_period: 20s
+      retries: 3
     environment:
       DATABASE_PATH: /app/data/database.db
       COOKIES_DIRECTORY: /app/cookiesFile

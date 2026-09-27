@@ -13,6 +13,21 @@ PLATFORM_CAPABILITIES = (
         "requires_images": False,
         "requires_video": False,
         "supports_schedule": True,
+        "supports_auto_execute": False,
+        "delivery_state": "verified",
+        "delivery_label": "逐次确认可发布",
+        "crawl_value": "high",
+        "crawl_label": "公开长文信号强",
+        "channel_role": "answer_evidence",
+        "channel_role_label": "问题解释与证据",
+        "safe_daily_new": 1,
+        "safe_daily_stable": 2,
+        "min_interval_hours": 6,
+        "official_daily_limit": None,
+        "official_limit_note": "未核验到长期有效的统一公开硬上限",
+        "public_url_expected": True,
+        "content_focus": "问题先行，先给结论，再解释机制、适用边界与可核验来源；降低品牌露出密度。",
+        "risk_note": "避免同质回答、重复品牌曝光和批量铺量。",
     },
     {
         "key": "toutiao",
@@ -23,6 +38,21 @@ PLATFORM_CAPABILITIES = (
         "requires_images": False,
         "requires_video": False,
         "supports_schedule": True,
+        "supports_auto_execute": False,
+        "delivery_state": "verified",
+        "delivery_label": "逐次确认可发布",
+        "crawl_value": "high",
+        "crawl_label": "公开资讯页",
+        "channel_role": "freshness_distribution",
+        "channel_role_label": "时效与资讯覆盖",
+        "safe_daily_new": 2,
+        "safe_daily_stable": 5,
+        "min_interval_hours": 3,
+        "official_daily_limit": 50,
+        "official_limit_note": "平台公开规则为全体裁合计上限；内控阈值更低",
+        "public_url_expected": True,
+        "content_focus": "标题和导语先回答新闻点，突出时效、事实来源、数据日期与读者影响。",
+        "risk_note": "拒审、删除和同步内容也可能占用平台额度；不得把 50/日当建议量。",
     },
     {
         "key": "baijiahao",
@@ -33,6 +63,21 @@ PLATFORM_CAPABILITIES = (
         "requires_images": True,
         "requires_video": False,
         "supports_schedule": True,
+        "supports_auto_execute": False,
+        "delivery_state": "verified",
+        "delivery_label": "逐次确认可发布",
+        "crawl_value": "high",
+        "crawl_label": "百度生态公开图文",
+        "channel_role": "search_distribution",
+        "channel_role_label": "搜索与实体发现",
+        "safe_daily_new": 2,
+        "safe_daily_stable": 3,
+        "min_interval_hours": 4,
+        "official_daily_limit": None,
+        "official_limit_note": "额度随账号权益和后台状态变化，以创作后台为准",
+        "public_url_expected": True,
+        "content_focus": "实体名称一致，摘要直接回答主题；图片与段落对应，并给出清晰来源和更新时间。",
+        "risk_note": "以后台实时权益为最终上限，避免近似标题和同文多发。",
     },
     {
         "key": "sohu",
@@ -43,6 +88,21 @@ PLATFORM_CAPABILITIES = (
         "requires_images": False,
         "requires_video": False,
         "supports_schedule": True,
+        "supports_auto_execute": False,
+        "delivery_state": "verified",
+        "delivery_label": "逐次确认可发布",
+        "crawl_value": "high",
+        "crawl_label": "公开长文页",
+        "channel_role": "authority_distribution",
+        "channel_role_label": "权威转载与长文",
+        "safe_daily_new": 2,
+        "safe_daily_stable": 3,
+        "min_interval_hours": 4,
+        "official_daily_limit": 5,
+        "official_limit_note": "已核验公开规则为个人及企业/机构账号 5 篇/日；内控阈值更低",
+        "public_url_expected": True,
+        "content_focus": "采用完整长文、明确作者与来源，把品牌事实写进可独立引用的段落。",
+        "risk_note": "拒审或删除内容也可能计入平台日额度。",
     },
     {
         "key": "xiaohongshu",
@@ -53,6 +113,21 @@ PLATFORM_CAPABILITIES = (
         "requires_images": True,
         "requires_video": False,
         "supports_schedule": True,
+        "supports_auto_execute": False,
+        "delivery_state": "assisted",
+        "delivery_label": "人工复核后发布",
+        "crawl_value": "medium",
+        "crawl_label": "社交验证信号",
+        "channel_role": "experience_validation",
+        "channel_role_label": "场景与口碑表达",
+        "safe_daily_new": 1,
+        "safe_daily_stable": 2,
+        "min_interval_hours": 6,
+        "official_daily_limit": None,
+        "official_limit_note": "未核验到长期有效的统一公开硬上限",
+        "public_url_expected": True,
+        "content_focus": "用真实使用场景、清单与图片表达体验，弱化广告腔；关键事实仍链接到公开证据源。",
+        "risk_note": "商业内容、AI 内容与体验结论必须按平台要求声明。",
     },
     {
         "key": "douyin",
@@ -63,6 +138,21 @@ PLATFORM_CAPABILITIES = (
         "requires_images": True,
         "requires_video": False,
         "supports_schedule": True,
+        "supports_auto_execute": False,
+        "delivery_state": "paused",
+        "delivery_label": "真实自动发布暂停",
+        "crawl_value": "limited",
+        "crawl_label": "发现渠道，引用有限",
+        "channel_role": "short_form_discovery",
+        "channel_role_label": "短内容发现",
+        "safe_daily_new": 1,
+        "safe_daily_stable": 2,
+        "min_interval_hours": 6,
+        "official_daily_limit": None,
+        "official_limit_note": "未核验到长期有效的统一公开硬上限",
+        "public_url_expected": True,
+        "content_focus": "前三秒给出问题与结论，画面字幕和正文保持一致，并保留可检索的完整文字摘要。",
+        "risk_note": "当前真实链路未取得可核验入库结果，只允许生成草稿和人工发布。",
     },
     {
         "key": "kuaishou",
@@ -73,6 +163,21 @@ PLATFORM_CAPABILITIES = (
         "requires_images": True,
         "requires_video": False,
         "supports_schedule": True,
+        "supports_auto_execute": False,
+        "delivery_state": "paused",
+        "delivery_label": "真实自动发布暂停",
+        "crawl_value": "limited",
+        "crawl_label": "发现渠道，引用有限",
+        "channel_role": "short_form_discovery",
+        "channel_role_label": "短内容发现",
+        "safe_daily_new": 1,
+        "safe_daily_stable": 2,
+        "min_interval_hours": 6,
+        "official_daily_limit": None,
+        "official_limit_note": "未核验到长期有效的统一公开硬上限",
+        "public_url_expected": True,
+        "content_focus": "本地化表达问题、步骤和结果，使用清晰字幕与摘要，不复制其他平台文案。",
+        "risk_note": "当前真实链路未取得可核验入库结果，只允许生成草稿和人工发布。",
     },
     {
         "key": "bilibili",
@@ -83,6 +188,21 @@ PLATFORM_CAPABILITIES = (
         "requires_images": False,
         "requires_video": True,
         "supports_schedule": True,
+        "supports_auto_execute": False,
+        "delivery_state": "assisted",
+        "delivery_label": "视频人工复核",
+        "crawl_value": "medium",
+        "crawl_label": "公开视频与字幕",
+        "channel_role": "video_evidence",
+        "channel_role_label": "视频解释与演示",
+        "safe_daily_new": 1,
+        "safe_daily_stable": 1,
+        "min_interval_hours": 12,
+        "official_daily_limit": None,
+        "official_limit_note": "视频投稿能力与账号状态动态变化",
+        "public_url_expected": True,
+        "content_focus": "标题回答问题，简介给出完整摘要、章节、字幕/转写和证据链接。",
+        "risk_note": "禁止机器批量同质投稿；商用前还需确认底层上传组件许可。",
     },
     {
         "key": "channels",
@@ -93,6 +213,21 @@ PLATFORM_CAPABILITIES = (
         "requires_images": False,
         "requires_video": True,
         "supports_schedule": True,
+        "supports_auto_execute": False,
+        "delivery_state": "assisted",
+        "delivery_label": "仅平台后台核验",
+        "crawl_value": "limited",
+        "crawl_label": "缺少稳定 Web 公链",
+        "channel_role": "private_ecosystem_video",
+        "channel_role_label": "微信生态触达",
+        "safe_daily_new": 1,
+        "safe_daily_stable": 1,
+        "min_interval_hours": 12,
+        "official_daily_limit": None,
+        "official_limit_note": "未核验到长期有效的统一公开硬上限",
+        "public_url_expected": False,
+        "content_focus": "视频内完整说清问题和结论，保留字幕；把可引用证据同步沉淀到官网或公开长文页。",
+        "risk_note": "没有可核验 Web 公链时，不计入 AI 可抓取交付。",
     },
     {
         "key": "tiktok",
@@ -103,6 +238,102 @@ PLATFORM_CAPABILITIES = (
         "requires_images": False,
         "requires_video": True,
         "supports_schedule": True,
+        "supports_auto_execute": False,
+        "delivery_state": "assisted",
+        "delivery_label": "视频人工复核",
+        "crawl_value": "medium",
+        "crawl_label": "国际公开视频信号",
+        "channel_role": "international_video",
+        "channel_role_label": "国际视频发现",
+        "safe_daily_new": 1,
+        "safe_daily_stable": 1,
+        "min_interval_hours": 12,
+        "official_daily_limit": None,
+        "official_limit_note": "官方 Direct Post 配额按创作者动态计算，常见约 15/24h；不是产品建议量",
+        "public_url_expected": True,
+        "content_focus": "按目标语言本地化标题、说明、字幕和章节，并链接到可公开访问的证据页。",
+        "risk_note": "规模化发布应迁移到通过审核的官方 Content Posting API，并保留用户预览与确认。",
+    },
+)
+
+
+PLANNED_PLATFORM_CATALOG = (
+    {
+        "key": "owned_web",
+        "name": "自有官网 / WordPress",
+        "priority": "P0-NEXT",
+        "availability": "planned",
+        "crawl_value": "high",
+        "crawl_label": "主证据源",
+        "channel_role_label": "可控、可索引的品牌事实中枢",
+        "integration_path": "WordPress REST API / CMS Webhook",
+        "release_note": "两天版先提供发布包与抓取检查；正式连接需站点凭据和回调配置。",
+    },
+    {
+        "key": "wechat_official",
+        "name": "微信公众号",
+        "priority": "P1",
+        "availability": "planned",
+        "crawl_value": "medium",
+        "crawl_label": "微信生态长文",
+        "channel_role_label": "私域触达与品牌沉淀",
+        "integration_path": "公众号草稿/发布能力（按账号权限）",
+        "release_note": "先做草稿导出；取得认证账号与接口权限后再开放发布。",
+    },
+    {
+        "key": "weibo",
+        "name": "微博",
+        "priority": "P1",
+        "availability": "planned",
+        "crawl_value": "medium",
+        "crawl_label": "公开时效信号",
+        "channel_role_label": "事件、声明与实体一致性",
+        "integration_path": "微博开放平台官方接口/CLI",
+        "release_note": "适合短内容和链接分发，不替代公开证据长文。",
+    },
+    {
+        "key": "youtube",
+        "name": "YouTube",
+        "priority": "P1",
+        "availability": "planned",
+        "crawl_value": "high",
+        "crawl_label": "国际视频与字幕",
+        "channel_role_label": "视频搜索、字幕与国际覆盖",
+        "integration_path": "YouTube Data API + OAuth",
+        "release_note": "需完成 API 项目审核，否则新项目上传内容可能只能设为私密。",
+    },
+    {
+        "key": "cnblogs",
+        "name": "博客园",
+        "priority": "P0-NEXT",
+        "availability": "planned",
+        "crawl_value": "high",
+        "crawl_label": "技术问题长文",
+        "channel_role_label": "技术与 B2B 问题覆盖",
+        "integration_path": "官方 PAT 发文 API",
+        "release_note": "技术类客户可作为两天条件项；需要客户提供 PAT，并保留 AIGC 标记和审核状态。",
+    },
+    {
+        "key": "developer_communities",
+        "name": "CSDN / 掘金",
+        "priority": "P2",
+        "availability": "planned",
+        "crawl_value": "high",
+        "crawl_label": "技术问题长文",
+        "channel_role_label": "技术与 B2B 问题覆盖",
+        "integration_path": "发布包 + 人工确认；逐站核验官方能力",
+        "release_note": "未核验到通用第三方写入 API，不做 Cookie 批量自动发布。",
+    },
+    {
+        "key": "international_text",
+        "name": "LinkedIn / Medium",
+        "priority": "P2",
+        "availability": "planned",
+        "crawl_value": "medium",
+        "crawl_label": "国际专业长文",
+        "channel_role_label": "英文品牌与专业受众",
+        "integration_path": "官方 API 可用性核验 + 人工确认",
+        "release_note": "仅在客户有国际问题簇与英文证据时接入。",
     },
 )
 
@@ -111,13 +342,44 @@ PLATFORM_BY_ACCOUNT_TYPE = {
     item["account_type"]: item for item in PLATFORM_CAPABILITIES
 }
 SUPPORTED_PUBLISH_PLATFORMS = frozenset(PLATFORM_BY_KEY)
+PLATFORM_ALIASES = {
+    "搜狐": "sohu",
+    "搜狐号": "sohu",
+    "b站": "bilibili",
+    "哔哩哔哩": "bilibili",
+    "微信视频号": "channels",
+}
 
 
 def list_platform_capabilities() -> list[dict[str, Any]]:
     return [dict(item) for item in PLATFORM_CAPABILITIES]
 
 
+def list_planned_platforms() -> list[dict[str, Any]]:
+    return [dict(item) for item in PLANNED_PLATFORM_CATALOG]
+
+
 def get_platform_capability(platform: str) -> dict[str, Any] | None:
-    normalized = str(platform or "").strip().lower()
+    normalized = str(platform or "").strip().casefold()
+    normalized = PLATFORM_ALIASES.get(normalized, normalized)
     capability = PLATFORM_BY_KEY.get(normalized)
+    if capability is None:
+        capability = next(
+            (
+                item
+                for item in PLATFORM_CAPABILITIES
+                if str(item["name"]).strip().casefold() == normalized.casefold()
+            ),
+            None,
+        )
     return dict(capability) if capability is not None else None
+
+
+def get_platform_content_guidance(platform: str) -> str:
+    capability = get_platform_capability(platform)
+    if capability is None:
+        return (
+            "通用公开内容：先直接回答问题，再给出可核验事实、适用边界、"
+            "更新时间和来源；避免复制铺量。"
+        )
+    return str(capability["content_focus"])

@@ -1,0 +1,66 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+deploy_user="dongai-deploy"
+deploy_uid="$(id -u "$deploy_user")"
+runtime_dir="/run/user/$deploy_uid"
+docker_socket="unix://$runtime_dir/docker.sock"
+container="geo-platform-web-1"
+backup_dir="/srv/geo-platform/backups/scheduled"
+stamp="$(date -u +%Y%m%dT%H%M%SZ)"
+container_copy="/app/data/.scheduled-backup-$stamp.db"
+output="$backup_dir/geo-platform-$stamp.db"
+
+install -d -m 0700 -o "$deploy_user" -g "$deploy_user" "$backup_dir"
+
+run_docker() {
+  runuser -u "$deploy_user" -- env \
+    XDG_RUNTIME_DIR="$runtime_dir" \
+    DOCKER_HOST="$docker_socket" \
+    docker "$@"
+}
+
+cleanup() {
+  run_docker exec "$container" python -c \
+    'from pathlib import Path; import sys; Path(sys.argv[1]).unlink(missing_ok=True)' \
+    "$container_copy" >/dev/null 2>&1 || true
+}
+trap cleanup EXIT
+
+test "$(run_docker inspect --format '{{.State.Running}}' "$container")" = "true"
+run_docker exec "$container" python -c '
+import sqlite3
+import sys
+from pathlib import Path
+
+source_path = Path("/app/data/database.db")
+target_path = Path(sys.argv[1])
+target_path.unlink(missing_ok=True)
+
+with sqlite3.connect(source_path) as source:
+    if source.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+        raise SystemExit("source SQLite quick_check failed")
+    with sqlite3.connect(target_path) as target:
+        source.backup(target)
+        if target.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            raise SystemExit("backup SQLite quick_check failed")
+' "$container_copy"
+
+run_docker cp "$container:$container_copy" "$output"
+cleanup
+trap - EXIT
+
+chown "$deploy_user:$deploy_user" "$output"
+chmod 0600 "$output"
+gzip -6 "$output"
+gzip -t "$output.gz"
+sha256sum "$output.gz" > "$output.gz.sha256"
+chown "$deploy_user:$deploy_user" "$output.gz" "$output.gz.sha256"
+chmod 0600 "$output.gz" "$output.gz.sha256"
+
+find "$backup_dir" -maxdepth 1 -type f \
+  \( -name 'geo-platform-*.db.gz' -o -name 'geo-platform-*.db.gz.sha256' \) \
+  -mtime +14 -delete
+
+logger -t geo-platform-backup "verified backup created: $(basename "$output.gz")"
+printf 'GEO_PLATFORM_BACKUP_OK=%s\n' "$output.gz"

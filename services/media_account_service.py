@@ -7,15 +7,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
-from services.platform_capability_service import PLATFORM_CAPABILITIES
+from services.platform_capability_service import (
+    PLATFORM_CAPABILITIES,
+    list_planned_platforms,
+)
 
 
 PLATFORM_DEFINITIONS = tuple(
     {
+        **item,
         "type": item["account_type"],
-        "key": item["key"],
-        "name": item["name"],
-        "priority": item["priority"],
     }
     for item in PLATFORM_CAPABILITIES
 )
@@ -44,13 +45,50 @@ def get_media_accounts_overview(
             ORDER BY type, id
             """
         ).fetchall()
+        usage_rows = conn.execute(
+            """
+            SELECT account_id, platform,
+                   COUNT(*) AS reserved_24h,
+                   SUM(CASE WHEN started_at IS NOT NULL THEN 1 ELSE 0 END)
+                       AS attempted_24h,
+                   MAX(started_at) AS last_attempt_at
+            FROM publish_jobs
+            WHERE demo = 0
+              AND account_id IS NOT NULL
+              AND created_at >= datetime('now', '-24 hours')
+            GROUP BY account_id, platform
+            """
+        ).fetchall()
 
+    usage_by_account = {
+        (int(row["account_id"]), str(row["platform"])): dict(row)
+        for row in usage_rows
+    }
     accounts = [_serialize_account(row, cookie_dir) for row in rows]
     platforms = []
     for definition in PLATFORM_DEFINITIONS:
         platform_accounts = [
             account for account in accounts if account["type"] == definition["type"]
         ]
+        for account in platform_accounts:
+            usage = usage_by_account.get(
+                (account["id"], definition["key"]),
+                {},
+            )
+            reserved_24h = int(usage.get("reserved_24h") or 0)
+            safe_daily_new = int(definition["safe_daily_new"])
+            safe_daily_stable = int(definition["safe_daily_stable"])
+            account["publish_policy"] = {
+                "reserved_24h": reserved_24h,
+                "attempted_24h": int(usage.get("attempted_24h") or 0),
+                "remaining_new": max(safe_daily_new - reserved_24h, 0),
+                "remaining_stable": max(safe_daily_stable - reserved_24h, 0),
+                "safe_daily_new": safe_daily_new,
+                "safe_daily_stable": safe_daily_stable,
+                "min_interval_hours": int(definition["min_interval_hours"]),
+                "last_attempt_at": usage.get("last_attempt_at"),
+                "delivery_state": definition["delivery_state"],
+            }
         platforms.append(
             {
                 **definition,
@@ -73,6 +111,7 @@ def get_media_accounts_overview(
             "checking": sum(account["status"] == "checking" for account in accounts),
         },
         "platforms": platforms,
+        "planned_platforms": list_planned_platforms(),
         "accounts": accounts,
     }
 

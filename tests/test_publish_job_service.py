@@ -264,6 +264,36 @@ class PublishJobServiceTests(unittest.TestCase):
         ):
             claim_publish_job(self.db_path, job["id"])
 
+    def test_only_one_job_per_account_and_platform_can_be_processing(self):
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                account_id = conn.execute(
+                    """
+                    INSERT INTO user_info (type, filePath, userName, status)
+                    VALUES (9, 'zhihu-concurrency.json', '知乎并发测试号', 1)
+                    """
+                ).lastrowid
+        first = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="zhihu",
+            account_id=account_id,
+        )
+        second = create_publish_job(
+            self.db_path,
+            article_id=self.article_id,
+            platform="zhihu",
+            account_id=account_id,
+        )
+
+        claim_publish_job(self.db_path, first["id"])
+
+        with self.assertRaisesRegex(
+            InvalidPublishJobTransitionError,
+            "同一账号",
+        ):
+            claim_publish_job(self.db_path, second["id"])
+
     def test_updates_processing_message_without_finishing_job(self):
         job = create_publish_job(
             self.db_path,

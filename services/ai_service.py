@@ -13,6 +13,8 @@ from urllib.parse import urlsplit
 
 import requests
 
+from services.platform_capability_service import get_platform_content_guidance
+
 
 logger = logging.getLogger(__name__)
 if not logger.handlers:
@@ -334,6 +336,7 @@ def _build_prompt(
 ) -> str:
     keyword_text = "、".join(keywords) if keywords else "无指定关键词"
     platform_text = target_platform or "通用内容媒体平台"
+    platform_guidance = get_platform_content_guidance(target_platform)
     template_text = str(template_instruction or "").strip()
     template_section = (
         f"\n本次内容模板的额外要求：\n{template_text}\n"
@@ -352,6 +355,7 @@ def _build_prompt(
 文章主题：{topic}
 内容类型：{content_type}
 目标平台：{platform_text}
+目标平台写作重点：{platform_guidance}
 {template_section}
 
 要求：
@@ -362,6 +366,9 @@ def _build_prompt(
 5. 只使用输入中能够确认的品牌或产品事实，不编造数据。
 6. 包含 FAQ 和总结。
 7. 内容应适合媒体平台直接发布。
+8. 先回答用户问题，再自然关联品牌；关键事实要紧邻可核验来源、日期或待补充标记。
+9. 不得暗示内容一定会被搜索引擎或生成式 AI 收录、引用或推荐。
+10. 同一主题用于多个平台时应按平台语境重写，不生成机械同义替换或批量复制稿。
 
 只返回一个 JSON 对象，不要附加解释：
 {{

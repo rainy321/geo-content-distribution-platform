@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the GEO Platform verified backup every day
+
+[Timer]
+OnCalendar=*-*-* 03:10:00 Asia/Shanghai
+RandomizedDelaySec=20m
+Persistent=true
+Unit=geo-platform-backup.service
+
+[Install]
+WantedBy=timers.target

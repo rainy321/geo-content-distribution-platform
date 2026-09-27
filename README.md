@@ -160,13 +160,15 @@ DEMO_MODE=true python sau_backend.py
 
 Demo Mode 首次连接到**完全空的数据库**时，会在一个事务内准备“XX科技（示例数据）”、6 篇带“示例数据”标签的文章，以及覆盖成功、失败、等待确认和计划中状态的演示发布历史。重复启动不会重复写入；只要数据库里已有任意项目、文章或发布任务，种子服务就会跳过，不会把样例混进用户数据。可通过 `SEED_DEMO_DATA=false` 单独关闭这一行为。
 
-## 在线演示与部署边界
+## 正式部署与在线演示边界
 
-Vercel 生产地址：[https://geo-content-distribution-platform.vercel.app](https://geo-content-distribution-platform.vercel.app)
+正式环境：[https://geo.tongyuye.com](https://geo.tongyuye.com)
 
-这是真实可访问的 GEO 管理台与 Demo API 部署，但不是云端媒体发布 Worker。线上固定使用 `DEMO_MODE=true`、`ALLOW_REAL_PUBLISHING=false`，不保存本地账号 Cookie，也不打包 Playwright、Patchright 和 OpenCV。SQLite、素材和示例数据位于 Vercel 函数的临时目录，实例重建后可能重置；默认 AI 连接已通过 Vercel Production 环境变量配置，密钥类型为 Secret。真实媒体登录和发布继续由本地浏览器 Worker 执行。
+正式环境运行在受控 Linux 服务器的独立 `geo-platform` Compose 项目中：Web 只绑定宿主机 `127.0.0.1:5409`，由 Nginx 提供 HTTPS；独立 Worker 与 Web 共享持久 SQLite、Cookie 和素材目录。服务器端已配置默认 AI、运营访问门、日志轮转、容器健康检查、证书自动续期和每日校验数据库备份。首次上线仍保持 `ALLOW_REAL_PUBLISHING=false`；迁移 Cookie 在服务器出口 IP 下逐个验证后，再由项目所有者显式开启真实发布总开关。
 
-当前在线演示启用了单运营者访问口令：口令只在部署环境中保存，验证成功后由后端签发 HttpOnly、SameSite=Lax 的短期会话 Cookie。AI 生成、优化和登录尝试默认使用进程内限流；配置 Upstash Redis 的两个 REST Secret 后会自动切换为跨实例原子计数，供应商暂时不可用时退回已预热的本地安全网。接入真实业务数据前，仍必须增加持久数据库/对象存储；云端真实媒体发布还需要独立长驻 Worker，且不得把媒体 Cookie 或模型密钥写进仓库或前端变量。
+旧版 Vercel Demo 地址：[https://geo-content-distribution-platform.vercel.app](https://geo-content-distribution-platform.vercel.app)。该部署仍固定使用 `DEMO_MODE=true`、`ALLOW_REAL_PUBLISHING=false`，不保存账号 Cookie，也不打包浏览器 Worker；其临时 SQLite 和素材不能视为正式数据源。
+
+两个公网入口都启用了单运营者访问口令：口令只在部署环境中保存，验证成功后由后端签发 HttpOnly、SameSite=Lax、HTTPS-only 的会话 Cookie。AI 生成、优化和登录尝试默认使用进程内限流；单机正式环境不需要跨实例计数，未来横向扩容时可配置 Upstash Redis 的两个 REST Secret。
 
 ### 生产访问控制与独立 Worker
 
@@ -184,7 +186,7 @@ sau-worker
 sau-worker --once
 ```
 
-Vercel 控制面、持久数据库、私有素材和本地/长驻 Worker 的生产拆分方案见 [生产基础设施落地清单](docs/production-infrastructure-plan.md)。
+正式服务器拓扑与回滚边界见 [生产服务器部署方案](docs/production-server-deployment.md)；多实例扩容路径见 [生产基础设施落地清单](docs/production-infrastructure-plan.md)。
 
 `--check` 会验证数据库、Cookie/素材目录、已连接账号数量，以及真实模式所需的浏览器运行时；它只做本地准备与检查，不会访问知乎等发布平台。Worker 继续复用同一套 SQLite、素材目录、Cookie 目录、授权指纹和 PublisherAdapter。Web 与 Worker 必须挂载同一份持久数据；在没有持久存储的 Vercel 函数中不要启动媒体 Worker。
 

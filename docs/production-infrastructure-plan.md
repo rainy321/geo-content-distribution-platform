@@ -8,12 +8,13 @@
 
 ## 当前边界
 
-- Vercel 只承载 Web 控制面和轻量 API，`DEMO_MODE=true`、`ALLOW_REAL_PUBLISHING=false`、`RUN_PUBLISH_SCHEDULER=false`。
-- Vercel Function 的本地文件系统只有临时 `/tmp`，不能作为文章、任务、Cookie 或素材的持久存储。
-- 真实发布必须在安装浏览器、能够长期运行且可安全保存媒体账号会话的 Worker 主机执行。
+- `https://geo.tongyuye.com` 是正式入口；Web 与独立 Worker 已部署到同一台受控 Linux 服务器并共享 `/srv/geo-platform/runtime`。
+- 正式环境使用持久 SQLite、私有 Cookie/素材目录和独立每日热备；Web 仅绑定 `127.0.0.1:5409`，由现有 Nginx 提供 HTTPS。
+- 旧 Vercel 地址只保留为可重建 Demo，继续固定 `DEMO_MODE=true`、`ALLOW_REAL_PUBLISHING=false`、`RUN_PUBLISH_SCHEDULER=false`。
+- 首次上线的服务器 Worker 也保持真实发布总开关关闭；逐个平台验证迁移 Cookie 后才显式开启。
 - 当前代码已完成运行时 `DATABASE_PATH`、`COOKIES_DIRECTORY`、`MEDIA_ROOT` 隔离；旧版兼容接口不再绕过这些配置。
 
-## 推荐的最小组合
+## 多实例扩容时的推荐组合
 
 ### 1. 业务数据库：Turso / libSQL
 
@@ -55,16 +56,15 @@
 
 官方资料：<https://upstash.com/docs/redis/howto/vercelintegration>
 
-### 4. 发布 Worker：先使用当前 Windows 主机
+### 4. 发布 Worker：当前正式 Linux 主机
 
-这是最少迁移的第一阶段：平台账号已经在此机器完成登录，浏览器运行时、Cookie 和素材目录均可用，`sau-worker --check` 已返回 `ready`。
+正式服务器已构建 Playwright 与 Patchright 浏览器运行时，迁移 12 个账号记录及其 Cookie、素材和 SQLite；`sau-worker --check` 在模拟真实模式下返回 `ready`，Web 与 Worker 容器均有独立健康探针。
 
 启用真实常驻执行前必须：
 
-- Web 与 Worker 已切换到同一个持久数据库；否则 Vercel 创建的任务无法被本机 Worker 看到。
-- Worker 能以最小权限读取私有素材与账号 Cookie。
-- 本机设置受控的开机启动/进程守护、日志轮转和磁盘空间告警。
-- Worker 环境设置 `DEMO_MODE=false`、`ALLOW_REAL_PUBLISHING=true`；Vercel 端仍保持真实发布关闭。
+- 从正式服务器出口 IP 逐个执行账号只读登录检查，失效账号由项目所有者重新登录。
+- 确认新建任务的文章、账号、素材、渠道和执行时间与授权指纹完全一致。
+- 把服务器 Worker 的 `ALLOW_REAL_PUBLISHING` 从 `false` 显式改为 `true`；Vercel 端仍保持关闭。
 - 先执行 `sau-worker --check`，再用一条新建的 Demo 定时任务跑通领取、执行和状态回写，最后才验收真实定时发布。
 
 ## 不应采用的方案
@@ -74,11 +74,11 @@
 - 不把媒体账号 Cookie 放在 Public Blob 或前端可读取变量中。
 - 不同时迁移到 PostgreSQL、重写全部数据访问层并更换发布运行时；这会背离 MVP 的最小侵入原则。
 
-## 需要项目所有者确认的外部动作
+## 未来横向扩容需要项目所有者确认的外部动作
 
 1. 创建 Turso 资源并确认套餐。
 2. 创建私有对象存储并确认套餐。
 3. 创建或连接 Upstash Redis；Free 适合当前 MVP，超限后再评估升级。
-4. 确认当前 Windows 主机是否允许作为第一阶段常驻 Worker；如果不允许，再选择 VPS/托管容器主机。
+4. 确认扩容后的浏览器 Worker 主机、出口 IP 和 Cookie 迁移策略。
 
 完成以上四项后，实施顺序固定为：数据库连接工厂与数据迁移 → 私有对象存储 → Web/Worker 联通 → Upstash → Demo 定时任务 → 单次授权真实定时验收。

@@ -173,7 +173,7 @@ class RealPublishApiTests(unittest.TestCase):
 
         self.assertTrue(payload["can_execute_real"])
 
-    def test_creates_pre_authorized_real_scheduled_job_only_behind_gate(self):
+    def test_public_api_rejects_unattended_real_scheduled_execution(self):
         payload = {
             "article_id": self.article_id,
             "platform": "zhihu",
@@ -202,12 +202,12 @@ class RealPublishApiTests(unittest.TestCase):
             },
         )
 
-        self.assertEqual(blocked.status_code, 403)
-        self.assertEqual(created.status_code, 201)
-        self.assertEqual(created.get_json()["data"]["status"], "scheduled")
-        self.assertTrue(created.get_json()["data"]["auto_execute"])
-        self.assertTrue(created.get_json()["data"]["authorization_bound"])
-        self.assertNotIn("authorization_fingerprint", created.get_json()["data"])
+        self.assertEqual(blocked.status_code, 409)
+        self.assertEqual(created.status_code, 409)
+        self.assertEqual(
+            created.get_json()["data"]["reason_code"],
+            "auto_execute_not_allowed",
+        )
         self.assertEqual(immediate.status_code, 400)
         self.assertEqual(malformed.status_code, 400)
 

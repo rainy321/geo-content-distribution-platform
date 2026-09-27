@@ -659,13 +659,16 @@
                   <span class="label">每天发布视频数：</span>
                   <el-select v-model="tab.videosPerDay" placeholder="选择发布数量">
                     <el-option
-                      v-for="num in 55"
+                      v-for="num in scheduleLimit(tab.selectedPlatform)"
                       :key="num"
                       :label="num"
                       :value="num"
                     />
                   </el-select>
                 </div>
+                <p class="schedule-risk-note">
+                  当前最多显示该平台稳定账号的产品内控上限；新账号应从 {{ newAccountLimit(tab.selectedPlatform) }} 条/24h 开始。旧版真实直发默认关闭。
+                </p>
                 <div class="schedule-item">
                   <span class="label">每天发布时间：</span>
                   <el-time-select
@@ -769,6 +772,20 @@ const platforms = [
   { key: 9, name: '知乎' }
 ]
 
+const platformSchedulePolicies = {
+  1: { newLimit: 1, stableLimit: 2 },
+  2: { newLimit: 1, stableLimit: 1 },
+  3: { newLimit: 1, stableLimit: 2 },
+  4: { newLimit: 1, stableLimit: 2 },
+  5: { newLimit: 2, stableLimit: 3 },
+  6: { newLimit: 1, stableLimit: 1 },
+  7: { newLimit: 2, stableLimit: 5 },
+  8: { newLimit: 2, stableLimit: 3 },
+  9: { newLimit: 1, stableLimit: 2 }
+}
+const scheduleLimit = platformType => platformSchedulePolicies[platformType]?.stableLimit || 1
+const newAccountLimit = platformType => platformSchedulePolicies[platformType]?.newLimit || 1
+
 const defaultTabInit = {
   name: 'tab1',
   label: '发布1',
@@ -826,6 +843,9 @@ const onContentTypeChange = (tab) => {
 }
 
 const onPlatformChange = (tab) => {
+  const maximum = scheduleLimit(tab.selectedPlatform)
+  tab.videosPerDay = Math.min(Number(tab.videosPerDay) || 1, maximum)
+  tab.dailyTimes = (tab.dailyTimes || ['10:00']).slice(0, tab.videosPerDay)
   if (articleOnlyPlatforms.includes(tab.selectedPlatform)) {
     tab.contentType = 'article'
     // 搜狐默认信息来源 / 知乎默认创作声明
@@ -2093,6 +2113,16 @@ const batchPublish = async () => {
               .el-button {
                 margin-left: 10px;
               }
+            }
+
+            .schedule-risk-note {
+              margin: -4px 0 15px;
+              padding: 9px 11px;
+              border-left: 3px solid #d39a45;
+              background: #fff8ec;
+              color: #7a6648;
+              font-size: 12px;
+              line-height: 1.6;
             }
           }
         }

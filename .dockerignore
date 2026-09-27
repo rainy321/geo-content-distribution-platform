@@ -3,6 +3,11 @@
 .idea
 .worktrees
 .tmp
+Dockerfile*
+compose*.yaml
+deploy
+docs
+tests
 /.env
 deploy/production/app.env
 runtime
