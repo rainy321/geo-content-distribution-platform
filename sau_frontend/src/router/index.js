@@ -8,6 +8,7 @@ import ProjectManagement from '../views/ProjectManagement.vue'
 import ContentCreation from '../views/ContentCreation.vue'
 import ContentLibrary from '../views/ContentLibrary.vue'
 import GeoOptimization from '../views/GeoOptimization.vue'
+import GeoSearchTests from '../views/GeoSearchTests.vue'
 import SystemSettings from '../views/SystemSettings.vue'
 
 const routes = [
@@ -40,6 +41,11 @@ const routes = [
     path: '/geo-optimize',
     name: 'GeoOptimization',
     component: GeoOptimization
+  },
+  {
+    path: '/geo-tests',
+    name: 'GeoSearchTests',
+    component: GeoSearchTests
   },
   {
     path: '/material-management',

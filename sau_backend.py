@@ -60,6 +60,8 @@ from services.cover_image_service import (
     recommend_article_images,
 )
 from services.geo_score_service import score_geo_content
+from services.geo_test_service import generate_test_plan, normalize_profile, case_quotas
+from services.geo_test_reports import list_saved_reports, read_saved_report
 from services.dashboard_service import get_dashboard_overview
 from services.demo_seed_service import seed_demo_data
 from services.media_account_service import (
@@ -821,6 +823,52 @@ def get_ai_config_status():
 def get_dashboard_data():
     overview = get_dashboard_overview(app.config["DATABASE_PATH"])
     return jsonify({"code": 200, "msg": "success", "data": overview}), 200
+
+
+@app.route('/api/geo-tests/reports', methods=['GET'])
+def get_saved_geo_test_reports():
+    root = Path(app.config.get("GEO_TEST_REPORTS_DIRECTORY", current_dir / "runtime" / "geo-tests"))
+    return jsonify({"code": 200, "msg": "success", "data": list_saved_reports(root)}), 200
+
+
+@app.route('/api/geo-tests/reports/<report_id>', methods=['GET'])
+def get_saved_geo_test_report(report_id):
+    root = Path(app.config.get("GEO_TEST_REPORTS_DIRECTORY", current_dir / "runtime" / "geo-tests"))
+    report = read_saved_report(root, report_id)
+    if report is None:
+        return jsonify({"code": 404, "msg": "未找到已保存的测试报告", "data": None}), 404
+    return jsonify({"code": 200, "msg": "success", "data": report}), 200
+
+
+@app.route('/api/geo-tests/plan', methods=['POST'])
+def create_geo_test_plan():
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"code": 400, "msg": "请提交 JSON 对象", "data": None}), 400
+    project_id = data.get("project_id")
+    if type(project_id) is not int or project_id <= 0:
+        return jsonify({"code": 400, "msg": "请选择品牌项目", "data": None}), 400
+    try:
+        project = get_project(app.config["DATABASE_PATH"], project_id)
+        profile = normalize_profile({**project, **{key: data[key] for key in
+                                    ("company", "aliases", "audience", "region") if key in data}})
+        count = data.get("case_count", 4)
+        case_quotas(profile, count)
+        ai_settings = _request_ai_settings(data)
+    except ProjectNotFoundError as exc:
+        return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except (ValueError, AIConfigurationError) as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
+    limited = _enforce_ai_rate_limit()
+    if limited is not None:
+        return limited
+    try:
+        plan = generate_test_plan(profile=profile, case_count=count, settings=ai_settings)
+    except AIConfigurationError:
+        return jsonify({"code": 503, "msg": "请在系统设置配置 AI，或导出客户资料后用本机已登录的豆包生成计划", "data": None}), 503
+    except AIServiceError as exc:
+        return jsonify({"code": 502, "msg": str(exc), "data": None}), 502
+    return jsonify({"code": 200, "msg": "测试计划已生成，可下载后执行", "data": plan}), 200
 
 
 @app.route('/api/media-accounts', methods=['GET'])

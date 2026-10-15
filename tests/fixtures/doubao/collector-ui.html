@@ -1,0 +1,21 @@
+<!doctype html>
+<!-- Synthetic selector-contract fixture. Not a captured Doubao answer. -->
+<html lang="zh-CN"><meta charset="utf-8"><title>采集器本地测试</title>
+<body>
+<nav><a href="https://sidebar.example.org/account">非来源的导航链接</a></nav>
+<div data-message-role="user">测试问题</div>
+<div data-message-role="assistant">
+  <div data-testid="message_text_content">
+    <p>本地测试回答<a href="https://authored.example.org/reading">模型自述链接</a></p>
+    <p>被引用的回答片段<a data-citation href="https://source.example.org/article">[1]</a></p>
+  </div>
+  <button data-testid="message_action_copy">复制</button>
+  <button data-testid="search-references-button" onclick="document.querySelector('[data-testid=search-references]').hidden=false">搜索来源</button>
+</div>
+<section data-testid="search-references" hidden>
+  <div data-testid="reference-item"><h3 data-testid="reference-title">真实 DOM 中的测试来源标题</h3><a href="https://source.example.org/article">访问来源</a></div>
+  <div data-testid="reference-item"><h3 data-testid="reference-title">只有标题的测试来源</h3></div>
+  <div data-testid="reference-item" hidden><a href="https://hidden.example.org/">隐藏的非可见来源</a></div>
+</section>
+<div contenteditable="true" class="tiptap"></div>
+</body></html>

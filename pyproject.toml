@@ -23,8 +23,13 @@ dependencies = [
 [project.scripts]
 sau = "sau_cli:main"
 sau-worker = "sau_worker:main"
+geo-doubao = "services.doubao_source_cli:main"
+geo-test = "services.geo_test_cli:main"
 
 [project.optional-dependencies]
+desktop = [
+  "pywebview==6.2.1",
+]
 # Browser/media dependencies are required by the local publishing worker, but are
 # intentionally excluded from the lightweight Vercel demo control plane.
 web = [

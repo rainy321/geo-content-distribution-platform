@@ -53,6 +53,8 @@
 - **统一 CLI**：`sau <platform> <action>`，便于脚本化与 Agent 调用
 - **可扩展 uploader**：每个平台独立模块，便于二开接入新平台
 - **GEO 内容工作流**：品牌底稿 → AI 生成 → GEO 评分/优化 → 内容库 → 多渠道分发
+- **AI 搜索测试**：按客户行业生成固定问题，本机串行采集豆包回答与来源，分开统计自然提及、品牌核验和官网核验
+- **Windows 桌面软件**：独立 EXE 窗口，支持登录豆包、AI 出题、启动/停止采集、任务记录与重开恢复；见[桌面版说明](./docs/desktop-app.md)
 - **内容生产提效**：内置/自定义内容模板、最多 5 个主题批量生成、Excel/CSV 批量导入
 - **图片工作流**：从素材库智能推荐封面，或自动生成 1200×628 中性 GEO 封面并关联稿件
 - **统一 Web 分发**：10 个渠道共用同一发布清单；图文渠道校验图片，视频渠道校验视频
@@ -377,6 +379,9 @@ cd sau_frontend && npm run build
 
 | 文档 | 内容 |
 | --- | --- |
+| [docs/doubao-source-collection.md](./docs/doubao-source-collection.md) | 豆包消费者网页版来源采集 MVP、调研证据与运行方法 |
+| [docs/geo-search-testing.md](./docs/geo-search-testing.md) | 通用客户 AI 测试计划、批量执行、断点恢复与报告 |
+| [docs/desktop-app.md](./docs/desktop-app.md) | Windows 桌面程序、数据目录、按钮采集与打包安装 |
 | [docs/install.md](./docs/install.md) | 安装与环境 |
 | [docs/update.md](./docs/update.md) | 更新说明 |
 | [docs/CLI.md](./docs/CLI.md) | `sau` CLI |

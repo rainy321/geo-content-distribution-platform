@@ -1,0 +1,55 @@
+{
+  "schema_version": "1.0",
+  "experiment_id": "tongyuye-dongai-web-baseline",
+  "target": {
+    "company": "北京同于野科技有限公司",
+    "project": "懂AI中转站",
+    "website": "https://tongyuye.com/",
+    "identity_provenance": "project_owner_statement",
+    "website_provenance": "project_owner_statement_and_public_homepage"
+  },
+  "baseline": {
+    "client": "doubao_consumer_web",
+    "question": "北京同于野科技有限公司的懂AI中转站是什么？请结合可查询到的公开网络信息介绍其功能；如果资料不足，请明确说明。",
+    "website_supplied_in_prompt": false,
+    "result_file": "runtime/doubao/evidence/20261012-154848-source-inspection/result.json",
+    "target_domain_in_captured_ui_sources": false,
+    "visible_source_count": 24,
+    "visible_citation_count": 1
+  },
+  "public_homepage_verification": {
+    "checked_on": "2026-10-12",
+    "http_status": 200,
+    "page_title": "懂AI · 统一模型聚合与中转站",
+    "description": "懂AI — 统一模型接口与人民币用量平台",
+    "published_capabilities": [
+      "多模型统一网关及 OpenAI 兼容接口",
+      "线路路由与故障切换",
+      "人民币计费、账户额度和调用日志",
+      "Agent 工作台及应用开发服务"
+    ],
+    "capability_provenance": "public_site_self_description_not_runtime_api_validation",
+    "company_full_name_found_in_checked_homepage": false,
+    "initial_html_body_contains_app_root_without_rendered_intro": true,
+    "evidence_directory": "runtime/doubao/site-verification/tongyuye-20261012",
+    "observation_stage": "before_website_company_relationship_update"
+  },
+  "proposed_followup": {
+    "type": "website_guided_verification",
+    "question": "请查看 https://tongyuye.com/ 的公开页面，介绍懂AI中转站提供的功能，并说明页面是否明确标注其运营公司为北京同于野科技有限公司；无法访问或无法确认的部分请明确说明。",
+    "execution_status": "not_run",
+    "interpretation": "域名提示对照，仅核验指定网站可读性与事实，不用于衡量主动品牌曝光或推荐率"
+  },
+  "automation_followup": {
+    "checked_on": "2026-10-12",
+    "client": "doubao_work_web",
+    "model_label": "豆包 2.1 Lite / 高",
+    "report_file": "runtime/geo-tests/tongyuye-20261012/run-002-lite/report.json",
+    "record_file": "docs/experiments/geo-automation-20261012.md",
+    "company_relationship_found_on_updated_homepage": true,
+    "updated_homepage_evidence_directory": "runtime/geo-tests/tongyuye-20261012/site-verification-after-update",
+    "original_proposed_question_run_verbatim": false,
+    "website_guided_ai_generated_question_completed": true,
+    "interpretation": "新计划的行业、品牌、官网三题已完成；条件与旧消费者基线不同，不构成优化前后因果对照。"
+  }
+}

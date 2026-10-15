@@ -1,0 +1,20 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Synthetic current-layout fixture, not a Doubao answer</title>
+<p>This synthetic fixture tests the UI shape observed on 2026-10-12.</p>
+<a data-thinking-box-tool-call="true" href="https://sidebar.example/">无关导航</a>
+<div data-testid="send_message"><div data-testid="message_text_content">测试问题</div></div>
+<div data-testid="receive_message" data-message-role="assistant">
+  <div data-plugin-identifier="block_type:10025 | search_query_result_block.search_type:1">
+    <div data-copy-ignore onclick="document.getElementById('materials').hidden = false" style="cursor:pointer">搜索 2 个关键词，参考 2 篇资料</div>
+    <div id="materials" hidden>
+      <a data-thinking-box-tool-call="true" href="https://source.example/article"><span>1.</span><div>测试文章标题</div></a>
+      <a data-thinking-box-tool-call="true" href="https://company.example/about"><span>2.</span><div>测试公司介绍</div></a>
+    </div>
+  </div>
+  <div data-testid="message_text_content" data-streaming="false">第一段回答。</div>
+  <div data-testid="message_text_content" data-streaming="false"><blockquote>第二段引用文字<span class="container-sWvQla" onmouseenter="document.getElementById('citation-tooltip').hidden = false" onclick="window.open('https://source.example/article?f_link_type=inline', '_blank')">测试新闻网</span>。</blockquote></div>
+  <button data-testid="message_action_copy">复制</button>
+</div>
+<div role="tooltip" id="citation-tooltip" hidden><div>测试文章标题</div></div>
+<div class="tiptap" contenteditable="true"></div>

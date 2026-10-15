@@ -61,6 +61,10 @@
               <el-icon><Picture /></el-icon>
               <span>素材管理</span>
             </el-menu-item>
+            <el-menu-item index="/geo-tests">
+              <el-icon><DataAnalysis /></el-icon>
+              <span>AI 搜索测试</span>
+            </el-menu-item>
             <el-menu-item index="/publish-center">
               <el-icon><Upload /></el-icon>
               <span>发布中心</span>

@@ -160,6 +160,7 @@ def _request_chat_completion(
     prompt: str,
     temperature: float,
     http_post,
+    system_message: str = "你是一名 GEO / AEO 内容优化专家。",
 ) -> str:
     """Call the shared OpenAI-compatible chat completion endpoint."""
 
@@ -170,7 +171,7 @@ def _request_chat_completion(
         "messages": [
             {
                 "role": "system",
-                "content": "你是一名 GEO / AEO 内容优化专家。",
+                "content": system_message,
             },
             {"role": "user", "content": prompt},
         ],
