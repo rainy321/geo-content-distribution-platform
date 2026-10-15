@@ -62,6 +62,7 @@ from services.cover_image_service import (
 from services.geo_score_service import score_geo_content
 from services.geo_test_service import generate_test_plan, normalize_profile, case_quotas
 from services.geo_test_reports import list_saved_reports, read_saved_report
+from services import geo_content_store, geo_content_research
 from services.dashboard_service import get_dashboard_overview
 from services.demo_seed_service import seed_demo_data
 from services.media_account_service import (
@@ -869,6 +870,108 @@ def create_geo_test_plan():
     except AIServiceError as exc:
         return jsonify({"code": 502, "msg": str(exc), "data": None}), 502
     return jsonify({"code": 200, "msg": "测试计划已生成，可下载后执行", "data": plan}), 200
+
+
+@app.route('/api/geo-content/cycles', methods=['GET', 'POST'])
+def geo_content_cycles():
+    database = app.config['DATABASE_PATH']
+    if request.method == 'GET':
+        return jsonify(code=200, data=geo_content_store.list_cycles(database))
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify(code=400, msg='请提交采集报告', data=None), 400
+    root = Path(app.config.get('GEO_TEST_REPORTS_DIRECTORY', current_dir / 'runtime/geo-tests'))
+    report_ref = data.get('report_id') or ''
+    report = read_saved_report(root, report_ref) if report_ref else data.get('report')
+    if report is None:
+        return jsonify(code=404, msg='采集报告不存在', data=None), 404
+    try:
+        cycle = geo_content_store.create_cycle(database, report, report_ref or 'user_import', data.get('project_id'))
+    except ValueError as error:
+        return jsonify(code=400, msg=str(error), data=None), 400
+    return jsonify(code=201, msg='采集内容任务单已保存', data=cycle), 201
+
+
+@app.route('/api/geo-content/cycles/<identifier>', methods=['GET', 'PUT'])
+def geo_content_cycle(identifier):
+    try:
+        if request.method == 'PUT':
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict):
+                raise ValueError('请提交已核对的事实资料')
+            cycle = geo_content_store.save_facts(app.config['DATABASE_PATH'], identifier, data.get('facts'), data.get('revision'))
+        else:
+            cycle = geo_content_store.get_cycle(app.config['DATABASE_PATH'], identifier)
+    except geo_content_store.ResearchNotFoundError as error:
+        return jsonify(code=404, msg=str(error), data=None), 404
+    except ValueError as error:
+        return jsonify(code=400, msg=str(error), data=None), 400
+    return jsonify(code=200, data=cycle)
+
+
+@app.route('/api/geo-content/cycles/<identifier>/generate', methods=['POST'])
+def geo_content_generate(identifier):
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify(code=400, msg='请提交生成选项', data=None), 400
+    try:
+        cycle = geo_content_store.get_cycle(app.config['DATABASE_PATH'], identifier)
+        kind = data.get('kind')
+        if kind == 'analysis':
+            prompt = geo_content_research.research_prompt(cycle)
+        elif kind == 'draft':
+            prompt = geo_content_research.draft_prompt(cycle, data.get('brief_id'), data.get('platform'))
+            existing = geo_content_store.existing_draft(app.config['DATABASE_PATH'], cycle, data.get('brief_id'), data.get('platform'))
+            if existing:
+                return jsonify(code=200, msg='相同资料已有草稿，请在内容库编辑', data={'cycle': cycle, **existing})
+        else:
+            raise ValueError('生成类型应为 analysis 或 draft')
+        settings = _request_ai_settings(data) or AISettings.from_environment()
+        limited = _enforce_ai_rate_limit()
+        if limited is not None:
+            return limited
+        from services.ai_service import _request_chat_completion
+        import requests as research_requests
+        raw = _request_chat_completion(settings=settings, prompt=prompt, temperature=0.3,
+                                       http_post=research_requests.post, system_message=geo_content_research.SYSTEM)
+        provenance = {'method': 'ai_api', 'model': settings.model, 'prompt_sha256': geo_content_research.fingerprint(prompt)}
+        result = {}
+        if kind == 'analysis':
+            geo_content_store.save_analysis(app.config['DATABASE_PATH'], identifier, raw, provenance, cycle['revision'])
+        else:
+            result = geo_content_store.save_draft(app.config['DATABASE_PATH'], identifier, data['brief_id'], data['platform'], raw, provenance, cycle['revision'])
+        return jsonify(code=200, msg='内容结果已保存', data={'cycle': geo_content_store.get_cycle(app.config['DATABASE_PATH'], identifier), **result})
+    except geo_content_store.ResearchNotFoundError as error:
+        return jsonify(code=404, msg=str(error), data=None), 404
+    except AIConfigurationError as error:
+        return jsonify(code=503, msg=str(error), data=None), 503
+    except AIServiceError as error:
+        return jsonify(code=502, msg=str(error), data=None), 502
+    except ValueError as error:
+        return jsonify(code=400, msg=str(error), data=None), 400
+
+
+@app.route('/api/geo-content/cycles/<identifier>/retests', methods=['POST'])
+def geo_content_attach_retest(identifier):
+    data = request.get_json(silent=True) or {}
+    root = Path(app.config.get('GEO_TEST_REPORTS_DIRECTORY', current_dir / 'runtime/geo-tests'))
+    if not isinstance(data, dict) or not isinstance(data.get('report_id'), str):
+        return jsonify(code=400, msg='请选择已有的复测报告', data=None), 400
+    report = read_saved_report(root, data['report_id'])
+    if not report:
+        return jsonify(code=404, msg='复测报告不存在', data=None), 404
+    try:
+        cycle = geo_content_store.attach_retest(app.config['DATABASE_PATH'], identifier, report)
+        return jsonify(code=200, data=cycle)
+    except geo_content_store.ResearchNotFoundError as error:
+        return jsonify(code=404, msg=str(error), data=None), 404
+    except ValueError as error:
+        return jsonify(code=400, msg=str(error), data=None), 400
+
+
+@app.route('/api/geo-content/articles/<int:article_id>', methods=['GET'])
+def geo_content_article_research(article_id):
+    return jsonify(code=200, data=geo_content_store.article_research(app.config['DATABASE_PATH'], article_id))
 
 
 @app.route('/api/media-accounts', methods=['GET'])

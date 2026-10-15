@@ -4,13 +4,15 @@
 
 软件内可以选择客户资料、通过 AI API 或已登录豆包生成固定问题、启动串行测试、停止任务及查看完整报告。首次使用豆包采集时点击“登录豆包”，在专用窗口正常登录/验证，完成后关闭登录窗口保存会话。选择与你实际账号对应的“豆包对话”或“豆包工作”；模型选项只选择正常可用项目。没有选择品牌项目时，豆包出题可以使用当前报告对应的客户资料。
 
+报告上的“用本报告制定内容任务”和侧栏“采集驱动内容”连接后续选题、写作事实、平台稿、内容库审稿、发布链接和同题复测。生成稿先保存为草稿；写作来源与曝光采集分开记录。详见[采集到发布说明](geo-content-loop.md)。
+
 “用豆包生成问题”完成后，在问题列表检查客户业务与问题，再点击“开始测试”。界面显示任务状态；逐题采集、固定计划、失败排除、模型记录和重复提交保护复用现有执行器。遇到登录和安全验证时在专用窗口正常处理，软件不绕过验证。停止或关闭软件会取消未完成任务，提交状态不明确的运行标记为待检查，不自动重发。
 
 当前采集仍只接豆包网页版。桌面按钮和执行器连接经过合成测试覆盖；采集浏览器引擎经过离线实际启动验证，已保存的公司实测来自 10 月 12 日，不能把本次桌面打包验证算成新一轮客户曝光实测。
 
 ## 本机安装与数据
 
-GitHub 下载：[2026-10-15 桌面修复版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.15)。下载 `GEO-AI-Workbench-2026.10.15-windows-x64.zip`，完整解压后打开 `GEO_AI_Workbench/GEO_AI_Workbench.exe`，保留同级 `_internal` 目录。历史版本在[旧版归档 Release](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-legacy-backup-2026.10.15)，仅用于备份恢复。
+GitHub 下载：[2026-10-16 采集内容迭代版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.16)。下载 `GEO-AI-Workbench-2026.10.16-windows-x64.zip`，完整解压后打开 `GEO_AI_Workbench/GEO_AI_Workbench.exe`，保留同级 `_internal` 目录。历史版本在[旧版归档 Release](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-legacy-backup-2026.10.15)，仅用于备份恢复。
 
 本机安装文件：`%LOCALAPPDATA%\Programs\GEO_AI_Workbench\GEO_AI_Workbench.exe`。桌面和开始菜单有“GEO AI搜索工作台”快捷方式。
 

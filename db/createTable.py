@@ -235,6 +235,37 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                 '''
             )
 
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS geo_content_cycles (
+                    id TEXT PRIMARY KEY, project_id INTEGER NOT NULL,
+                    report_ref TEXT NOT NULL, report_digest TEXT NOT NULL,
+                    baseline TEXT NOT NULL, observations TEXT NOT NULL,
+                    analysis TEXT NOT NULL, facts TEXT NOT NULL DEFAULT '[]',
+                    revision INTEGER NOT NULL DEFAULT 1,
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    UNIQUE(project_id, report_digest),
+                    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE RESTRICT
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS geo_content_drafts (
+                    article_id INTEGER PRIMARY KEY, cycle_id TEXT NOT NULL,
+                    brief_id TEXT NOT NULL, platform TEXT NOT NULL,
+                    input_sha256 TEXT NOT NULL, provenance TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(cycle_id, input_sha256),
+                    FOREIGN KEY(article_id) REFERENCES articles(id) ON DELETE CASCADE,
+                    FOREIGN KEY(cycle_id) REFERENCES geo_content_cycles(id) ON DELETE CASCADE
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS geo_content_retests (
+                    cycle_id TEXT NOT NULL, run_id TEXT NOT NULL, report TEXT NOT NULL,
+                    created_at TEXT NOT NULL, PRIMARY KEY(cycle_id, run_id),
+                    FOREIGN KEY(cycle_id) REFERENCES geo_content_cycles(id) ON DELETE CASCADE
+                )
+            ''')
+
     return db_path
 
 

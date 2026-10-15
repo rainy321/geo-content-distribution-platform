@@ -9,9 +9,11 @@ import ContentCreation from '../views/ContentCreation.vue'
 import ContentLibrary from '../views/ContentLibrary.vue'
 import GeoOptimization from '../views/GeoOptimization.vue'
 import GeoSearchTests from '../views/GeoSearchTests.vue'
+import GeoContentLoop from '../views/GeoContentLoop.vue'
 import SystemSettings from '../views/SystemSettings.vue'
 
 const routes = [
+  { path: '/geo-content', name: 'GeoContentLoop', component: GeoContentLoop },
   {
     path: '/',
     name: 'Dashboard',

@@ -30,6 +30,10 @@
       </ol>
     </header>
 
+    <el-alert v-if="researchContext" type="info" :closable="false" show-icon class="research-lineage">
+      <template #title>本稿来自 AI 搜索采集 · {{ researchContext.provenance.brief.case_ids.join('、') }}</template>
+      <router-link :to="{path:'/geo-content',query:{cycle:researchContext.cycle_id}}">查看选题依据、写作事实和发布后复测</router-link>
+    </el-alert>
     <div v-if="loadingExisting" class="loading-existing" aria-live="polite">
       <span class="loading-existing-mark" />
       正在从内容库载入稿件…
@@ -437,9 +441,11 @@ import {
 } from '@element-plus/icons-vue'
 import { articleApi } from '@/api/article'
 import { projectApi } from '@/api/project'
+import { geoContentApi } from '@/api/geoContent'
 
 const router = useRouter()
 const route = useRoute()
+const researchContext = ref(null)
 const briefFormRef = ref(null)
 const projects = ref([])
 const projectLoading = ref(false)
@@ -849,6 +855,7 @@ const loadExistingArticle = async (articleId) => {
     articleStatus.value = article.status || 'draft'
     dirty.value = false
     hydrateStoredScore(article)
+    researchContext.value = (await geoContentApi.article(articleId)).data
   } catch (error) {
     generationError.value = {
       title: '稿件载入失败',

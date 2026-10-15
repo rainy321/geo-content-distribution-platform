@@ -78,7 +78,7 @@
     </el-card>
 
     <el-card v-if="report" ref="reportCard" shadow="never">
-      <div class="card-heading"><h2>{{ report.profile.name }} · 采集报告</h2><el-tag>{{ statusNames[report.status] || report.status }}</el-tag></div>
+      <div class="card-heading"><h2>{{ report.profile.name }} · 采集报告</h2><el-tag>{{ statusNames[report.status] || report.status }}</el-tag><el-button type="primary" :disabled="nativeBusy" @click="useReport">用本报告制定内容任务</el-button></div>
       <p class="context">历史采集记录 · {{ reportDate(report.cases[0]?.collected_at || report.updated_at) }}。回答原文来自豆包，尚未逐项核实事实；“提及”只说明名称出现在回答里。</p>
       <p v-if="report.stop_reason" class="context">中断原因：{{ report.stop_reason }}</p>
       <div class="cohorts">
@@ -127,19 +127,25 @@ python -m services.geo_test_cli plan --profile client-profile.json --planner dou
 
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { projectApi } from '@/api/project'
 import { geoTestApi } from '@/api/geoTest'
+import { geoContentApi } from '@/api/geoContent'
 
 const projects = ref([]), projectId = ref(null), company = ref(''), audience = ref(''), caseCount = ref(4)
 const loading = ref(false), generating = ref(false), plan = ref(null), report = ref(null), importInput = ref(null)
 const route = useRoute(), savedReports = ref([]), selectedReportId = ref(''), reportLoading = ref(false), reportCard = ref(null)
-const isDesktop = computed(() => route.query.desktop === '1')
+const isDesktop = computed(() => route.query.desktop === '1' || Boolean(window.pywebview?.api))
+const router = useRouter()
+const useReport = async () => {
+  const value = (await geoContentApi.create({ report: report.value })).data
+  router.push({path:'/geo-content',query:{cycle:value.id}})
+}
 const desktopClientMode = ref('consumer'), desktopModel = ref(''), nativeTask = ref({ status: 'idle' })
 const nativeHistory = ref([]), nativeDetails = ref(null), restoringWorkspace = ref(false)
 const workspaceSaveError = ref('')
-const taskNames = { login: '登录豆包', plan: '生成问题', run: '采集测试' }
+const taskNames = { login: '登录豆包', plan: '生成问题', run: '采集测试', research: '采集内容策划', draft: '生成平台稿' }
 let workspaceSaveTimer = null, workspaceReady = false
 const nativeBusy = computed(() => nativeTask.value.status === 'running')
 const nativeMessage = computed(() => `${nativeTask.value.restored_from_disk ? '上次任务：' : ''}${nativeTask.value.message || ({ idle: '先生成并检查问题，再开始测试。', running: `任务执行中${nativeTask.value.progress?.case_id ? ` · ${nativeTask.value.progress.case_id}` : ''}。`, completed: '任务已完成。', stopped: '任务已停止。', failed: '任务未完成。', needs_review: '上次任务未完成，记录已保留，请检查后再执行。' }[nativeTask.value.status] || '')}`)

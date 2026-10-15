@@ -10,12 +10,15 @@ import threading
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
+from dataclasses import replace
 
 from services.doubao_source_collector import CollectorConfig, open_doubao_session
 from services.geo_test_cli import _plan_with_doubao
 from services.geo_test_runner import RunConfig, exclusive_lock, run_test_plan, write_json
 from services.geo_test_service import build_report, normalize_profile, validate_plan
 from services.desktop_task_store import DesktopTaskStore, now
+from services import geo_content_store, geo_content_research
+from services.doubao_source_collector import collect_doubao_sources
 
 
 def edge_executable() -> str | None:
@@ -84,13 +87,15 @@ class DesktopGeoJobs:
                                requested_model_label=options.get("model_label") or None,
                                executable_path=edge_executable())
 
-    def _start(self, kind, operation, *, client_name=""):
+    def _start(self, kind, operation, *, client_name="", cycle_id=None):
         with self.lock:
             if self.job["status"] == "running":
                 return {"error": "已有任务正在执行，请先等待或停止"}
             self.cancel_requested = False
             self.job = {"id": uuid.uuid4().hex, "kind": kind, "status": "running",
                         "created_at": now(), "client_name": client_name}
+            if cycle_id:
+                self.job['cycle_id'] = cycle_id
             self._persist()
 
         def run():
@@ -154,7 +159,7 @@ class DesktopGeoJobs:
             return {"plan": value}
         return self._start("plan", plan, client_name=profile["name"])
 
-    def start_run(self, plan, options):
+    def start_run(self, plan, options, cycle_id=None):
         try:
             plan = copy.deepcopy(validate_plan(plan))
             config = self._config(options)
@@ -170,8 +175,52 @@ class DesktopGeoJobs:
                     self.job["progress"] = event
                     self._persist()
             report = await run_test_plan(plan, RunConfig(run_dir, config), progress=progress)
+            if cycle_id:
+                geo_content_store.attach_retest(self.data / 'database.db', cycle_id, report)
             return {"report": report}
-        return self._start("run", run, client_name=plan["profile"]["name"])
+        return self._start("run", run, client_name=plan["profile"]["name"], cycle_id=cycle_id)
+
+    def start_research_retest(self, cycle_id):
+        try:
+            cycle = geo_content_store.get_cycle(self.data / 'database.db', cycle_id)
+            execution = cycle['baseline'].get('execution') or {}
+            options = {'client_mode': execution.get('client_mode') or next((case.get('client_mode') for case in cycle['baseline']['cases'] if case.get('client_mode')), 'consumer'),
+                       'model_label': execution.get('requested_model_label') or ''}
+            return self.start_run(cycle['test_plan'], options, cycle_id=cycle_id)
+        except (ValueError, geo_content_store.ResearchNotFoundError) as error:
+            return {'error': str(error)}
+
+    def generate_research(self, cycle_id, kind, brief_id, platform, options):
+        database = self.data / 'database.db'
+        try:
+            cycle = geo_content_store.get_cycle(database, cycle_id)
+            config = self._config(options)
+            if kind == 'analysis':
+                prompt = geo_content_research.research_prompt(cycle)
+            elif kind == 'draft':
+                prompt = geo_content_research.draft_prompt(cycle, brief_id, platform)
+            else:
+                raise ValueError('生成类型无效')
+        except (ValueError, geo_content_store.ResearchNotFoundError) as error:
+            return {'error': str(error)}
+
+        async def generate():
+            if kind == 'draft' and geo_content_store.existing_draft(database, cycle, brief_id, platform):
+                return {'cycle_id': cycle_id, 'message': '相同资料已有草稿，未重复提问'}
+            with exclusive_lock(config.profile_dir / '.geo-test.lock'):
+                result, path = await collect_doubao_sources(replace(config, question=prompt,
+                    output_root=self.data / 'geo-content/evidence' / uuid.uuid4().hex))
+            if not result.get('answer_completed') or not result.get('question_submitted') or result.get('question') != prompt:
+                raise ValueError(f"豆包未返回完整内容（{result.get('failure_reason') or 'answer_incomplete'}），原始证据已保存，未自动重试")
+            provenance = {'method': 'doubao_web_ai', 'model_label': (result.get('environment') or {}).get('model_label'),
+                          'client_mode': (result.get('environment') or {}).get('client_mode'), 'evidence_path': str(path),
+                          'role': 'content_editing_not_exposure_test', 'prompt_sha256': geo_content_research.fingerprint(prompt)}
+            if kind == 'analysis':
+                geo_content_store.save_analysis(database, cycle_id, result['response'], provenance, cycle['revision'])
+            else:
+                geo_content_store.save_draft(database, cycle_id, brief_id, platform, result['response'], provenance, cycle['revision'])
+            return {'cycle_id': cycle_id}
+        return self._start('research' if kind == 'analysis' else 'draft', generate, client_name=cycle['profile']['name'], cycle_id=cycle_id)
 
     def stop_task(self):
         self.cancel_requested = True
@@ -193,6 +242,9 @@ class DesktopGeoJobs:
         write_json(root / "state.json", state)
         report = build_report(plan, state)
         write_json(root / "report.json", report)
+        cycle_id = (job or self.job).get('cycle_id')
+        if cycle_id:
+            geo_content_store.attach_retest(self.data / 'database.db', cycle_id, report)
         return report
 
     def shutdown(self):

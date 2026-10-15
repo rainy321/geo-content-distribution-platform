@@ -69,6 +69,10 @@
               <el-icon><Upload /></el-icon>
               <span>发布中心</span>
             </el-menu-item>
+            <el-menu-item index="/geo-content">
+              <el-icon><DataAnalysis /></el-icon>
+              <span>采集驱动内容</span>
+            </el-menu-item>
             <el-menu-item index="/settings">
               <el-icon><Setting /></el-icon>
               <span>系统设置</span>
