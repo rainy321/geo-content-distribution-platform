@@ -18,6 +18,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+from services.browser_runtime import launch_context
 
 
 DOUBAO_URL = "https://www.doubao.com/chat/"
@@ -59,6 +60,7 @@ class CollectorConfig:
     stable_seconds: float = 3
     manual_wait_seconds: float = 0
     executable_path: str | None = None
+    fallback_executable_path: str | None = None
     client_mode: str = "consumer"
     requested_model_label: str | None = None
     selectors: DoubaoSelectors = DoubaoSelectors()
@@ -483,7 +485,7 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                                       "locale": "zh-CN", "timezone_id": "Asia/Hong_Kong"}
             if config.executable_path:
                 options["executable_path"] = config.executable_path
-            context = await playwright.chromium.launch_persistent_context(str(config.profile_dir.resolve()), **options)
+            context = await launch_context(playwright, config.profile_dir.resolve(), options, config.fallback_executable_path)
             try:
                 page = await context.new_page()
                 stage = "navigation"
@@ -666,7 +668,7 @@ async def open_doubao_session(config: CollectorConfig, wait_seconds: float = 300
         options: dict[str, Any] = {"headless": False, "locale": "zh-CN", "timezone_id": "Asia/Hong_Kong"}
         if config.executable_path:
             options["executable_path"] = config.executable_path
-        context = await playwright.chromium.launch_persistent_context(str(config.profile_dir.resolve()), **options)
+        context = await launch_context(playwright, config.profile_dir.resolve(), options, config.fallback_executable_path)
         try:
             page = context.pages[0] if context.pages else await context.new_page()
             try:

@@ -265,6 +265,24 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                     FOREIGN KEY(cycle_id) REFERENCES geo_content_cycles(id) ON DELETE CASCADE
                 )
             ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS geo_distribution_targets (
+                    id TEXT PRIMARY KEY, project_id INTEGER NOT NULL,
+                    config TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
+                    state TEXT NOT NULL DEFAULT 'configured', blocked_reason TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE RESTRICT
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS geo_distribution_events (
+                    id TEXT PRIMARY KEY, target_id TEXT NOT NULL, article_id INTEGER,
+                    kind TEXT NOT NULL, state TEXT NOT NULL, message TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(target_id) REFERENCES geo_distribution_targets(id) ON DELETE CASCADE,
+                    FOREIGN KEY(article_id) REFERENCES articles(id) ON DELETE SET NULL
+                )
+            ''')
 
     return db_path
 

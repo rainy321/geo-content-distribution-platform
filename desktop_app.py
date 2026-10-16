@@ -226,14 +226,17 @@ def run_smoke_check(window, data: Path, url: str) -> None:
         if not status["passed"]:
             status["last_observed"] = observed
             raise RuntimeError("桌面窗口未加载实际报告")
-        from services.desktop_geo_jobs import edge_executable
+        from services.desktop_geo_jobs import edge_executable, chrome_executable
+        from services.browser_runtime import launch_context
         from playwright.async_api import async_playwright
 
         async def check_browser_engine():
             async with async_playwright() as playwright:
-                browser = await playwright.chromium.launch(headless=True, executable_path=edge_executable())
+                browser = await launch_context(playwright, data / 'logs/browser-engine-diagnostic',
+                    {'headless': True, 'executable_path': edge_executable()}, chrome_executable())
                 try:
-                    page = await browser.new_page(viewport={"width": 1380, "height": 880})
+                    page = await browser.new_page()
+                    await page.set_viewport_size({"width": 1380, "height": 880})
                     await page.set_content('<title>Synthetic desktop browser-engine check</title>')
                     ready = await page.title() == 'Synthetic desktop browser-engine check'
                     await page.goto(url)

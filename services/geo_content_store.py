@@ -14,6 +14,7 @@ from services.geo_content_research import (
     parse_draft, parse_research, plan_from_report, public_url, research_observations,
 )
 from services.geo_score_service import score_geo_content
+from services import geo_destination_service as destinations
 
 
 class ResearchNotFoundError(LookupError):
@@ -44,7 +45,9 @@ def _cycle(connection, identifier):
         result[field] = json.loads(result[field])
     result['profile'] = result['baseline']['profile']
     result['test_plan'] = plan_from_report(result['baseline'])
-    result['channels'] = CHANNELS
+    result['destinations'] = destinations.targets_for_connection(connection, result['project_id'])
+    result['channels'] = {**CHANNELS, **{target['key']: target['config']['name'] for target in result['destinations']}}
+    result['opportunities'] = destinations.opportunities(result['observations'], result['destinations'], result['profile'].get('website', ''))
     return result
 
 
@@ -166,6 +169,8 @@ def save_draft(database, identifier, brief_id, platform, raw, provenance, revisi
         _check_revision(cycle, revision)
         inputs = draft_input(cycle, brief_id, platform)
         key = fingerprint(inputs)
+        if provenance.get('input_sha256') and provenance['input_sha256'] != key:
+            raise ValueError('生成期间目标平台或写作资料变化，请刷新；未保存过期稿件')
         prior = connection.execute('SELECT article_id FROM geo_content_drafts WHERE cycle_id=? AND input_sha256=?', (identifier, key)).fetchone()
         if prior:
             return {'article_id': prior['article_id'], 'cycle_id': identifier, 'already_saved': True}
@@ -181,6 +186,9 @@ def save_draft(database, identifier, brief_id, platform, raw, provenance, revisi
         context = {**provenance, 'report_digest': cycle['report_digest'], 'baseline_run_id': cycle['baseline']['run_id'],
                    'plan_sha256': cycle['test_plan']['plan_sha256'], 'brief': inputs['brief'], 'facts': inputs['facts'],
                    'used_fact_ids': draft['used_fact_ids'], 'review_state': 'draft_requires_editorial_review'}
+        if inputs.get('destination'):
+            context['destination'] = inputs['destination']
+            context['distribution_basis'] = inputs['distribution_basis']
         stamp = _now()
         connection.execute('INSERT INTO geo_content_drafts VALUES(?,?,?,?,?,?,?)',
                            (article_id, identifier, brief_id, platform, key, _json(context), stamp))

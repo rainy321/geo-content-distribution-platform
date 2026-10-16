@@ -17,7 +17,7 @@ from services.geo_test_cli import _plan_with_doubao
 from services.geo_test_runner import RunConfig, exclusive_lock, run_test_plan, write_json
 from services.geo_test_service import build_report, normalize_profile, validate_plan
 from services.desktop_task_store import DesktopTaskStore, now
-from services import geo_content_store, geo_content_research
+from services import geo_content_store, geo_content_research, geo_destination_service
 from services.doubao_source_collector import collect_doubao_sources
 
 
@@ -25,6 +25,15 @@ def edge_executable() -> str | None:
     for variable in ("ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA"):
         root = os.getenv(variable)
         candidate = Path(root) / "Microsoft/Edge/Application/msedge.exe" if root else None
+        if candidate and candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def chrome_executable() -> str | None:
+    for variable in ('ProgramFiles', 'ProgramFiles(x86)', 'LOCALAPPDATA'):
+        root = os.getenv(variable)
+        candidate = Path(root) / 'Google/Chrome/Application/chrome.exe' if root else None
         if candidate and candidate.is_file():
             return str(candidate)
     return None
@@ -47,6 +56,9 @@ class DesktopGeoJobs:
                     report = self._save_interrupted_run(record, reason="application_closed_submission_unknown")
                     if report:
                         record["result"] = {"report": report}
+                if record.get('target_id') and record.get('kind') == 'destination_fill':
+                    geo_destination_service.record_event(data / 'database.db', record['target_id'], 'interrupted', 'need_action',
+                        '上次填写时软件关闭，编辑器是否自动保存或提交未知；请检查页面，不会自动重试')
                 self.store.save(record)
         if records:
             self.job = self.store.read(records[0]["id"])
@@ -85,9 +97,9 @@ class DesktopGeoJobs:
         return CollectorConfig(profile_dir=self.data / "doubao/browser-profile", headed=True,
                                manual_wait_seconds=600, client_mode=options.get("client_mode", "consumer"),
                                requested_model_label=options.get("model_label") or None,
-                               executable_path=edge_executable())
+                               executable_path=edge_executable(), fallback_executable_path=chrome_executable())
 
-    def _start(self, kind, operation, *, client_name="", cycle_id=None):
+    def _start(self, kind, operation, *, client_name="", cycle_id=None, target_id=None):
         with self.lock:
             if self.job["status"] == "running":
                 return {"error": "已有任务正在执行，请先等待或停止"}
@@ -96,6 +108,8 @@ class DesktopGeoJobs:
                         "created_at": now(), "client_name": client_name}
             if cycle_id:
                 self.job['cycle_id'] = cycle_id
+            if target_id:
+                self.job['target_id'] = target_id
             self._persist()
 
         def run():
@@ -109,6 +123,8 @@ class DesktopGeoJobs:
                 result = asyncio.run(execute())
                 with self.lock:
                     self.job.update(status="completed", result=result)
+                    if isinstance(result, dict) and result.get('message'):
+                        self.job['message'] = result['message']
                     self._persist()
             except asyncio.CancelledError:
                 try:
@@ -215,12 +231,50 @@ class DesktopGeoJobs:
             provenance = {'method': 'doubao_web_ai', 'model_label': (result.get('environment') or {}).get('model_label'),
                           'client_mode': (result.get('environment') or {}).get('client_mode'), 'evidence_path': str(path),
                           'role': 'content_editing_not_exposure_test', 'prompt_sha256': geo_content_research.fingerprint(prompt)}
+            if kind == 'draft':
+                provenance['input_sha256'] = geo_content_research.fingerprint(geo_content_research.draft_input(cycle, brief_id, platform))
             if kind == 'analysis':
                 geo_content_store.save_analysis(database, cycle_id, result['response'], provenance, cycle['revision'])
             else:
                 geo_content_store.save_draft(database, cycle_id, brief_id, platform, result['response'], provenance, cycle['revision'])
             return {'cycle_id': cycle_id}
         return self._start('research' if kind == 'analysis' else 'draft', generate, client_name=cycle['profile']['name'], cycle_id=cycle_id)
+
+    def open_destination(self, cycle_id, target_id, article_id=None):
+        database = self.data / 'database.db'
+        try:
+            cycle = geo_content_store.get_cycle(database, cycle_id)
+            target = geo_destination_service.get_target(database, cycle['project_id'], target_id)
+            if article_id is not None and (type(article_id) is not int or article_id <= 0):
+                raise ValueError('文章编号无效')
+        except (ValueError, geo_content_store.ResearchNotFoundError) as error:
+            return {'error': str(error)}
+
+        async def operate():
+            from services.geo_destination_browser import open_session
+            event_id, article = None, None
+            kind = 'fill' if article_id is not None else 'login'
+            if article_id is not None:
+                current, article, event_id = geo_destination_service.reserve_fill(database, cycle['project_id'], target_id, article_id)
+            else:
+                current = geo_destination_service.get_target(database, cycle['project_id'], target_id)
+            def progress(value):
+                if kind == 'fill':
+                    geo_destination_service.record_event(database, target_id, kind, value['state'], value['message'], article_id, event_id)
+                with self.lock:
+                    self.job['message'] = value['message']
+                    self._persist()
+            try:
+                result = await open_session(current, self.data / 'platform-profiles' / str(cycle['project_id']) / target_id,
+                    edge_executable(), fallback_executable_path=chrome_executable(), article=article, progress=progress)
+                geo_destination_service.record_event(database, target_id, kind, result['state'], result['message'], article_id, event_id)
+                return {'target_id': target_id, **result}
+            except BaseException:
+                geo_destination_service.record_event(database, target_id, kind, 'need_action',
+                    '窗口关闭、任务停止或页面异常，请检查页面内容和账号状态；不会自动重复填写', article_id, event_id)
+                raise
+        return self._start('destination_fill' if article_id is not None else 'destination_login', operate,
+                           client_name=cycle['profile']['name'], cycle_id=cycle_id, target_id=target_id)
 
     def stop_task(self):
         self.cancel_requested = True

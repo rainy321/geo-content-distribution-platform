@@ -138,6 +138,8 @@ def delete_project(database_path: str | Path, project_id: int) -> None:
             research_count = conn.execute('SELECT COUNT(*) FROM geo_content_cycles WHERE project_id=?', (project_id,)).fetchone()[0]
             if research_count:
                 raise ProjectHasArticlesError('项目下仍有关联的采集内容任务单，不能删除')
+            if conn.execute('SELECT COUNT(*) FROM geo_distribution_targets WHERE project_id=?', (project_id,)).fetchone()[0]:
+                raise ProjectHasArticlesError('项目下仍有平台接入记录，不能删除')
             conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
 
 

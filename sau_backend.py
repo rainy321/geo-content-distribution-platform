@@ -62,7 +62,7 @@ from services.cover_image_service import (
 from services.geo_score_service import score_geo_content
 from services.geo_test_service import generate_test_plan, normalize_profile, case_quotas
 from services.geo_test_reports import list_saved_reports, read_saved_report
-from services import geo_content_store, geo_content_research
+from services import geo_content_store, geo_content_research, geo_destination_service
 from services.dashboard_service import get_dashboard_overview
 from services.demo_seed_service import seed_demo_data
 from services.media_account_service import (
@@ -935,6 +935,8 @@ def geo_content_generate(identifier):
         raw = _request_chat_completion(settings=settings, prompt=prompt, temperature=0.3,
                                        http_post=research_requests.post, system_message=geo_content_research.SYSTEM)
         provenance = {'method': 'ai_api', 'model': settings.model, 'prompt_sha256': geo_content_research.fingerprint(prompt)}
+        if kind == 'draft':
+            provenance['input_sha256'] = geo_content_research.fingerprint(geo_content_research.draft_input(cycle, data['brief_id'], data['platform']))
         result = {}
         if kind == 'analysis':
             geo_content_store.save_analysis(app.config['DATABASE_PATH'], identifier, raw, provenance, cycle['revision'])
@@ -972,6 +974,42 @@ def geo_content_attach_retest(identifier):
 @app.route('/api/geo-content/articles/<int:article_id>', methods=['GET'])
 def geo_content_article_research(article_id):
     return jsonify(code=200, data=geo_content_store.article_research(app.config['DATABASE_PATH'], article_id))
+
+
+@app.route('/api/geo-content/cycles/<identifier>/destinations', methods=['POST'])
+@app.route('/api/geo-content/cycles/<identifier>/destinations/<target_id>', methods=['GET', 'PUT'])
+def geo_content_destinations(identifier, target_id=None):
+    try:
+        database = app.config['DATABASE_PATH']
+        cycle = geo_content_store.get_cycle(database, identifier)
+        if request.method == 'GET':
+            target = geo_destination_service.get_target(database, cycle['project_id'], target_id)
+        else:
+            data = request.get_json(silent=True)
+            if not isinstance(data, dict):
+                raise ValueError('请填写平台配置')
+            target = geo_destination_service.save_target(database, cycle['project_id'], data.get('config'), target_id, data.get('revision'))
+        return jsonify(code=200, data={'target': target, 'cycle': geo_content_store.get_cycle(database, identifier)})
+    except geo_content_store.ResearchNotFoundError as error:
+        return jsonify(code=404, msg=str(error), data=None), 404
+    except ValueError as error:
+        return jsonify(code=400, msg=str(error), data=None), 400
+
+
+@app.route('/api/geo-content/cycles/<identifier>/destinations/<target_id>/review', methods=['POST'])
+def geo_content_destination_review(identifier, target_id):
+    try:
+        database = app.config['DATABASE_PATH']
+        cycle = geo_content_store.get_cycle(database, identifier)
+        data = request.get_json(silent=True)
+        if not isinstance(data, dict):
+            raise ValueError('请确认已检查页面与尝试记录')
+        target = geo_destination_service.review_block(database, cycle['project_id'], target_id, data.get('confirmed'))
+        return jsonify(code=200, data=target)
+    except geo_content_store.ResearchNotFoundError as error:
+        return jsonify(code=404, msg=str(error), data=None), 404
+    except ValueError as error:
+        return jsonify(code=400, msg=str(error), data=None), 400
 
 
 @app.route('/api/media-accounts', methods=['GET'])
