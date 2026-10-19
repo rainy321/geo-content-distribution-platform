@@ -3,12 +3,55 @@
 
 // 导入变量
 @use './variables.scss' as *;
+@use './motion.scss';
+
+:root {
+  --geo-primary: #{$primary-color};
+  --geo-primary-soft: #eaf4f1;
+  --geo-ink: #{$text-primary};
+  --geo-text: #{$text-regular};
+  --geo-muted: #{$text-secondary};
+  --geo-border: #{$border-light};
+  --geo-canvas: #{$bg-color-page};
+  --geo-surface: #{$bg-color};
+  --geo-radius: 14px;
+  --geo-space-1: 4px;
+  --geo-space-2: 8px;
+  --geo-space-3: 12px;
+  --geo-space-4: 16px;
+  --geo-space-6: 24px;
+  --geo-space-8: 32px;
+  --el-color-primary: #{$primary-color};
+  --el-color-primary-light-3: #579e96;
+  --el-color-primary-light-5: #83b9b3;
+  --el-color-primary-light-7: #b8d8d3;
+  --el-color-primary-light-8: #d1e6e2;
+  --el-color-primary-light-9: #eaf4f1;
+  --el-color-primary-dark-2: #0b5d57;
+  --el-color-success: #{$success-color};
+  --el-color-warning: #{$warning-color};
+  --el-color-danger: #{$danger-color};
+  --el-color-info: #{$info-color};
+  --el-text-color-primary: #{$text-primary};
+  --el-text-color-regular: #{$text-regular};
+  --el-text-color-secondary: #{$text-secondary};
+  --el-text-color-placeholder: #{$text-placeholder};
+  --el-border-color: #{$border-base};
+  --el-border-color-light: #{$border-light};
+  --el-border-color-lighter: #{$border-lighter};
+  --el-border-radius-base: #{$border-radius-base};
+  --el-border-radius-small: #{$border-radius-small};
+  --el-bg-color-page: #{$bg-color-page};
+  --el-fill-color-blank: #{$bg-color};
+  --el-font-size-base: #{$font-size-base};
+  --el-box-shadow-light: #{$box-shadow-light};
+}
 
 // 全局样式
 body {
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
-    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue',
-    sans-serif;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC',
+    'Microsoft YaHei', 'Helvetica Neue', sans-serif;
+  font-size: $font-size-base;
   color: $text-primary;
   background-color: $bg-color-page;
 }
@@ -16,6 +59,26 @@ body {
 #app {
   min-height: 100vh;
 }
+
+button:focus-visible, a:focus-visible, [role='button']:focus-visible,
+[role='menuitem']:focus-visible, summary:focus-visible {
+  outline: 2px solid $primary-color;
+  outline-offset: 3px;
+}
+
+.el-card { --el-card-border-radius: 14px; }
+.el-dialog { border-radius: 16px; }
+.el-dialog__title { color: $text-primary; font-size: 18px; font-weight: 600; }
+.el-form-item__label { color: $text-regular; }
+.el-input__wrapper, .el-select__wrapper { min-height: 36px; }
+.el-table { --el-table-header-text-color: #{$text-regular}; --el-table-text-color: #{$text-regular}; }
+
+// 主流程和新页面可复用，不覆盖业务页面的局部布局。
+.geo-page { width: 100%; max-width: 1160px; margin: 0 auto; }
+.geo-page-heading { margin: 0; color: $text-primary; font-size: clamp(24px, 2.2vw, 30px); font-weight: 650; line-height: 1.35; letter-spacing: -0.025em; }
+.geo-page-description { max-width: 720px; margin: 10px 0 0; color: $text-secondary; font-size: 14px; line-height: 1.75; }
+.geo-surface { border: 1px solid $border-light; border-radius: 14px; background: $bg-color; box-shadow: $box-shadow-light; }
+.geo-muted { color: $text-secondary; }
 
 // 通用工具类
 .text-center {

@@ -1,5 +1,6 @@
 <template>
   <main class="content-loop" data-testid="geo-content-loop">
+    <div v-if="journeyProjectId" class="journey-return"><span>这里保留详细来源和平台接入配置，品牌资料与稿件会延续到同一轮流程。</span><el-button @click="returnToJourney">返回优化流程</el-button></div>
     <header><div><h1>采集驱动内容</h1><p>从引用来源找到投放目标，接入平台、适配内容，再追踪发布与复测。</p></div><el-button :loading="loading" @click="reload">刷新</el-button></header>
     <el-card shadow="never">
       <h2>1 · 选择采集依据</h2>
@@ -9,7 +10,7 @@
     </el-card>
     <el-card v-if="nativeAvailable" shadow="never">
       <div class="row"><strong>豆包写作会话</strong><el-select v-model="clientMode" :disabled="busy" aria-label="写作豆包界面"><el-option label="豆包对话" value="consumer"/><el-option label="豆包工作" value="work"/></el-select><el-input v-model="model" :disabled="busy" placeholder="模型选项可留空" aria-label="写作模型选项"/><el-button :disabled="busy" @click="login">登录豆包</el-button><el-button v-if="nativeBusy" @click="stop">停止任务</el-button></div>
-      <p class="hint">{{ task.message || (nativeBusy ? '任务执行中；遇到验证请在专用窗口正常完成。' : '平台登录、填写、写作与曝光采集分开记录。') }}</p>
+      <p class="hint" aria-live="polite">{{ currentTaskMessage }}</p>
     </el-card>
     <template v-if="cycle">
       <el-card shadow="never">
@@ -23,6 +24,7 @@
       <GeoDestinations :cycle="cycle" :busy="busy" :native-available="nativeAvailable" @updated="applyCycle" @select="selectDestination" @open="openDestination"/>
       <el-card shadow="never">
         <h2>3 · 补充可用于写作的事实</h2>
+        <div v-if="cycle.fact_candidates && !cycle.facts.length" class="fact-reuse"><p>上轮 {{ date(cycle.fact_candidates.source_created_at) }} 核对过的资料可作为本轮候选，带入后仍需重新核对。</p><el-button :disabled="busy" @click="reuseFacts">带入上轮资料</el-button></div>
         <p class="hint">每行“事实内容 | 来源网址”，没有公开网址时留空，稿件须注明据运营方说明。采集回答不会自动变成事实库。</p>
         <el-input v-model="factsText" type="textarea" :rows="6" :disabled="busy" data-testid="research-facts" placeholder="例如：官网明确标注运营公司全称 | https://客户官网/关于我们" />
         <div class="row"><el-checkbox v-model="confirmed" :disabled="busy">我已核对这些资料，允许据此起草</el-checkbox><el-button :disabled="busy || !confirmed || !factsText.trim()" @click="saveFacts">保存事实资料</el-button></div>
@@ -37,7 +39,7 @@
         <article v-for="draft in cycle.drafts" :key="draft.article_id" class="draft" data-testid="research-draft">
           <h3>{{ draft.title }}</h3><p>{{ cycle.channels[draft.platform] }} · {{ status[draft.status] || draft.status }} · 原始问题 {{ draft.provenance.brief.case_ids.join('、') }}</p>
           <p>{{ draft.summary }}</p>
-          <div class="row"><el-button @click="edit(draft)">审稿 / 编辑</el-button><el-button v-if="draft.provenance.destination" :disabled="busy || !nativeAvailable || draft.status !== 'ready'" @click="fillDestination(draft)">打开目标平台并填写</el-button><el-button v-if="legacyChannel(draft) && legacyChannel(draft) !== 'owned_web'" :disabled="draft.status !== 'ready'" @click="publish(draft)">进入现有发布中心</el-button><el-button @click="downloadArticle(draft)">导出稿件</el-button></div>
+          <div class="row"><el-button @click="edit(draft)">审稿 / 编辑</el-button><el-button v-if="draft.provenance.destination" :disabled="busy || !nativeAvailable || draft.status !== 'ready'" @click="fillDestination(draft)">打开目标平台并填写</el-button><el-button v-if="draft.provenance.destination" :disabled="busy || !['ready','published'].includes(draft.status)" @click="openPublication(draft)">登记站内发布链接</el-button><el-button v-if="legacyChannel(draft) && legacyChannel(draft) !== 'owned_web'" :disabled="draft.status !== 'ready'" @click="publish(draft)">进入现有发布中心</el-button><el-button @click="downloadArticle(draft)">导出稿件</el-button></div>
           <p v-if="draft.provenance.destination" class="hint">来源匹配依据：{{ draft.provenance.distribution_basis?.source_ids.join('、') || '手动选择，当前选题未匹配来源网址' }}。填写可能触发网站自动保存；发布状态以实际结果为准。已有发布中心需另外绑定对应账号。</p>
           <p v-if="draft.platform === 'owned_web'" class="hint">官网稿可导出交给网站编辑发布。</p>
           <p v-for="job in draft.jobs" :key="job.id" class="hint">{{ job.demo ? '演示任务' : '发布任务' }} #{{ job.id }} · {{ job.platform }} · {{ jobStatus[job.status] || job.status }} <a v-if="safeUrl(job.result_url)" :href="safeUrl(job.result_url)" target="_blank" rel="noopener noreferrer">查看发布链接</a></p>
@@ -47,18 +49,25 @@
       </el-card>
       <el-card shadow="never">
         <h2>5 · 发布记录与同题复测</h2>
-        <p>已确认成功的真实发布链接：{{ cycle.publications.length }} 条。演示、失败和缺少结果链接的任务不算已发布。</p>
+        <p>发布器确认成功：{{ cycle.publications.length }} 条；用户登记：{{ cycle.reported_publications?.length || 0 }} 条（尚未独立核验）。演示和失败任务不计成功。</p>
+        <p v-for="item in cycle.reported_publications" :key="item.id" class="hint"><el-tag type="info">用户登记，未核验</el-tag> {{ date(item.published_at) }} · <a :href="safeUrl(item.url)" target="_blank" rel="noopener noreferrer">查看登记链接</a></p>
         <p class="hint">复测使用原计划、原界面和原模型选项，新开一轮采集。发布不代表已被索引；条件相同也只能观察变化，不能证明因果。</p>
         <el-button v-if="nativeAvailable" :disabled="busy" @click="retest">按原计划开始新一轮复测</el-button>
-        <div class="row"><el-select v-model="retestReportId" aria-label="关联复测报告" placeholder="或选择已有报告"><el-option v-for="report in reports" :key="report.id" :value="report.id" :label="`${report.name} · ${date(report.updated_at)}`"/></el-select><el-button :disabled="!retestReportId || busy" @click="attachRetest">关联并比较</el-button></div>
+        <div class="row"><el-select v-model="retestReportId" aria-label="关联复测报告" placeholder="或选择本品牌的其他报告"><el-option v-for="report in matchingRetests" :key="report.id" :value="report.id" :label="`${report.name} · ${date(report.updated_at)}`"/></el-select><el-button :disabled="!retestReportId || busy" @click="attachRetest">关联并比较</el-button></div>
         <article v-for="report in cycle.retests" :key="report.run_id" class="draft">
           <h3>复测 {{ date(report.updated_at) }}</h3><p>{{ report.comparison.conditions_match ? '计划、界面及模型标签匹配，按共同有效题观察' : `条件不匹配：${report.comparison.reasons.join('；')}` }}</p>
+          <el-tag>{{ feedbackStages[report.comparison.feedback_stage] || '采集观察' }}</el-tag><p class="hint">{{ report.comparison.publication_context }} 本次样本只能描述变化，不能独立证明有效、无效或因果关系。</p>
           <el-table :data="report.comparison.cohorts"><el-table-column label="类别"><template #default="{row}">{{ category[row.category] }}</template></el-table-column><el-table-column prop="paired_answers" label="共同有效题"/><el-table-column label="之前提及"><template #default="{row}">{{ rate(row.before_brand_rate) }}</template></el-table-column><el-table-column label="复测提及"><template #default="{row}">{{ rate(row.after_brand_rate) }}</template></el-table-column></el-table>
           <p class="hint">官网正文引用：<span v-for="row in report.comparison.cohorts" :key="row.category">{{ category[row.category] }} {{ rate(row.official_citation_before) }} → {{ rate(row.official_citation_after) }}（共同可判断 {{ row.official_citation_paired }} 题）；</span></p>
-          <p class="hint">{{ report.comparison.publication_context }}</p><p class="hint">{{ report.comparison.note }}</p><p v-for="link in report.comparison.publication_citations" :key="link.url" class="hint">{{ link.url }} · {{ link.observed_in_citations === true ? '在本次正文引用中观察到' : '暂未观察到引用，是否被索引未知' }}</p>
+          <p class="hint">{{ report.comparison.note }}</p><p v-for="link in report.comparison.publication_citations" :key="link.url" class="hint">{{ link.url }} · {{ link.observed_in_citations === true ? '在本次正文引用中观察到' : '暂未观察到引用，是否被索引未知' }}</p>
         </article>
       </el-card>
     </template>
+    <el-dialog v-model="publicationVisible" title="登记已在平台提交的公开文章" width="620px" :close-on-click-modal="false">
+      <p class="hint">请先在平台确认提交结果。这里保留你的发布声明和时间，不会把它伪装成发布器已核验成功。</p>
+      <el-form label-position="top"><el-form-item label="公开文章链接"><el-input v-model="publication.url" aria-label="公开文章链接" placeholder="完整 HTTPS 文章网址"/></el-form-item><el-form-item label="平台显示的发布时间"><el-input v-model="publication.published_at" type="datetime-local" aria-label="平台发布时间"/></el-form-item><el-form-item label="备注，可留空"><el-input v-model="publication.note" maxlength="500"/></el-form-item><el-checkbox v-model="publication.confirmed">我已在平台核对这篇文章的链接和发布时间</el-checkbox></el-form>
+      <template #footer><el-button @click="publicationVisible=false">取消</el-button><el-button type="primary" :loading="working" :disabled="!publication.confirmed || !publication.url" @click="savePublication">保存发布声明</el-button></template>
+    </el-dialog>
   </main>
 </template>
 
@@ -74,6 +83,7 @@ const route = useRoute(), router = useRouter()
 const reports = ref([]), cycles = ref([]), cycle = ref(null), cycleId = ref(''), reportId = ref(''), retestReportId = ref('')
 const loading = ref(false), working = ref(false), nativeAvailable = ref(false), task = ref({status:'idle'})
 const clientMode = ref('consumer'), model = ref(''), factsText = ref(''), confirmed = ref(false), briefId = ref(''), platform = ref('zhihu')
+const publicationVisible = ref(false), publication = ref({url:'',published_at:'',confirmed:false,note:''})
 const nativeBusy = computed(() => task.value.status === 'running'), busy = computed(() => working.value || nativeBusy.value)
 const category = { discovery:'行业自然发现', brand_identity:'品牌核验', website_guided:'官网引导核验' }
 const status = { draft:'待审草稿', ready:'就绪', publishing:'发布中', published:'已发布' }
@@ -85,6 +95,11 @@ const factsValue = () => factsText.value.split('\n').filter(line => line.trim())
 const factsStoredText = facts => facts.map(fact => `${fact.text} | ${fact.source_url || ''}`).join('\n')
 const canDraft = computed(() => Boolean(cycle.value?.facts.length && confirmed.value && factsStoredText(factsValue()) === factsStoredText(cycle.value.facts) && briefId.value))
 const selectedDestination = computed(() => cycle.value?.destinations.find(item => item.key === platform.value))
+const journeyProjectId = computed(() => {const value=Number(route.query.journey_project);return Number.isSafeInteger(value)&&value>0?value:null})
+const returnToJourney = () => router.push({path:'/journey',query:{journey_project:String(journeyProjectId.value)}})
+const matchingRetests = computed(() => reports.value.filter(report => report.name === cycle.value?.profile.name && report.run_id !== cycle.value?.baseline.run_id))
+const currentTaskMessage = computed(() => task.value.cycle_id === cycleId.value ? (task.value.message || (nativeBusy.value ? '当前内容任务执行中，验证请在专用窗口完成。' : '本轮任务记录已保存。')) : (nativeBusy.value ? '另一个桌面任务正在执行，请完成后再开始写作。' : '平台登录、填写、写作与曝光采集分开记录。历史失败详情保留在任务记录。'))
+const feedbackStages = {collection_only:'尚无发布证据',conditions_mismatch:'复测条件不匹配',retest_precedes_publication:'复测早于发布时间',publication_time_unknown:'发布时间待核对',post_publication_observation:'发布后的采集观察'}
 const date = value => value ? new Date(value).toLocaleString('zh-CN', {timeZone:'Asia/Hong_Kong',hour12:false}) : '时间未知'
 const rate = value => typeof value === 'number' ? `${Math.round(value*100)}%` : '未知'
 const safeUrl = value => { try { const url = new URL(value); return ['http:','https:'].includes(url.protocol) && !url.username && !url.password ? url.href : null } catch { return null } }
@@ -110,6 +125,17 @@ const saveFacts = async () => {
   working.value = true
   try { applyCycle((await geoContentApi.facts(cycleId.value,{facts:factsValue(),revision:cycle.value.revision})).data); ElMessage.success('事实资料已保存') }
   finally { working.value = false }
+}
+const reuseFacts = () => {factsText.value=factsStoredText(cycle.value.fact_candidates.facts);confirmed.value=false;ElMessage.info('已带入候选资料，请重新核对后勾选确认')}
+const openPublication = draft => {
+  const now=new Date();const local=new Date(now.getTime()-now.getTimezoneOffset()*60000).toISOString().slice(0,16)
+  publication.value={article_id:draft.article_id,target_id:draft.provenance.destination.id,url:'',published_at:local,confirmed:false,note:''};publicationVisible.value=true
+}
+const savePublication = async () => {
+  working.value=true
+  try {const timestamp=new Date(publication.value.published_at);if(!Number.isFinite(timestamp.getTime())) throw new Error('请填写平台实际发布时间');applyCycle((await geoContentApi.publication(cycleId.value,{...publication.value,published_at:timestamp.toISOString()})).data);publicationVisible.value=false;ElMessage.success('发布声明已保存，证据级别为用户登记')}
+  catch(error) {if(!error.response) ElMessage.error(error.message)}
+  finally {working.value=false}
 }
 const options = () => ({client_mode:clientMode.value,model_label:model.value.trim()})
 const generate = async (kind, provider) => {
@@ -181,5 +207,6 @@ onUnmounted(()=>clearInterval(timer))
 </script>
 
 <style scoped>
+.journey-return{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 20px;border:1px solid var(--geo-border,#dce6e5);border-radius:14px;background:#fff;font-size:13px;color:var(--geo-muted,#52676d)}.fact-reuse{display:flex;align-items:center;gap:16px;margin-bottom:16px;padding:12px;background:#f3f8f7;border-radius:10px;font-size:13px}
 .content-loop{max-width:1200px;margin:auto;display:grid;gap:20px}.row,header{display:flex;align-items:center;gap:12px;flex-wrap:wrap}header{justify-content:space-between}h1{margin:0;font-size:28px}h2{font-size:20px;margin:0 0 16px}h3{font-size:17px}.hint,header p{color:#59696e;line-height:1.8}.row{margin:12px 0}.row .el-select{width:300px}.row .el-input{width:210px}.observations,.draft{background:#f4f8f7;padding:16px;margin-top:18px;border-radius:8px}pre{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.8;font-family:inherit}li{margin:8px 0}a{color:#0a756e}.el-select{max-width:100%}@media(max-width:600px){.row .el-select,.row .el-input{width:100%}}
 </style>

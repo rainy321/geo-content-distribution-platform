@@ -131,7 +131,7 @@
       <div class="login-dialog">
         <el-form label-position="top">
           <el-form-item label="媒体平台">
-            <el-select v-model="loginForm.platformType" placeholder="选择平台" :disabled="loginStage !== 'idle'">
+            <el-select v-model="loginForm.platformType" placeholder="选择平台" :disabled="loginStage !== 'idle' || !!loginForm.existingAccountId">
               <el-option
                 v-for="platform in overview.platforms"
                 :key="platform.type"
@@ -152,7 +152,7 @@
 
         <div v-if="loginStage === 'idle'" class="login-consent">
           <el-icon><WarningFilled /></el-icon>
-          <p>继续后会打开对应平台的登录流程。请只操作你有权使用的账号；扫码、验证码和人工确认不会被绕过。</p>
+          <p>{{ loginForm.existingAccountId ? '重新登录会更新这个账号的会话，已绑定的文章任务会保留。' : '继续后会打开对应平台的登录流程。' }} 请在浏览器正常完成扫码或验证。</p>
         </div>
 
         <div v-else class="login-progress">
@@ -299,6 +299,7 @@ const loginDialogVisible = ref(false)
 const loginStage = ref('idle')
 const qrCodeData = ref('')
 const loginForm = reactive({ platformType: null, accountName: '', existingAccountId: null })
+const loginFailureReason = ref('')
 let eventSource = null
 
 const primaryPlatforms = computed(() => overview.platforms.filter(item => ['P0', 'P1'].includes(item.priority)))
@@ -309,11 +310,11 @@ const syncLabel = computed(() => lastSyncedAt.value
 const selectedPlatform = computed(() => overview.platforms.find(item => item.type === loginForm.platformType))
 const loginDialogTitle = computed(() => `${loginForm.existingAccountId ? '重新登录' : '连接'}${selectedPlatform.value ? ` · ${selectedPlatform.value.name}` : '媒体账号'}`)
 const loginStageTitle = computed(() => ({
-  connecting: '登录流程已启动', manual: '等待你完成平台登录', success: '账号登录成功', failed: '登录没有完成'
+  connecting: '登录流程已启动', manual: '等待你完成平台登录', success: '会话已保存', failed: '登录没有完成'
 }[loginStage.value] || '准备登录'))
 const loginStageMessage = computed(() => {
   if (loginStage.value === 'success') return '本地账号记录已刷新，可以返回媒体账号页继续检测。'
-  if (loginStage.value === 'failed') return '平台登录超时或验证失败，没有绕过任何安全步骤。'
+  if (loginStage.value === 'failed') return loginFailureReason.value || '登录未完成，请检查浏览器中的提示后重试。'
   if (qrCodeData.value) return '请使用对应平台 App 扫描二维码，并在平台侧完成确认。'
   if (loginStage.value === 'manual') return '请在已打开的浏览器或终端中完成登录，系统会等待结果。'
   return '正在等待平台返回二维码或人工登录窗口。'
@@ -356,6 +357,7 @@ const openLogin = (platform = null, account = null) => {
   loginForm.accountName = account?.account_name || ''
   loginForm.existingAccountId = account?.id || null
   loginStage.value = 'idle'
+  loginFailureReason.value = ''
   qrCodeData.value = ''
   loginDialogVisible.value = true
 }
@@ -363,11 +365,19 @@ const openLogin = (platform = null, account = null) => {
 const startLogin = () => {
   closeEventSource()
   loginStage.value = 'connecting'
+  loginFailureReason.value = ''
   qrCodeData.value = ''
-  const url = apiUrl(`/login?type=${loginForm.platformType}&id=${encodeURIComponent(loginForm.accountName.trim())}`)
+  const query = new URLSearchParams({ type: String(loginForm.platformType), id: loginForm.accountName.trim() })
+  if (loginForm.existingAccountId) query.set('account_id', String(loginForm.existingAccountId))
+  const url = apiUrl(`/login?${query.toString()}`)
   eventSource = new EventSource(url, { withCredentials: true })
   eventSource.onmessage = event => {
     const data = event.data
+    if (data.startsWith('COMPONENT_MISSING:')) {
+      const component = data.slice('COMPONENT_MISSING:'.length)
+      loginFailureReason.value = `缺少此平台的登录组件（${component}），请联系软件维护者补齐组件后重试。`
+      return
+    }
     if (data === 'MANUAL_LOGIN') {
       loginStage.value = 'manual'
       return

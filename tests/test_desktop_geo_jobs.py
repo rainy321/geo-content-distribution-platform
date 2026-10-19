@@ -41,6 +41,25 @@ class TestNativeGeoJobs(unittest.TestCase):
         self.jobs.stop_task()
         self.assertEqual(self.wait_finished()['status'], 'stopped')
 
+    def test_manual_login_has_no_automatic_timeout_and_remains_cancellable(self):
+        entered, closed = threading.Event(), threading.Event()
+        budgets = []
+        async def manual_login(_config, wait_seconds):
+            budgets.append(wait_seconds)
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                closed.set()
+        with patch('services.desktop_geo_jobs.open_doubao_session', manual_login):
+            self.jobs.open_login({'client_mode': 'consumer'})
+            self.assertTrue(entered.wait(timeout=3))
+            self.assertEqual(budgets, [None])
+            self.assertEqual(self.jobs.get_task()['status'], 'running')
+            self.jobs.stop_task()
+            self.assertEqual(self.wait_finished()['status'], 'stopped')
+        self.assertTrue(closed.is_set())
+
     def test_native_run_returns_real_runner_report_with_synthetic_answers(self):
         async def collect(config):
             return answer(config.question, response='合成桌面桥接验收回答，并非客户曝光数据。'), self.root / 'synthetic-result.json'
@@ -55,6 +74,31 @@ class TestNativeGeoJobs(unittest.TestCase):
         self.assertEqual(result['result']['report']['status'], 'completed')
         self.assertEqual(len(result['result']['report']['cases']), 4)
         self.assertTrue((Path(result['run_dir']) / 'report.json').is_file())
+
+    def test_native_retest_keeps_case_scoped_source_progress_without_resubmitting(self):
+        value=plan()
+        calls, observations=[],[]
+        async def collect(config, *, progress):
+            calls.append(config.question)
+            progress({'event':'answer_completed','state':'extracting_sources','question_submitted':True})
+            progress({'event':'source_progress','phase':'inline_citations','processed':3,'total':28,'url':'https://not-for-task.example'})
+            observations.append(self.jobs.get_task())
+            return answer(config.question),self.root/'synthetic-result.json'
+        async def no_wait(_):pass
+        async def bridge(plan_value, config, **kwargs):
+            return await run_test_plan(plan_value,config,collect=collect,sleep=no_wait,**kwargs)
+        cycle={'baseline':{'execution':{'client_mode':'consumer'},'cases':value['cases']},'test_plan':value}
+        with patch('services.desktop_geo_jobs.geo_content_store.get_cycle',return_value=cycle), \
+             patch('services.desktop_geo_jobs.geo_content_store.attach_retest') as attach, \
+             patch('services.desktop_geo_jobs.run_test_plan',bridge):
+            self.jobs.start_research_retest('synthetic-cycle')
+            result=self.wait_finished()
+        self.assertEqual(result['status'],'completed')
+        self.assertEqual(calls,[case['question'] for case in value['cases']])
+        self.assertEqual([item['progress']['case_id'] for item in observations],[case['id'] for case in value['cases']])
+        self.assertTrue(all('已检查 3/28' in item['message'] for item in observations))
+        self.assertNotIn('not-for-task.example',json.dumps(observations))
+        attach.assert_called_once()
 
     def test_cancel_preserves_unknown_submission_as_needs_review(self):
         entered = threading.Event()

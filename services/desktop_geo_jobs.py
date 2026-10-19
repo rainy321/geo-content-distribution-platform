@@ -95,9 +95,64 @@ class DesktopGeoJobs:
         if not isinstance(options, dict):
             raise ValueError("采集选项格式无效")
         return CollectorConfig(profile_dir=self.data / "doubao/browser-profile", headed=True,
-                               manual_wait_seconds=600, client_mode=options.get("client_mode", "consumer"),
+                               manual_wait_seconds=None, client_mode=options.get("client_mode", "consumer"),
                                requested_model_label=options.get("model_label") or None,
                                executable_path=edge_executable(), fallback_executable_path=chrome_executable())
+
+    def _collector_progress(self, event):
+        """Persist only known phase fields; raw DOM, URLs and prompts stay in evidence."""
+        names = {'manual_action_required', 'manual_action_cleared', 'manual_action_ended',
+                 'question_sent', 'case_started', 'case_finished', 'background_task_waiting', 'background_task_cleared',
+                 'answer_completed', 'source_progress'}
+        if not isinstance(event, dict) or event.get('event') not in names:
+            return
+        name = event['event']
+        reason = event.get('reason') if event.get('reason') in {'human_verification_required', 'login_required'} else None
+        safe = {'event': name}
+        if name == 'source_progress':
+            phase, processed, total = event.get('phase'), event.get('processed'), event.get('total')
+            if (phase not in {'source_panels', 'inline_citations'} or type(processed) is not int or type(total) is not int
+                    or not 0 <= processed <= total <= 30):
+                return
+            safe.update(phase=phase, processed=processed, total=total)
+        case_id = event.get('case_id') or event.get('id')
+        if isinstance(case_id, str) and 0 < len(case_id) <= 100 and all(char.isalnum() or char in '_-' for char in case_id):
+            safe['case_id'] = case_id
+        else:
+            case_id = None
+        for field in ('question_submission_attempted', 'question_submitted'):
+            if type(event.get(field)) is bool:
+                safe[field] = event[field]
+        if reason:
+            safe['reason'] = reason
+        messages = {
+            'manual_action_required': '等待你在当前豆包窗口完成正常验证或登录；保持窗口打开，本轮会原地继续，请勿重新发送。',
+            'manual_action_cleared': '正常验证或登录已解除，继续当前请求；不会重新发送问题。',
+            'manual_action_ended': '当前验证等待已结束，请核对窗口与提交状态；不会自动重发。',
+            'question_sent': '问题已发送，正在等待豆包当前回答；无需重复发送。',
+            'background_task_waiting': '豆包已委托后台调研，尚未返回最终回答；保留当前请求等待，不作为曝光结果，无需重新发送。',
+            'background_task_cleared': '豆包后台调研已返回当前请求的最终回答，继续保存证据。',
+            'answer_completed': '回答已完成，正在检查可见引用和网址；每条来源需要单独核对，请保持窗口打开。',
+            'case_started': f'正在采集 {case_id or "当前问题"}，每题只发送一次。',
+            'case_finished': f'{case_id or "当前问题"} 的结果已保存，继续本轮采集。',
+        }
+        if name == 'source_progress':
+            if phase == 'source_panels':
+                messages[name] = (f'{case_id or "当前问题"} 回答已完成，正在检查来源面板：已检查 {processed}/{total}（本批最多 30 个）。'
+                                  if total else f'{case_id or "当前问题"} 回答已完成，继续核对当前回答的可见引用。')
+            else:
+                messages[name] = (f'{case_id or "当前问题"} 正在逐条核对可见引用：已检查 {processed}/{total}（本批最多 30 条），请保持窗口打开。'
+                                  if total else f'{case_id or "当前问题"} 暂未发现需逐条核对的可见引用，正在保存现有来源证据。')
+        with self.lock:
+            if self.job.get('status') != 'running':
+                return
+            self.job['waiting_for_user'] = name == 'manual_action_required'
+            if name == 'manual_action_required' and reason:
+                self.job['wait_reason'] = reason
+            else:
+                self.job.pop('wait_reason', None)
+            self.job.update(progress=safe, message=messages[name])
+            self._persist()
 
     def _start(self, kind, operation, *, client_name="", cycle_id=None, target_id=None):
         with self.lock:
@@ -122,9 +177,12 @@ class DesktopGeoJobs:
             try:
                 result = asyncio.run(execute())
                 with self.lock:
-                    self.job.update(status="completed", result=result)
+                    self.job.update(status="completed", result=result, waiting_for_user=False)
+                    self.job.pop('wait_reason', None)
                     if isinstance(result, dict) and result.get('message'):
                         self.job['message'] = result['message']
+                    elif self.job.get('progress'):
+                        self.job['message'] = '本轮任务已结束，结果和未完成原因已保存，请查看对应记录。'
                     self._persist()
             except asyncio.CancelledError:
                 try:
@@ -134,7 +192,8 @@ class DesktopGeoJobs:
                 except Exception:
                     logging.exception("Could not save interrupted native run; original running state remains")
                 with self.lock:
-                    self.job.update(status="stopped", message="已停止；提交状态不明确的问题保留待检查，不会自动重发")
+                    self.job.update(status="stopped", waiting_for_user=False, message="已停止；提交状态不明确的问题保留待检查，不会自动重发")
+                    self.job.pop('wait_reason', None)
                     self._persist()
             except Exception as error:
                 logging.exception("Native GEO task failed")
@@ -142,7 +201,8 @@ class DesktopGeoJobs:
                     message = str(error) if isinstance(error, ValueError) else f"任务失败（{type(error).__name__}），请检查软件日志"
                     if isinstance(error, ImportError):
                         message = f"软件采集组件加载失败（{getattr(error, 'name', None) or '运行库'}），本次未发送问题。请重新打开更新后的软件。"
-                    self.job.update(status="failed", message=message)
+                    self.job.update(status="failed", waiting_for_user=False, message=message)
+                    self.job.pop('wait_reason', None)
                     self._persist()
             finally:
                 self.task = self.loop = None
@@ -157,7 +217,7 @@ class DesktopGeoJobs:
             return {"error": str(error)}
         async def login():
             with exclusive_lock(config.profile_dir / ".geo-test.lock"):
-                await open_doubao_session(config, 600)
+                await open_doubao_session(config, None)
             return {"message": "登录窗口已关闭，会话已保存"}
         return self._start("login", login)
 
@@ -170,7 +230,7 @@ class DesktopGeoJobs:
         output = self.data / "geo-tests/desktop-plans" / uuid.uuid4().hex / "plan.json"
         async def plan():
             args = SimpleNamespace(case_count=case_count, output=output)
-            value = await _plan_with_doubao(profile, args, config)
+            value = await _plan_with_doubao(profile, args, config, progress=self._collector_progress)
             write_json(output, value)
             return {"plan": value}
         return self._start("plan", plan, client_name=profile["name"])
@@ -186,11 +246,7 @@ class DesktopGeoJobs:
             with self.lock:
                 self.job["run_dir"] = str(run_dir)
                 self._persist()
-            def progress(event):
-                with self.lock:
-                    self.job["progress"] = event
-                    self._persist()
-            report = await run_test_plan(plan, RunConfig(run_dir, config), progress=progress)
+            report = await run_test_plan(plan, RunConfig(run_dir, config), progress=self._collector_progress)
             if cycle_id:
                 geo_content_store.attach_retest(self.data / 'database.db', cycle_id, report)
             return {"report": report}
@@ -224,9 +280,12 @@ class DesktopGeoJobs:
             if kind == 'draft' and geo_content_store.existing_draft(database, cycle, brief_id, platform):
                 return {'cycle_id': cycle_id, 'message': '相同资料已有草稿，未重复提问'}
             with exclusive_lock(config.profile_dir / '.geo-test.lock'):
-                result, path = await collect_doubao_sources(replace(config, question=prompt,
-                    output_root=self.data / 'geo-content/evidence' / uuid.uuid4().hex))
+                result, path = await collect_doubao_sources(replace(config, question=prompt, submission_format='verbatim_fenced',
+                    output_root=self.data / 'geo-content/evidence' / uuid.uuid4().hex), progress=self._collector_progress)
             if not result.get('answer_completed') or not result.get('question_submitted') or result.get('question') != prompt:
+                if (result.get('failure_reason') in {'editor_readback_mismatch_not_submitted', 'submission_fresh_user_context_not_confirmed'}
+                        and result.get('question_submission_attempted') is False):
+                    raise ValueError('发送前核对未通过，问题尚未发送，证据已保存；请检查当前窗口后再手动开始。')
                 raise ValueError(f"豆包未返回完整内容（{result.get('failure_reason') or 'answer_incomplete'}），原始证据已保存，未自动重试")
             provenance = {'method': 'doubao_web_ai', 'model_label': (result.get('environment') or {}).get('model_label'),
                           'client_mode': (result.get('environment') or {}).get('client_mode'), 'evidence_path': str(path),

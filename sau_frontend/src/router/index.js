@@ -11,8 +11,10 @@ import GeoOptimization from '../views/GeoOptimization.vue'
 import GeoSearchTests from '../views/GeoSearchTests.vue'
 import GeoContentLoop from '../views/GeoContentLoop.vue'
 import SystemSettings from '../views/SystemSettings.vue'
+import GeoJourney from '../views/GeoJourney.vue'
 
 const routes = [
+  { path: '/journey', name: 'GeoJourney', component: GeoJourney },
   { path: '/geo-content', name: 'GeoContentLoop', component: GeoContentLoop },
   {
     path: '/',

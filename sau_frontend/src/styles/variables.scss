@@ -1,30 +1,30 @@
-// 颜色变量
-$primary-color: #409eff;
-$success-color: #67c23a;
-$warning-color: #e6a23c;
-$danger-color: #f56c6c;
-$info-color: #909399;
+// 工作区沿用深青品牌，组件与页面共享令牌。
+$primary-color: #0f766e;
+$success-color: #28745c;
+$warning-color: #b87423;
+$danger-color: #c44c4c;
+$info-color: #65777f;
 
 // 文字颜色
-$text-primary: #303133;
-$text-regular: #606266;
-$text-secondary: #909399;
-$text-placeholder: #c0c4cc;
+$text-primary: #203338;
+$text-regular: #455b62;
+$text-secondary: #65777f;
+$text-placeholder: #788b91;
 
 // 边框颜色
-$border-base: #dcdfe6;
-$border-light: #e4e7ed;
-$border-lighter: #ebeef5;
-$border-extra-light: #f2f6fc;
+$border-base: #d7e1e3;
+$border-light: #e3eaeb;
+$border-lighter: #ecf1f1;
+$border-extra-light: #f3f6f6;
 
 // 背景颜色
 $bg-color: #ffffff;
-$bg-color-page: #f2f3f5;
+$bg-color-page: #f5f7f7;
 $bg-color-overlay: #ffffff;
 
 // 字体大小
-$font-size-extra-large: 20px;
-$font-size-large: 18px;
+$font-size-extra-large: 24px;
+$font-size-large: 20px;
 $font-size-medium: 16px;
 $font-size-base: 14px;
 $font-size-small: 13px;
@@ -38,15 +38,15 @@ $spacing-lg: 24px;
 $spacing-xl: 32px;
 
 // 圆角
-$border-radius-base: 4px;
-$border-radius-small: 2px;
+$border-radius-base: 8px;
+$border-radius-small: 6px;
 $border-radius-round: 20px;
 $border-radius-circle: 50%;
 
 // 阴影
-$box-shadow-base: 0 2px 4px rgba(0, 0, 0, 0.12), 0 0 6px rgba(0, 0, 0, 0.04);
-$box-shadow-dark: 0 2px 4px rgba(0, 0, 0, 0.12), 0 0 6px rgba(0, 0, 0, 0.12);
-$box-shadow-light: 0 2px 12px 0 rgba(0, 0, 0, 0.1);
+$box-shadow-base: 0 4px 18px rgba(24, 51, 55, 0.06);
+$box-shadow-dark: 0 16px 48px rgba(24, 51, 55, 0.16);
+$box-shadow-light: 0 2px 10px rgba(24, 51, 55, 0.04);
 
 // 层级
 $z-index-normal: 1;

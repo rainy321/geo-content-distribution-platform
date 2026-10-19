@@ -25,6 +25,7 @@
       <el-form label-position="top" @submit.prevent>
         <el-form-item label="平台名称"><el-input v-model="form.name" aria-label="接入平台名称" maxlength="80"/></el-form-item>
         <div class="grid"><el-form-item label="平台首页 HTTPS"><el-input v-model="form.home_url" aria-label="平台首页网址"/></el-form-item><el-form-item label="用于匹配来源的具体网址范围"><el-input v-model="form.source_scope" aria-label="来源网址范围" placeholder="https://平台/开放栏目/"/></el-form-item><el-form-item label="正常注册 / 登录入口"><el-input v-model="form.login_url" aria-label="平台登录入口"/></el-form-item><el-form-item label="作者编辑器入口"><el-input v-model="form.editor_url" aria-label="平台编辑器入口"/></el-form-item></div>
+        <el-form-item label="发布后公开网址范围，可与编辑器、来源栏目不同"><el-input v-model="form.publication_scope" aria-label="发布后公开网址范围" placeholder="留空沿用来源范围，例如 https://zhuanlan.zhihu.com/"/></el-form-item>
         <el-form-item label="平台风格、受众与内容要求（需核对，AI 不会自行验证平台规则）"><el-input v-model="form.style" type="textarea" :rows="3" aria-label="平台内容规范" maxlength="3000"/></el-form-item>
         <el-form-item label="平台规则原文网址，可留空"><el-input v-model="form.rules_url" aria-label="平台规则网址"/></el-form-item>
         <div class="grid"><el-form-item label="标题字数上限"><el-input-number v-model="form.title_limit" :min="10" :max="180"/></el-form-item><el-form-item label="正文字数上限"><el-input-number v-model="form.body_limit" :min="100" :max="30000"/></el-form-item><el-form-item label="本软件每 24 小时填写上限"><el-input-number v-model="form.daily_limit" :min="1" :max="20"/></el-form-item><el-form-item label="两次填写最小间隔（小时）"><el-input-number v-model="form.interval_hours" :min="1" :max="168"/></el-form-item></div>
@@ -46,11 +47,11 @@ import { geoContentApi } from '@/api/geoContent'
 const props = defineProps({cycle:{type:Object,required:true},busy:Boolean,nativeAvailable:Boolean})
 const emit = defineEmits(['updated','select','open'])
 const show=ref(false), saving=ref(false), editing=ref(null), showEvents=ref(false), eventRows=ref([])
-const defaults = () => ({name:'',home_url:'',source_scope:'',login_url:'',editor_url:'',style:'先回答读者的问题，再说明依据、适用条件和局限。不要复制来源文章或编造体验；按平台现行规范核对商业内容。',rules_url:'',channel:'',title_limit:100,body_limit:15000,daily_limit:1,interval_hours:6,title_selector:'',body_selector:''})
+const defaults = () => ({name:'',home_url:'',source_scope:'',publication_scope:'',login_url:'',editor_url:'',style:'先回答读者的问题，再说明依据、适用条件和局限。不要复制来源文章或编造体验；按平台现行规范核对商业内容。',rules_url:'',channel:'',title_limit:100,body_limit:15000,daily_limit:1,interval_hours:6,title_selector:'',body_selector:''})
 const form = reactive(defaults())
 const surfaces = {community_candidate:'开放内容平台候选，权限待核对',vendor_documentation:'厂商文档 / 自有资料',url_unknown:'仅有标题',owned_site:'客户官网',unknown:'未知网站，需调研'}
 const states = {configured:'已配置',session_saved:'会话已保存，权限未验证',preparing:'尝试未结束',filled:'已填写，发布未确认',need_action:'待检查',reviewed:'已人工检查'}
-const configure = (config, target) => { editing.value=target || null; Object.assign(form,defaults(),config || {}); show.value=true }
+const configure = (config, target) => { editing.value=target || null; Object.assign(form,defaults(),config || {}); if (!form.publication_scope && form.channel === 'zhihu') form.publication_scope='https://zhuanlan.zhihu.com/'; show.value=true }
 const unknownCandidate = row => {const home=`https://${row.domain}/`;return {name:row.domain,home_url:home,source_scope:home,login_url:home,editor_url:home}}
 const save = async () => {
   saving.value=true

@@ -976,6 +976,17 @@ def geo_content_article_research(article_id):
     return jsonify(code=200, data=geo_content_store.article_research(app.config['DATABASE_PATH'], article_id))
 
 
+@app.route('/api/geo-content/cycles/<identifier>/publications', methods=['POST'])
+def geo_content_report_publication(identifier):
+    try:
+        cycle = geo_content_store.save_reported_publication(app.config['DATABASE_PATH'], identifier, request.get_json(silent=True))
+        return jsonify(code=200, msg='已保存用户登记链接；公开内容和审核状态尚未独立核验', data=cycle)
+    except geo_content_store.ResearchNotFoundError as error:
+        return jsonify(code=404, msg=str(error), data=None), 404
+    except ValueError as error:
+        return jsonify(code=400, msg=str(error), data=None), 400
+
+
 @app.route('/api/geo-content/cycles/<identifier>/destinations', methods=['POST'])
 @app.route('/api/geo-content/cycles/<identifier>/destinations/<target_id>', methods=['GET', 'PUT'])
 def geo_content_destinations(identifier, target_id=None):
@@ -1646,6 +1657,24 @@ def retry_publish_task(job_id):
     ), 200
 
 
+@app.route('/api/publish/jobs/<int:job_id>/check-result', methods=['POST'])
+def check_publish_task_result(job_id):
+    # This endpoint accepts no claimed URL, title or success flag. Only normal
+    # visible platform pages can supply the observation used for reconciliation.
+    if app.config.get('DEMO_MODE',False) or not app.config.get('DESKTOP_MODE',False):
+        return jsonify({'code':403,'msg':'仅本机桌面真实任务可打开可见窗口核对结果','data':None}),403
+    if request.get_json(silent=True) not in (None,{}):
+        return jsonify({'code':400,'msg':'核对结果不接受自报网址、内容或成功状态','data':None}),400
+    from services.toutiao_result_check import start_result_check,ResultCheckUnavailable
+    try:
+        value=start_result_check(app.config['DATABASE_PATH'],app.config['COOKIES_DIRECTORY'],job_id)
+    except PublishJobNotFoundError as error:
+        return jsonify({'code':404,'msg':str(error),'data':None}),404
+    except (ResultCheckUnavailable,ValueError) as error:
+        return jsonify({'code':409,'msg':str(error),'data':None}),409
+    return jsonify({'code':202,'msg':value['message'],'data':value}),202
+
+
 @app.route('/api/publish/jobs/<int:job_id>/execute', methods=['POST'])
 def execute_demo_publish_task(job_id):
     try:
@@ -1727,9 +1756,20 @@ def execute_real_publish_task(job_id):
             }
         ), 409
 
+    factory_options = {}
+    if app.config.get('DESKTOP_MODE', False) and current['platform'] == 'toutiao':
+        from services.publish_job_service import update_publish_job_progress
+        def publish_progress(message):
+            update_publish_job_progress(app.config['DATABASE_PATH'], job_id, message=message)
+        def submission_recorder(state):
+            from services.publish_job_service import record_publish_submission_state
+            record_publish_submission_state(app.config['DATABASE_PATH'], job_id, 'toutiao', state)
+        factory_options = {'toutiao_interactive': True, 'publish_progress': publish_progress,
+                           'submission_recorder': submission_recorder}
     publisher_factory = create_real_publisher_factory(
         app.config["DATABASE_PATH"],
         cookies_directory=app.config["COOKIES_DIRECTORY"],
+        **factory_options,
     )
     try:
         job = execute_publish_job(
@@ -1753,6 +1793,7 @@ def execute_real_publish_task(job_id):
 
 
 def _publish_job_payload(job):
+    from services.toutiao_result_check import result_check_running
     payload = {
         "job_id": job["id"],
         "article_id": job["article_id"],
@@ -1770,6 +1811,10 @@ def _publish_job_payload(job):
         "created_at": job["created_at"],
         "started_at": job["started_at"],
         "finished_at": job["finished_at"],
+        "platform_published_at": job.get('platform_published_at'),
+        "platform_published_precision": job.get('platform_published_precision'),
+        "result_checked_at": job.get('result_checked_at'),
+        "result_checking": result_check_running(app.config['DATABASE_PATH'],job['id']),
         "can_execute_real": bool(
             not job["demo"]
             and not app.config.get("DEMO_MODE", False)
@@ -2335,19 +2380,33 @@ def delete_account():
 def login():
     # 1 小红书 2 视频号 3 抖音 4 快手 5 百家号 6 B站 7 今日头条
     login_type = str(request.args.get('type') or '').strip()
-    # 账号名
-    account_id = str(request.args.get('id') or '').strip()
+    # ``id`` is the legacy display-name argument; account_id explicitly binds
+    # a reconnect to the existing database row and all of its publish tasks.
+    account_name = str(request.args.get('id') or '').strip()
     if login_type not in {str(value) for value in range(1, 11)}:
         return jsonify({"code": 400, "msg": "不支持的平台类型", "data": None}), 400
-    if not account_id:
+    reconnect_id = None
+    if request.args.get('account_id') is not None:
+        raw_reconnect_id = str(request.args.get('account_id') or '').strip()
+        if len(raw_reconnect_id) > 19 or not raw_reconnect_id.isdecimal() or not 0 < int(raw_reconnect_id) <= 9223372036854775807:
+            return jsonify({"code": 400, "msg": "重连账号 ID 无效", "data": None}), 400
+        reconnect_id = int(raw_reconnect_id)
+        with closing(sqlite3.connect(app.config["DATABASE_PATH"])) as conn:
+            account = conn.execute('SELECT type, userName FROM user_info WHERE id=?', (reconnect_id,)).fetchone()
+        if account is None:
+            return jsonify({"code": 404, "msg": "重连账号不存在", "data": None}), 404
+        if int(account[0]) != int(login_type):
+            return jsonify({"code": 409, "msg": "重连账号的平台不匹配", "data": None}), 409
+        account_name = account_name or str(account[1] or '').strip()
+    if not account_name:
         return jsonify({"code": 400, "msg": "账号名不能为空", "data": None}), 400
-    if len(account_id) > 100:
+    if len(account_name) > 100:
         return jsonify({"code": 400, "msg": "账号名不能超过 100 个字符", "data": None}), 400
-    print(f"登录请求: type={login_type}, id={account_id}")
+    print(f"登录请求: type={login_type}, account_id={reconnect_id or 'new'}")
 
     # 模拟一个用于异步通信的队列
     status_queue = Queue()
-    session_key = (login_type, account_id)
+    session_key = (login_type, f"account:{reconnect_id}" if reconnect_id is not None else account_name)
     with active_queues_lock:
         if session_key in active_queues:
             return jsonify(
@@ -2359,12 +2418,12 @@ def login():
         with active_queues_lock:
             if active_queues.get(session_key) is status_queue:
                 active_queues.pop(session_key, None)
-        print(f"清理登录会话: type={login_type}, id={account_id}")
+        print(f"清理登录会话: type={login_type}, account_id={reconnect_id or 'new'}")
     # 启动异步任务线程
     try:
         thread = threading.Thread(
             target=run_async_function,
-            args=(login_type, account_id, status_queue),
+            args=(login_type, account_name, status_queue, reconnect_id),
             daemon=True,
         )
         thread.start()
@@ -3025,7 +3084,7 @@ def download_cookie():
 
 
 # 包装函数：在线程中运行异步函数
-def run_async_function(type,id,status_queue):
+def run_async_function(type,id,status_queue,account_id=None):
     # Login helpers launch real browsers and belong to the local worker runtime.
     from myUtils.login import (
         baijiahao_cookie_gen,
@@ -3045,6 +3104,8 @@ def run_async_function(type,id,status_queue):
         "database_path": app.config["DATABASE_PATH"],
         "cookies_directory": app.config["COOKIES_DIRECTORY"],
     }
+    if account_id is not None:
+        login_storage["account_id"] = account_id
     try:
         match str(type):
             case '1':
@@ -3120,6 +3181,10 @@ def run_async_function(type,id,status_queue):
             case _:
                 print(f"❌ 不支持的登录平台类型: {type}", flush=True)
                 status_queue.put("500")
+    except ModuleNotFoundError as exc:
+        component = re.sub(r"[^A-Za-z0-9_.-]", "", str(exc.name or "browser-runtime"))[:80]
+        status_queue.put(f"COMPONENT_MISSING:{component}")
+        status_queue.put("500")
     except Exception as e:
         print(f"❌ 登录线程异常 type={type}, id={id}: {e}", flush=True)
         import traceback
@@ -3128,6 +3193,9 @@ def run_async_function(type,id,status_queue):
             status_queue.put("500")
         except Exception:
             pass
+    finally:
+        if 'loop' in locals() and not loop.is_closed():
+            loop.close()
 
 # SSE 流生成器函数
 def sse_stream(status_queue, *, on_close=None):

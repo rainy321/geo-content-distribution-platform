@@ -81,6 +81,7 @@
       <div class="card-heading"><h2>{{ report.profile.name }} · 采集报告</h2><el-tag>{{ statusNames[report.status] || report.status }}</el-tag><el-button type="primary" :disabled="nativeBusy" @click="useReport">用本报告制定内容任务</el-button></div>
       <p class="context">历史采集记录 · {{ reportDate(report.cases[0]?.collected_at || report.updated_at) }}。回答原文来自豆包，尚未逐项核实事实；“提及”只说明名称出现在回答里。</p>
       <p v-if="report.stop_reason" class="context">中断原因：{{ report.stop_reason }}</p>
+      <details v-if="report.evaluation_projection" class="context"><summary>评估说明 · {{ report.evaluation_projection.stored_evaluation_version }} → {{ report.evaluation_projection.applied_evaluation_version }}</summary><p>{{ report.evaluation_projection.note }}</p></details>
       <div class="cohorts">
         <article v-for="category in categories" :key="category">
           <h3>{{ categoryNames[category] }}</h3>

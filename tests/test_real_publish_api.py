@@ -1,4 +1,5 @@
 import sqlite3
+import json
 import tempfile
 import unittest
 from contextlib import closing
@@ -77,6 +78,25 @@ class RealPublishApiTests(unittest.TestCase):
         self.assertEqual(unconfirmed.status_code, 400)
         self.assertEqual(get_publish_job(self.db_path, job["id"])["status"], "queued")
 
+    def test_real_api_rejects_unreviewed_draft_and_stops_changed_queued_task(self):
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("UPDATE articles SET status='draft' WHERE id=?", (self.article_id,))
+        response = self.client.post('/api/publish', json={'article_id': self.article_id, 'platform': 'zhihu'})
+        self.assertEqual(response.status_code, 400)
+        self.assertIn('审稿', response.json['msg'])
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("UPDATE articles SET status='ready' WHERE id=?", (self.article_id,))
+        job = self._create_job()
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("UPDATE articles SET content='尚未重新确认的正文' WHERE id=?", (self.article_id,))
+        publisher_factory = Mock()
+        with patch('sau_backend.create_real_publisher_factory', return_value=publisher_factory):
+            result = self.client.post(f"/api/publish/jobs/{job['id']}/execute-real", json={'confirm': True})
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json['data']['status'], 'need_action')
+        self.assertIn('重新审稿', result.json['data']['message'])
+        publisher_factory.assert_not_called()
+
     def test_rejects_demo_real_job_without_execution(self):
         demo_job = self._create_job(demo=True)
 
@@ -153,6 +173,33 @@ class RealPublishApiTests(unittest.TestCase):
             publisher_factory=factory,
             media_root=app.config["MEDIA_ROOT"],
         )
+
+    def test_desktop_toutiao_reports_manual_progress_through_existing_job(self):
+        from services.publish_job_service import claim_publish_job
+        job = self._create_job(platform='toutiao')
+        def execute(_database, identifier, **_kwargs):
+            claim_publish_job(self.db_path, identifier)
+            create_factory.call_args.kwargs['publish_progress']('请在当前发布窗口完成正常验证')
+            create_factory.call_args.kwargs['submission_recorder']({'submission_phase': 'initial_click_attempted', 'submission_attempted': True})
+            return get_publish_job(self.db_path, identifier)
+        with patch.dict(app.config, {'DESKTOP_MODE': True}), \
+                patch('sau_backend.create_real_publisher_factory', return_value=Mock()) as create_factory, \
+                patch('sau_backend.execute_publish_job', side_effect=execute):
+            response = self.client.post(f"/api/publish/jobs/{job['id']}/execute-real", json={'confirm': True})
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(create_factory.call_args.kwargs['toutiao_interactive'])
+        self.assertEqual(response.json['data']['status'], 'processing')
+        self.assertIn('当前发布窗口', get_publish_job(self.db_path, job['id'])['message'])
+        evidence = json.loads((self.db_path.parent / 'publish-evidence' / f"job-{job['id']}.json").read_text(encoding='utf-8'))
+        self.assertEqual(evidence['submission_phase'], 'initial_click_attempted')
+        self.assertTrue(evidence['submission_attempted'])
+        self.assertEqual(evidence['article_id'], job['article_id'])
+        self.assertEqual(evidence['account_id'], job['account_id'])
+        self.assertEqual(evidence['authorization_fingerprint'], job['authorization_fingerprint'])
+        self.assertTrue(evidence['started_at'])
+        history = list((self.db_path.parent / 'publish-evidence' / 'history' / f"job-{job['id']}" / 'phases').glob('*.json'))
+        self.assertEqual(len(history), 1)
+        self.assertEqual(json.loads(history[0].read_text(encoding='utf-8')), evidence)
 
     def test_job_payload_exposes_real_action_only_when_all_server_gates_allow_it(self):
         job = self._create_job()

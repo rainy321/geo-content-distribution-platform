@@ -28,6 +28,7 @@ def evaluate_publish_reservation(
     platform: str,
     publish_at: str | datetime | None = None,
     now: datetime | None = None,
+    exclude_job_id: int | None = None,
 ) -> dict[str, Any]:
     """Evaluate one task against the product's conservative rolling policy.
 
@@ -42,7 +43,7 @@ def evaluate_publish_reservation(
     reference = _normalize_reference_time(publish_at, now=now)
     rows = conn.execute(
         """
-        SELECT status, created_at, publish_at
+        SELECT id, status, created_at, publish_at, started_at
         FROM publish_jobs
         WHERE account_id = ? AND platform = ? AND demo = 0
         """,
@@ -51,6 +52,7 @@ def evaluate_publish_reservation(
     reserved_times = [
         timestamp
         for row in rows
+        if row['id'] != exclude_job_id
         if str(row["status"]) in COUNTED_JOB_STATUSES
         if (timestamp := _job_effective_time(row)) is not None
     ]
@@ -129,12 +131,14 @@ def assert_can_reserve_publish(
     account_id: int,
     platform: str,
     publish_at: str | datetime | None = None,
+    exclude_job_id: int | None = None,
 ) -> dict[str, Any]:
     decision = evaluate_publish_reservation(
         conn,
         account_id=account_id,
         platform=platform,
         publish_at=publish_at,
+        exclude_job_id=exclude_job_id,
     )
     if decision["allowed"]:
         return decision
@@ -170,6 +174,8 @@ def _normalize_reference_time(
 
 
 def _job_effective_time(row: sqlite3.Row) -> datetime | None:
+    if 'started_at' in row.keys() and row['started_at']:
+        return _parse_time(row['started_at'], naive_timezone=timezone.utc)
     publish_at = row["publish_at"]
     if publish_at:
         return _parse_time(publish_at, naive_timezone=_local_timezone())

@@ -15,6 +15,7 @@ from services.platform_capability_service import (
     SUPPORTED_PUBLISH_PLATFORMS,
 )
 from services.publish_policy_service import assert_can_reserve_publish
+from services.publish_retry_evidence import record_publish_submission_state
 
 
 PUBLISH_JOB_STATUSES = frozenset(
@@ -30,7 +31,8 @@ _ALLOWED_TRANSITIONS = {
 }
 _RETRYABLE_STATUSES = frozenset({"failed", "need_action"})
 PUBLISH_AUTHORIZATION_MISMATCH_MESSAGE = (
-    "定时自动执行授权后，文章内容或分发参数已变化；未访问平台，请重新确认"
+    "发布执行授权后，文章内容、审稿状态或分发参数已变化，或缺少有效确认快照；"
+    "未访问平台，请重新审稿并确认"
 )
 
 
@@ -44,6 +46,10 @@ class UnsupportedPublishPlatformError(ValueError):
 
 class InvalidPublishJobTransitionError(RuntimeError):
     """Raised when a job status change would break the workflow."""
+
+
+class PublishReviewRequiredError(InvalidPublishJobTransitionError):
+    """A real task cannot be claimed without its unchanged reviewed payload."""
 
 
 def create_publish_job(
@@ -73,9 +79,12 @@ def create_publish_job(
 
     with closing(_connect(database_path)) as conn:
         with conn:
-            article_row = _fetch_authorization_article(conn, article_id)
+            conn.execute('BEGIN IMMEDIATE')
+            article_row = _fetch_authorization_article(conn, article_id, platform=normalized_platform)
             if article_row is None:
                 raise ArticleNotFoundError("文章不存在")
+            if not demo and article_row['status'] != 'ready':
+                raise ValueError('真实发布前请先审稿，并把文章标记为就绪；已发布文章需重新确认后另建任务')
             resolved_account_id = _resolve_publish_account_id(
                 conn,
                 normalized_platform,
@@ -84,6 +93,9 @@ def create_publish_job(
             )
             if require_account and not demo and resolved_account_id is None:
                 raise ValueError("真实发布任务必须绑定一个已连接的对应平台账号")
+            if not demo:
+                _assert_target_publish_policy(conn, article_row, normalized_platform, resolved_account_id,
+                                              publish_at=normalized_publish_at)
             if enforce_publish_policy and not demo and resolved_account_id is not None:
                 assert_can_reserve_publish(
                     conn,
@@ -100,7 +112,7 @@ def create_publish_job(
                     publish_at=normalized_publish_at,
                     account_id=resolved_account_id,
                 )
-                if normalized_auto_execute
+                if not demo
                 else ""
             )
             cursor = conn.execute(
@@ -136,7 +148,7 @@ def build_publish_authorization_fingerprint(
     publish_at: str | datetime | None,
     account_id: int | None = None,
 ) -> str:
-    """Bind automatic execution to the exact publishable payload."""
+    """Bind every real task to the exact reviewed publishable payload."""
 
     canonical_payload = {
         "schema": 3,
@@ -150,6 +162,9 @@ def build_publish_authorization_fingerprint(
         "publish_at": _normalize_publish_at(publish_at),
         "account_id": _normalize_optional_account_id(account_id),
     }
+    if article.get('_destination_authorization') is not None:
+        canonical_payload['schema'] = 4
+        canonical_payload['destination'] = article['_destination_authorization']
     encoded = json.dumps(
         canonical_payload,
         ensure_ascii=False,
@@ -162,10 +177,20 @@ def build_publish_authorization_fingerprint(
 def publish_authorization_matches(
     job: dict[str, Any],
     article: dict[str, Any],
+    *, connection: sqlite3.Connection | None = None,
 ) -> bool:
     expected = str(job.get("authorization_fingerprint") or "").strip().lower()
     if not expected:
         return False
+    if connection is not None:
+        from services.geo_target_publish_guard import article_target_context
+        try:
+            target = article_target_context(connection, article['id'], platform=job['platform'], require_builtin=True)
+        except ValueError:
+            return False
+        article = dict(article)
+        if target:
+            article['_destination_authorization'] = target['authorization']
     actual = build_publish_authorization_fingerprint(
         article=article,
         platform=job["platform"],
@@ -225,6 +250,18 @@ def claim_publish_job(
                     raise InvalidPublishJobTransitionError(
                         "同一账号在该平台已有发布任务处理中，请等待完成后再试"
                     )
+            if not bool(current_row['demo']):
+                try:
+                    article = _fetch_authorization_article(conn, current_row['article_id'], platform=current_row['platform'])
+                    reviewed = (article is not None and article['status'] in ('ready', 'publishing', 'published')
+                                and publish_authorization_matches(_serialize_job(current_row), dict(article)))
+                    if reviewed:
+                        _assert_target_publish_policy(conn, article, current_row['platform'], current_row['account_id'],
+                                                      exclude_job_id=job_id)
+                except (ValueError, TypeError) as error:
+                    raise PublishReviewRequiredError(str(error)) from error
+                if not reviewed:
+                    raise PublishReviewRequiredError(PUBLISH_AUTHORIZATION_MISMATCH_MESSAGE)
             cursor = conn.execute(
                 """
                 UPDATE publish_jobs
@@ -237,6 +274,9 @@ def claim_publish_job(
             )
             if cursor.rowcount != 1:
                 raise InvalidPublishJobTransitionError("发布任务已被其他执行器领取")
+            if not bool(current_row['demo']) and article.get('_distribution_target'):
+                from services.geo_target_publish_guard import record_builtin_attempt
+                record_builtin_attempt(conn, article['_distribution_target'], job_id, current_row['article_id'])
             _sync_article_status(conn, current_row["article_id"])
             updated_row = _fetch_job(conn, job_id)
     return _serialize_job(updated_row)
@@ -405,6 +445,7 @@ def retry_publish_job(
 ) -> dict[str, Any]:
     with closing(_connect(database_path)) as conn:
         with conn:
+            conn.execute('BEGIN IMMEDIATE')
             current_row = _fetch_job(conn, job_id)
             if current_row is None:
                 raise PublishJobNotFoundError("发布任务不存在")
@@ -412,15 +453,35 @@ def retry_publish_job(
                 raise InvalidPublishJobTransitionError(
                     f"状态为 {current_row['status']} 的发布任务不能重试"
                 )
+            authorization = ''
+            if not current_row['demo']:
+                try:
+                    article = _fetch_authorization_article(conn, current_row['article_id'], platform=current_row['platform'])
+                    if article:
+                        if article['status'] != 'ready':
+                            raise ValueError('重试真实发布前请重新审稿，并把文章标记为就绪')
+                        if (article.get('_distribution_target') and
+                                publish_authorization_matches(_serialize_job(current_row), article)):
+                            from services.publish_retry_evidence import archive_zero_write_retry
+                            archive_zero_write_retry(conn, current_row, article['_distribution_target'])
+                        _assert_target_publish_policy(conn, article, current_row['platform'], current_row['account_id'], exclude_job_id=job_id)
+                except ValueError as error:
+                    raise InvalidPublishJobTransitionError(str(error)) from error
+                if article is None or article['status'] != 'ready':
+                    raise InvalidPublishJobTransitionError('重试真实发布前请重新审稿，并把文章标记为就绪')
+                authorization = build_publish_authorization_fingerprint(
+                    article=dict(article), platform=current_row['platform'],
+                    images=json.loads(current_row['images'] or '[]'), video=current_row['video'],
+                    publish_at=current_row['publish_at'], account_id=current_row['account_id'])
             conn.execute(
                 """
                 UPDATE publish_jobs
                 SET status = 'queued', message = '', result_url = '',
-                    authorization_fingerprint = '', auto_execute = 0,
+                    authorization_fingerprint = ?, auto_execute = 0,
                     started_at = NULL, finished_at = NULL
                 WHERE id = ?
                 """,
-                (job_id,),
+                (authorization, job_id),
             )
             _sync_article_status(conn, current_row["article_id"])
             updated_row = _fetch_job(conn, job_id)
@@ -433,6 +494,8 @@ def reconcile_publish_job_success(
     *,
     result_url: str,
     message: str = "平台侧已核验发布成功",
+    expected_binding: dict[str, Any] | None = None,
+    platform_evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Correct an ambiguous/failed local result using explicit platform proof."""
 
@@ -441,9 +504,19 @@ def reconcile_publish_job_success(
         raise ValueError("平台对账成功必须提供 http(s) 文章链接")
     with closing(_connect(database_path)) as conn:
         with conn:
+            conn.execute('BEGIN IMMEDIATE')
             current_row = _fetch_job(conn, job_id)
             if current_row is None:
                 raise PublishJobNotFoundError("发布任务不存在")
+            if expected_binding is not None:
+                fields = ('article_id','account_id','started_at','authorization_fingerprint')
+                if (set(expected_binding) != set(fields) or current_row['demo']
+                        or current_row['status'] != 'processing'
+                        or any(current_row[field] != expected_binding[field] for field in fields)):
+                    raise InvalidPublishJobTransitionError('核对期间任务绑定已变化，原证据未更新到当前任务')
+                article = _fetch_authorization_article(conn,current_row['article_id'],platform=current_row['platform'])
+                if not article or article['status']=='draft' or not publish_authorization_matches(_serialize_job(current_row),article):
+                    raise InvalidPublishJobTransitionError('核对期间已授权内容或目标已变化，未更改发布结果')
             if current_row["status"] == "success":
                 return _serialize_job(current_row)
             if current_row["status"] not in {"processing", "failed", "need_action"}:
@@ -459,6 +532,17 @@ def reconcile_publish_job_success(
                 """,
                 (_normalize_text(message), normalized_url, job_id),
             )
+            if platform_evidence is not None:
+                from datetime import timezone
+                if expected_binding is None or current_row['platform'] != 'toutiao':
+                    raise ValueError('平台公开时间需绑定已核验的真实头条任务')
+                stamp = datetime.fromisoformat(platform_evidence['published_at'].replace('Z','+00:00'))
+                if stamp.tzinfo is None or platform_evidence.get('precision') != 'minute':
+                    raise ValueError('平台公开时间必须包含时区与可见分钟精度')
+                conn.execute('''UPDATE publish_jobs SET platform_published_at=?,platform_published_precision=?,
+                    result_checked_at=?,result_check_evidence=? WHERE id=?''',
+                    (stamp.isoformat(),'minute',datetime.now(timezone.utc).isoformat(),
+                     json.dumps(platform_evidence,ensure_ascii=False),job_id))
             _sync_article_status(conn, current_row["article_id"])
             updated_row = _fetch_job(conn, job_id)
     return _serialize_job(updated_row)
@@ -548,11 +632,50 @@ def _connect(database_path: str | Path) -> sqlite3.Connection:
     return conn
 
 
-def _fetch_authorization_article(conn: sqlite3.Connection, article_id: int):
-    return conn.execute(
-        "SELECT id, title, content, tags FROM articles WHERE id = ?",
+def _fetch_authorization_article(conn: sqlite3.Connection, article_id: int, *, platform=None):
+    from services.geo_target_publish_guard import article_target_context
+    row = conn.execute(
+        "SELECT id, project_id, title, content, tags, status FROM articles WHERE id = ?",
         (article_id,),
     ).fetchone()
+    if row is None:
+        return None
+    article = dict(row)
+    target = article_target_context(conn, article_id, platform=platform, require_builtin=True)
+    if target:
+        article['_distribution_target'] = target
+        article['_destination_authorization'] = target['authorization']
+    return article
+
+
+def _assert_target_publish_policy(conn, article, platform, account_id, *, exclude_job_id=None,
+                                  exclude_attempt_job_id=None, publish_at=None):
+    target = article.get('_distribution_target')
+    if not target:
+        return
+    from services.geo_target_publish_guard import assert_target_frequency
+    if account_id is None:
+        raise ValueError('目标稿接入内置发布器必须绑定已连接的对应平台账号')
+    _resolve_publish_account_id(conn, platform, requested_account_id=account_id, demo=False)
+    assert_can_reserve_publish(conn, account_id=account_id, platform=platform,
+                              publish_at=publish_at, exclude_job_id=exclude_job_id)
+    assert_target_frequency(conn, target, exclude_job_id=exclude_job_id,
+                            exclude_attempt_job_id=exclude_attempt_job_id, publish_at=publish_at)
+
+
+def validate_publish_job_for_execution(database, job, article):
+    """Recheck current lineage and both policies immediately before an adapter."""
+    with closing(_connect(database)) as conn:
+        try:
+            current = _fetch_authorization_article(conn, job['article_id'], platform=job['platform'])
+            if (not current or current['status'] == 'draft'
+                    or not publish_authorization_matches(job, current)
+                    or not publish_authorization_matches(job, article, connection=conn)):
+                raise ValueError(PUBLISH_AUTHORIZATION_MISMATCH_MESSAGE)
+            _assert_target_publish_policy(conn, current, job['platform'], job['account_id'],
+                                          exclude_job_id=job['id'], exclude_attempt_job_id=job['id'])
+        except (ValueError, TypeError) as error:
+            raise PublishReviewRequiredError(str(error)) from error
 
 
 def _normalize_authorization_tags(value: Any) -> list[str]:
@@ -599,7 +722,15 @@ def _sync_article_status(conn: sqlite3.Connection, article_id: int) -> str | Non
             (article_id,),
         ).fetchall()
     }
-    if current_status == "published" or "success" in job_statuses:
+    # A real task could only have been created from a reviewed ready article.
+    # A later draft status is an explicit withdrawal of that review, including
+    # after another task succeeded. Do not revive permission while syncing the
+    # failed/blocked task. Demo-only workflows retain their historical behavior.
+    withdrawn_real_review = current_status == 'draft' and conn.execute(
+        'SELECT 1 FROM publish_jobs WHERE article_id=? AND demo=0 LIMIT 1', (article_id,)).fetchone() is not None
+    if withdrawn_real_review:
+        desired_status = 'draft'
+    elif current_status == "published" or "success" in job_statuses:
         desired_status = "published"
     elif "processing" in job_statuses:
         desired_status = "publishing"

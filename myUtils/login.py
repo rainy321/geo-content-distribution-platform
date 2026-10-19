@@ -1,5 +1,7 @@
 import asyncio
 import sqlite3
+from contextlib import closing
+from datetime import datetime, timezone
 
 from playwright.async_api import async_playwright
 
@@ -25,6 +27,27 @@ def _login_cookies_directory(cookies_directory=None):
         if cookies_directory is not None
         else Path(BASE_DIR / "cookiesFile")
     )
+
+
+def _save_login_account(database_path, platform, file_name, user_name, connected, *, account_id=None):
+    """Reconnect in place so already-bound tasks keep their account identity."""
+    checked_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+    with closing(sqlite3.connect(_login_database_path(database_path))) as conn, conn:
+        if account_id is None:
+            cursor = conn.execute(
+                "INSERT INTO user_info (type, filePath, userName, status, last_checked_at) VALUES (?, ?, ?, ?, ?)",
+                (int(platform), file_name, user_name, int(bool(connected)), checked_at),
+            )
+            return cursor.lastrowid
+        if isinstance(account_id, bool) or not isinstance(account_id, int) or account_id <= 0:
+            raise ValueError("重连账号 ID 无效")
+        cursor = conn.execute(
+            "UPDATE user_info SET filePath=?, userName=?, status=?, last_checked_at=? WHERE id=? AND type=?",
+            (file_name, user_name, int(bool(connected)), checked_at, account_id, int(platform)),
+        )
+        if cursor.rowcount != 1:
+            raise ValueError("重连账号不存在或平台不匹配；未创建新账号")
+        return account_id
 
 # 统一获取浏览器启动配置（防风控+引入本地浏览器）
 def get_browser_options():
@@ -103,7 +126,7 @@ async def _wait_for_interactive_login(
 
 # 抖音登录
 async def douyin_cookie_gen(
-    id, status_queue, *, database_path=None, cookies_directory=None,
+    id, status_queue, *, database_path=None, cookies_directory=None, account_id=None,
     timeout_seconds=600,
 ):
     async with async_playwright() as playwright:
@@ -156,20 +179,13 @@ async def douyin_cookie_gen(
         await page.close()
         await context.close()
         await browser.close()
-        with sqlite3.connect(_login_database_path(database_path)) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                                INSERT INTO user_info (type, filePath, userName, status)
-                                VALUES (?, ?, ?, ?)
-                                ''', (3, f"{uuid_v1}.json", id, 1))
-            conn.commit()
-            print("✅ 用户状态已记录")
+        _save_login_account(database_path, 3, f"{uuid_v1}.json", id, True, account_id=account_id)
         status_queue.put("200")
 
 
 # 视频号登录
 async def get_tencent_cookie(
-    id, status_queue, *, database_path=None, cookies_directory=None,
+    id, status_queue, *, database_path=None, cookies_directory=None, account_id=None,
     timeout_seconds=600,
 ):
     async with async_playwright() as playwright:
@@ -234,19 +250,12 @@ async def get_tencent_cookie(
         await context.close()
         await browser.close()
 
-        with sqlite3.connect(_login_database_path(database_path)) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                                INSERT INTO user_info (type, filePath, userName, status)
-                                VALUES (?, ?, ?, ?)
-                                ''', (2, f"{uuid_v1}.json", id, 1))
-            conn.commit()
-            print("✅ 用户状态已记录")
+        _save_login_account(database_path, 2, f"{uuid_v1}.json", id, True, account_id=account_id)
         status_queue.put("200")
 
 # 快手登录
 async def get_ks_cookie(
-    id, status_queue, *, database_path=None, cookies_directory=None,
+    id, status_queue, *, database_path=None, cookies_directory=None, account_id=None,
     timeout_seconds=600,
 ):
     async with async_playwright() as playwright:
@@ -308,19 +317,12 @@ async def get_ks_cookie(
         await context.close()
         await browser.close()
 
-        with sqlite3.connect(_login_database_path(database_path)) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-                                        INSERT INTO user_info (type, filePath, userName, status)
-                                        VALUES (?, ?, ?, ?)
-                                        ''', (4, f"{uuid_v1}.json", id, 1))
-            conn.commit()
-            print("✅ 用户状态已记录")
+        _save_login_account(database_path, 4, f"{uuid_v1}.json", id, True, account_id=account_id)
         status_queue.put("200")
 
 # 小红书登录
 async def xiaohongshu_cookie_gen(
-    id, status_queue, *, database_path=None, cookies_directory=None
+    id, status_queue, *, database_path=None, cookies_directory=None, account_id=None
 ):
     """Run the maintained Xiaohongshu QR flow and persist the account locally."""
 
@@ -345,17 +347,7 @@ async def xiaohongshu_cookie_gen(
             status_queue.put("500")
             return None
 
-        with sqlite3.connect(_login_database_path(database_path)) as conn:
-            cursor = conn.cursor()
-            cursor.execute(
-                """
-                INSERT INTO user_info (type, filePath, userName, status)
-                VALUES (?, ?, ?, ?)
-                """,
-                (1, file_name, id, 1),
-            )
-            conn.commit()
-            print("✅ 小红书用户状态已记录")
+        _save_login_account(database_path, 1, file_name, id, True, account_id=account_id)
         status_queue.put("200")
         return True
     except Exception as exc:
@@ -365,7 +357,7 @@ async def xiaohongshu_cookie_gen(
 
 # 百家号登录（手动登录，非二维码）
 async def baijiahao_cookie_gen(
-    id, status_queue, *, database_path=None, cookies_directory=None
+    id, status_queue, *, database_path=None, cookies_directory=None, account_id=None
 ):
     browser = None
     context = None
@@ -409,14 +401,7 @@ async def baijiahao_cookie_gen(
             if not result:
                 print("⚠️ cookie 即时校验未通过，仍保存账号，请稍后刷新验证")
 
-            with sqlite3.connect(_login_database_path(database_path)) as conn:
-                cursor = conn.cursor()
-                cursor.execute('''
-                    INSERT INTO user_info (type, filePath, userName, status)
-                    VALUES (?, ?, ?, ?)
-                ''', (5, f"{uuid_v1}.json", id, 1 if result else 0))
-                conn.commit()
-                print("✅ 百家号用户状态已记录")
+            _save_login_account(database_path, 5, f"{uuid_v1}.json", id, result, account_id=account_id)
             status_queue.put("200")
             return True
     except Exception as e:
@@ -448,7 +433,7 @@ async def baijiahao_cookie_gen(
 
 # 今日头条登录（扫码/手动，非二维码 SSE 推送，与百家号类似）
 async def toutiao_cookie_gen(
-    id, status_queue, *, database_path=None, cookies_directory=None
+    id, status_queue, *, database_path=None, cookies_directory=None, account_id=None
 ):
     browser = None
     context = None
@@ -489,14 +474,7 @@ async def toutiao_cookie_gen(
             if not result:
                 print("⚠️ cookie 即时校验未通过，仍保存账号，请稍后刷新验证")
 
-            with sqlite3.connect(_login_database_path(database_path)) as conn:
-                cursor = conn.cursor()
-                cursor.execute('''
-                    INSERT INTO user_info (type, filePath, userName, status)
-                    VALUES (?, ?, ?, ?)
-                ''', (7, f"{uuid_v1}.json", id, 1 if result else 0))
-                conn.commit()
-                print("✅ 今日头条用户状态已记录")
+            _save_login_account(database_path, 7, f"{uuid_v1}.json", id, result, account_id=account_id)
             status_queue.put("200")
             return True
     except Exception as e:
@@ -527,7 +505,7 @@ async def toutiao_cookie_gen(
 
 
 async def sohu_cookie_gen(
-    id, status_queue, *, database_path=None, cookies_directory=None
+    id, status_queue, *, database_path=None, cookies_directory=None, account_id=None
 ):
     browser = None
     context = None
@@ -573,14 +551,7 @@ async def sohu_cookie_gen(
             if not result:
                 print("⚠️ cookie 即时校验未通过，仍保存账号，请稍后刷新验证")
 
-            with sqlite3.connect(_login_database_path(database_path)) as conn:
-                cursor = conn.cursor()
-                cursor.execute('''
-                    INSERT INTO user_info (type, filePath, userName, status)
-                    VALUES (?, ?, ?, ?)
-                ''', (8, f"{uuid_v1}.json", id, 1 if result else 0))
-                conn.commit()
-                print("✅ 搜狐号用户状态已记录")
+            _save_login_account(database_path, 8, f"{uuid_v1}.json", id, result, account_id=account_id)
             status_queue.put("200")
             return True
     except Exception as e:
@@ -611,7 +582,7 @@ async def sohu_cookie_gen(
 
 
 async def zhihu_cookie_gen(
-    id, status_queue, *, database_path=None, cookies_directory=None
+    id, status_queue, *, database_path=None, cookies_directory=None, account_id=None
 ):
     browser = None
     context = None
@@ -651,14 +622,7 @@ async def zhihu_cookie_gen(
             if not result:
                 print("⚠️ cookie 即时校验未通过，仍保存账号，请稍后刷新验证")
 
-            with sqlite3.connect(_login_database_path(database_path)) as conn:
-                cursor = conn.cursor()
-                cursor.execute('''
-                    INSERT INTO user_info (type, filePath, userName, status)
-                    VALUES (?, ?, ?, ?)
-                ''', (9, f"{uuid_v1}.json", id, 1 if result else 0))
-                conn.commit()
-                print("✅ 知乎用户状态已记录")
+            _save_login_account(database_path, 9, f"{uuid_v1}.json", id, result, account_id=account_id)
             status_queue.put("200")
             return True
     except Exception as e:
@@ -690,7 +654,7 @@ async def zhihu_cookie_gen(
 
 # Bilibili登录（通过biliup CLI，在新终端窗口中扫码）
 async def bilibili_cookie_gen(
-    id, status_queue, *, database_path=None, cookies_directory=None,
+    id, status_queue, *, database_path=None, cookies_directory=None, account_id=None,
     timeout_seconds=600,
 ):
     import subprocess
@@ -699,7 +663,8 @@ async def bilibili_cookie_gen(
 
     account_dir = _login_cookies_directory(cookies_directory)
     account_dir.mkdir(parents=True, exist_ok=True)
-    account_file = account_dir / f"bilibili_{id}.json"
+    file_name = f"bilibili_{uuid.uuid4()}.json"
+    account_file = account_dir / file_name
 
     # 获取正确的biliup二进制路径（不是pip安装的Python版）
     biliup_path = str(ensure_biliup_binary(force_check=False))
@@ -731,11 +696,7 @@ async def bilibili_cookie_gen(
             result = run_biliup_command(["-u", str(account_file), "renew"])
             if result.returncode == 0:
                 print("✅ Bilibili登录成功")
-                with sqlite3.connect(_login_database_path(database_path)) as conn:
-                    conn.cursor().execute(
-                        'INSERT INTO user_info (type, filePath, userName, status) VALUES (?, ?, ?, ?)',
-                        (6, f"bilibili_{id}.json", id, 1))
-                    conn.commit()
+                _save_login_account(database_path, 6, file_name, id, True, account_id=account_id)
                 status_queue.put("200")
                 return
 
@@ -744,7 +705,7 @@ async def bilibili_cookie_gen(
 
 
 async def tiktok_cookie_gen(
-    id, status_queue, *, database_path=None, cookies_directory=None,
+    id, status_queue, *, database_path=None, cookies_directory=None, account_id=None,
     timeout_seconds=600,
 ):
     """Open a headed TikTok login and persist the browser session for Web use."""
@@ -797,15 +758,7 @@ async def tiktok_cookie_gen(
                 await browser.close()
 
         result = await check_cookie(10, file_name, cookies_directory=cookies_dir)
-        with sqlite3.connect(_login_database_path(database_path)) as conn:
-            conn.execute(
-                """
-                INSERT INTO user_info (type, filePath, userName, status)
-                VALUES (?, ?, ?, ?)
-                """,
-                (10, file_name, id, 1 if result else 0),
-            )
-            conn.commit()
+        _save_login_account(database_path, 10, file_name, id, result, account_id=account_id)
         status_queue.put("200" if result else "500")
         return bool(result)
     except Exception as exc:

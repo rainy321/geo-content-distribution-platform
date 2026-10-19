@@ -108,7 +108,8 @@ class FrontendDeliveryTests(unittest.TestCase):
         )
 
         self.assertIn("path: '/settings'", router)
-        self.assertIn("<span>系统设置</span>", app)
+        self.assertIn("{ path: '/settings', label: '系统设置', icon: Setting }", app)
+        self.assertIn('v-for="item in managementMenu"', app)
         self.assertIn("withCustomAIConfig(data)", article_api)
         self.assertIn("withCustomAIConfig()", article_api)
         self.assertIn("window.sessionStorage.setItem(SESSION_SECRET_KEY", config)

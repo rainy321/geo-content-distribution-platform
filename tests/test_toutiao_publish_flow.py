@@ -85,6 +85,19 @@ class ToutiaoPublishFlowTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["status"], "processing")
         self.assertIn("等待平台审核", result["message"])
 
+    async def test_manual_verification_hooks_do_not_click_publish_twice(self):
+        button = Mock(is_visible=AsyncMock(return_value=True), is_enabled=AsyncMock(return_value=True), click=AsyncMock())
+        page = Mock(url='https://www.toutiao.com/article/123456789/')
+        page.get_by_role.side_effect = self._role_lookup({'发布': [button]})
+        page.locator.return_value = _DialogList()
+        page.wait_for_timeout = AsyncMock()
+        before, after = AsyncMock(), AsyncMock()
+        result = await click_exact_publish_and_observe(page, before_confirmation=before, after_submission=after)
+        self.assertEqual(result['status'], 'success')
+        button.click.assert_awaited_once()
+        before.assert_awaited_once()
+        after.assert_awaited_once()
+
     async def test_draft_save_success_is_not_submission_acceptance(self):
         evidence = await _summarize_submission_responses(
             [

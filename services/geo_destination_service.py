@@ -15,12 +15,12 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit, urlunsplit
 
 
-CATALOG_VERSION = '2026-10-16.1'
+CATALOG_VERSION = '2026-10-20.1'
 
 
-def _candidate(name, home, login, editor, style, channel='', rules_url=''):
+def _candidate(name, home, login, editor, style, channel='', rules_url='', **limits):
     return dict(name=name, home_url=home, login_url=login, editor_url=editor,
-                source_scope=home, style=style, channel=channel, rules_url=rules_url)
+                source_scope=home, style=style, channel=channel, rules_url=rules_url, **limits)
 
 
 CATALOG = [
@@ -29,7 +29,10 @@ CATALOG = [
         '直接回答具体问题，提供推理、适用边界和可核验依据；避免堆品牌和伪装亲身体验。', 'zhihu')),
     ('toutiao', ('toutiao.com', 'www.toutiao.com'), '/', _candidate(
         '今日头条', 'https://www.toutiao.com/', 'https://mp.toutiao.com/', 'https://mp.toutiao.com/',
-        '标题准确，先给结论再解释，避免夸张标题、重复铺稿和无法证实的效果承诺。', 'toutiao')),
+        '标题准确，先给结论再解释；技术说明需要有可核验的信息增量，不写纯广告、导购或私信引流。'
+        '避免夸张标题、重复铺稿和无法证实的效果承诺。AI 创作内容不得声明原创，并按平台要求标注 AI 使用。'
+        '这些提示不代表自动合规，发布前仍需人工核对平台当前规则。', 'toutiao',
+        rules_url='https://baike.toutiao.com/detail/236/238/0', title_limit=30)),
     ('baijiahao', ('baijiahao.baidu.com',), '/', _candidate(
         '百家号', 'https://baijiahao.baidu.com/', 'https://baijiahao.baidu.com/', 'https://baijiahao.baidu.com/',
         '清晰说明问题和依据，保留事实出处；配图与账号权限需要单独检查。', 'baijiahao')),
@@ -165,10 +168,14 @@ def normalize_config(value):
     if not isinstance(value, dict):
         raise ValueError('请填写平台配置')
     config = {field: public_https(value.get(field)) for field in ('home_url', 'login_url', 'editor_url', 'source_scope')}
+    config['publication_scope'] = public_https(value.get('publication_scope') or config['source_scope'])
     config['name'] = _text(value.get('name'), '平台名称', 80)
     config['style'] = _text(value.get('style'), '平台内容规范', 3000)
     config['rules_url'] = public_https(value['rules_url']) if value.get('rules_url') else ''
     config['channel'] = value.get('channel') or ''
+    config['enabled'] = value.get('enabled', True)
+    if type(config['enabled']) is not bool:
+        raise ValueError('目标启用状态必须为布尔值')
     if config['channel'] not in ('', 'zhihu', 'toutiao', 'baijiahao', 'sohu', 'xiaohongshu', 'owned_web'):
         raise ValueError('已有发布渠道无效')
     for field, default, low, high in (('daily_limit', 1, 1, 20), ('interval_hours', 6, 1, 168),
@@ -186,11 +193,16 @@ def normalize_config(value):
 
 
 def _target(row):
+    from services.geo_target_publish_guard import builtin_publisher, configuration_digest
     value = dict(row)
     value['config'] = json.loads(value['config'])
+    value['config_sha256'] = configuration_digest(value['config'])
     value['key'] = 'target_' + value['id']
     value['capability'] = 'configured_fill' if value['config']['title_selector'] else 'login_and_export'
     value['auto_publish_verified'] = False
+    value['builtin_publisher'] = builtin_publisher(value['config'])
+    if value['state'] in ('disabled', 'archived', 'deleted'):
+        value['builtin_publisher'] = {**value['builtin_publisher'], 'available': False, 'reason': '目标已停用'}
     return value
 
 
@@ -222,6 +234,9 @@ def save_target(database, project_id, value, identifier=None, revision=None):
         connection.execute('BEGIN IMMEDIATE')
         prior = connection.execute('SELECT * FROM geo_distribution_targets WHERE id=? AND project_id=?', (identifier, project_id)).fetchone()
         if prior:
+            if connection.execute('''SELECT 1 FROM publish_jobs j JOIN geo_content_drafts d ON d.article_id=j.article_id
+                WHERE d.platform=? AND j.demo=0 AND j.status='processing' LIMIT 1''', ('target_' + identifier,)).fetchone():
+                raise ValueError('目标存在正在发布或最终状态未知的任务，请先核对结果；配置暂不能修改')
             if prior['revision'] != revision or prior['state'] == 'preparing':
                 raise ValueError('平台配置已变化或正在填写，请刷新后再修改')
             connection.execute('UPDATE geo_distribution_targets SET config=?,revision=revision+1,updated_at=? WHERE id=?',
@@ -270,6 +285,7 @@ def reserve_fill(database, project_id, identifier, article_id):
     """Atomic reservation before opening an editor; no automatic replay after a crash."""
     target = get_target(database, project_id, identifier)
     with closing(_connect(database)) as connection, connection:
+        from services.geo_target_publish_guard import article_target_context, assert_target_frequency
         connection.execute('BEGIN IMMEDIATE')
         current = connection.execute('SELECT * FROM geo_distribution_targets WHERE id=?', (identifier,)).fetchone()
         if current['revision'] != target['revision']:
@@ -280,6 +296,9 @@ def reserve_fill(database, project_id, identifier, article_id):
             WHERE a.id=? AND a.project_id=?''', (article_id, project_id)).fetchone()
         if not row or row['platform'] != target['key'] or row['status'] != 'ready':
             raise ValueError('只能填写当前客户、当前平台已审稿并标记就绪的文章')
+        lineage = article_target_context(connection, article_id)
+        if not lineage or lineage['id'] != identifier:
+            raise ValueError('缺少当前目标稿件的可核验关联，请重新生成并审稿')
         config = target['config']
         if not config['title_selector']:
             raise ValueError('尚未配置标题和正文编辑框，当前只能打开登录或导出稿件')
@@ -287,12 +306,7 @@ def reserve_fill(database, project_id, identifier, article_id):
             raise ValueError('文章超过当前平台配置的长度限制，请先编辑')
         if connection.execute('SELECT 1 FROM geo_distribution_events WHERE target_id=? AND article_id=? AND kind=\'fill\' AND state != \'reviewed\'', (identifier, article_id)).fetchone():
             raise ValueError('这篇文章已有填写尝试，请检查页面和记录；不会重复填写')
-        attempts = [datetime.fromisoformat(item[0]) for item in connection.execute('SELECT created_at FROM geo_distribution_events WHERE target_id=? AND kind=\'fill\'', (identifier,))]
-        now = datetime.now(timezone.utc)
-        if sum(now - value < timedelta(hours=24) for value in attempts) >= config['daily_limit']:
-            raise ValueError('达到本软件设置的滚动 24 小时填写阈值；这不是平台官方额度')
-        if attempts and now - max(attempts) < timedelta(hours=config['interval_hours']):
-            raise ValueError('尚未达到本软件设置的两次填写间隔')
+        assert_target_frequency(connection, lineage)
         event_id = uuid.uuid4().hex
         connection.execute('INSERT INTO geo_distribution_events VALUES(?,?,?,?,?,?,?)', (event_id, identifier, article_id, 'fill', 'preparing', '打开编辑器前保留尝试，未确认已发布', _now()))
         connection.execute('UPDATE geo_distribution_targets SET state=\'preparing\' WHERE id=?', (identifier,))

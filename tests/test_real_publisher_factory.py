@@ -108,6 +108,14 @@ class RealPublisherFactoryTests(unittest.TestCase):
         self.assertIsInstance(publisher, SohuPublisherAdapter)
         self.assertEqual(Path(publisher.account_file), cookie_file)
 
+    def test_explicit_desktop_mode_enables_only_toutiao_visible_session(self):
+        for platform, account_type in [('toutiao', 7), ('zhihu', 9)]:
+            (self.cookies_dir / (platform + '.json')).write_text('{}', encoding='utf-8')
+            self._insert_account(platform + '.json', account_type=account_type)
+        factory = RealPublisherFactory(self.db_path, cookies_directory=self.cookies_dir, toutiao_interactive=True)
+        self.assertTrue(factory({'platform': 'toutiao'}).interactive)
+        self.assertFalse(getattr(factory({'platform': 'zhihu'}), 'interactive', False))
+
     def test_builds_baijiahao_adapter_from_connected_local_cookie(self):
         cookie_file = self.cookies_dir / "baijiahao.json"
         cookie_file.write_text("{}", encoding="utf-8")

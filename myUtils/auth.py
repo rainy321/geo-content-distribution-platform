@@ -101,26 +101,11 @@ async def cookie_auth_baijiahao(account_file):
 
 
 async def cookie_auth_toutiao(account_file):
-    async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=LOCAL_CHROME_HEADLESS)
-        context = await browser.new_context(storage_state=account_file)
-        context = await set_init_script(context)
-        page = await context.new_page()
-        await page.goto("https://mp.toutiao.com/")
-        await page.wait_for_timeout(timeout=5000)
-        url = page.url
-        if "/auth/page/login" in url or "sso.toutiao.com" in url:
-            print("[+] 今日头条 cookie 失效")
-            return False
-        if "/profile_v4" in url:
-            print("[+] 今日头条 cookie 有效")
-            return True
-        # 兜底：侧栏/发布入口
-        if await page.locator('a[href*="upload-video"], a[href*="graphic/publish"]').count():
-            print("[+] 今日头条 cookie 有效")
-            return True
-        print("[+] 今日头条 cookie 失效")
-        return False
+    # Share browser configuration and guaranteed cleanup with the publisher.
+    # Keep the platform import local so optional uploaders cannot block login.
+    from uploader.toutiao_uploader.main import cookie_auth as toutiao_cookie_auth
+
+    return await toutiao_cookie_auth(account_file)
 
 
 async def cookie_auth_sohu(account_file):

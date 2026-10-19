@@ -27,7 +27,7 @@ _ACCEPTED_SUBMISSION_MESSAGES = (
 )
 
 
-async def click_exact_publish_and_observe(page: Any) -> dict[str, Any]:
+async def click_exact_publish_and_observe(page: Any, *, before_confirmation=None, after_submission=None, on_submission_attempt=None) -> dict[str, Any]:
     """Click Toutiao's exact publish action and report observable evidence only.
 
     A successful click is not equivalent to a public article. The helper only
@@ -53,14 +53,20 @@ async def click_exact_publish_and_observe(page: Any) -> dict[str, Any]:
             _INITIAL_PUBLISH_LABELS,
             stage="首阶段",
         )
+        if on_submission_attempt:
+            await on_submission_attempt()
         await initial_button.click(timeout=5_000)
         try:
             await page.wait_for_timeout(1_500)
+            if before_confirmation:
+                await before_confirmation()
             if initial_label == "预览并发布":
                 await _confirm_preview_publish(page)
             else:
                 await _confirm_publish_dialog_if_present(page)
             await page.wait_for_timeout(6_000)
+            if after_submission:
+                await after_submission()
         except Exception as exc:
             if not _is_navigation_context_error(exc):
                 raise

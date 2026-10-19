@@ -1,6 +1,9 @@
 import sqlite3
 import tempfile
 import unittest
+from concurrent.futures import ThreadPoolExecutor
+from threading import Barrier
+from unittest.mock import Mock, patch
 from contextlib import closing
 from datetime import datetime
 from pathlib import Path
@@ -11,7 +14,10 @@ from services.publish_job_service import (
     InvalidPublishJobTransitionError,
     create_publish_job,
     get_publish_job,
+    publish_authorization_matches,
+    retry_publish_job,
 )
+from services.article_service import get_article
 from services.publisher_adapter import PublishContent, PublisherAdapter, PublishResult
 
 
@@ -106,6 +112,131 @@ class PublishJobExecutorTests(unittest.TestCase):
 
         self.assertEqual(result["status"], "need_action")
         self.assertIn("真实发布器尚未配置", result["message"])
+
+    def test_changed_manual_task_cannot_contact_publisher_without_new_review(self):
+        job = self._create_job()
+        factory = Mock(side_effect=AssertionError('Changed content must never contact a publisher'))
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute('UPDATE articles SET content=? WHERE id=?', ('排队后未确认的新正文', self.article_id))
+        result = execute_publish_job(self.db_path, job['id'], publisher_factory=factory)
+        self.assertEqual(result['status'], 'need_action')
+        self.assertIn('重新审稿', result['message'])
+        self.assertIsNone(result['started_at'])
+        factory.assert_not_called()
+        retried = retry_publish_job(self.db_path, job['id'])
+        self.assertTrue(publish_authorization_matches(retried, get_article(self.db_path, self.article_id)))
+        self.assertEqual(retried['status'], 'queued')
+        self.assertFalse(retried['auto_execute'])
+        factory.assert_not_called()
+
+    def test_retracted_review_blocks_claim_and_retry_until_ready(self):
+        job = self._create_job()
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("UPDATE articles SET status='draft' WHERE id=?", (self.article_id,))
+        factory = Mock()
+        result = execute_publish_job(self.db_path, job['id'], publisher_factory=factory)
+        self.assertEqual(result['status'], 'need_action')
+        self.assertEqual(self._article_status(), 'draft')
+        with self.assertRaisesRegex(InvalidPublishJobTransitionError, '审稿'):
+            retry_publish_job(self.db_path, job['id'])
+        factory.assert_not_called()
+
+    def test_legacy_task_without_review_snapshot_cannot_contact_platform(self):
+        job = self._create_job()
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("UPDATE publish_jobs SET authorization_fingerprint='' WHERE id=?", (job['id'],))
+        factory = Mock()
+        result = execute_publish_job(self.db_path, job['id'], publisher_factory=factory)
+        self.assertEqual(result['status'], 'need_action')
+        self.assertIn('确认快照', result['message'])
+        factory.assert_not_called()
+
+    def test_revision_between_atomic_claim_and_content_read_is_checked_again(self):
+        job = self._create_job()
+        factory = Mock()
+        def changed_article(database, article_id):
+            with closing(sqlite3.connect(database)) as conn, conn:
+                conn.execute('UPDATE articles SET title=? WHERE id=?', ('领取后被改的标题', article_id))
+            return get_article(database, article_id)
+        with patch('services.publish_job_executor.get_article', changed_article):
+            result = execute_publish_job(self.db_path, job['id'], publisher_factory=factory)
+        self.assertEqual(result['status'], 'need_action')
+        factory.assert_not_called()
+
+    def test_two_workers_only_publish_a_real_job_once(self):
+        job = self._create_job()
+        publisher = StubPublisher('zhihu', PublishResult(True, 'zhihu', 'success', url='https://zhuanlan.zhihu.com/p/synthetic-concurrent'))
+        barrier = Barrier(2)
+        def execute():
+            barrier.wait(timeout=5)
+            try:
+                return execute_publish_job(self.db_path, job['id'], publisher_factory=lambda _job: publisher)['status']
+            except InvalidPublishJobTransitionError:
+                return 'already_claimed'
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(pool.map(lambda _: execute(), range(2)))
+        self.assertCountEqual(results, ['success', 'already_claimed'])
+        self.assertEqual(len(publisher.calls), 1)
+
+    def test_existing_authorized_queue_can_continue_after_another_platform_published(self):
+        first, second = self._create_job(), self._create_job(platform='toutiao')
+        zhihu = StubPublisher('zhihu', PublishResult(True, 'zhihu', 'success', url='https://zhuanlan.zhihu.com/p/synthetic-first'))
+        toutiao = StubPublisher('toutiao', PublishResult(True, 'toutiao', 'success', url='https://www.toutiao.com/article/synthetic-second'))
+        result = execute_publish_job(self.db_path, first['id'], publisher_factory=lambda _job: zhihu)
+        self.assertEqual(result['status'], 'success')
+        self.assertEqual(self._article_status(), 'published')
+        # Existing approvals continue, while a newly created real task still
+        # requires the owner to explicitly review and mark the article ready.
+        with self.assertRaisesRegex(ValueError, '审稿'):
+            self._create_job(platform='sohu')
+        result = execute_publish_job(self.db_path, second['id'], publisher_factory=lambda _job: toutiao)
+        self.assertEqual(result['status'], 'success')
+        self.assertEqual(len(zhihu.calls), 1)
+        self.assertEqual(len(toutiao.calls), 1)
+
+    def test_existing_queue_can_continue_while_another_platform_is_processing(self):
+        first, second = self._create_job(), self._create_job(platform='toutiao')
+        zhihu = StubPublisher('zhihu', PublishResult(False, 'zhihu', 'processing', message='合成平台已接收，仍待回读'))
+        toutiao = StubPublisher('toutiao', PublishResult(True, 'toutiao', 'success', url='https://www.toutiao.com/article/synthetic-second'))
+        first_result = execute_publish_job(self.db_path, first['id'], publisher_factory=lambda _job: zhihu)
+        self.assertEqual(first_result['status'], 'processing')
+        self.assertEqual(self._article_status(), 'publishing')
+        second_result = execute_publish_job(self.db_path, second['id'], publisher_factory=lambda _job: toutiao)
+        self.assertEqual(second_result['status'], 'success')
+        self.assertEqual(len(toutiao.calls), 1)
+
+    def test_retracting_review_after_one_success_stops_all_remaining_tasks(self):
+        first = self._create_job()
+        remaining = [self._create_job(platform='toutiao'), self._create_job(platform='sohu')]
+        publisher = StubPublisher('zhihu', PublishResult(True, 'zhihu', 'success', url='https://zhuanlan.zhihu.com/p/synthetic-first'))
+        execute_publish_job(self.db_path, first['id'], publisher_factory=lambda _job: publisher)
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("UPDATE articles SET status='draft' WHERE id=?", (self.article_id,))
+        factory = Mock()
+        for job in remaining:
+            result = execute_publish_job(self.db_path, job['id'], publisher_factory=factory)
+            self.assertEqual(result['status'], 'need_action')
+            self.assertEqual(self._article_status(), 'draft')
+        factory.assert_not_called()
+
+    def test_changed_content_after_first_success_still_blocks_remaining_approval(self):
+        first, second = self._create_job(), self._create_job(platform='toutiao')
+        publisher = StubPublisher('zhihu', PublishResult(True, 'zhihu', 'success', url='https://zhuanlan.zhihu.com/p/synthetic-first'))
+        execute_publish_job(self.db_path, first['id'], publisher_factory=lambda _job: publisher)
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("UPDATE articles SET content='首个平台发布后修改了正文' WHERE id=?", (self.article_id,))
+        factory = Mock()
+        result = execute_publish_job(self.db_path, second['id'], publisher_factory=factory)
+        self.assertEqual(result['status'], 'need_action')
+        factory.assert_not_called()
+
+    def test_demo_draft_still_uses_original_demo_publication_state(self):
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("UPDATE articles SET status='draft' WHERE id=?", (self.article_id,))
+        job = self._create_job(demo=True)
+        result = execute_publish_job(self.db_path, job['id'])
+        self.assertEqual(result['status'], 'success')
+        self.assertEqual(self._article_status(), 'published')
 
     def test_persists_success_url_and_passes_article_content(self):
         job = self._create_job()

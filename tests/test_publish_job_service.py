@@ -64,6 +64,7 @@ class PublishJobServiceTests(unittest.TestCase):
         self.assertEqual(queued["status"], "queued")
         self.assertEqual(queued["platform"], "zhihu")
         self.assertFalse(queued["demo"])
+        self.assertTrue(queued['authorization_bound'])
         self.assertEqual(queued["article_title"], "企业 AI Agent 指南")
         self.assertEqual(scheduled["status"], "scheduled")
         self.assertEqual(scheduled["publish_at"], "2026-09-02 09:30:00+00:00")
@@ -71,6 +72,18 @@ class PublishJobServiceTests(unittest.TestCase):
         self.assertFalse(scheduled["auto_execute"])
         self.assertFalse(scheduled["authorization_bound"])
         self.assertEqual(get_publish_job(self.db_path, scheduled["id"]), scheduled)
+
+    def test_real_jobs_require_ready_but_demo_keeps_original_contract(self):
+        for status in ('draft', 'publishing', 'published'):
+            with closing(sqlite3.connect(self.db_path)) as conn, conn:
+                conn.execute('UPDATE articles SET status=? WHERE id=?', (status, self.article_id))
+            with self.subTest(status=status), self.assertRaisesRegex(ValueError, '审稿'):
+                create_publish_job(self.db_path, article_id=self.article_id, platform='zhihu')
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("UPDATE articles SET status='draft' WHERE id=?", (self.article_id,))
+        demo = create_publish_job(self.db_path, article_id=self.article_id, platform='zhihu', demo=True)
+        self.assertTrue(demo['demo'])
+        self.assertFalse(demo['authorization_bound'])
 
     def test_persists_real_scheduled_auto_execute_authorization(self):
         scheduled = create_publish_job(
@@ -369,8 +382,8 @@ class PublishJobServiceTests(unittest.TestCase):
 
         self.assertEqual(retried["status"], "queued")
         self.assertFalse(retried["auto_execute"])
-        self.assertFalse(retried["authorization_bound"])
-        self.assertEqual(retried["authorization_fingerprint"], "")
+        self.assertTrue(retried["authorization_bound"])
+        self.assertEqual(len(retried["authorization_fingerprint"]), 64)
 
     def test_reconciles_failed_job_with_platform_article_proof(self):
         job = create_publish_job(

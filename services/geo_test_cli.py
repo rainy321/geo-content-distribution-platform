@@ -42,12 +42,14 @@ def build_parser():
     return parser
 
 
-async def _plan_with_doubao(profile, args, config):
+async def _plan_with_doubao(profile, args, config, *, progress=None):
     prompt = build_planning_prompt(profile, args.case_count)
     from dataclasses import replace
     with exclusive_lock(config.profile_dir / ".geo-test.lock"):
         result, path = await collect_doubao_sources(replace(
-            config, question=prompt, output_root=args.output.parent / (args.output.stem + "-planner-evidence")))
+            config, question=prompt, submission_format='verbatim_fenced',
+            output_root=args.output.parent / (args.output.stem + "-planner-evidence")),
+            **({'progress': progress} if progress is not None else {}))
     _print({"event": "planner_collected", "status": result["collection_status"], "result_path": str(path)})
     if not result.get("answer_completed") or not result.get("question_submitted") or result.get("question") != prompt:
         reason = result.get("failure_reason") or "answer_incomplete"
@@ -55,7 +57,9 @@ async def _plan_with_doubao(profile, args, config):
                     "login_required": "豆包尚未登录，请先点击“登录豆包”完成正常登录。",
                     "client_mode_mismatch": "豆包当前界面与所选类型不符，请确认“豆包对话”或“豆包工作”选项。",
                     "human_verification_required": "豆包需要正常安全验证，当前未取得完整出题结果。",
-                    "service_capacity_unavailable": "豆包当前算力繁忙，本次未取得有效出题结果。"}
+                    "manual_verification_window_closed": "正常验证窗口已关闭，本轮提交状态需要核对；软件不会自动重发。",
+                    "service_capacity_unavailable": "豆包当前算力繁忙，本次未取得有效出题结果。",
+                    "background_task_timeout": "豆包仅确认已委托后台调研，等待期间未返回最终结果；本次未取得有效出题结果，不会自动重发。"}
         if reason.startswith("browser_runtime_dependency_missing:"):
             message = "软件浏览器运行库未加载成功，本次没有发送问题。请重新打开更新后的软件。"
         else:

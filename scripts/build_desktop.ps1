@@ -5,7 +5,7 @@ $ErrorActionPreference = 'Stop'
 $geoRoot = Split-Path -Parent $PSScriptRoot
 $geoPython = Join-Path $geoRoot '.tmp/desktop-build-venv/Scripts/python.exe'
 if (-not (Test-Path -LiteralPath $geoPython)) {
-    throw '请先创建 .tmp/desktop-build-venv 并安装 .[desktop]、playwright==1.52.0、pyinstaller==6.22.3。'
+    throw 'Create .tmp/desktop-build-venv and install .[desktop], playwright==1.52.0 and pyinstaller==6.22.3 first.'
 }
 $geoDestination = Join-Path $geoRoot "dist/desktop-$Mode"
 $geoBuild = Join-Path $geoRoot "build/desktop-$Mode"
@@ -27,4 +27,4 @@ $geoArguments = @(
     '--exclude-module', 'cefpython3', '--exclude-module', 'pytest'
 )
 & $geoPython @geoArguments
-if ($LASTEXITCODE -ne 0) { throw "桌面打包失败：$LASTEXITCODE" }
+if ($LASTEXITCODE -ne 0) { throw "Desktop build failed: $LASTEXITCODE" }

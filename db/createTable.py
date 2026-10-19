@@ -183,6 +183,10 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     started_at DATETIME,
                     finished_at DATETIME,
+                    platform_published_at TEXT,
+                    platform_published_precision TEXT,
+                    result_checked_at TEXT,
+                    result_check_evidence TEXT,
                     FOREIGN KEY (article_id) REFERENCES articles(id) ON DELETE CASCADE,
                     FOREIGN KEY (account_id) REFERENCES user_info(id) ON DELETE SET NULL
                 )
@@ -191,6 +195,9 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
             publish_job_columns = {
                 row[1] for row in cursor.execute("PRAGMA table_info(publish_jobs)")
             }
+            for name in ('platform_published_at', 'platform_published_precision', 'result_checked_at', 'result_check_evidence'):
+                if name not in publish_job_columns:
+                    cursor.execute(f'ALTER TABLE publish_jobs ADD COLUMN {name} TEXT')
             if "images" not in publish_job_columns:
                 cursor.execute(
                     "ALTER TABLE publish_jobs "
@@ -281,6 +288,22 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                     created_at TEXT NOT NULL,
                     FOREIGN KEY(target_id) REFERENCES geo_distribution_targets(id) ON DELETE CASCADE,
                     FOREIGN KEY(article_id) REFERENCES articles(id) ON DELETE SET NULL
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS geo_content_publications (
+                    id TEXT PRIMARY KEY, cycle_id TEXT NOT NULL,
+                    article_id INTEGER NOT NULL, target_id TEXT NOT NULL,
+                    target_revision INTEGER NOT NULL, target_snapshot TEXT NOT NULL,
+                    url TEXT NOT NULL, published_at TEXT NOT NULL,
+                    evidence_level TEXT NOT NULL CHECK(evidence_level = 'owner_reported'),
+                    note TEXT NOT NULL DEFAULT '', baseline_run_id TEXT NOT NULL,
+                    report_digest TEXT NOT NULL, plan_sha256 TEXT NOT NULL,
+                    article_sha256 TEXT NOT NULL, created_at TEXT NOT NULL,
+                    UNIQUE(cycle_id, url),
+                    FOREIGN KEY(cycle_id) REFERENCES geo_content_cycles(id) ON DELETE CASCADE,
+                    FOREIGN KEY(article_id) REFERENCES articles(id) ON DELETE CASCADE,
+                    FOREIGN KEY(target_id) REFERENCES geo_distribution_targets(id) ON DELETE RESTRICT
                 )
             ''')
 

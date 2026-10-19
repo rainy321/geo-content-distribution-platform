@@ -414,6 +414,9 @@ class ToutiaoPublisherAdapter(PublisherAdapter):
         login_checker: Callable[..., Any] | None = None,
         login_runner: Callable[..., Any] | None = None,
         publish_runner: Callable[..., Any] | None = None,
+        interactive: bool = False,
+        progress: Callable[[str], Any] | None = None,
+        record_submission: Callable[[dict], Any] | None = None,
     ):
         if timeout_seconds <= 0 or login_timeout_seconds <= 0:
             raise ValueError("超时时间必须大于 0")
@@ -423,6 +426,11 @@ class ToutiaoPublisherAdapter(PublisherAdapter):
         self._login_checker = login_checker or _default_toutiao_login_checker
         self._login_runner = login_runner or _default_toutiao_login_runner
         self._publish_runner = publish_runner or _default_toutiao_publish_runner
+        self.interactive = bool(interactive)
+        if self.interactive and publish_runner is None:
+            from functools import partial
+            self._publish_runner = partial(_default_toutiao_publish_runner, interactive=True, progress=progress,
+                                           record_submission=record_submission)
 
     def login(self) -> bool:
         return bool(
@@ -445,7 +453,7 @@ class ToutiaoPublisherAdapter(PublisherAdapter):
     def publish(self, content: PublishContent) -> PublishResult:
         _validate_content_platform(content, self.platform)
         try:
-            logged_in = self.check_login()
+            logged_in = True if self.interactive else self.check_login()
         except (TimeoutError, asyncio.TimeoutError):
             return self._failed("今日头条登录状态检查超时，请稍后重试")
         except Exception as exc:
@@ -464,7 +472,7 @@ class ToutiaoPublisherAdapter(PublisherAdapter):
                 self._publish_runner,
                 content,
                 self.account_file,
-                timeout_seconds=self.timeout_seconds,
+                timeout_seconds=None if self.interactive else self.timeout_seconds,
             )
         except (TimeoutError, asyncio.TimeoutError):
             return PublishResult(
@@ -1017,7 +1025,11 @@ async def _default_toutiao_login_runner(account_file: str) -> bool:
 async def _default_toutiao_publish_runner(
     content: PublishContent,
     account_file: str,
+    *, interactive: bool = False, progress=None, record_submission=None,
 ) -> Any:
+    if interactive:
+        from services.toutiao_article_session import run_visible_article
+        return await run_visible_article(content, account_file, progress, record_submission=record_submission)
     from services.toutiao_publish_flow import click_exact_publish_and_observe
     from uploader.toutiao_uploader.main import TouTiaoArticle
 
@@ -1178,7 +1190,7 @@ async def _default_xiaohongshu_publish_runner(
 def _run_with_timeout(
     runner: Callable[..., Any],
     *args: Any,
-    timeout_seconds: float,
+    timeout_seconds: float | None,
 ) -> Any:
     async def invoke() -> Any:
         value = runner(*args)

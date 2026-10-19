@@ -58,6 +58,16 @@ class ResearchFixture:
 
 
 class TestResearchLoop(ResearchFixture, unittest.TestCase):
+    def test_later_cited_community_remains_available_to_editorial_planning(self):
+        baseline = copy.deepcopy(self.baseline)
+        baseline['cases'][0]['citations'] = [
+            {'title': f'公开技术资料 {index}', 'url': f'https://docs.example.org/{index}'}
+            for index in range(24)
+        ] + [{'title': '后续引用的社区实操文章', 'url': 'https://blog.csdn.net/example/article/details/123'}]
+        observations = research.research_observations(baseline)
+        community = next(source for source in observations['sources'] if source['domain'] == 'blog.csdn.net')
+        self.assertIn(community['id'], observations['briefs'][0]['source_ids'])
+
     def test_report_produces_traceable_work_and_unknown_sources_stay_unknown(self):
         self.assertEqual(self.cycle['analysis']['method'], 'rule_observations_not_ai')
         self.assertEqual(self.cycle['test_plan']['plan_sha256'], plan()['plan_sha256'])
@@ -204,8 +214,9 @@ class TestResearchLoop(ResearchFixture, unittest.TestCase):
     def test_native_research_stores_evidence_and_same_input_never_resubmits(self):
         self.prepare_facts()
         calls = []
-        async def collect(config):
+        async def collect(config, **_kwargs):
             calls.append(config.question)
+            self.assertEqual(config.submission_format, 'verbatim_fenced')
             return ({'question': config.question, 'question_submitted': True, 'answer_completed': True,
                      'response': draft(), 'environment': {'model_label': 'synthetic-model'}}, self.root/'synthetic-evidence.json')
         bridge = DesktopGeoJobs(self.root)
@@ -218,6 +229,29 @@ class TestResearchLoop(ResearchFixture, unittest.TestCase):
         self.assertEqual(len(calls), 1)
         self.assertEqual(len(store.get_cycle(self.database, self.cycle['id'])['drafts']), 1)
         self.assertEqual(DesktopGeoJobs(self.root).get_task()['cycle_id'], self.cycle['id'])
+
+    def test_native_pre_submission_failure_is_explicit_and_not_a_missing_answer(self):
+        for reason, attempted in (('editor_readback_mismatch_not_submitted', False),
+                                  ('submission_fresh_user_context_not_confirmed', False),
+                                  ('answer_timeout', True),
+                                  ('editor_readback_mismatch_not_submitted', True)):
+            async def collect(config, **_kwargs):
+                return ({'question': config.question, 'question_submitted': False, 'answer_completed': False,
+                         'question_submission_attempted': attempted, 'failure_reason': reason}, self.root/'synthetic-failure.json')
+            bridge = DesktopGeoJobs(self.root)
+            with self.subTest(reason=reason, attempted=attempted), \
+                 patch('services.desktop_geo_jobs.collect_doubao_sources', collect):
+                response = bridge.generate_research(self.cycle['id'], 'analysis', None, None, {})
+                self.assertNotIn('error', response)
+                bridge.worker.join(timeout=5)
+                task = bridge.get_task()
+                self.assertEqual(task['status'], 'failed')
+                if attempted is False:
+                    self.assertIn('发送前核对未通过，问题尚未发送，证据已保存', task['message'])
+                    self.assertNotIn('未返回完整内容', task['message'])
+                else:
+                    self.assertNotIn('尚未发送', task['message'])
+                    self.assertIn(reason, task['message'])
 
     def test_native_retest_uses_exact_baseline_and_associates_report(self):
         async def collect(value, config, progress):

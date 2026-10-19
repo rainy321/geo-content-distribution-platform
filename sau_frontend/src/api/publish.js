@@ -17,6 +17,10 @@ export const publishApi = {
     return http.get(`/api/publish/jobs/${id}`)
   },
 
+  checkResult(id) {
+    return http.post(`/api/publish/jobs/${id}/check-result`, undefined, { suppressGlobalError: true })
+  },
+
   retryJob(id) {
     return http.post(`/api/publish/jobs/${id}/retry`)
   },

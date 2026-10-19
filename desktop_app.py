@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import faulthandler
 import hashlib
 import json
 import logging
@@ -15,6 +16,7 @@ import threading
 import time
 from contextlib import closing
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 WINDOW_TITLE = "GEO AI 搜索工作台"
@@ -75,8 +77,76 @@ def migrate_legacy_desktop_data(destination: Path) -> None:
             json.dumps({"sources": imported, "originals_preserved": True}, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
+def _migrate_workspace_media_sessions(workspace: Path, destination: Path) -> dict:
+    """Import only matching local account files, never whole browser profiles.
+
+    The desktop database may already contain newer accounts. Requiring the same
+    account id, platform and relative file path prevents an unrelated source
+    account from being connected to an existing desktop account. Imported
+    sessions still require a live login check; historical status is not proof.
+    """
+    summary = {"media_session_files_copied": 0, "media_session_files_preserved": 0,
+               "media_session_files_skipped": 0, "media_sessions_require_check": False}
+    source_db, target_db = workspace / "db/database.db", destination / "database.db"
+    source_root, target_root = (workspace / "cookiesFile").resolve(), (destination / "cookies").resolve()
+    if not source_db.is_file() or not target_db.is_file() or not source_root.is_dir():
+        return summary
+    try:
+        with closing(sqlite3.connect(source_db.as_uri() + "?mode=ro", uri=True)) as source:
+            source_accounts = set(source.execute("SELECT id, type, filePath FROM user_info"))
+        with closing(sqlite3.connect(target_db.as_uri() + "?mode=ro", uri=True)) as target:
+            accounts = target.execute("SELECT id, type, filePath FROM user_info").fetchall()
+    except sqlite3.OperationalError:
+        # Older databases may not contain media accounts yet.
+        return summary
+    target_root.mkdir(parents=True, exist_ok=True)
+    imported = []
+    for account_id, platform, raw_path in accounts:
+        if (account_id, platform, raw_path) not in source_accounts:
+            continue
+        relative = Path(str(raw_path or ""))
+        source_file, target_file = (source_root / relative).resolve(), (target_root / relative).resolve()
+        try:
+            if not str(raw_path or "").strip() or relative.is_absolute():
+                raise ValueError("Account file must be relative")
+            source_file.relative_to(source_root)
+            target_file.relative_to(target_root)
+            if (source_root / relative).is_symlink() or not source_file.is_file():
+                raise ValueError("Account file is unavailable")
+        except (OSError, ValueError):
+            summary["media_session_files_skipped"] += 1
+            continue
+        if target_file.exists():
+            summary["media_session_files_preserved"] += 1
+            continue
+        target_file.parent.mkdir(parents=True, exist_ok=True)
+        created = False
+        try:
+            # Exclusive creation preserves a newer login even if another local
+            # instance creates its session between the existence check and copy.
+            with source_file.open("rb") as source, target_file.open("xb") as target:
+                created = True
+                shutil.copyfileobj(source, target)
+            imported.append((account_id, platform, raw_path))
+            summary["media_session_files_copied"] += 1
+        except FileExistsError:
+            summary["media_session_files_preserved"] += 1
+        except OSError:
+            if created:
+                target_file.unlink(missing_ok=True)
+            summary["media_session_files_skipped"] += 1
+    if imported:
+        with closing(sqlite3.connect(target_db)) as target, target:
+            target.executemany(
+                "UPDATE user_info SET status = 0, last_checked_at = NULL WHERE id = ? AND type = ? AND filePath = ?",
+                imported,
+            )
+        summary["media_sessions_require_check"] = True
+    return summary
+
+
 def migrate_workspace(workspace: Path, destination: Path) -> dict:
-    """Copy local data once; never bundle accounts or overwrite desktop data."""
+    """Import this user's local data; never bundle it or replace desktop data."""
     workspace, destination = workspace.resolve(), destination.resolve()
     destination.mkdir(parents=True, exist_ok=True)
     copied = 0
@@ -106,8 +176,10 @@ def migrate_workspace(workspace: Path, destination: Path) -> dict:
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
             copied += 1
+    media_sessions = _migrate_workspace_media_sessions(workspace, destination)
     summary = {"source": str(workspace), "database_copied": database_copied,
-               "report_files_copied": copied, "browser_sessions_copied": False}
+               "report_files_copied": copied, "browser_sessions_copied": False,
+               "browser_profiles_copied": False, **media_sessions}
     (destination / "workspace-import.json").write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     return summary
 
@@ -121,6 +193,9 @@ def configure_environment(data: Path) -> None:
     os.environ["RUN_PUBLISH_SCHEDULER"] = "false"
     os.environ["SEED_DEMO_DATA"] = "false"
     os.environ.setdefault("DEMO_MODE", "false")
+    # Local desktop publishing still requires an explicit confirmation and a
+    # verified bound account. Preserve an administrator's explicit disable.
+    os.environ.setdefault("ALLOW_REAL_PUBLISHING", "true")
     os.chdir(data)
 
 
@@ -194,14 +269,87 @@ def activate_existing_window() -> None:
         user.SetForegroundWindow(handle)
 
 
+def desktop_urls(port: int, data: Path) -> tuple[str, str]:
+    """Open the guided workflow; keep report selection on its dedicated route."""
+    from services.geo_test_reports import list_saved_reports
+
+    base = f"http://127.0.0.1:{port}/#/"
+    legacy = base + "geo-tests?desktop=1"
+    selected = next((item for item in list_saved_reports(data / "geo-tests")
+                     if item["status"] == "completed"), None)
+    if selected:
+        legacy += "&report=" + selected["id"]
+    return base + "journey?desktop=1", legacy
+
+
+def shutdown_desktop_runtime(jobs, server, thread) -> None:
+    """Finish native work before the interpreter discards daemon threads.
+
+    pywebview dispatches ``closed`` callbacks asynchronously, so cleanup must
+    run synchronously after its UI loop returns rather than depend on that
+    callback finishing before process exit.
+    """
+    if jobs:
+        try:
+            current = jobs.get_task()
+            logging.info("Desktop collector shutdown requested: id=%s kind=%s status=%s",
+                         current.get('id'), current.get('kind'), current.get('status'))
+            jobs.shutdown()
+            current = jobs.get_task()
+            logging.info("Desktop collector shutdown finished: id=%s status=%s",
+                         current.get('id'), current.get('status'))
+        except Exception:
+            logging.exception('Desktop collector shutdown failed; saved task requires review')
+    if server:
+        try:
+            if thread and thread.is_alive():
+                server.shutdown()
+        finally:
+            server.server_close()
+    if thread:
+        thread.join(timeout=3)
+
+
 def run_smoke_check(window, data: Path, url: str) -> None:
     """Exercise the actual embedded window; no provider requests or fixtures."""
     status = {"passed": False, "embedded_window": True, "url": url, "mock_api": False}
     try:
+        _entry_url, legacy_url = desktop_urls(urlsplit(url).port, data)
+        status["legacy_report_url"] = legacy_url
+        journey_observed = {}
+        for _ in range(60):
+            try:
+                journey_observed = window.evaluate_js("""JSON.stringify({
+                    heading: document.querySelector('[data-testid="geo-journey"] h1')?.textContent,
+                    steps: [...document.querySelectorAll('[data-testid="geo-journey"] .journey-steps > button')].map(e => e.textContent.trim()),
+                    primary_action: !!document.querySelector('[data-testid="journey-primary"]'),
+                    native_bridge: ['open_login','plan_with_doubao','start_run','generate_research','get_task'].every(name => typeof window.pywebview?.api?.[name] === 'function')
+                })""")
+                journey_observed = json.loads(journey_observed) if isinstance(journey_observed, str) else journey_observed
+                steps = journey_observed.get('steps') or []
+                if (str(journey_observed.get('heading') or '').strip() and len(steps) == 5
+                        and all(label in actual for label, actual in zip(('品牌', '搜索基线', '内容', '发布', '反馈'), steps))
+                        and journey_observed.get('primary_action') and journey_observed.get('native_bridge')):
+                    status['journey'] = journey_observed
+                    status['journey_verified'] = True
+                    break
+            except Exception:
+                pass
+            time.sleep(0.5)
+        if not status.get('journey_verified'):
+            status['last_journey_observed'] = journey_observed
+            raise RuntimeError('桌面主流程未加载五个步骤或原生桥接')
+
+        # Verify historical reports after the entry workflow. Selecting a past
+        # report belongs to this explicit navigation, not a new user's start.
+        window.evaluate_js('window.location.hash = ' + json.dumps(urlsplit(legacy_url).fragment))
         from services.desktop_task_store import DesktopTaskStore
         store = DesktopTaskStore(data)
         expected_history = len(store.records())
         workspace = store.workspace()
+        observed = {}
+        require_report = '&report=' in legacy_url
+        legacy_ready = False
         for _ in range(60):
             try:
                 observed = window.evaluate_js("""JSON.stringify({
@@ -216,14 +364,17 @@ def run_smoke_check(window, data: Path, url: str) -> None:
                 observed = json.loads(observed) if isinstance(observed, str) else observed
                 restored_company = "company" not in workspace or observed.get("draft_company") == workspace["company"]
                 restored_plan = not workspace.get("plan") or observed.get("plan_heading") == workspace["plan"]["profile"]["name"] + " · 测试计划"
-                if observed and observed.get("heading") == "AI 搜索测试" and observed.get("report") and observed.get("native_bridge") and observed.get("history_rows", 0) >= expected_history and restored_company and restored_plan:
-                    status.update(passed=True, **observed)
+                if observed and observed.get("heading") == "AI 搜索测试" and (not require_report or observed.get("report")) and observed.get("native_bridge") and observed.get("history_rows", 0) >= expected_history and restored_company and restored_plan:
+                    status.update(**observed)
                     status["workspace_restored"] = True
+                    status["legacy_report_verified"] = bool(observed.get("report"))
+                    status["legacy_report_required"] = require_report
+                    legacy_ready = True
                     break
             except Exception:
                 pass
             time.sleep(0.5)
-        if not status["passed"]:
+        if not legacy_ready:
             status["last_observed"] = observed
             raise RuntimeError("桌面窗口未加载实际报告")
         from services.desktop_geo_jobs import edge_executable, chrome_executable
@@ -240,8 +391,13 @@ def run_smoke_check(window, data: Path, url: str) -> None:
                     await page.set_content('<title>Synthetic desktop browser-engine check</title>')
                     ready = await page.title() == 'Synthetic desktop browser-engine check'
                     await page.goto(url)
-                    await page.get_by_role('heading', name='AI 搜索测试', exact=True).wait_for()
+                    await page.locator('[data-testid="geo-journey"] .journey-steps > button').last.wait_for()
+                    if await page.locator('[data-testid="geo-journey"] .journey-steps > button').count() != 5:
+                        raise RuntimeError('实际浏览器未显示五步主流程')
                     await page.screenshot(path=str(data / 'logs/content-preview.png'))
+                    await page.goto(legacy_url)
+                    await page.get_by_role('heading', name='AI 搜索测试', exact=True).wait_for()
+                    await page.screenshot(path=str(data / 'logs/legacy-report-preview.png'))
                     return ready
                 finally:
                     await browser.close()
@@ -269,6 +425,7 @@ def run_smoke_check(window, data: Path, url: str) -> None:
         status["content_preview_method"] = "headless_preview_of_actual_local_server"
         if not status["collector_engine_ready"]:
             raise RuntimeError("采集浏览器引擎未就绪")
+        status['passed'] = True
     except Exception as error:
         status.update(passed=False, error=type(error).__name__)
         logging.exception("Desktop smoke check failed")
@@ -290,13 +447,18 @@ def main(argv=None) -> int:
         activate_existing_window()
         instance.close()
         return 0
-    server, thread = None, None
+    server, thread, jobs = None, None, None
     log = None
     try:
         (data / "logs").mkdir(exist_ok=True)
         log = (data / "logs/desktop.log").open("a", encoding="utf-8", buffering=1)
         sys.stdout = sys.stderr = log
-        logging.basicConfig(stream=log, level=logging.INFO)
+        logging.basicConfig(stream=log, level=logging.INFO,
+                            format='%(asctime)s %(levelname)s %(threadName)s %(message)s')
+        # Native Windows / CLR faults may bypass Python exception handling.
+        # Keep this file open through interpreter exit for a useful traceback.
+        faulthandler.enable(file=log, all_threads=True)
+        logging.info('Desktop startup pid=%s', os.getpid())
         if not args.data_dir or data == default_data_directory().resolve():
             migrate_legacy_desktop_data(data)
         if args.import_workspace:
@@ -306,7 +468,6 @@ def main(argv=None) -> int:
         runtime = initialize_browser_runtime()
         logging.info("Collector runtime initialized: %s", runtime)
         from sau_backend import app
-        from services.geo_test_reports import list_saved_reports
         from services.desktop_geo_jobs import DesktopGeoJobs
         import webview
         from webview.menu import Menu, MenuAction, MenuSeparator
@@ -314,11 +475,7 @@ def main(argv=None) -> int:
         app.config["GEO_TEST_REPORTS_DIRECTORY"] = data / "geo-tests"
         app.config["DESKTOP_MODE"] = True
         server = create_desktop_server(app, data)
-        url = f"http://127.0.0.1:{server.server_port}/#/geo-tests?desktop=1"
-        reports = list_saved_reports(data / "geo-tests")
-        selected = next((item for item in reports if item["status"] == "completed"), None)
-        if selected:
-            url += "&report=" + selected["id"]
+        url, _legacy_url = desktop_urls(server.server_port, data)
         thread = threading.Thread(target=server.serve_forever, daemon=True, name="GEO desktop backend")
         thread.start()
         webview.settings["ALLOW_DOWNLOADS"] = True
@@ -326,7 +483,7 @@ def main(argv=None) -> int:
         jobs = DesktopGeoJobs(data)
         window = webview.create_window(WINDOW_TITLE, url=url, width=1380, height=920,
                                        min_size=(920, 640), text_select=True, js_api=jobs)
-        window.events.closed += jobs.shutdown
+        window.events.closed += lambda: logging.info('Desktop window closed')
         menu = [Menu("软件", [MenuAction("打开数据文件夹", lambda: os.startfile(data)),
                             MenuSeparator(), MenuAction("退出", window.destroy)])]
         icon = Path(__file__).resolve().parent / "desktop/app.ico"
@@ -336,9 +493,12 @@ def main(argv=None) -> int:
         if icon.is_file():
             start_options["icon"] = str(icon)
         if args.smoke_test:
+            logging.info('Desktop UI loop entering smoke check')
             webview.start(lambda: run_smoke_check(window, data, url), **start_options)
         else:
+            logging.info('Desktop UI loop entering')
             webview.start(**start_options)
+        logging.info('Desktop UI loop returned')
         if args.smoke_test:
             return 0 if json.loads((data / "logs/smoke-test.json").read_text(encoding="utf-8"))["passed"] else 1
         return 0
@@ -348,14 +508,10 @@ def main(argv=None) -> int:
             ctypes.windll.user32.MessageBoxW(None, f"软件未能启动，请查看日志：\n{data / 'logs/desktop.log'}", WINDOW_TITLE, 0x10)
         return 1
     finally:
-        if server:
-            if thread and thread.is_alive():
-                server.shutdown()
-            server.server_close()
-        if thread:
-            thread.join(timeout=3)
+        shutdown_desktop_runtime(jobs, server, thread)
         instance.close()
         if log:
+            logging.info('Desktop main exiting pid=%s', os.getpid())
             log.flush()
 
 

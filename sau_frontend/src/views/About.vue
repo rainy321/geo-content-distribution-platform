@@ -2,8 +2,8 @@
   <div class="about">
     <el-card class="about-card">
       <div class="about-header">
-        <h1>自媒体自动化运营系统</h1>
-        <p class="version">social-auto-upload</p>
+        <h1>GEO AI 搜索工作台</h1>
+        <p class="version">2026.10.20</p>
       </div>
 
       <el-divider />
@@ -11,42 +11,36 @@
       <div class="about-section">
         <h3>系统简介</h3>
         <p>
-          本系统是一款强大的自动化工具，帮助内容创作者和运营人员一键将视频内容高效发布到多个国内外主流社交媒体平台。
-          支持视频上传、定时发布等功能。
+          从品牌和产品资料开始，观察 AI 如何回答与引用来源，再把采集发现转成选题、平台稿件和发布后的复测记录。
+          品牌、报告、稿件与任务保存在本机工作区，关闭软件后可以继续。
         </p>
       </div>
 
       <div class="about-section">
-        <h3>支持平台</h3>
+        <h3>当前工作流程</h3>
         <div class="platform-tags">
-          <el-tag type="danger">抖音</el-tag>
-          <el-tag type="success">快手</el-tag>
-          <el-tag type="warning">视频号</el-tag>
-          <el-tag type="info">小红书</el-tag>
+          <el-tag effect="plain">品牌资料</el-tag>
+          <el-tag effect="plain">豆包搜索采集</el-tag>
+          <el-tag effect="plain">来源驱动内容</el-tag>
+          <el-tag effect="plain">平台发布</el-tag>
+          <el-tag effect="plain">同题反馈</el-tag>
         </div>
       </div>
 
       <div class="about-section">
         <h3>核心功能</h3>
         <ul class="feature-list">
-          <li>多平台账号管理与登录状态维护</li>
-          <li>视频素材上传与管理</li>
-          <li>一键多平台发布</li>
-          <li>定时发布与批量发布</li>
-          <li>Cookie 导入导出</li>
+          <li>记录实际回答、可见引用和采集时间，按品牌隔离</li>
+          <li>根据来源发现平台，按目标要求生成待审文章</li>
+          <li>已接入平台逐篇确认发布；其他平台可配置辅助填写</li>
+          <li>遇到登录或人机验证，在可见窗口正常完成</li>
+          <li>分别查看发布状态、公开链接与 AI 引用观察</li>
         </ul>
       </div>
 
       <div class="about-section">
-        <h3>技术栈</h3>
-        <div class="tech-tags">
-          <el-tag effect="plain">Vue 3</el-tag>
-          <el-tag effect="plain">Element Plus</el-tag>
-          <el-tag effect="plain">Pinia</el-tag>
-          <el-tag effect="plain">Flask</el-tag>
-          <el-tag effect="plain">Playwright</el-tag>
-          <el-tag effect="plain">SQLite</el-tag>
-        </div>
+        <h3>使用范围</h3>
+        <p>当前已完成今日头条文章的真实发布走查。各平台的账号权限与页面不同，尚未验证的平台需单独接入和测试；稿件需审阅，发布不代表已被 AI 收录或引用。</p>
       </div>
     </el-card>
   </div>

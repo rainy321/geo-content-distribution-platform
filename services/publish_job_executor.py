@@ -7,11 +7,11 @@ from typing import Any
 
 from services.article_service import get_article
 from services.publish_job_service import (
-    PUBLISH_AUTHORIZATION_MISMATCH_MESSAGE,
+    PublishReviewRequiredError,
     claim_publish_job,
-    publish_authorization_matches,
     transition_publish_job,
     update_publish_job_progress,
+    validate_publish_job_for_execution,
 )
 from services.publisher_adapter import (
     classify_publisher_error,
@@ -45,26 +45,21 @@ def execute_publish_job(
     accident.
     """
 
-    job = claim_publish_job(database_path, job_id)
+    try:
+        job = claim_publish_job(database_path, job_id)
+    except PublishReviewRequiredError as error:
+        return transition_publish_job(database_path, job_id, 'need_action', message=str(error))
     try:
         article = get_article(database_path, job["article_id"])
-        if require_authorization_match and not publish_authorization_matches(
-            job,
-            article,
-        ):
-            return transition_publish_job(
-                database_path,
-                job_id,
-                "need_action",
-                message=PUBLISH_AUTHORIZATION_MISMATCH_MESSAGE,
-            )
+        if not job['demo'] or require_authorization_match:
+            validate_publish_job_for_execution(database_path, job, article)
         content = _build_publish_content(job, article, media_root=media_root)
         publisher = _select_publisher(job, publisher_factory)
         result = publisher.publish(content)
         if not isinstance(result, PublishResult):
             raise TypeError("发布器必须返回 PublishResult")
         return _persist_result(database_path, job, result)
-    except PublisherNotConfiguredError as exc:
+    except (PublisherNotConfiguredError, PublishReviewRequiredError) as exc:
         return transition_publish_job(
             database_path,
             job_id,

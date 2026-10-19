@@ -192,7 +192,7 @@ class PublishSchedulerServiceTests(unittest.TestCase):
         self.assertEqual(result["attempted_real_count"], 0)
         self.assertEqual(result["blocked_authorization_count"], 1)
         self.assertEqual(blocked["status"], "need_action")
-        self.assertIn("文章内容或分发参数已变化", blocked["message"])
+        self.assertIn("重新审稿", blocked["message"])
         self.assertIn("未访问平台", blocked["message"])
         self.assertEqual(factory_calls, [])
 

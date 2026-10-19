@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import inspect
 import math
 import os
 import tempfile
@@ -121,8 +122,20 @@ async def run_test_plan(plan: dict, config: RunConfig, *, resume: bool = False,
             if progress:
                 progress({"event": "case_started", "id": case["id"], "category": case["category"]})
             try:
+                def collector_progress(event):
+                    if progress:
+                        progress({**event, 'case_id': case['id']})
+                # Keep existing injected config-only collectors compatible.
+                # Inspect before calling: never retry a call after TypeError,
+                # because it may already have submitted the current question.
+                try:
+                    parameters = inspect.signature(collect).parameters.values()
+                except (ValueError, TypeError):
+                    parameters = ()
+                supports_progress = any(item.name == 'progress' or item.kind == inspect.Parameter.VAR_KEYWORD for item in parameters)
+                callback = {'progress': collector_progress} if progress and supports_progress else {}
                 result, path = await collect(replace(config.collector, question=case["question"],
-                                                     output_root=run_dir / "evidence" / case["id"]))
+                                                     output_root=run_dir / "evidence" / case["id"]), **callback)
             except Exception as exc:
                 # No automatic re-submission after exceptions: browser input may
                 # have happened before the collector could write its result.

@@ -1,0 +1,57 @@
+// 短促、可中断的反馈；业务状态和操作结果不依赖动画表达。
+:root {
+  --geo-duration-fast: 180ms;
+  --geo-duration-normal: 240ms;
+  --geo-duration-panel: 300ms;
+  --geo-ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --geo-ease-spring: cubic-bezier(0.2, 0.8, 0.3, 1.08);
+}
+
+.page-enter-active {
+  transition: opacity var(--geo-duration-normal) var(--geo-ease-out), transform var(--geo-duration-panel) var(--geo-ease-out);
+}
+.page-leave-active {
+  position: absolute !important;
+  inset: 0 0 auto;
+  width: 100%;
+  pointer-events: none;
+  transition: opacity var(--geo-duration-fast) ease, transform var(--geo-duration-fast) var(--geo-ease-out);
+}
+.page-enter-from { opacity: 0; transform: translateY(7px); }
+.page-leave-to { opacity: 0; transform: translateY(-3px); }
+
+.geo-reveal-enter-active, .geo-reveal-leave-active {
+  transition: opacity var(--geo-duration-normal) var(--geo-ease-out), transform var(--geo-duration-normal) var(--geo-ease-out);
+}
+.geo-reveal-enter-from, .geo-reveal-leave-to { opacity: 0; transform: translateY(6px); }
+
+.el-button {
+  transition: color var(--geo-duration-fast), background-color var(--geo-duration-fast), border-color var(--geo-duration-fast), box-shadow var(--geo-duration-fast), transform var(--geo-duration-normal) var(--geo-ease-spring);
+}
+.el-button:enabled:not(.is-disabled):active { transform: scale(0.985); }
+.el-dialog, .el-drawer { --el-transition-duration: var(--geo-duration-panel); }
+.dialog-fade-enter-active .el-dialog {
+  animation: geo-dialog-in var(--geo-duration-panel) var(--geo-ease-spring);
+}
+.dialog-fade-leave-active .el-dialog {
+  animation: geo-dialog-out var(--geo-duration-fast) ease forwards;
+}
+@keyframes geo-dialog-in {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+@keyframes geo-dialog-out {
+  from { opacity: 1; transform: translateY(0) scale(1); }
+  to { opacity: 0; transform: translateY(4px) scale(0.99); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+  .page-enter-from, .page-leave-to, .geo-reveal-enter-from, .geo-reveal-leave-to { transform: none; }
+}

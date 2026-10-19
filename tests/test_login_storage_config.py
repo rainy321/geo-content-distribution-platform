@@ -3,12 +3,14 @@ import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from contextlib import closing
 from queue import Queue
+from types import SimpleNamespace
 from unittest.mock import ANY, AsyncMock, patch
 
 from db.createTable import initialize_database
 from myUtils.auth import check_cookie
-from myUtils.login import xiaohongshu_cookie_gen
+from myUtils.login import _save_login_account, xiaohongshu_cookie_gen
 from sau_backend import app, run_async_function
 
 
@@ -30,10 +32,7 @@ class LoginStorageConfigTests(unittest.IsolatedAsyncioTestCase):
             return {"success": True, "message": "ok"}
 
         status_queue = Queue()
-        with patch(
-            "uploader.xiaohongshu_uploader.main.xiaohongshu_cookie_gen",
-            new=AsyncMock(side_effect=fake_login),
-        ):
+        with patch.dict('sys.modules', {'uploader.xiaohongshu_uploader.main': SimpleNamespace(xiaohongshu_cookie_gen=AsyncMock(side_effect=fake_login))}):
             result = await xiaohongshu_cookie_gen(
                 "xhs-isolated",
                 status_queue,
@@ -44,7 +43,7 @@ class LoginStorageConfigTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result)
         self.assertEqual(status_queue.get_nowait(), "MANUAL_LOGIN")
         self.assertEqual(status_queue.get_nowait(), "200")
-        with sqlite3.connect(self.db_path) as conn:
+        with closing(sqlite3.connect(self.db_path)) as conn:
             account = conn.execute(
                 "SELECT type, filePath, userName, status FROM user_info"
             ).fetchone()
@@ -67,6 +66,44 @@ class LoginStorageConfigTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(connected)
         checker.assert_awaited_once_with(expected_path)
+
+    async def test_reconnect_updates_same_account_without_orphaning_bound_job(self):
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            account_id = conn.execute("INSERT INTO user_info(type,filePath,userName,status) VALUES (1,'old.json','old account',0)").lastrowid
+            conn.execute("INSERT INTO publish_jobs(article_id,platform,account_id,demo,status) VALUES (99,'xiaohongshu',?,0,'queued')", (account_id,))
+        old_file = self.cookies_directory / 'old.json'
+        old_file.write_text('previous login preserved', encoding='utf-8')
+        async def fake_login(account_file, *, headless):
+            Path(account_file).write_text('{}', encoding='utf-8')
+            return {'success': True}
+        with patch.dict('sys.modules', {'uploader.xiaohongshu_uploader.main': SimpleNamespace(xiaohongshu_cookie_gen=AsyncMock(side_effect=fake_login))}):
+            self.assertTrue(await xiaohongshu_cookie_gen('updated remark', Queue(), database_path=self.db_path,
+                cookies_directory=self.cookies_directory, account_id=account_id))
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            accounts = conn.execute('SELECT id,filePath,userName,status,last_checked_at FROM user_info').fetchall()
+            self.assertEqual(len(accounts), 1)
+            self.assertEqual(accounts[0][0], account_id)
+            self.assertNotEqual(accounts[0][1], 'old.json')
+            self.assertEqual(accounts[0][2:4], ('updated remark', 1))
+            self.assertIsNotNone(accounts[0][4])
+            self.assertEqual(conn.execute('SELECT account_id,status FROM publish_jobs').fetchone(), (account_id, 'queued'))
+        self.assertEqual(old_file.read_text(), 'previous login preserved')
+
+    async def test_failed_login_keeps_previous_account_and_session_binding(self):
+        account_id = _save_login_account(self.db_path, 1, 'old.json', 'original', True)
+        with patch.dict('sys.modules', {'uploader.xiaohongshu_uploader.main': SimpleNamespace(xiaohongshu_cookie_gen=AsyncMock(return_value={'success': False, 'message': 'manual login interrupted'}))}):
+            self.assertIsNone(await xiaohongshu_cookie_gen('changed', Queue(), database_path=self.db_path,
+                cookies_directory=self.cookies_directory, account_id=account_id))
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(conn.execute('SELECT id,filePath,userName,status FROM user_info').fetchall(), [(account_id, 'old.json', 'original', 1)])
+
+    async def test_reconnect_rejects_missing_or_changed_platform_instead_of_inserting(self):
+        account_id = _save_login_account(self.db_path, 7, 'old.json', 'original', False)
+        for requested, platform in [(account_id, 8), (account_id + 1, 7)]:
+            with self.assertRaises(ValueError):
+                _save_login_account(self.db_path, platform, 'new.json', 'changed', True, account_id=requested)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(conn.execute('SELECT id,type,filePath,status FROM user_info').fetchall(), [(account_id, 7, 'old.json', 0)])
 
 
 class LoginThreadStorageConfigTests(unittest.TestCase):
@@ -116,6 +153,19 @@ class LoginThreadStorageConfigTests(unittest.TestCase):
             database_path=self.db_path,
             cookies_directory=self.cookies_directory,
         )
+
+    def test_reconnect_thread_forwards_bound_account_id(self):
+        with patch('myUtils.login.toutiao_cookie_gen', new=AsyncMock(return_value=True)) as login_runner:
+            run_async_function('7', 'existing account', Queue(), account_id=23)
+        login_runner.assert_awaited_once_with('existing account', ANY, database_path=self.db_path,
+            cookies_directory=self.cookies_directory, account_id=23)
+
+    def test_missing_optional_platform_component_reports_readable_error(self):
+        status_queue = Queue()
+        with patch('myUtils.login.xiaohongshu_cookie_gen', new=AsyncMock(side_effect=ModuleNotFoundError('missing optional module', name='patchright'))):
+            run_async_function('1', 'account', status_queue)
+        self.assertEqual(status_queue.get_nowait(), 'COMPONENT_MISSING:patchright')
+        self.assertEqual(status_queue.get_nowait(), '500')
 
 
 class LegacyStorageConfigTests(unittest.TestCase):

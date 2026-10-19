@@ -1,5 +1,7 @@
 <template>
   <main class="distribution-center">
+    <div v-if="journeyProjectId" class="journey-return" role="region" aria-label="优化流程衔接"><div><strong>本次优化流程 · 发布</strong><p>固定这篇稿件与对应平台。提交后返回反馈步骤查看真实结果。</p><el-button text @click="leaveJourney">退出本次流程，打开通用发布中心</el-button></div><el-button @click="returnToJourney">返回优化流程</el-button></div>
+    <el-alert v-if="journeyProjectId && !articlesLoading && !journeyContextMatches" type="error" :closable="false" title="本次流程的稿件、品牌或渠道不匹配，请返回优化流程重新进入。"/>
     <header class="page-heading">
       <div class="heading-copy">
         <p class="eyebrow">DISTRIBUTION ROUTING / 内容分发</p>
@@ -21,7 +23,7 @@
           <span>CONTROL / 01</span>
           <div>
             <h2 id="dispatch-title">建立分发任务</h2>
-            <p>一次选择多个平台，系统会为每个平台创建独立任务。</p>
+            <p>{{ journeyProjectId ? '核对账号后，为这一篇文章创建发布任务。' : '一次选择多个平台，系统会为每个平台创建独立任务。' }}</p>
           </div>
         </div>
 
@@ -34,7 +36,7 @@
             clearable
             placeholder="选择一篇已标记就绪的文章"
             :loading="articlesLoading"
-            :disabled="articlesLoading || articlesLoadError"
+            :disabled="articlesLoading || articlesLoadError || Boolean(journeyProjectId)"
           >
             <el-option
               v-for="article in articles"
@@ -76,13 +78,13 @@
           <p>平台能力由后端统一声明；图文渠道和视频渠道会分别校验所需素材。</p>
           <div class="platform-grid">
             <button
-              v-for="platform in platforms"
+              v-for="platform in visiblePlatforms"
               :key="platform.key"
               type="button"
               :class="['platform-option', platform.delivery_state, { selected: selectedPlatforms.includes(platform.key) }]"
               :aria-pressed="selectedPlatforms.includes(platform.key)"
               :aria-disabled="platform.delivery_state === 'paused'"
-              :disabled="platform.delivery_state === 'paused'"
+              :disabled="platform.delivery_state === 'paused' || Boolean(journeyProjectId)"
               @click="togglePlatform(platform.key)"
             >
               <span class="platform-code">{{ platform.code }}</span>
@@ -463,8 +465,18 @@
             >
               确认真实发布
             </el-button>
+            <div v-if="canCheckResult(job)" class="result-check-action">
+              <el-button
+                plain
+                :loading="busyJobIds.has(job.job_id) || job.result_checking"
+                :disabled="busyJobIds.has(job.job_id) || job.result_checking"
+                title="只读打开可见浏览器核对平台结果。需要登录或验证时请在窗口正常完成，不会再次填写或提交。"
+                @click="checkPlatformResult(job)"
+              >核对平台结果</el-button>
+              <small>只读核对，不会再次提交</small>
+            </div>
             <el-button v-if="job.url" text :icon="Link" @click="openResult(job.url)">查看结果</el-button>
-            <span v-if="!job.url && !['failed', 'need_action', 'queued'].includes(job.status)" class="no-action">无需操作</span>
+            <span v-if="!job.url && !['failed', 'need_action', 'queued'].includes(job.status) && !canCheckResult(job)" class="no-action">无需操作</span>
           </div>
         </article>
       </div>
@@ -519,7 +531,12 @@ const articles = ref([])
 const articlesLoading = ref(false)
 const articlesLoadError = ref(false)
 const selectedArticleId = ref(null)
-const selectedPlatforms = ref(['zhihu'])
+const selectedPlatforms = ref([])
+const journeyProjectId = computed(() => { const value=Number(route.query.journey_project);return Number.isSafeInteger(value)&&value>0?value:null })
+const journeyArticleId = computed(() => { const value=Number(route.query.article_id);return Number.isSafeInteger(value)&&value>0?value:null })
+const journeyPlatform = computed(() => typeof route.query.platform==='string' ? route.query.platform : '')
+const returnToJourney = () => router.push({path:'/journey',query:{journey_project:String(journeyProjectId.value)}})
+const leaveJourney = async () => { await router.replace({path:'/publish-center',query:{}});selectedArticleId.value=null;selectedPlatforms.value=[];jobPagination.page=1;await Promise.allSettled([fetchArticles(),fetchJobs()]) }
 const scheduleEnabled = ref(false)
 const publishAt = ref('')
 const autoExecuteAtDue = ref(false)
@@ -550,6 +567,13 @@ let pollingStopped = false
 
 const selectedArticle = computed(() => (
   articles.value.find(article => article.id === selectedArticleId.value) || null
+))
+const visiblePlatforms = computed(() => journeyProjectId.value ? platforms.value.filter(item=>item.key===journeyPlatform.value) : platforms.value)
+const journeyContextMatches = computed(() => !journeyProjectId.value || Boolean(
+  journeyArticleId.value && selectedArticle.value?.id===journeyArticleId.value
+  && selectedArticle.value?.project_id===journeyProjectId.value
+  && selectedPlatforms.value.length===1 && selectedPlatforms.value[0]===journeyPlatform.value
+  && platforms.value.some(item=>item.key===journeyPlatform.value && item.delivery_state!=='paused')
 ))
 
 const manifestPlatforms = computed(() => (
@@ -584,6 +608,8 @@ const assetSummary = computed(() => {
 
 const canDispatch = computed(() => Boolean(
   selectedArticleId.value
+  && selectedArticle.value?.status==='ready'
+  && journeyContextMatches.value
   && selectedPlatforms.value.length
   && (!imageRequired.value || selectedImage.value || autoImage.value)
   && (!videoRequired.value || selectedVideo.value)
@@ -595,7 +621,9 @@ const canDispatch = computed(() => Boolean(
 ))
 
 const dispatchButtonLabel = computed(() => {
+  if (!journeyContextMatches.value) return '请返回优化流程核对稿件与渠道'
   if (!selectedArticleId.value) return '先选择就绪稿件'
+  if (selectedArticle.value?.status!=='ready') return '请查看下方已有任务，勿重复创建'
   if (!selectedPlatforms.value.length) return '至少选择一个渠道'
   if (hasExhaustedQuota.value) return '所选账号已达到 24h 建议上限'
   if (!riskAcknowledged.value) return '先确认发布风险边界'
@@ -634,6 +662,13 @@ const fetchArticles = async () => {
   articlesLoading.value = true
   articlesLoadError.value = false
   try {
+    if(journeyProjectId.value){
+      if(!journeyArticleId.value)throw new Error('优化流程缺少稿件编号')
+      const response=await articleApi.getArticle(journeyArticleId.value)
+      if(response.data?.project_id!==journeyProjectId.value)throw new Error('稿件与当前品牌不一致')
+      articles.value=[response.data];selectedArticleId.value=journeyArticleId.value
+      return
+    }
     const response = await articleApi.getArticles({ status: 'ready', page: 1, page_size: 100 })
     articles.value = response.data?.items || []
     const queryId = Number(route.query.article_id)
@@ -684,6 +719,7 @@ const fetchJobs = async (pageOrSilent = false) => {
     page: jobPagination.page,
     page_size: jobPagination.page_size
   }
+  if (journeyProjectId.value && Number.isSafeInteger(Number(route.query.article_id))) params.article_id=Number(route.query.article_id)
   if (jobFilters.platform) params.platform = jobFilters.platform
   if (jobFilters.status) params.status = jobFilters.status
 
@@ -702,6 +738,7 @@ const fetchJobs = async (pageOrSilent = false) => {
 }
 
 const togglePlatform = (key) => {
+  if(journeyProjectId.value)return
   const platform = platforms.value.find(item => item.key === key)
   if (platform?.delivery_state === 'paused') {
     ElMessage.warning(`${platform.name}真实自动发布当前暂停，可在内容创作中生成平台稿后手工发布`)
@@ -1020,6 +1057,21 @@ const retryJob = async (job) => {
   }
 }
 
+const canCheckResult = job => !job.demo && job.platform === 'toutiao' && job.status === 'processing'
+const checkPlatformResult = async (job) => {
+  if (!canCheckResult(job) || job.result_checking || busyJobIds.value.has(job.job_id)) return
+  markJobBusy(job.job_id, true)
+  try {
+    const response = await publishApi.checkResult(job.job_id)
+    ElMessage.info(`${response.data?.message || '已开始只读核对平台结果'} 请在可见窗口正常完成登录或验证；不会再次填写或提交。`)
+    await fetchJobs(true)
+  } catch (error) {
+    ElMessage.error(error?.response?.data?.msg || error?.message || '平台结果核对未启动，原发布任务已保留')
+  } finally {
+    markJobBusy(job.job_id, false)
+  }
+}
+
 const markJobBusy = (jobId, busy) => {
   const next = new Set(busyJobIds.value)
   if (busy) next.add(jobId)
@@ -1107,6 +1159,8 @@ const scheduleJobPoll = () => {
 onMounted(async () => {
   pollingStopped = false
   await Promise.allSettled([fetchPlatforms(), fetchAccounts(), fetchArticles(), fetchJobs()])
+  const requested = typeof route.query.platform === 'string' ? route.query.platform : ''
+  if (requested && platforms.value.some(item=>item.key===requested && item.delivery_state!=='paused')) selectedPlatforms.value=[requested]
   scheduleJobPoll()
 })
 
@@ -1129,6 +1183,7 @@ onBeforeUnmount(() => {
 </script>
 
 <style lang="scss" scoped>
+.journey-return{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 20px;margin-bottom:24px;border:1px solid var(--geo-border,#dce6e5);border-radius:14px;background:#fff}.journey-return strong{font-size:15px}.journey-return p{margin:5px 0 0;color:var(--geo-muted,#52676d);font-size:13px;line-height:1.6}@media(max-width:600px){.journey-return{align-items:flex-start;flex-direction:column}}
 .distribution-center {
   --harbor: #102b31;
   --harbor-deep: #0a2227;
@@ -1875,6 +1930,9 @@ onBeforeUnmount(() => {
   :deep(.el-button) { border-radius: 3px; }
   .no-action { color: #9aa8a6; font-size: 10px; }
 }
+
+.result-check-action { display: grid; gap: 6px; justify-items: end; }
+.result-check-action small { max-width: 150px; color: #677d77; font-size: 12px; line-height: 1.6; }
 
 .board-state {
   display: flex;

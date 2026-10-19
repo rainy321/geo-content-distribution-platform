@@ -5,13 +5,13 @@ import json
 import sqlite3
 import uuid
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from urllib.parse import urlsplit
 
 from services.geo_content_research import (
     CHANNELS, compare_reports, draft_input, fingerprint, normalize_facts,
-    parse_draft, parse_research, plan_from_report, public_url, research_observations,
+    parse_draft, parse_research, plan_from_report, public_url, publication_feedback, research_observations,
 )
 from services.geo_score_service import score_geo_content
 from services import geo_destination_service as destinations
@@ -48,7 +48,25 @@ def _cycle(connection, identifier):
     result['destinations'] = destinations.targets_for_connection(connection, result['project_id'])
     result['channels'] = {**CHANNELS, **{target['key']: target['config']['name'] for target in result['destinations']}}
     result['opportunities'] = destinations.opportunities(result['observations'], result['destinations'], result['profile'].get('website', ''))
+    result['fact_candidates'] = _fact_candidates(connection, result)
     return result
+
+
+def _fact_candidates(connection, cycle):
+    """Offer previous owner statements without silently confirming them again."""
+    rows = connection.execute('''SELECT id,created_at,updated_at,facts FROM geo_content_cycles
+        WHERE project_id=? AND id!=? AND created_at<=? AND facts!='[]' ORDER BY updated_at DESC,id DESC''',
+        (cycle['project_id'], cycle['id'], cycle['created_at']))
+    for row in rows:
+        try:
+            facts = normalize_facts(json.loads(row['facts']))
+        except (ValueError, TypeError):
+            continue
+        return {'source_cycle_id': row['id'], 'source_created_at': row['created_at'],
+                'source_updated_at': row['updated_at'],
+                'facts': [{**fact, 'confirmed': False, 'provenance': 'previous_cycle_requires_confirmation'} for fact in facts],
+                'note': '同一品牌上轮已确认的资料，仅供复用；请检查是否仍准确并重新确认，保存后才能用于本轮写作。'}
+    return None
 
 
 def create_cycle(database, report, report_ref, project_id=None):
@@ -105,7 +123,8 @@ def _drafts(connection, identifier):
             JOIN articles a ON a.id=d.article_id WHERE d.cycle_id=? ORDER BY d.created_at DESC''', (identifier,)):
         item = dict(row)
         item['tags'], item['provenance'] = json.loads(item['tags']), json.loads(item['provenance'])
-        item['jobs'] = [dict(job) for job in connection.execute('''SELECT id,platform,status,result_url,message,demo,finished_at
+        item['jobs'] = [dict(job) for job in connection.execute('''SELECT id,platform,status,result_url,message,demo,finished_at,
+            platform_published_at,platform_published_precision,result_checked_at,result_check_evidence
             FROM publish_jobs WHERE article_id=? ORDER BY id DESC''', (item['article_id'],))]
         result.append(item)
     return result
@@ -118,12 +137,37 @@ def get_cycle(database, identifier):
         publications = list(dict.fromkeys(job['result_url'] for draft in result['drafts'] for job in draft['jobs']
                                          if job['status'] == 'success' and not job['demo'] and public_url(job['result_url'])))
         result['publications'] = publications
+        result['reported_publications'] = [dict(row) for row in connection.execute('''
+            SELECT id,article_id,target_id,target_revision,url,published_at,evidence_level,note,
+                   baseline_run_id,report_digest,plan_sha256,article_sha256,created_at
+            FROM geo_content_publications WHERE cycle_id=? ORDER BY created_at DESC,id DESC''', (identifier,))]
+        publication_records = []
+        for draft in result['drafts']:
+            for job in draft['jobs']:
+                if job['status'] != 'success' or job['demo'] or not public_url(job['result_url']):
+                    continue
+                # SQLite CURRENT_TIMESTAMP is UTC but has no offset. This is the
+                # adapter completion time, not proof of the platform's index time.
+                try:
+                    finished = datetime.fromisoformat((job['platform_published_at'] or job['finished_at']).replace('Z', '+00:00'))
+                    if finished.tzinfo is None:
+                        finished = finished.replace(tzinfo=timezone.utc)
+                    stamp = finished.isoformat()
+                except (ValueError, TypeError, AttributeError):
+                    stamp = None
+                publication_records.append({'url': job['result_url'], 'article_id': draft['article_id'],
+                    'job_id': job['id'], 'platform': job['platform'], 'published_at': stamp,
+                    'published_at_basis': 'platform_visible_public_time' if job['platform_published_at'] else 'publisher_completion_time',
+                    'published_at_precision': job['platform_published_precision'] or 'second',
+                    'platform_published_at': job['platform_published_at'], 'result_checked_at': job['result_checked_at'],
+                    'evidence_level': 'publisher_reported_success'})
+        publication_records += result['reported_publications']
+        publication_urls = list(dict.fromkeys(item['url'] for item in publication_records))
         result['retests'] = []
         for row in connection.execute('SELECT report FROM geo_content_retests WHERE cycle_id=? ORDER BY created_at DESC', (identifier,)):
             report = json.loads(row['report'])
-            comparison = compare_reports(result['baseline'], report, publications)
-            comparison['publication_context'] = ('已记录真实成功发布链接；是否已被索引仍需观察。' if publications
-                                                 else '尚未记录真实成功发布链接，本轮仅作为采集复测，不算发布效果验证。')
+            comparison = compare_reports(result['baseline'], report, publication_urls)
+            comparison.update(publication_feedback(comparison, report, publication_records))
             result['retests'].append({'run_id': report['run_id'], 'updated_at': report.get('updated_at'),
                                       'comparison': comparison})
     return result
@@ -188,6 +232,7 @@ def save_draft(database, identifier, brief_id, platform, raw, provenance, revisi
                    'used_fact_ids': draft['used_fact_ids'], 'review_state': 'draft_requires_editorial_review'}
         if inputs.get('destination'):
             context['destination'] = inputs['destination']
+            context['destination_config_sha256'] = inputs['destination_config_sha256']
             context['distribution_basis'] = inputs['distribution_basis']
         stamp = _now()
         connection.execute('INSERT INTO geo_content_drafts VALUES(?,?,?,?,?,?,?)',
@@ -206,12 +251,83 @@ def article_research(database, article_id):
         return result
 
 
+def save_reported_publication(database, identifier, value):
+    """Record an account owner's statement, never forge an adapter success job."""
+    if not isinstance(value, dict) or value.get('confirmed') is not True:
+        raise ValueError('请确认这是你在对应平台已提交的文章链接；软件尚未独立核验')
+    article_id, target_id = value.get('article_id'), value.get('target_id')
+    if type(article_id) is not int or article_id <= 0 or not isinstance(target_id, str) or not target_id:
+        raise ValueError('请选择本轮文章和对应的目标平台')
+    url = destinations.public_https(value.get('url'))
+    stamp = value.get('published_at')
+    if not isinstance(stamp, str) or len(stamp) > 80:
+        raise ValueError('发布时间需要含时区的 ISO 日期时间')
+    try:
+        published = datetime.fromisoformat(stamp.replace('Z', '+00:00'))
+        if published.tzinfo is None:
+            raise ValueError()
+        published = published.astimezone(timezone.utc)
+        if published > datetime.now(timezone.utc) + timedelta(minutes=5):
+            raise ValueError()
+    except (ValueError, OverflowError) as error:
+        raise ValueError('发布时间需要含时区，且不能是未来时间') from error
+    note = value.get('note') or ''
+    if not isinstance(note, str) or len(note) > 1000:
+        raise ValueError('发布备注不能超过 1000 字')
+    with closing(_connect(database)) as connection, connection:
+        connection.execute('BEGIN IMMEDIATE')
+        cycle = _cycle(connection, identifier)
+        row = connection.execute('''SELECT a.*,d.platform FROM articles a
+            JOIN geo_content_drafts d ON d.article_id=a.id
+            WHERE a.id=? AND d.cycle_id=? AND a.project_id=?''', (article_id, identifier, cycle['project_id'])).fetchone()
+        target_row = connection.execute('SELECT * FROM geo_distribution_targets WHERE id=? AND project_id=?',
+                                        (target_id, cycle['project_id'])).fetchone()
+        if not row or not target_row or row['platform'] != 'target_' + target_id:
+            raise ValueError('文章必须属于本轮客户与所选目标平台，不能跨客户或跨平台登记')
+        if row['status'] not in ('ready', 'published'):
+            raise ValueError('请先审稿并把文章标记就绪，再登记平台提交结果')
+        config = json.loads(target_row['config'])
+        if not destinations.scope_matches(url, config.get('publication_scope') or config['source_scope']):
+            raise ValueError('发布链接不在该平台配置的公开网址范围内，请核对链接或平台配置')
+        if url in [destinations.public_https(config[field]) for field in ('home_url', 'login_url', 'editor_url')]:
+            raise ValueError('请填写具体的公开文章链接，不能使用平台首页、登录页或编辑器入口')
+        for case in cycle['baseline']['cases']:
+            if not case['assessment']['answer_evaluable']:
+                continue
+            try:
+                baseline_time = datetime.fromisoformat(case['collected_at'].replace('Z', '+00:00'))
+            except (ValueError, KeyError, TypeError, AttributeError):
+                continue
+            if baseline_time.tzinfo is not None and published <= baseline_time:
+                raise ValueError('本轮内容的发布时间必须晚于本轮基线采集时间')
+        prior = connection.execute('SELECT article_id,target_id FROM geo_content_publications WHERE cycle_id=? AND url=?', (identifier, url)).fetchone()
+        if prior:
+            if prior['article_id'] != article_id or prior['target_id'] != target_id:
+                raise ValueError('该链接已登记给另一篇文章，不能重复认作不同内容')
+        else:
+            connection.execute('''INSERT INTO geo_content_publications
+                (id,cycle_id,article_id,target_id,target_revision,target_snapshot,url,published_at,evidence_level,note,
+                 baseline_run_id,report_digest,plan_sha256,article_sha256,created_at)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
+                (uuid.uuid4().hex, identifier, article_id, target_id, target_row['revision'], target_row['config'], url,
+                 published.isoformat(), 'owner_reported', note.strip(), cycle['baseline']['run_id'], cycle['report_digest'],
+                 cycle['test_plan']['plan_sha256'], fingerprint({'title': row['title'], 'content': row['content']}), _now()))
+            connection.execute('UPDATE geo_content_cycles SET updated_at=? WHERE id=?', (_now(), identifier))
+    return get_cycle(database, identifier)
+
+
 def attach_retest(database, identifier, report):
     plan_from_report(report)
     with closing(_connect(database)) as connection, connection:
         cycle = _cycle(connection, identifier)
         if report['run_id'] == cycle['baseline']['run_id']:
             raise ValueError('基线报告本身不能作为发布后的复测')
+        if report['profile']['name'].strip().casefold() != cycle['profile']['name'].strip().casefold():
+            raise ValueError('复测客户与本轮品牌不同，不能关联其他客户的报告')
+        original_host = urlsplit(cycle['profile'].get('website') or '').hostname
+        later_host = urlsplit(report['profile'].get('website') or '').hostname
+        if original_host and later_host and original_host.casefold().removeprefix('www.') != later_host.casefold().removeprefix('www.'):
+            raise ValueError('复测客户官网与本轮品牌不同，请核对报告')
         connection.execute('INSERT OR REPLACE INTO geo_content_retests VALUES(?,?,?,?)',
                            (identifier, report['run_id'], _json(report), _now()))
     return get_cycle(database, identifier)

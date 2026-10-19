@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from contextlib import closing
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from services.publish_job_executor import PublisherNotConfiguredError
 from services.media_publisher_adapters import (
@@ -41,9 +41,15 @@ class RealPublisherFactory:
         database_path: str | Path,
         *,
         cookies_directory: str | Path,
+        toutiao_interactive: bool = False,
+        publish_progress: Callable[[str], Any] | None = None,
+        submission_recorder: Callable[[dict], Any] | None = None,
     ):
         self.database_path = Path(database_path)
         self.cookies_directory = Path(cookies_directory).resolve()
+        self.toutiao_interactive = bool(toutiao_interactive)
+        self.publish_progress = publish_progress
+        self.submission_recorder = submission_recorder
 
     def __call__(self, job: dict[str, Any]) -> PublisherAdapter:
         platform = str(job.get("platform") or "").strip().lower()
@@ -91,7 +97,8 @@ class RealPublisherFactory:
                 if platform == "zhihu":
                     return ZhihuPublisherAdapter(account_file)
                 if platform == "toutiao":
-                    return ToutiaoPublisherAdapter(account_file)
+                    return ToutiaoPublisherAdapter(account_file, interactive=self.toutiao_interactive,
+                                                   progress=self.publish_progress, record_submission=self.submission_recorder)
                 if platform == "sohu":
                     return SohuPublisherAdapter(account_file)
                 if platform == "baijiahao":
@@ -134,8 +141,14 @@ def create_real_publisher_factory(
     database_path: str | Path,
     *,
     cookies_directory: str | Path,
+    toutiao_interactive: bool = False,
+    publish_progress: Callable[[str], Any] | None = None,
+    submission_recorder: Callable[[dict], Any] | None = None,
 ) -> RealPublisherFactory:
     return RealPublisherFactory(
         database_path,
         cookies_directory=cookies_directory,
+        toutiao_interactive=toutiao_interactive,
+        publish_progress=publish_progress,
+        submission_recorder=submission_recorder,
     )
