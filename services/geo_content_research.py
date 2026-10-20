@@ -11,6 +11,7 @@ from services.geo_test_service import CATEGORIES, validate_plan
 from services.geo_test_reports import project_report_evaluation
 from services.platform_capability_service import get_platform_content_guidance
 from services.geo_destination_service import scope_matches
+from services.geo_entity_identity import entity_measurement_signature
 
 
 CHANNELS = {'zhihu': '知乎', 'toutiao': '今日头条', 'baijiahao': '百家号',
@@ -299,6 +300,8 @@ def compare_reports(before, after, publication_urls=()):
     reasons = []
     if before['plan_sha256'] != after['plan_sha256']:
         reasons.append('测试问题或客户资料发生变化')
+    if entity_measurement_signature(before['profile']) != entity_measurement_signature(after['profile']):
+        reasons.append('公司/产品对象、别名或官网范围的评估口径不同')
     if before.get('run_id') == after.get('run_id'):
         reasons.append('选择了同一次采集，不能作为复测')
     def collected_times(report):

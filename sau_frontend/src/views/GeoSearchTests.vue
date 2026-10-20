@@ -17,7 +17,7 @@
       </div>
       <el-button :disabled="nativeBusy" @click="startNative('login')">登录豆包</el-button>
       <el-button :disabled="nativeBusy || (!project && !report)" @click="startNative('plan')">用豆包生成问题</el-button>
-      <el-button type="primary" :disabled="nativeBusy || !plan" @click="startNative('run')">开始测试</el-button>
+      <el-button type="primary" :disabled="nativeBusy || !plan || !planMatchesProject" @click="startNative('run')">开始测试</el-button>
       <el-button v-if="nativeBusy" type="warning" @click="stopNative">停止任务</el-button>
       <p class="context">{{ nativeMessage }}</p>
       <p class="context">任务、计划和客户资料会自动保存，重开后恢复。登录或验证请在专用豆包窗口正常完成，登录完成后关闭登录窗口保存会话。</p>
@@ -50,15 +50,18 @@
         <div class="form-grid">
           <el-form-item label="品牌项目">
             <el-select v-model="projectId" placeholder="选择已建项目" :loading="loading" :disabled="nativeBusy || generating">
-              <el-option v-for="item in projects" :key="item.id" :label="item.name" :value="item.id" />
+              <el-option v-for="item in projects" :key="item.id" :label="`${entityLabel(item)} · ${item.name} · ${item.website || '未填网址'}`" :value="item.id" />
             </el-select>
           </el-form-item>
-          <el-form-item label="运营公司（可选）"><el-input v-model="company" data-testid="company-input" :disabled="nativeBusy || generating" maxlength="300" placeholder="用于核验公司与产品的关系" /></el-form-item>
-          <el-form-item label="目标客户（可选）"><el-input v-model="audience" :disabled="nativeBusy || generating" maxlength="300" placeholder="例如：企业采购团队" /></el-form-item>
+          <el-form-item :label="project?.entity_type==='company' ? '关联公司（可选）' : '运营公司（可选）'"><el-input v-model="company" data-testid="company-input" :disabled="!project || nativeBusy || generating" maxlength="300" placeholder="公司提及与产品提及分别统计" /></el-form-item>
+          <el-form-item label="目标客户（可选）"><el-input v-model="audience" :disabled="!project || nativeBusy || generating" maxlength="300" placeholder="例如：企业采购团队" /></el-form-item>
           <el-form-item label="问题数量"><el-input-number v-model="caseCount" :disabled="nativeBusy || generating" :min="3" :max="12" /></el-form-item>
         </div>
+        <p v-if="project" class="context">测试对象：{{ entityLabel(project) }} · {{ project.entity_type==='company' ? '公司官网' : '产品介绍或服务网址' }}：{{ project.website || '待补充' }}。切换对象后需重新生成并检查问题。</p>
         <p v-if="project" class="context">{{ project.industry || '请在品牌项目补充行业' }} · {{ project.description || '可在品牌项目补充业务说明' }}</p>
+        <el-collapse v-if="project"><el-collapse-item title="当前对象别名与额外官方页面" name="profile"><div class="profile-grid"><el-form-item label="当前对象别名（每行一个）"><el-input v-model="aliasesText" type="textarea" :rows="3" :disabled="nativeBusy || generating" placeholder="仅当前公司或产品的名称，不填其他对象"/></el-form-item><el-form-item label="额外官方页面 / 服务网址（每行一个）"><el-input v-model="officialUrlsText" type="textarea" :rows="3" :disabled="nativeBusy || generating" placeholder="具体产品介绍、官方文档或服务入口"/></el-form-item></div><p class="context">产品按登记的具体网址路径判断官方来源，不把整个公司站点都算作该产品来源。资料在保存或生成计划时写入项目档案。</p></el-collapse-item></el-collapse>
         <el-button type="primary" :loading="generating" :disabled="!project || nativeBusy" @click="generate">AI 生成测试计划</el-button>
+        <el-button :disabled="!project || nativeBusy || generating" @click="saveProfile">保存测试资料</el-button>
         <el-button :disabled="!project" @click="downloadProfile">导出客户资料</el-button>
         <router-link to="/projects" class="link">管理品牌项目</router-link>
       </el-form>
@@ -70,6 +73,8 @@
     <el-card v-if="plan" shadow="never">
       <div class="card-heading"><h2>{{ plan.profile.name }} · 测试计划</h2><el-button @click="download(plan, 'plan.json')">下载计划</el-button></div>
       <p class="context">问题由 AI 生成，运行前请检查是否符合客户业务。复测使用同一份计划。</p>
+      <p class="context">测试对象：{{ entityLabel(plan.profile) }} · {{ plan.profile.website }}。</p><p v-if="!planMatchesProject" class="context">这份计划与当前选择的对象不一致，只供查看；请为当前对象重新生成问题。</p>
+      <p v-if="reportEntityContext(plan).legacy" class="context">{{ reportEntityContext(plan).note }}</p>
       <el-table :data="plan.cases">
         <el-table-column label="类别" width="130"><template #default="{ row }">{{ categoryNames[row.category] }}</template></el-table-column>
         <el-table-column prop="question" label="测试问题" min-width="260" />
@@ -80,12 +85,14 @@
     <el-card v-if="report" ref="reportCard" shadow="never">
       <div class="card-heading"><h2>{{ report.profile.name }} · 采集报告</h2><el-tag>{{ statusNames[report.status] || report.status }}</el-tag><el-button type="primary" :disabled="nativeBusy" @click="useReport">用本报告制定内容任务</el-button></div>
       <p class="context">历史采集记录 · {{ reportDate(report.cases[0]?.collected_at || report.updated_at) }}。回答原文来自豆包，尚未逐项核实事实；“提及”只说明名称出现在回答里。</p>
+      <p class="context">测试对象：{{ reportContext.label }} · {{ report.profile.name }}{{ reportContext.legacy ? '（旧报告，混合统计口径）' : '' }}。</p><p class="context">{{ reportContext.note }}</p>
+      <details class="context"><summary>本对象登记的官方页面 / 服务网址</summary><p v-for="url in reportContext.urls" :key="url"><a v-if="safeLink(url)" :href="safeLink(url)" target="_blank" rel="noopener noreferrer">{{ url }}</a><span v-else>{{ url }}</span></p></details>
       <p v-if="report.stop_reason" class="context">中断原因：{{ report.stop_reason }}</p>
       <details v-if="report.evaluation_projection" class="context"><summary>评估说明 · {{ report.evaluation_projection.stored_evaluation_version }} → {{ report.evaluation_projection.applied_evaluation_version }}</summary><p>{{ report.evaluation_projection.note }}</p></details>
       <div class="cohorts">
         <article v-for="category in categories" :key="category">
           <h3>{{ categoryNames[category] }}</h3>
-          <strong>{{ rate(report.cohorts[category]?.brand_mention_rate) }}</strong><p>品牌提及率</p>
+          <strong>{{ rate(report.cohorts[category]?.brand_mention_rate) }}</strong><p>{{ reportContext.mentionLabel }}率</p>
           <small>完成 {{ report.cohorts[category]?.answers_evaluable || 0 }} / {{ report.cohorts[category]?.planned || 0 }} 题</small>
           <p class="context">官网搜索资料命中 {{ report.cohorts[category]?.official_source_hits || 0 }} / 可判断 {{ report.cohorts[category]?.official_source_evaluable || 0 }}</p>
           <p class="context">官网正文引用命中 {{ report.cohorts[category]?.official_citation_hits || 0 }} / 可判断 {{ report.cohorts[category]?.official_citation_evaluable || 0 }}</p>
@@ -93,7 +100,8 @@
       </div>
       <el-collapse>
         <el-collapse-item v-for="item in report.cases" :key="item.id" :name="item.id" :title="`${categoryNames[item.category]} · ${item.question}`">
-          <p>{{ statusNames[item.status] || item.status }} · 品牌提及：{{ booleanText(item.assessment.brand_mentioned) }}</p>
+          <p>{{ statusNames[item.status] || item.status }} · {{ reportContext.mentionLabel }}：{{ booleanText(item.assessment.brand_mentioned) }}</p>
+          <p v-if="report.profile.entity_type==='product' && !reportContext.legacy && relatedCompanyMention(item)!==undefined" class="context">运营公司单独提及：{{ booleanText(relatedCompanyMention(item)) }}<span v-if="item.assessment.brand_mentioned===false && relatedCompanyMention(item)===true">；仅公司出现，未计入当前产品提及</span>。</p>
           <p v-if="item.client_mode" class="context">{{ item.client_mode === 'work' ? '豆包工作界面' : '豆包消费者对话界面' }} · {{ item.model_label || '模型标签未知' }} · {{ item.collected_at }}</p>
           <p v-if="item.failure_reason">{{ item.failure_reason }}</p>
           <el-collapse><el-collapse-item title="查看豆包原始回答（未逐项核验）" :name="`raw-${item.id}`"><pre>{{ item.response || '尚无完整回答' }}</pre></el-collapse-item></el-collapse>
@@ -133,22 +141,24 @@ import { ElMessage } from 'element-plus'
 import { projectApi } from '@/api/project'
 import { geoTestApi } from '@/api/geoTest'
 import { geoContentApi } from '@/api/geoContent'
+import { entityLabel, entityProfileFields, profileLines, reportEntityContext, restoreEntityDraftFields, sameBrand } from '@/utils/geoJourney'
 
-const projects = ref([]), projectId = ref(null), company = ref(''), audience = ref(''), caseCount = ref(4)
+const projects = ref([]), projectId = ref(null), company = ref(''), audience = ref(''), aliasesText=ref(''), officialUrlsText=ref(''), caseCount = ref(4)
 const loading = ref(false), generating = ref(false), plan = ref(null), report = ref(null), importInput = ref(null)
 const route = useRoute(), savedReports = ref([]), selectedReportId = ref(''), reportLoading = ref(false), reportCard = ref(null)
 const isDesktop = computed(() => route.query.desktop === '1' || Boolean(window.pywebview?.api))
 const router = useRouter()
 const useReport = async () => {
-  const value = (await geoContentApi.create({ report: report.value })).data
+  const value = (await geoContentApi.create({ report: report.value,...(sameBrand(project.value,report.value?.profile)?{project_id:projectId.value}:{}) })).data
   router.push({path:'/geo-content',query:{cycle:value.id}})
 }
 const desktopClientMode = ref('consumer'), desktopModel = ref(''), nativeTask = ref({ status: 'idle' })
 const nativeHistory = ref([]), nativeDetails = ref(null), restoringWorkspace = ref(false)
 const workspaceSaveError = ref('')
+const nativeStarting=ref(false)
 const taskNames = { login: '登录豆包', plan: '生成问题', run: '采集测试', research: '采集内容策划', draft: '生成平台稿' }
 let workspaceSaveTimer = null, workspaceReady = false
-const nativeBusy = computed(() => nativeTask.value.status === 'running')
+const nativeBusy = computed(() => nativeStarting.value || nativeTask.value.status === 'running')
 const nativeMessage = computed(() => `${nativeTask.value.restored_from_disk ? '上次任务：' : ''}${nativeTask.value.message || ({ idle: '先生成并检查问题，再开始测试。', running: `任务执行中${nativeTask.value.progress?.case_id ? ` · ${nativeTask.value.progress.case_id}` : ''}。`, completed: '任务已完成。', stopped: '任务已停止。', failed: '任务未完成。', needs_review: '上次任务未完成，记录已保留，请检查后再执行。' }[nativeTask.value.status] || '')}`)
 let nativeTimer = null, handledNativeTask = null
 const nativeBridge = () => {
@@ -156,25 +166,29 @@ const nativeBridge = () => {
   return window.pywebview.api
 }
 const startNative = async kind => {
+  if(nativeBusy.value || generating.value)return
+  nativeStarting.value=true
   try {
     const options = { client_mode: desktopClientMode.value, model_label: desktopModel.value.trim() }
     const api = nativeBridge()
-    const source = project.value || report.value?.profile
+    const source = kind==='plan' ? await persistProfile() : project.value || report.value?.profile
+    if(kind==='run'&&!planMatchesProject.value)throw new Error('测试计划与当前对象不一致，请重新生成问题')
     const result = kind === 'login' ? await api.open_login(options)
-      : kind === 'plan' ? await api.plan_with_doubao({ ...source, company: company.value || source.company || '', audience: audience.value || source.audience || '' }, caseCount.value, options)
+      : kind === 'plan' ? await api.plan_with_doubao({ ...source,...entityProfileFields(source) }, caseCount.value, options)
         : await api.start_run(plan.value, options)
     if (result.error) throw new Error(result.error)
     nativeTask.value = { ...result, kind }
     nativeHistory.value = await api.list_tasks()
     if (kind === 'run') report.value = null
-  } catch (error) { ElMessage.error(error.message || '任务无法启动') }
+  } catch (error) { ElMessage.error(error.response?.data?.msg || error.message || '任务无法启动') }
+  finally {nativeStarting.value=false}
 }
 const stopNative = async () => {
   try { await nativeBridge().stop_task() }
   catch (error) { ElMessage.error(error.message || '停止失败') }
 }
 const pollNative = async () => {
-  if (!nativeBusy.value) return
+  if (!nativeBusy.value || nativeStarting.value) return
   try {
     const task = await nativeBridge().get_task()
     nativeTask.value = task
@@ -202,12 +216,25 @@ const showNativeTask = async id => {
   } catch (error) { ElMessage.error(error.message || '读取任务记录失败') }
 }
 const project = computed(() => projects.value.find(item => item.id === projectId.value))
+const planMatchesProject=computed(()=>Boolean(plan.value&&(!project.value||sameBrand(plan.value.profile,project.value))))
+const reportContext=computed(()=>reportEntityContext(report.value))
+const relatedCompanyMention=item=>Object.hasOwn(item.assessment,'related_company_mentioned')?item.assessment.related_company_mentioned:item.assessment.company_mentioned
+const editableProfile=()=>({...project.value,...entityProfileFields({...project.value,company:company.value,audience:audience.value,aliases:aliasesText.value,official_urls:officialUrlsText.value})})
+const persistProfile=async()=>{
+  if(!project.value){if(!report.value?.profile)throw new Error('请先选择测试对象');return report.value.profile}
+  const id=projectId.value,fields=entityProfileFields(editableProfile())
+  const saved=(await projectApi.updateProject(id,fields)).data
+  if(projectId.value!==id)throw new Error('测试对象已切换，请重新生成问题')
+  projects.value=projects.value.map(item=>item.id===id?saved:item)
+  return {...saved,...fields}
+}
+const saveProfile=async()=>{if(nativeBusy.value||generating.value)return;generating.value=true;try{await persistProfile();ElMessage.success('测试资料已保存到项目档案')}catch(error){ElMessage.error(error.response?.data?.msg||error.message||'保存资料失败')}finally{generating.value=false}}
 const categories = ['discovery', 'brand_identity', 'website_guided']
 const categoryNames = { discovery: '行业自然发现', brand_identity: '品牌核验', website_guided: '官网引导核验' }
 const statusNames = { completed: '全部完成', completed_with_gaps: '完成（有缺口）', running: '采集中', pending: '待采集', stopped: '已停止', needs_review: '需要检查', success: '完成', partial: '来源不完整', failed: '失败', need_action: '等待人工处理', service_unavailable: '服务容量不足' }
 const sourceGroups = [{ key: 'citations', title: '正文引用' }, { key: 'displayed_sources', title: '界面搜索资料' }]
-watch(projectId, () => { if (!restoringWorkspace.value) { company.value = ''; audience.value = ''; plan.value = null } })
-watch([company, audience, caseCount], () => { if (!restoringWorkspace.value) plan.value = null })
+watch(projectId, () => { if (!restoringWorkspace.value) { const selected=project.value;company.value=selected?.company||'';audience.value=selected?.audience||'';aliasesText.value=profileLines(selected?.aliases).join('\n');officialUrlsText.value=profileLines(selected?.official_urls).join('\n');plan.value=null } })
+watch([company, audience, aliasesText, officialUrlsText, caseCount], () => { if (!restoringWorkspace.value) plan.value = null })
 watch(desktopClientMode, () => { if (!restoringWorkspace.value) desktopModel.value = '' })
 const rate = value => typeof value === 'number' && Number.isFinite(value) ? `${Math.round(value * 100)}%` : '未知'
 const booleanText = value => value === true ? '出现' : value === false ? '未出现' : '未知'
@@ -216,7 +243,7 @@ const reportDate = value => {
   const date = new Date(value)
   return Number.isNaN(date.getTime()) ? '时间未知' : date.toLocaleString('zh-CN', { timeZone: 'Asia/Hong_Kong', hour12: false })
 }
-const workspaceSnapshot = () => ({ project_id: projectId.value, company: company.value, audience: audience.value,
+const workspaceSnapshot = () => ({ project_id: projectId.value, company: company.value, audience: audience.value,aliases:profileLines(aliasesText.value),official_urls:profileLines(officialUrlsText.value),
   case_count: caseCount.value, client_mode: desktopClientMode.value, model_label: desktopModel.value,
   selected_report_id: selectedReportId.value, plan: plan.value, report: report.value })
 const saveWorkspace = () => {
@@ -227,7 +254,7 @@ const saveWorkspace = () => {
     catch { workspaceSaveError.value = '自动保存未成功，请先保留当前计划或报告文件，再重试。' }
   }, 200)
 }
-watch([projectId, company, audience, caseCount, desktopClientMode, desktopModel, selectedReportId, plan, report], saveWorkspace, { deep: true })
+watch([projectId, company, audience, aliasesText, officialUrlsText, caseCount, desktopClientMode, desktopModel, selectedReportId, plan, report], saveWorkspace, { deep: true })
 const restoreWorkspace = async () => {
   if (!isDesktop.value) return
   for (let attempt = 0; attempt < 20 && !window.pywebview?.api; attempt++) await new Promise(resolve => setTimeout(resolve, 100))
@@ -237,9 +264,12 @@ const restoreWorkspace = async () => {
     const saved = await api.get_workspace_state()
     restoringWorkspace.value = true
     if (saved.project_id != null && projects.value.some(item => item.id === saved.project_id)) projectId.value = saved.project_id
-    else if (saved.client_name) projectId.value = projects.value.find(item => item.name === saved.client_name)?.id || null
-    if (typeof saved.company === 'string') company.value = saved.company
-    if (typeof saved.audience === 'string') audience.value = saved.audience
+    else {const prior=saved.plan?.profile||saved.report?.profile;projectId.value=prior?projects.value.find(item=>sameBrand(item,prior))?.id||null:null}
+    const draft=restoreEntityDraftFields(project.value,saved)
+    company.value=draft.company
+    audience.value=draft.audience
+    aliasesText.value=profileLines(draft.aliases).join('\n')
+    officialUrlsText.value=profileLines(draft.official_urls).join('\n')
     if (typeof saved.case_count === 'number') caseCount.value = saved.case_count
     if (saved.plan) setRecord(saved.plan)
     if (saved.report) setRecord(saved.report)
@@ -279,15 +309,18 @@ const download = (value, filename) => {
   link.href = url; link.download = filename; link.click()
   setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
-const downloadProfile = () => download({ ...project.value, company: company.value, audience: audience.value, aliases: [] }, 'client-profile.json')
+const downloadProfile = () => {try{download(editableProfile(),'client-profile.json')}catch(error){ElMessage.error(error.message)}}
 const generate = async () => {
-  const request = { project_id: projectId.value, case_count: caseCount.value, company: company.value, audience: audience.value }
+  if(generating.value||nativeBusy.value||!project.value)return
+  const id=projectId.value
   generating.value = true
   try {
+    const saved=await persistProfile()
+    const request = { project_id:id,case_count:caseCount.value,...entityProfileFields(saved) }
     const response = await geoTestApi.generatePlan(request)
-    if (request.project_id === projectId.value && request.case_count === caseCount.value && request.company === company.value && request.audience === audience.value) plan.value = response.data
+    if (request.project_id === projectId.value && request.case_count === caseCount.value && sameBrand(response.data.profile,project.value)) plan.value = response.data
     else ElMessage.info('客户资料已变更，请重新生成计划')
-  } catch { /* Request interceptor presents the error. */ }
+  } catch(error) { ElMessage.error(error.response?.data?.msg||error.message||'生成计划失败') }
   finally { generating.value = false }
 }
 const setRecord = value => {
@@ -337,6 +370,7 @@ header, .card-heading { display: flex; align-items: center; justify-content: spa
 h1 { margin: 0; font-size: 28px; } h2 { margin: 0 0 16px; font-size: 20px; }
 header p, .context { color: #59696e; line-height: 1.7; }
 .form-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
+.profile-grid { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px; }
 .el-select { width: 100%; } .link { margin-left: 16px; color: #0a756e; }
 .cohorts { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; margin-bottom: 24px; }
 .cohorts article { background: #f3f8f7; padding: 18px; border-radius: 8px; }
@@ -344,5 +378,5 @@ header p, .context { color: #59696e; line-height: 1.7; }
 pre { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.8; background: #f5f7f8; padding: 16px; border-radius: 6px; font-family: inherit; }
 li { margin: 8px 0; overflow-wrap: anywhere; } a { color: #0a756e; }
 @media (max-width: 900px) { .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
-@media (max-width: 600px) { header, .card-heading { align-items: flex-start; flex-direction: column; } .form-grid, .cohorts { grid-template-columns: 1fr; } }
+@media (max-width: 600px) { header, .card-heading { align-items: flex-start; flex-direction: column; } .form-grid, .profile-grid, .cohorts { grid-template-columns: 1fr; } }
 </style>

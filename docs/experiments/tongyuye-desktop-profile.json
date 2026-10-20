@@ -1,0 +1,14 @@
+{
+  "name": "同于野软件",
+  "entity_type": "product",
+  "product": "同于野桌面客户端",
+  "company": "北京同于野科技有限公司",
+  "website": "https://tongyuye.com/products/tongyuye/",
+  "official_urls": [],
+  "aliases": ["同于野桌面客户端", "Tongyuye Desktop"],
+  "industry": "AI 桌面工作空间与资料处理软件",
+  "description": "据官方产品页自述，同于野桌面客户端面向资料研究、内容写作和日常文档处理，把对话、文件、网页与图片批注放在同一个工作环境中，提供工作区、分屏浏览器及文档辅助工具。当前产品页链接客户端下载中心，具体平台能力及可用操作以版本和实际任务为准。它与懂AI模型API服务、小龙虾DongClaw和Agent工作台是不同项目，不混用功能、安装入口或曝光数据。",
+  "audience": "需要资料整理、内容写作、文档辅助处理与图片批注的研究及办公用户",
+  "keywords": ["AI 桌面工作空间", "资料研究", "文档处理", "内容写作", "分屏浏览器", "图片批注"],
+  "competitors": []
+}

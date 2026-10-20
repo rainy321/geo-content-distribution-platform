@@ -108,7 +108,7 @@ class DesktopTaskStore:
                 continue
 
     def save_workspace(self, state):
-        allowed = {"project_id", "company", "audience", "case_count", "client_mode", "model_label",
+        allowed = {"project_id", "company", "audience", "aliases", "official_urls", "case_count", "client_mode", "model_label",
                    "selected_report_id", "plan", "report"}
         if not isinstance(state, dict):
             raise ValueError("工作区状态格式无效")

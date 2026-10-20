@@ -131,10 +131,11 @@ def project_report_evaluation(report: dict) -> dict:
     assessments may therefore be excluded by current rules, never upgraded.
     """
     from services.geo_test_service import (
-        EVALUATION_VERSION, answer_evaluation_error, report_cohorts,
+        EVALUATION_VERSION, answer_evaluation_error, report_cohorts, evaluation_semantics,
     )
 
     projected = copy.deepcopy(report)
+    semantics=evaluation_semantics(projected.get('profile') or {})
     changed_case_ids = []
     invalid_statuses = {'failed', 'stopped', 'pending', 'running', 'needs_review',
                         'need_action', 'service_unavailable', 'deferred_answer'}
@@ -144,12 +145,19 @@ def project_report_evaluation(report: dict) -> dict:
         assessment.setdefault('answer_evaluable', False)
         for field in ('brand_mentioned', 'official_source_present', 'official_citation_present'):
             assessment.setdefault(field, None)
+        if semantics=='target_entity_scoped_urls':
+            for field in ('company_mentioned','related_company_mentioned'):
+                assessment.setdefault(field,None)
+            assessment['evaluation_semantics']=semantics
         response = row.get('response')
         error = answer_evaluation_error(response if isinstance(response, str) else '')
         if error or row.get('status') in invalid_statuses or assessment['answer_evaluable'] is not True:
             assessment.update(answer_evaluable=False, brand_mentioned=None,
                               official_source_present=None, official_citation_present=None,
                               recommended=None, fact_accuracy=None, matched_terms=[], mention_evidence=[])
+            for field in ('company_mentioned','related_company_mentioned'):
+                if field in assessment:
+                    assessment[field]=None
             if error:
                 assessment.update(answer_error=error, matched_terms=[], mention_evidence=[],
                                   evaluation_note='读取时按当前规则排除未完成或不可用回答；不作为零曝光。')
@@ -164,10 +172,13 @@ def project_report_evaluation(report: dict) -> dict:
             row['assessment']['answer_evaluable'] is not True for row in projected['cases']):
         projected['status'] = 'completed_with_gaps'
     projected['evaluation_version'] = EVALUATION_VERSION
+    projected['evaluation_semantics']=semantics
     projected['evaluation_projection'] = {
         'mode': 'read_only_conservative_current_rules',
         'stored_evaluation_version': report.get('evaluation_version') or 'unknown',
         'applied_evaluation_version': EVALUATION_VERSION,
+        'stored_evaluation_semantics':report.get('evaluation_semantics') or semantics,
+        'applied_evaluation_semantics':semantics,
         'changed_case_ids': changed_case_ids,
         'cohorts_changed': projected['cohorts'] != report.get('cohorts'),
         'original_status': report.get('status'),
@@ -177,6 +188,10 @@ def project_report_evaluation(report: dict) -> dict:
                  '重新计算有效题分母；缺少原始完成证据的旧题不会提升为有效。'
                  '原始报告、运行编号、采集时间与证据文件未修改，也未重新采集。'),
     }
+    if semantics=='legacy_mixed_entity_hostwide':
+        projected['evaluation_projection']['note'] += ' 此历史口径混合品牌、产品和公司名称，官网按域名判断；不能作为新对象隔离口径的产品曝光结论。'
+    else:
+        projected['evaluation_projection']['note'] += ' 当前口径仅统计本测试对象名称与别名，官网按明确URL范围判断；运营公司提及单独记录。'
     if isinstance(report.get('source_reinspection'), dict) and isinstance(report['source_reinspection'].get('note'), str):
         projected['evaluation_projection']['note'] += report['source_reinspection']['note']
     return projected
@@ -215,6 +230,8 @@ def list_saved_reports(root: Path) -> list[dict]:
                 "run_id": report.get("run_id"), "status": report.get("status"),
                 "updated_at": report.get("updated_at"), "case_count": len(report["cases"]),
                 "evaluation_version": report.get("evaluation_version"),
+                "evaluation_semantics":report.get('evaluation_semantics'),
+                "entity_type":report['profile'].get('entity_type'),"website":report['profile'].get('website'),
                 "source_reinspection": report.get("source_reinspection"),
                 "evaluation_projection": report.get("evaluation_projection")}
                for report_id, report in _reports(root)]

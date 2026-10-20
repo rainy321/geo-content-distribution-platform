@@ -83,6 +83,7 @@ from services.project_service import (
     delete_project,
     get_project,
     list_projects,
+    normalize_project_identity_fields,
     update_project,
 )
 from services.publish_job_executor import execute_publish_job
@@ -852,7 +853,7 @@ def create_geo_test_plan():
     try:
         project = get_project(app.config["DATABASE_PATH"], project_id)
         profile = normalize_profile({**project, **{key: data[key] for key in
-                                    ("company", "aliases", "audience", "region") if key in data}})
+                                    ("company", "aliases", "audience", "region", "entity_type", "official_urls") if key in data}})
         count = data.get("case_count", 4)
         case_quotas(profile, count)
         ai_settings = _request_ai_settings(data)
@@ -1893,7 +1894,10 @@ def save_project():
     project_data, validation_error = _parse_project_fields(data, partial=False)
     if validation_error:
         return jsonify({"code": 400, "msg": validation_error, "data": None}), 400
-    project = create_project(app.config["DATABASE_PATH"], **project_data)
+    try:
+        project = create_project(app.config["DATABASE_PATH"], **project_data)
+    except ValueError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
     return jsonify({"code": 201, "msg": "项目已创建", "data": project}), 201
 
 
@@ -1932,6 +1936,8 @@ def edit_project(project_id):
         )
     except ProjectNotFoundError as exc:
         return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except ValueError as exc:
+        return jsonify({"code": 400, "msg": str(exc), "data": None}), 400
     return jsonify({"code": 200, "msg": "项目已更新", "data": project}), 200
 
 
@@ -1977,6 +1983,12 @@ def _parse_project_fields(data, *, partial):
         if not isinstance(value, list):
             return None, f"{field} 必须是字符串数组"
         result[field] = _normalize_string_list(value)
+
+    identity = {field: data[field] for field in ('entity_type', 'company', 'audience', 'aliases', 'official_urls') if field in data}
+    try:
+        result.update(normalize_project_identity_fields({**result, **identity}, partial=partial))
+    except ValueError as exc:
+        return None, str(exc)
 
     return result, None
 

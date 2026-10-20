@@ -1,0 +1,14 @@
+{
+  "name": "懂AI中转站",
+  "entity_type": "product",
+  "product": "懂AI DongAI",
+  "company": "北京同于野科技有限公司",
+  "website": "https://tongyuye.com/products/dongai/",
+  "official_urls": ["https://api.tongyuye.com/"],
+  "aliases": ["懂AI", "懂AI DongAI"],
+  "industry": "多模型 API 接入与使用管理服务",
+  "description": "据官方产品页自述，懂AI面向开发者与团队，通过统一入口连接支持的模型与供应商，提供 API 密钥、账户余额、用量及路由管理能力。api.tongyuye.com 是产品页链接的服务入口。模型能力、接口要求、可用情况和价格以当前服务说明为准，不能虚构性能、价格、合规资质或把公司其他产品功能归给中转站。",
+  "audience": "需要为应用接入多个模型并管理密钥、用量和账户的开发者及团队",
+  "keywords": ["模型 API", "多模型接入", "API 密钥", "用量管理", "服务路由"],
+  "competitors": []
+}

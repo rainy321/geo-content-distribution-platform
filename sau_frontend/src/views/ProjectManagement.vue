@@ -74,7 +74,7 @@
             <div class="brand-monogram">{{ brandMonogram(project.name) }}</div>
             <div class="brand-title">
               <div class="brand-meta">
-                <span>{{ project.industry || '行业待补充' }}</span>
+                <span>{{ entityLabel(project) }} · {{ project.industry || '行业待补充' }}</span>
                 <span class="record-id">ID {{ String(project.id).padStart(3, '0') }}</span>
               </div>
               <h2>{{ project.name }}</h2>
@@ -98,7 +98,7 @@
             rel="noopener noreferrer"
           >
             <el-icon><Link /></el-icon>
-            {{ websiteHost(project.website) }}
+            {{ project.website }}
             <el-icon><TopRight /></el-icon>
           </a>
           <div v-else class="website-link is-empty">
@@ -188,18 +188,19 @@
         label-position="top"
         @submit.prevent="submitProject"
       >
+        <el-form-item label="测试对象"><el-radio-group v-model="projectForm.entity_type" aria-label="测试对象"><el-radio-button value="company">公司</el-radio-button><el-radio-button value="product">产品</el-radio-button></el-radio-group><p class="entity-note">公司与旗下产品分别测试；名称或网址范围变化后，应重新生成计划。</p></el-form-item>
         <div class="form-grid">
-          <el-form-item label="品牌名称" prop="name">
+          <el-form-item :label="projectForm.entity_type==='company' ? '公司名称' : '产品名称'" prop="name">
             <el-input v-model="projectForm.name" maxlength="100" show-word-limit placeholder="例如：XX科技" />
           </el-form-item>
           <el-form-item label="所属行业" prop="industry">
             <el-input v-model="projectForm.industry" placeholder="例如：人工智能" />
           </el-form-item>
-          <el-form-item label="产品名称" prop="product">
+          <el-form-item label="补充产品说明（不计入对象别名）" prop="product">
             <el-input v-model="projectForm.product" placeholder="例如：企业 AI Agent" />
           </el-form-item>
-          <el-form-item label="官方网站" prop="website">
-            <el-input v-model="projectForm.website" placeholder="https://example.com" />
+          <el-form-item :label="projectForm.entity_type==='company' ? '公司官网' : '产品介绍或服务网址'" prop="website">
+            <el-input v-model="projectForm.website" maxlength="300" placeholder="https://example.com" />
           </el-form-item>
         </div>
 
@@ -212,6 +213,8 @@
             placeholder="说明品牌服务对象、核心能力和已确认的产品事实"
           />
         </el-form-item>
+
+        <el-collapse><el-collapse-item title="补充公司、受众、当前对象别名与官方页面" name="entity-profile"><div class="form-grid"><el-form-item :label="projectForm.entity_type==='company' ? '关联公司（可选）' : '运营公司（可选）'"><el-input v-model="projectForm.company" maxlength="300"/></el-form-item><el-form-item label="目标客户（可选）"><el-input v-model="projectForm.audience" maxlength="300"/></el-form-item><el-form-item label="当前对象别名（每行一个）"><el-input v-model="projectForm.aliasesText" type="textarea" :rows="3" placeholder="仅填写当前公司或产品的别名"/></el-form-item><el-form-item label="额外官方页面 / 服务网址（每行一个）"><el-input v-model="projectForm.officialUrlsText" type="textarea" :rows="3" placeholder="具体产品介绍、文档或服务入口"/></el-form-item></div><p class="entity-note">产品别名不能使用运营公司名称。产品来源按具体网址路径判断，不将整个公司站点都算作产品命中。</p></el-collapse-item></el-collapse>
 
         <div class="form-grid">
           <el-form-item label="核心关键词" prop="keywords">
@@ -281,6 +284,7 @@ import {
   WarningFilled
 } from '@element-plus/icons-vue'
 import { projectApi } from '@/api/project'
+import { entityLabel, entityProfileFields, entityType, normalizeWebsite, profileLines } from '@/utils/geoJourney'
 
 const projects = ref([])
 const loading = ref(false)
@@ -299,7 +303,8 @@ const emptyProject = () => ({
   industry: '',
   description: '',
   keywords: [],
-  competitors: []
+  competitors: [],
+  entity_type:'product',company:'',audience:'',aliasesText:'',officialUrlsText:''
 })
 
 const projectForm = reactive(emptyProject())
@@ -310,8 +315,7 @@ const validateWebsite = (rule, value, callback) => {
     return
   }
   try {
-    const url = new URL(value)
-    if (!['http:', 'https:'].includes(url.protocol)) throw new Error('unsupported protocol')
+    normalizeWebsite(value)
     callback()
   } catch {
     callback(new Error('请输入以 http:// 或 https:// 开头的有效网址'))
@@ -385,7 +389,8 @@ const openEditDialog = async (project) => {
     industry: project.industry,
     description: project.description,
     keywords: [...(project.keywords || [])],
-    competitors: [...(project.competitors || [])]
+    competitors: [...(project.competitors || [])],
+    entity_type:entityType(project),company:project.company||'',audience:project.audience||'',aliasesText:profileLines(project.aliases).join('\n'),officialUrlsText:profileLines(project.official_urls).join('\n')
   })
 }
 
@@ -394,17 +399,18 @@ const submitProject = async () => {
   if (!valid) return
 
   saving.value = true
-  const payload = {
-    name: projectForm.name,
-    website: projectForm.website,
-    product: projectForm.product,
-    industry: projectForm.industry,
-    description: projectForm.description,
-    keywords: projectForm.keywords,
-    competitors: projectForm.competitors
-  }
-
   try {
+    const payload = {
+      name: projectForm.name,
+      website: projectForm.website?normalizeWebsite(projectForm.website):'',
+      product: projectForm.product,
+      industry: projectForm.industry,
+      description: projectForm.description,
+      keywords: projectForm.keywords,
+      competitors: projectForm.competitors,
+      ...entityProfileFields({...projectForm,aliases:projectForm.aliasesText,official_urls:projectForm.officialUrlsText})
+    }
+
     if (dialogMode.value === 'create') {
       await projectApi.createProject(payload)
       ElMessage.success('项目已创建')
@@ -415,6 +421,7 @@ const submitProject = async () => {
     dialogVisible.value = false
     await fetchProjects()
   } catch (error) {
+    ElMessage.error(error.response?.data?.msg||error.message||'保存项目失败')
     console.error('保存品牌项目失败:', error)
   } finally {
     saving.value = false
@@ -485,6 +492,7 @@ onMounted(fetchProjects)
 </script>
 
 <style lang="scss" scoped>
+.entity-note{width:100%;font-size:12px;line-height:1.8;color:var(--geo-muted,#59696e);margin-top:8px}
 .project-management {
   --ink: #17222b;
   --teal: #0d5c63;

@@ -42,11 +42,21 @@ class TestDesktopPersistence(unittest.TestCase):
             return {'plan': value}
         first._start('plan', finish, client_name=value['profile']['name'])
         first.worker.join(timeout=3)
-        first.save_workspace_state({'company': '合成自动保存公司', 'case_count': 4, 'plan': value, 'api_key': 'must-not-be-persisted'})
+        first.save_workspace_state({'project_id': 7, 'company': '合成自动保存公司',
+                                    'aliases': ['合成产品别名'], 'official_urls': ['https://example.org/products/a/'],
+                                    'case_count': 4, 'plan': value, 'api_key': 'must-not-be-persisted'})
         second = DesktopGeoJobs(self.root)
         self.assertEqual(second.get_task()['result']['plan']['plan_sha256'], value['plan_sha256'])
         self.assertEqual(second.get_workspace_state()['company'], '合成自动保存公司')
+        self.assertEqual(second.get_workspace_state()['project_id'], 7)
+        self.assertEqual(second.get_workspace_state()['aliases'], ['合成产品别名'])
+        self.assertEqual(second.get_workspace_state()['official_urls'], ['https://example.org/products/a/'])
         self.assertNotIn('api_key', second.get_workspace_state())
+        second.save_workspace_state({'project_id': 7, 'company': '', 'aliases': [], 'official_urls': []})
+        cleared = DesktopGeoJobs(self.root).get_workspace_state()
+        self.assertEqual(cleared['company'], '')
+        self.assertEqual(cleared['aliases'], [])
+        self.assertEqual(cleared['official_urls'], [])
 
     def test_running_state_becomes_review_needed_without_replay(self):
         value = plan()

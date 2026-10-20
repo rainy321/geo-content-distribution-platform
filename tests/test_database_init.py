@@ -62,6 +62,11 @@ class DatabaseInitializationTests(unittest.TestCase):
                     "description",
                     "keywords",
                     "competitors",
+                    "entity_type",
+                    "company",
+                    "audience",
+                    "aliases",
+                    "official_urls",
                     "created_at",
                     "updated_at",
                 },
@@ -69,6 +74,32 @@ class DatabaseInitializationTests(unittest.TestCase):
             self.assertEqual(project[:7], ("XX科技", "", "", "", "", "[]", "[]"))
             self.assertTrue(project[7])
             self.assertTrue(project[8])
+
+    def test_project_identity_migration_preserves_existing_rows_and_relations(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path=Path(temp_dir)/'old.db'
+            with closing(sqlite3.connect(path)) as connection,connection:
+                connection.execute('''CREATE TABLE projects(id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,website TEXT NOT NULL DEFAULT '',product TEXT NOT NULL DEFAULT '',
+                    industry TEXT NOT NULL DEFAULT '',description TEXT NOT NULL DEFAULT '',
+                    keywords TEXT NOT NULL DEFAULT '[]',competitors TEXT NOT NULL DEFAULT '[]',
+                    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)''')
+                connection.execute("INSERT INTO projects(id,name,website,description,keywords,created_at,updated_at) VALUES(7,'旧项目','legacy.example.org','原介绍','[\"old\"]','2020-01-01','2020-01-02')")
+                before=connection.execute('SELECT * FROM projects WHERE id=7').fetchone()
+            initialize_database(path)
+            initialize_database(path)
+            with closing(sqlite3.connect(path)) as connection:
+                connection.row_factory=sqlite3.Row
+                row=connection.execute('SELECT * FROM projects WHERE id=7').fetchone()
+                self.assertEqual(tuple(row)[:len(before)],before)
+                self.assertEqual((row['entity_type'],row['company'],row['audience'],row['aliases'],row['official_urls']),('product','','','[]','[]'))
+                with self.assertRaises(sqlite3.IntegrityError):
+                    connection.execute("UPDATE projects SET entity_type='other' WHERE id=7")
+            from services.project_service import update_project
+            updated=update_project(path,7,{'description':'新介绍'})
+            self.assertEqual(updated['website'],'legacy.example.org')
+            self.assertEqual(updated['keywords'],['old'])
+            self.assertEqual(updated['created_at'],'2020-01-01')
 
     def test_articles_schema_and_defaults_match_mvp_contract(self):
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -6,6 +6,24 @@
 
 客户资料支持 `name`、`product`、`company`、`industry`、`description`、`keywords`、`competitors`、`audience`、`region`、`aliases`、`website`。名称和行业/业务说明是必填信息，其余可留空；没有官网时不生成官网问题。资料属于客户自述，不能作为已验证事实。品牌别名应由客户明确提供；相似公司名不自动视为别名。
 
+新资料还支持 `entity_type`（`company` 或 `product`）和 `official_urls`。公司与产品分别建项目、生成计划并记录基线；别名只填写当前测试对象的明确名称。产品资料中的 `company` 是运营关系背景，回答只出现该公司不计产品提及；报告另行显示公司提及。产品核验题必须点名产品，不能只点名运营公司。自然发现题仍禁止泄漏产品、公司、别名或全部官方网址的域名。
+
+官网命中按主网址和明确配置的 `official_urls` 核对：主机和端口准确匹配，非根路径按完整路径段限定。同一主站的 `/about/`、其他产品页或另一个子域，不会自动算作当前产品的官方引用。所有官方范围保存在计划快照中；范围或测试对象改变时需要新基线，不能直接混算复测。没有 `entity_type` 的旧计划保留原指纹和历史宽口径，并在报告标注，不能冒充新方法的基线。
+
+### 同于野：公司与两个产品
+
+2026-10-20 读取官网后，按以下三个对象分别配置。产品能力来自官网自述，尚不等于软件独立功能验证。
+
+| 测试对象 | 主网址与范围 | 自然需求方向 |
+| --- | --- | --- |
+| 北京同于野科技有限公司 | [公司官网](https://tongyuye.com/)；公司主体与业务 | 企业 AI 应用建设、模型接入、智能体开发及系统集成服务商 |
+| 懂AI中转站 / 懂AI DongAI | [产品页](https://tongyuye.com/products/dongai/)；另登记官方链接的 [API 服务入口](https://api.tongyuye.com/) | 开发团队的多模型 API 接入、密钥和用量管理 |
+| 同于野软件 / 同于野桌面客户端 | [桌面产品页](https://tongyuye.com/products/tongyuye/) | 资料研究、内容写作、文件和网页协同的 AI 桌面软件 |
+
+每个对象各自执行自然发现、点名核验和官网引导三类问题。问句仍由 AI 根据资料生成并经用户确认，不把手写示例标为 AI 出题；本次调整方法和配置本身也不是新的真实采集结果。旧中转站报告继续保留在原项目，不因公司官网改版而改写历史网址或提及率。
+
+可审阅的资料文件分别为 [公司](experiments/tongyuye-company-profile.json)、[懂AI产品](experiments/dongai-product-profile.json) 和 [同于野桌面软件](experiments/tongyuye-desktop-profile.json)。
+
 AI 返回的 JSON 经过数量、类别、重复问题、名称/域名泄漏等校验；校验失败会明确报错，不用模板问题冒充 AI 输出。默认 4 题在有官网时分配为 2 个行业问题、1 个品牌问题和 1 个官网问题。计划生成后保存客户资料、问题原文、AI 生成方式和 SHA256 指纹；复测用同一份计划开启新的运行目录。
 
 首次实测后加强了生成指令：至少一道行业发现问题要求给出公开可核验的候选产品/方案/服务商，避免所有问题都只询问通用方法。已经生成的计划保留原文，不在看到回答后改题并混为同一轮。
@@ -50,13 +68,13 @@ Windows 本地使用可直接双击仓库根目录的 `start-geo-tests.bat`：�
 
 # 豆包生成：先在专用窗口完成正常登录，然后关闭窗口保存会话。
 .venv\Scripts\python.exe -X utf8 -m services.doubao_source_cli login --login-wait 600
-.venv\Scripts\python.exe -X utf8 -m services.geo_test_cli plan --profile docs/experiments/tongyuye-client-profile.json --planner doubao-web --output runtime/geo-tests/tongyuye-plan.json --headed
+.venv\Scripts\python.exe -X utf8 -m services.geo_test_cli plan --profile docs/experiments/dongai-product-profile.json --planner doubao-web --output runtime/geo-tests/dongai-product-plan.json --headed
 
 # 审阅计划后，执行整轮；每题新建对话，默认间隔 15 秒。
-.venv\Scripts\python.exe -X utf8 -m services.geo_test_cli run --plan runtime/geo-tests/tongyuye-plan.json --run-dir runtime/geo-tests/tongyuye-run-001 --headed
+.venv\Scripts\python.exe -X utf8 -m services.geo_test_cli run --plan runtime/geo-tests/dongai-product-plan.json --run-dir runtime/geo-tests/dongai-product-run-001 --headed
 
 # 正常登录/验证恢复后，仅继续可安全执行的未提交问题。
-.venv\Scripts\python.exe -X utf8 -m services.geo_test_cli resume --run-dir runtime/geo-tests/tongyuye-run-001 --headed
+.venv\Scripts\python.exe -X utf8 -m services.geo_test_cli resume --run-dir runtime/geo-tests/dongai-product-run-001 --headed
 ```
 
 `--case-count` 只用于计划生成；`--timeout` 控制每题回答等待；`--cooldown` 允许 10–300 秒。`--manual-wait 300 --headed` 可保留当前页面等待用户正常验证，预算上限 600 秒。退出码：0 完成，1 配置/输入/计划错误，2 采集停下、存在缺口或需要检查。

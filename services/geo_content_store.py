@@ -15,6 +15,7 @@ from services.geo_content_research import (
 )
 from services.geo_score_service import score_geo_content
 from services import geo_destination_service as destinations
+from services.geo_entity_identity import same_entity_target, entity_measurement_signature
 
 
 class ResearchNotFoundError(LookupError):
@@ -54,13 +55,15 @@ def _cycle(connection, identifier):
 
 def _fact_candidates(connection, cycle):
     """Offer previous owner statements without silently confirming them again."""
-    rows = connection.execute('''SELECT id,created_at,updated_at,facts FROM geo_content_cycles
+    rows = connection.execute('''SELECT id,created_at,updated_at,facts,baseline FROM geo_content_cycles
         WHERE project_id=? AND id!=? AND created_at<=? AND facts!='[]' ORDER BY updated_at DESC,id DESC''',
         (cycle['project_id'], cycle['id'], cycle['created_at']))
     for row in rows:
         try:
+            if not same_entity_target(json.loads(row['baseline'])['profile'], cycle['profile']):
+                continue
             facts = normalize_facts(json.loads(row['facts']))
-        except (ValueError, TypeError):
+        except (ValueError, TypeError, KeyError):
             continue
         return {'source_cycle_id': row['id'], 'source_created_at': row['created_at'],
                 'source_updated_at': row['updated_at'],
@@ -86,14 +89,16 @@ def create_cycle(database, report, report_ref, project_id=None):
         if project:
             if project['name'].strip().casefold() != profile['name'].strip().casefold():
                 raise ValueError('采集客户与所选品牌项目不一致，不能混入其他客户的内容')
-            original_host, profile_host = urlsplit(project['website']).hostname, urlsplit(profile['website']).hostname
-            if original_host and profile_host and original_host.casefold().removeprefix('www.') != profile_host.casefold().removeprefix('www.'):
-                raise ValueError('同名品牌的官网不同，请核对品牌项目与采集客户')
+            if not same_entity_target(dict(project), profile):
+                raise ValueError('同名对象的公司/产品类型或官网路径不同，请核对品牌项目与采集客户')
             project_id = project['id']
         else:
-            project_id = connection.execute('''INSERT INTO projects(name,website,product,industry,description,keywords,competitors)
-                VALUES(?,?,?,?,?,?,?)''', (profile['name'], profile['website'], profile['product'], profile['industry'],
-                                          profile['description'], _json(profile['keywords']), _json(profile['competitors']))).lastrowid
+            project_id = connection.execute('''INSERT INTO projects
+                (name,website,product,industry,description,keywords,competitors,entity_type,company,audience,aliases,official_urls)
+                VALUES(?,?,?,?,?,?,?,?,?,?,?,?)''', (profile['name'], profile['website'], profile['product'], profile['industry'],
+                    profile['description'], _json(profile['keywords']), _json(profile['competitors']),
+                    profile.get('entity_type', 'product'), profile.get('company', ''), profile.get('audience', ''),
+                    _json(profile.get('aliases', [])), _json(profile.get('official_urls', [])))).lastrowid
         report_hash = fingerprint(report)
         prior = connection.execute('SELECT id FROM geo_content_cycles WHERE project_id=? AND report_digest=?', (project_id, report_hash)).fetchone()
         if prior:
@@ -324,10 +329,10 @@ def attach_retest(database, identifier, report):
             raise ValueError('基线报告本身不能作为发布后的复测')
         if report['profile']['name'].strip().casefold() != cycle['profile']['name'].strip().casefold():
             raise ValueError('复测客户与本轮品牌不同，不能关联其他客户的报告')
-        original_host = urlsplit(cycle['profile'].get('website') or '').hostname
-        later_host = urlsplit(report['profile'].get('website') or '').hostname
-        if original_host and later_host and original_host.casefold().removeprefix('www.') != later_host.casefold().removeprefix('www.'):
-            raise ValueError('复测客户官网与本轮品牌不同，请核对报告')
+        if not same_entity_target(cycle['profile'], report['profile']):
+            raise ValueError('复测对象的公司/产品类型或官网路径与本轮品牌不同，请核对报告')
+        if entity_measurement_signature(cycle['profile']) != entity_measurement_signature(report['profile']):
+            raise ValueError('复测的对象别名、官网范围或历史评估口径不同，请建立新的搜索基线')
         connection.execute('INSERT OR REPLACE INTO geo_content_retests VALUES(?,?,?,?)',
                            (identifier, report['run_id'], _json(report), _now()))
     return get_cycle(database, identifier)

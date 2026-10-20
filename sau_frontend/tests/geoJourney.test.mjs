@@ -1,13 +1,90 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { articleSnapshot, baselineEvidenceSummary, canRestoreArticleEdits, canRestoreFactEdits, journeyDraftLimits, journeyLengthReview, lastJourneyProject, normalizeWebsite, readJourney, sameBrand, targetDraftOutdated, writeJourney } from '../src/utils/geoJourney.js'
+import { articleSnapshot, baselineEvidenceSummary, canRestoreArticleEdits, canRestoreFactEdits, entityProfileFields, journeyDraftLimits, journeyLengthReview, lastJourneyProject, normalizeWebsite, readJourney, reportEntityContext, restoreEntityDraftFields, sameBrand, targetDraftOutdated, websiteIdentity, writeJourney } from '../src/utils/geoJourney.js'
+
+test('same-entity unsaved workspace fields survive migration defaults, including explicit clearing',()=>{
+  const project={id:7,name:'产品A',entity_type:'product',website:'https://example.org/products/a',company:'',audience:'',aliases:[],official_urls:[]}
+  const values={company:'迁移前草稿公司',audience:'未提交受众',aliases:['未提交别名'],official_urls:['https://api.example.org/a']}
+  for(const evidence of [{project_id:7},{plan:{profile:project}},{report:{profile:project}}])assert.deepEqual(restoreEntityDraftFields(project,{...values,...evidence}),values)
+  assert.deepEqual(restoreEntityDraftFields(project,values,7),values)
+  const populated={...project,company:'已保存公司',audience:'已保存受众',aliases:['已保存别名'],official_urls:['https://example.org/docs/a']}
+  const cleared={company:'',audience:'',aliases:[],official_urls:[]}
+  assert.deepEqual(restoreEntityDraftFields(populated,{project_id:7,...cleared}),cleared)
+  assert.deepEqual(restoreEntityDraftFields(populated,{project_id:7,company:''}),{...cleared,audience:populated.audience,aliases:populated.aliases,official_urls:populated.official_urls})
+})
+
+test('unbound or another entity workspace cannot seed profile drafts by name alone',()=>{
+  const project={id:7,name:'同名对象',entity_type:'product',website:'https://example.org/products/a',company:'正确公司',audience:'本对象受众',aliases:['甲'],official_urls:['https://api.example.org/a']}
+  const foreign={project_id:8,company:'别的对象草稿',audience:'别的受众',aliases:['乙'],official_urls:['https://api.example.org/b']}
+  const expected={company:project.company,audience:project.audience,aliases:project.aliases,official_urls:project.official_urls}
+  for(const evidence of [{},{plan:{profile:{...project,website:'https://example.org/products/b'}}},{report:{profile:{...project,entity_type:'company'}}}])assert.deepEqual(restoreEntityDraftFields(project,{...foreign,...evidence}),expected)
+  assert.deepEqual(restoreEntityDraftFields(project,foreign,7),expected)
+  assert.deepEqual(restoreEntityDraftFields(project,{...foreign,project_id:undefined,plan:{profile:{...project,website:'https://example.org/products/b'}}},7),expected)
+  assert.deepEqual(restoreEntityDraftFields(undefined,{project_id:7,...foreign}),{company:'',audience:'',aliases:[],official_urls:[]})
+})
 
 test('same-name brands on different sites cannot share research', () => {
   const original = {name:'懂AI中转站',website:'https://tongyuye.com'}
   assert.equal(sameBrand(original, {...original,website:'https://another-company.com'}),false)
   assert.equal(sameBrand(original, {...original,website:''}),false)
   assert.equal(sameBrand(original, {name:'另一品牌',website:original.website}),false)
-  assert.equal(sameBrand(original, {...original,website:'https://www.tongyuye.com/about'}),true)
+  assert.equal(sameBrand(original, {...original,website:'https://www.tongyuye.com/about'}),false)
+  assert.equal(sameBrand(original, {...original,website:'https://tongyuye.com:443/'}),true)
+})
+
+test('company and same-host product paths never reuse another target plan or report',()=>{
+  const product={name:'相同名称',entity_type:'product',website:'https://example.org/products/a/'}
+  for(const changes of [{entity_type:'company'},{website:'https://example.org/'},{website:'https://example.org/products/ab'},
+    {website:'https://example.org/products/b/'},{website:'https://www.example.org/products/a/'},
+    {website:'http://example.org/products/a/'},{website:'https://example.org:444/products/a/'}]) {
+    assert.equal(sameBrand(product,{...product,...changes}),false,JSON.stringify(changes))
+  }
+  const legacy={name:product.name,website:product.website}
+  assert.equal(sameBrand(legacy,product),true)
+  assert.equal(sameBrand(legacy,{...product,entity_type:'company'}),false)
+  assert.equal(sameBrand({...product,name:''},{...product,name:''}),false)
+})
+
+test('entity URL identity aligns UTF-8, NFC, default ports and slash boundaries',()=>{
+  assert.equal(websiteIdentity('https://example.org/产品/'),websiteIdentity('https://EXAMPLE.org:443/%e4%ba%a7%e5%93%81'))
+  assert.equal(websiteIdentity('https://example.org/café/'),websiteIdentity('https://example.org/cafe%CC%81'))
+  assert.equal(websiteIdentity('https://example.org/products/%61'),websiteIdentity('https://example.org/products/a/'))
+  for(const url of ['https://example.org/products/a%2fb','https://example.org/products/a%5Cb',
+    'https://example.org/%252F','https://example.org/%FF','https://example.org/%GG',
+    'https://example.org/products/../b','https://example.org/products/%2e%2e/b','https://example.org:0/a',
+    'https://example.org:/a','https://example.org/a\\b','https://example.org/a?','https://example.org/a#'])assert.equal(websiteIdentity(url),'',url)
+})
+
+test('profile fields preserve object-specific aliases, owner and official paths in API payloads',()=>{
+  const fields=entityProfileFields({entity_type:'product',company:'运营公司',audience:' 开发者 ',
+    aliases:' 产品A\n\n产品英文名\n产品A ',official_urls:'example.org/products/a/\nhttps://api.example.org/docs/a'})
+  assert.deepEqual(fields,{entity_type:'product',company:'运营公司',audience:'开发者',aliases:['产品A','产品英文名'],
+    official_urls:['https://example.org/products/a','https://api.example.org/docs/a']})
+  assert.throws(()=>entityProfileFields({...fields,aliases:['运营公司']}),/别名不能填写运营公司/)
+  assert.throws(()=>entityProfileFields({...fields,official_urls:['https://example.org/products/a?token=secret']}))
+  assert.throws(()=>entityProfileFields({...fields,aliases:Array.from({length:21},(_,i)=>`别名${i}`)}),/20/)
+  assert.throws(()=>entityProfileFields({...fields,official_urls:Array.from({length:11},(_,i)=>`https://example.org/products/${i}`)}),/10/)
+  assert.equal(entityProfileFields({entity_type:'company',company:'公'.repeat(300),aliases:['😀'.repeat(120)]}).company.length,300)
+  assert.throws(()=>entityProfileFields({...fields,company:'公'.repeat(301)}),/300/)
+  assert.throws(()=>entityProfileFields({...fields,audience:'客'.repeat(301)}),/300/)
+  assert.throws(()=>entityProfileFields({...fields,aliases:['别'.repeat(121)]}),/120/)
+})
+
+test('explicit product semantics separate owner and exact URL scope, while legacy stays visibly mixed',()=>{
+  const profile={entity_type:'product',name:'产品A',website:'https://example.org/products/a/',company:'运营公司',official_urls:['https://api.example.org/a']}
+  const strict=reportEntityContext({profile,evaluation_semantics:'target_entity_scoped_urls'})
+  assert.equal(strict.legacy,false)
+  assert.equal(strict.mentionLabel,'产品提及')
+  assert.match(strict.note,/运营公司提及单独列出/)
+  assert.match(strict.note,/不把整站页面/)
+  assert.deepEqual(strict.urls,[profile.website,...profile.official_urls])
+  assert.equal(reportEntityContext({profile:{...profile,entity_type:'company'}}).mentionLabel,'公司提及')
+  for(const report of [{profile:{name:'旧档案',website:profile.website}},
+    {profile,evaluation_semantics:'legacy_mixed_entity_hostwide'}]) {
+    assert.equal(reportEntityContext(report).mentionLabel,'历史混合提及')
+    assert.equal(reportEntityContext(report).legacy,true)
+    assert.match(reportEntityContext(report).note,/旧报告.*不能按新的独立对象/)
+  }
 })
 
 test('brand website cannot contain credentials, query data or script schemes', () => {

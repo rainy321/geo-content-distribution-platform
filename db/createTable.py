@@ -76,11 +76,26 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                     description TEXT NOT NULL DEFAULT '',
                     keywords TEXT NOT NULL DEFAULT '[]',
                     competitors TEXT NOT NULL DEFAULT '[]',
+                    entity_type TEXT NOT NULL DEFAULT 'product' CHECK (entity_type IN ('company', 'product')),
+                    company TEXT NOT NULL DEFAULT '',
+                    audience TEXT NOT NULL DEFAULT '',
+                    aliases TEXT NOT NULL DEFAULT '[]',
+                    official_urls TEXT NOT NULL DEFAULT '[]',
                     created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
                     updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
                 '''
             )
+            project_columns = {row[1] for row in cursor.execute('PRAGMA table_info(projects)')}
+            for field, definition in (
+                ('entity_type', "TEXT NOT NULL DEFAULT 'product' CHECK (entity_type IN ('company', 'product'))"),
+                ('company', "TEXT NOT NULL DEFAULT ''"),
+                ('audience', "TEXT NOT NULL DEFAULT ''"),
+                ('aliases', "TEXT NOT NULL DEFAULT '[]'"),
+                ('official_urls', "TEXT NOT NULL DEFAULT '[]'"),
+            ):
+                if field not in project_columns:
+                    cursor.execute(f'ALTER TABLE projects ADD COLUMN {field} {definition}')
             cursor.execute(
                 '''
                 CREATE TABLE IF NOT EXISTS articles (
