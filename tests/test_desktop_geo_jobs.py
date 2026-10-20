@@ -24,6 +24,19 @@ class TestNativeGeoJobs(unittest.TestCase):
         self.assertFalse(self.jobs.worker.is_alive())
         return self.jobs.get_task()
 
+    def test_public_chat_and_work_keep_separate_sessions_without_copying_connectors(self):
+        work = self.root/'doubao/browser-profile'
+        work.mkdir(parents=True)
+        marker = work/'existing-work-session.json'
+        marker.write_text('{"synthetic_work_connector":true}', encoding='utf-8')
+        public_config = self.jobs._config({'client_mode': 'consumer'})
+        work_config = self.jobs._config({'client_mode': 'work'})
+        self.assertEqual(public_config.profile_dir, self.root/'doubao/consumer-browser-profile')
+        self.assertEqual(work_config.profile_dir, work)
+        self.assertEqual(self.jobs._config({}).profile_dir, public_config.profile_dir)
+        self.assertFalse((public_config.profile_dir/marker.name).exists())
+        self.assertEqual(marker.read_text(encoding='utf-8'), '{"synthetic_work_connector":true}')
+
     def test_invalid_plan_is_rejected_without_starting_browser(self):
         value = plan()
         value['cases'][0]['question'] += '已修改'

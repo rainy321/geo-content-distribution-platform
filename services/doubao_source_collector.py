@@ -12,6 +12,7 @@ import hashlib
 import json
 import re
 import time
+import unicodedata
 import uuid
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
@@ -537,28 +538,43 @@ async def _expand_sources(page: Any, config: CollectorConfig, run_dir: Path, *, 
 
 
 def _citation_title_match(source_title: str, document: dict) -> str | None:
-    """Require a public headline, or the original exact document-title proof."""
-    fold = lambda value: re.sub(r'\s+', '', value or '').casefold()
-    headlines = list(dict.fromkeys(fold(item.get('text')) for item in document.get('headlines', []) if item.get('text')))
-    expected = fold(source_title)
-    if len(headlines) == 1 and headlines[0] == expected:
-        return 'visible_h1_exact'
+    """Require complete title equality, recording compatibility normalization."""
     # The observed Toutiao layout appends the public author to a source-card
     # title. Strip it only when both the unique headline and that same public
     # author corroborate the exact parts; never infer a URL or match a domain.
     try:
         parsed = urlsplit(document.get('url') or '')
-        toutiao_article = parsed.hostname in {'www.toutiao.com', 'm.toutiao.com'} and re.fullmatch(r'/article/\d+/?', parsed.path)
+        toutiao_article = (parsed.scheme in {'http', 'https'} and not parsed.username and not parsed.password
+            and parsed.hostname in {'www.toutiao.com', 'm.toutiao.com'}
+            and parsed.port in (None, 443 if parsed.scheme == 'https' else 80)
+            and re.fullmatch(r'/article/\d+/?', parsed.path))
     except ValueError:
         toutiao_article = False
     base, separator, author = source_title.rpartition('_')
-    if (toutiao_article and separator and base and author and len(headlines) == 1
-            and headlines[0] == fold(base)
-            and any(fold(item.get('text')) == fold(author) for item in document.get('authors', []))):
-        return 'visible_h1_and_public_author_exact'
-    if fold(document.get('title')) == expected:
-        return 'document_title_exact'
-    return None
+
+    def match(fold, suffix):
+        headlines = list(dict.fromkeys(fold(item.get('text')) for item in document.get('headlines', []) if item.get('text')))
+        expected = fold(source_title)
+        if not expected:
+            return None
+        if len(headlines) == 1 and headlines[0] == expected:
+            return 'visible_h1_' + suffix
+        if (toutiao_article and separator and base and author and len(headlines) == 1
+                and headlines[0] == fold(base)
+                and any(fold(item.get('text')) == fold(author) for item in document.get('authors', []))):
+            return 'visible_h1_and_public_author_' + suffix
+        if fold(document.get('title')) == expected:
+            return 'document_title_' + suffix
+        return None
+
+    fold = lambda value: re.sub(r'\s+', '', value or '').casefold()
+    exact = match(fold, 'exact')
+    if exact:
+        return exact
+    # Full/half-width punctuation and compatibility glyphs can differ between
+    # the visible source card and its observed destination. Keep both originals
+    # in evidence; only complete NFKC-equivalent strings may authorize a match.
+    return match(lambda value: fold(unicodedata.normalize('NFKC', value or '')), 'nfkc_equivalent')
 
 
 def _http_navigation_url(value):

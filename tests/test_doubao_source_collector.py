@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from services.doubao_source_collector import (
     DOUBAO_URL, CollectorConfig, CompletionTracker, _blocked_reason, _browser_error_reason, _expand_sources,
-    _navigate_to_doubao, collect_doubao_sources,
+    _inspect_citation_destination, _navigate_to_doubao, collect_doubao_sources,
     normalize_ui_sources, open_doubao_session, read_snapshot, write_evidence_result, _citation_title_match,
 )
 from services.doubao_source_cli import main
@@ -45,6 +45,44 @@ class SourceEvidenceTests(unittest.TestCase):
             with self.subTest(title=title):
                 self.assertEqual(_citation_title_match(title, {'title': title,
                     'headlines': [{'text': h} for h in headings]}), 'document_title_exact')
+
+    def test_observed_fullwidth_colon_matches_without_rewriting_public_evidence(self):
+        source = 'Agent平台选型:方舟适配互联网，百度侧重政企合规'
+        destination = 'Agent平台选型：方舟适配互联网，百度侧重政企合规'
+        document = {'url': 'https://www.volcengine.com/article/2824753', 'title': destination,
+                    'headlines': [{'text': destination, 'dom': '<h1>' + destination + '</h1>'}], 'authors': []}
+        original = json.dumps(document, ensure_ascii=False)
+        self.assertEqual(_citation_title_match(source, document), 'visible_h1_nfkc_equivalent')
+        self.assertEqual(json.dumps(document, ensure_ascii=False), original)
+        self.assertEqual(source, 'Agent平台选型:方舟适配互联网，百度侧重政企合规')
+
+    def test_fullwidth_letters_digits_and_punctuation_require_complete_nfkc_equality(self):
+        source = 'Ａｇｅｎｔ平台２：适用范围（公开资料）'
+        destination = 'Agent平台2:适用范围(公开资料)'
+        self.assertEqual(_citation_title_match(source, {'title': destination,
+            'headlines': [{'text': '不同的官网主视觉标题'}]}), 'document_title_nfkc_equivalent')
+        for change in ('Agent平台3:适用范围(公开资料)', 'Agent平台2:其他范围(公开资料)',
+                       destination + '补充说明', 'Аgent平台2:适用范围(公开资料)',
+                       'Agent平台2:适用\u200b范围(公开资料)'):
+            with self.subTest(change=change):
+                self.assertIsNone(_citation_title_match(source, {'title': change, 'headlines': [{'text': change}]}))
+        self.assertIsNone(_citation_title_match(source, {'title': '多个文章',
+            'headlines': [{'text': destination}, {'text': '另一篇平台选型文章'}]}))
+
+    def test_nfkc_author_suffix_still_needs_unique_headline_and_exact_public_author(self):
+        source = 'ＡＩ：公开核验_合成发布者'
+        document = {'url': 'https://www.toutiao.com/article/123456/', 'title': 'AI:公开核验 - 今日头条',
+                    'headlines': [{'text': 'AI:公开核验'}], 'authors': [{'text': '合成发布者'}]}
+        self.assertEqual(_citation_title_match(source, document), 'visible_h1_and_public_author_nfkc_equivalent')
+        for change in ({'authors': []}, {'authors': [{'text': '其他发布者'}]},
+                       {'headlines': [{'text': 'AI:公开核验'}, {'text': '其他文章标题'}]},
+                       {'headlines': [{'text': 'AI:另一篇核验'}]},
+                       {'url': 'https://www.toutiao.com.evil.example/article/123456/'},
+                       {'url': 'ftp://www.toutiao.com/article/123456/'},
+                       {'url': 'https://account:secret@www.toutiao.com/article/123456/'},
+                       {'url': 'https://www.toutiao.com:8443/article/123456/'}):
+            with self.subTest(change=change):
+                self.assertIsNone(_citation_title_match(source, {**document, **change}))
 
     def test_only_ui_scopes_are_sources_and_missing_links_stay_missing(self):
         result = normalize_ui_sources([
@@ -134,6 +172,20 @@ class CompletionTests(unittest.TestCase):
 
 
 class NavigationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_nfkc_destination_is_confirmed_on_first_read_without_timeout_or_rewriting(self):
+        source = 'Agent平台选型:方舟适配互联网，百度侧重政企合规'
+        destination = 'Agent平台选型：方舟适配互联网，百度侧重政企合规'
+        document = {'url': 'https://www.volcengine.com/article/2824753', 'title': destination,
+                    'ready_state': 'complete', 'headlines': [{'text': destination}], 'authors': []}
+        popup = SimpleNamespace(url=document['url'], is_closed=Mock(return_value=False),
+                                evaluate=AsyncMock(return_value=document))
+        with patch('services.doubao_source_collector.asyncio.sleep', new_callable=AsyncMock) as wait:
+            observed, method = await _inspect_citation_destination(popup, source, asyncio.get_running_loop().time() + 12)
+        self.assertEqual(method, 'visible_h1_nfkc_equivalent')
+        self.assertEqual(observed, document)
+        self.assertEqual(popup.evaluate.await_count, 1)
+        wait.assert_not_awaited()
+
     async def test_aborted_navigation_accepted_only_with_fixed_url_and_visible_ui(self):
         wait = AsyncMock()
         page = SimpleNamespace(url=DOUBAO_URL, goto=AsyncMock(side_effect=RuntimeError('net::ERR_ABORTED')),

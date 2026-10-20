@@ -138,7 +138,7 @@ def project_report_evaluation(report: dict) -> dict:
     semantics=evaluation_semantics(projected.get('profile') or {})
     changed_case_ids = []
     invalid_statuses = {'failed', 'stopped', 'pending', 'running', 'needs_review',
-                        'need_action', 'service_unavailable', 'deferred_answer'}
+                        'need_action', 'service_unavailable', 'deferred_answer', 'private_account_context'}
     for index, row in enumerate(projected['cases']):
         stored_assessment = row.get('assessment')
         assessment = dict(stored_assessment) if isinstance(stored_assessment, dict) else {}
@@ -150,7 +150,8 @@ def project_report_evaluation(report: dict) -> dict:
                 assessment.setdefault(field,None)
             assessment['evaluation_semantics']=semantics
         response = row.get('response')
-        error = answer_evaluation_error(response if isinstance(response, str) else '')
+        client_mode = row.get('client_mode') or (projected.get('execution') or {}).get('client_mode')
+        error = answer_evaluation_error(response if isinstance(response, str) else '', client_mode=client_mode)
         if error or row.get('status') in invalid_statuses or assessment['answer_evaluable'] is not True:
             assessment.update(answer_evaluable=False, brand_mentioned=None,
                               official_source_present=None, official_citation_present=None,
@@ -160,9 +161,12 @@ def project_report_evaluation(report: dict) -> dict:
                     assessment[field]=None
             if error:
                 assessment.update(answer_error=error, matched_terms=[], mention_evidence=[],
-                                  evaluation_note='读取时按当前规则排除未完成或不可用回答；不作为零曝光。')
+                                  evaluation_note=('回答声称使用工作账户的内部资料，不能作为公开 GEO 曝光；只读排除有效题分母，不作为零曝光。'
+                                                   if error == 'private_account_context' else
+                                                   '读取时按当前规则排除未完成或不可用回答；不作为零曝光。'))
                 if row.get('status') in ('success', 'completed', 'partial', 'completed_with_gaps'):
-                    row['status'] = 'deferred_answer' if error == 'background_task_not_final' else 'service_unavailable'
+                    row['status'] = {'background_task_not_final': 'deferred_answer',
+                                     'private_account_context': 'private_account_context'}.get(error, 'service_unavailable')
         row['assessment'] = assessment
         if row != report['cases'][index]:
             changed_case_ids.append(row.get('id') or f'case-{index + 1}')
@@ -184,7 +188,7 @@ def project_report_evaluation(report: dict) -> dict:
         'original_status': report.get('status'),
         'source_file_unchanged': True,
         'new_collection_performed': False,
-        'note': ('本页为读取时的只读评估投影：按当前规则保守排除后台委托占位及不可用回答，'
+        'note': ('本页为读取时的只读评估投影：按当前规则保守排除后台委托占位、声称使用账户内部资料及不可用回答，'
                  '重新计算有效题分母；缺少原始完成证据的旧题不会提升为有效。'
                  '原始报告、运行编号、采集时间与证据文件未修改，也未重新采集。'),
     }

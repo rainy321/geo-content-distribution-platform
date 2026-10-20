@@ -10,7 +10,11 @@ if (-not (Test-Path -LiteralPath $geoSource)) { throw '请先构建桌面程序�
 New-Item -ItemType Directory -Path $geoInstall -Force | Out-Null
 Get-ChildItem -LiteralPath $geoBundle | ForEach-Object { Copy-Item -LiteralPath $_.FullName -Destination $geoInstall -Recurse -Force }
 # Import only this user's existing reports/database; the distributable has no customer data.
-$geoCheck = Start-Process -FilePath $geoExecutable -ArgumentList @('--import-workspace', ('"' + $geoRoot + '"'), '--smoke-test') -WindowStyle Hidden -PassThru -Wait
+$geoCheck = Start-Process -FilePath $geoExecutable -ArgumentList @('--import-workspace', ('"' + $geoRoot + '"'), '--smoke-test') -WindowStyle Hidden -PassThru
+# Wait for the smoke executable itself; Edge background processes can outlive
+# its successful exit and keep Start-Process -Wait's process-tree job open.
+$geoCheck.WaitForExit()
+$geoCheck.Refresh()
 if ($geoCheck.ExitCode -ne 0) { throw "桌面程序验证失败，请查看 $geoData/logs/desktop.log" }
 $geoVerification = Get-Content -LiteralPath (Join-Path $geoData 'logs/smoke-test.json') -Raw | ConvertFrom-Json
 if (-not $geoVerification.passed) { throw '桌面程序未通过实际窗口验证。' }

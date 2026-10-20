@@ -2,9 +2,11 @@
 
 桌面程序名为“GEO AI 搜索工作台”，启动文件为 `GEO_AI_Workbench.exe`。使用独立 WebView2 窗口，包含 Python 后端和已构建的界面。需要 Windows x64、Microsoft WebView2 和可用的 Edge 或 Chrome。
 
-本文对应 **2026.10.20.1 公司与产品独立测试版**。最终源码通过 673 项 Python 回归和 14 项前端状态测试；重新构建的桌面包分别在空数据目录与实际用户目录验证了原生窗口、浏览器引擎和历史恢复。安装后正常关闭重开，已保存的事实、文章、发布结果与同题反馈均保留。下载文件及源码提交以对应 Release 清单为准。
+本文对应 **2026.10.20.2 公开搜索与工作资料隔离版**。最终源码通过 686 项 Python 回归和 14 项前端状态测试；重新构建的桌面包分别在空数据目录与实际用户目录验证了原生窗口、浏览器引擎和历史恢复。实际软件已验证旧报告的内部资料回答只读排除，原报告文件不改写。下载文件及源码提交以对应 Release 清单为准。
 
-本版可分别建立公司与产品档案，填写当前对象别名、运营公司与额外官方页面。公司提及不会自动计入旗下产品；同域不同产品路径分别匹配，主网址和额外官方页面不自动扩展到整站或其他子域。旧报告保留原统计口径，新的对象应生成新的问题和基线。此次按更新后的官网准备了北京同于野科技有限公司、懂AI中转站、同于野软件三个独立配置，详见[测试方法与配置](geo-search-testing.md)。本次验证了对象隔离和实际软件持久保存，没有重新发送这三个对象的豆包搜索问题。
+软件可分别建立公司与产品档案，填写当前对象别名、运营公司与额外官方页面。公司提及不会自动计入旗下产品；同域不同产品路径分别匹配，主网址和额外官方页面不自动扩展到整站或其他子域。此次按更新后的官网准备了北京同于野科技有限公司、懂AI中转站、同于野软件三个独立配置，详见[测试方法与配置](geo-search-testing.md)。继续实测时，公司工作模式三题取得回答，其中一道明确声称使用账号内部资料，已排除公开曝光统计；普通对话下的三个对象新基线仍需完成正常登录后继续，不能把工作模式这轮称为公开 GEO 效果。
+
+普通对话与工作模式使用独立浏览器会话，原工作会话保留，不复制企业连接器。普通对话首次使用需要正常登录。明确声称使用内部企业或飞书资料的工作模式回答保留原文，但不计有效题和公开曝光，也不把内部摘录及来源传给文章生成。旧报告、任务和工作区读取时应用同一排除规则，不改写原始采集文件。来源标题可接受完整文字的全半角等价，保留原始标题与匹配方法；不以近似标题或猜测网址补充来源。
 
 默认首页为“开始优化”，按品牌、搜索基线、内容、发布、反馈五步推进。输入品牌名称、官网和一句话业务介绍即可开始；运营公司、目标客户与模型设置可展开补充。原来的采集报告、内容任务单、内容库和发布中心仍可从侧栏打开，管理配置收在“管理工具”。界面有短时淡入和位移动效，并尊重系统减少动态效果设置。
 
@@ -40,7 +42,7 @@
 
 ## 本机安装与数据
 
-从 [2026.10.20.1 Release](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.20.1) 下载 Windows x64 ZIP，完整解压后打开 `GEO_AI_Workbench/GEO_AI_Workbench.exe`，保留同级 `_internal` 目录。此前的[2026.10.20 五步流程版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.20)与[2026.10.16.1 来源投放与平台接入版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.16.1)不含本轮对象拆分。更早版本在[旧版归档 Release](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-legacy-backup-2026.10.15)，仅用于备份恢复。
+从 [2026.10.20.2 Release](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.20.2) 下载 Windows x64 ZIP，完整解压后打开 `GEO_AI_Workbench/GEO_AI_Workbench.exe`，保留同级 `_internal` 目录。此前的[2026.10.20.1 对象独立测试版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.20.1)不含本轮来源标题和账号内部资料排除修复。[2026.10.20 五步流程版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.20)保留此前真实发布走查。更早版本在[旧版归档 Release](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-legacy-backup-2026.10.15)，仅用于备份恢复。
 
 本机安装文件：`%LOCALAPPDATA%\Programs\GEO_AI_Workbench\GEO_AI_Workbench.exe`。桌面和开始菜单有“GEO AI搜索工作台”快捷方式。
 

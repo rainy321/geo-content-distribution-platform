@@ -66,7 +66,17 @@ class DesktopGeoJobs:
 
     def get_task(self, identifier=None):
         with self.lock:
-            return copy.deepcopy(self.store.read(identifier) if identifier else self.job)
+            value = copy.deepcopy(self.store.read(identifier) if identifier else self.job)
+        if isinstance(value, dict) and isinstance(value.get('result'), dict):
+            self._project_report_view(value['result'])
+        return value
+
+    @staticmethod
+    def _project_report_view(container):
+        report = container.get('report')
+        if isinstance(report, dict) and report.get('kind') == 'geo_search_test_report':
+            from services.geo_test_reports import project_report_evaluation
+            container['report'] = project_report_evaluation(report)
 
     def list_tasks(self):
         with self.lock:
@@ -82,6 +92,7 @@ class DesktopGeoJobs:
         with self.lock:
             saved = self.store.workspace()
             if saved:
+                self._project_report_view(saved)
                 return saved
             profile = self.job.get('profile') or {}
             return {'client_name': profile.get('name'), 'company': profile.get('company', ''),
@@ -94,8 +105,12 @@ class DesktopGeoJobs:
     def _config(self, options):
         if not isinstance(options, dict):
             raise ValueError("采集选项格式无效")
-        return CollectorConfig(profile_dir=self.data / "doubao/browser-profile", headed=True,
-                               manual_wait_seconds=None, client_mode=options.get("client_mode", "consumer"),
+        # Keep public chat separate from a work account's enterprise connectors.
+        # The existing profile remains the work profile; no sessions are copied.
+        client_mode = options.get("client_mode", "consumer")
+        profile = "consumer-browser-profile" if client_mode == "consumer" else "browser-profile"
+        return CollectorConfig(profile_dir=self.data / "doubao" / profile, headed=True,
+                               manual_wait_seconds=None, client_mode=client_mode,
                                requested_model_label=options.get("model_label") or None,
                                executable_path=edge_executable(), fallback_executable_path=chrome_executable())
 

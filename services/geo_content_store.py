@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 
 from services.geo_content_research import (
     CHANNELS, compare_reports, draft_input, fingerprint, normalize_facts,
-    parse_draft, parse_research, plan_from_report, public_url, publication_feedback, research_observations,
+    parse_draft, parse_research, plan_from_report, public_url, publication_feedback, research_observations, public_research_observations,
 )
 from services.geo_score_service import score_geo_content
 from services import geo_destination_service as destinations
@@ -46,6 +46,7 @@ def _cycle(connection, identifier):
         result[field] = json.loads(result[field])
     result['profile'] = result['baseline']['profile']
     result['test_plan'] = plan_from_report(result['baseline'])
+    result['observations'] = public_research_observations(result['baseline'], result['observations'])
     result['destinations'] = destinations.targets_for_connection(connection, result['project_id'])
     result['channels'] = {**CHANNELS, **{target['key']: target['config']['name'] for target in result['destinations']}}
     result['opportunities'] = destinations.opportunities(result['observations'], result['destinations'], result['profile'].get('website', ''))

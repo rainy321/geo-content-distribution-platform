@@ -86,6 +86,7 @@
       <div class="card-heading"><h2>{{ report.profile.name }} · 采集报告</h2><el-tag>{{ statusNames[report.status] || report.status }}</el-tag><el-button type="primary" :disabled="nativeBusy" @click="useReport">用本报告制定内容任务</el-button></div>
       <p class="context">历史采集记录 · {{ reportDate(report.cases[0]?.collected_at || report.updated_at) }}。回答原文来自豆包，尚未逐项核实事实；“提及”只说明名称出现在回答里。</p>
       <p class="context">测试对象：{{ reportContext.label }} · {{ report.profile.name }}{{ reportContext.legacy ? '（旧报告，混合统计口径）' : '' }}。</p><p class="context">{{ reportContext.note }}</p>
+      <el-alert v-if="report.cases?.some(item=>item.assessment?.answer_error==='private_account_context')" type="warning" :closable="false" show-icon title="部分回答声称使用了账号内部资料，已排除公开搜索统计。原回答保留，可用普通对话另测一轮。"/>
       <details class="context"><summary>本对象登记的官方页面 / 服务网址</summary><p v-for="url in reportContext.urls" :key="url"><a v-if="safeLink(url)" :href="safeLink(url)" target="_blank" rel="noopener noreferrer">{{ url }}</a><span v-else>{{ url }}</span></p></details>
       <p v-if="report.stop_reason" class="context">中断原因：{{ report.stop_reason }}</p>
       <details v-if="report.evaluation_projection" class="context"><summary>评估说明 · {{ report.evaluation_projection.stored_evaluation_version }} → {{ report.evaluation_projection.applied_evaluation_version }}</summary><p>{{ report.evaluation_projection.note }}</p></details>
@@ -101,6 +102,7 @@
       <el-collapse>
         <el-collapse-item v-for="item in report.cases" :key="item.id" :name="item.id" :title="`${categoryNames[item.category]} · ${item.question}`">
           <p>{{ statusNames[item.status] || item.status }} · {{ reportContext.mentionLabel }}：{{ booleanText(item.assessment.brand_mentioned) }}</p>
+          <p v-if="item.assessment.answer_error==='private_account_context'" class="context">{{ item.assessment.evaluation_note }}</p>
           <p v-if="report.profile.entity_type==='product' && !reportContext.legacy && relatedCompanyMention(item)!==undefined" class="context">运营公司单独提及：{{ booleanText(relatedCompanyMention(item)) }}<span v-if="item.assessment.brand_mentioned===false && relatedCompanyMention(item)===true">；仅公司出现，未计入当前产品提及</span>。</p>
           <p v-if="item.client_mode" class="context">{{ item.client_mode === 'work' ? '豆包工作界面' : '豆包消费者对话界面' }} · {{ item.model_label || '模型标签未知' }} · {{ item.collected_at }}</p>
           <p v-if="item.failure_reason">{{ item.failure_reason }}</p>
@@ -231,7 +233,7 @@ const persistProfile=async()=>{
 const saveProfile=async()=>{if(nativeBusy.value||generating.value)return;generating.value=true;try{await persistProfile();ElMessage.success('测试资料已保存到项目档案')}catch(error){ElMessage.error(error.response?.data?.msg||error.message||'保存资料失败')}finally{generating.value=false}}
 const categories = ['discovery', 'brand_identity', 'website_guided']
 const categoryNames = { discovery: '行业自然发现', brand_identity: '品牌核验', website_guided: '官网引导核验' }
-const statusNames = { completed: '全部完成', completed_with_gaps: '完成（有缺口）', running: '采集中', pending: '待采集', stopped: '已停止', needs_review: '需要检查', success: '完成', partial: '来源不完整', failed: '失败', need_action: '等待人工处理', service_unavailable: '服务容量不足' }
+const statusNames = { completed: '全部完成', completed_with_gaps: '完成（有缺口）', running: '采集中', pending: '待采集', stopped: '已停止', needs_review: '需要检查', success: '完成', partial: '来源不完整', failed: '失败', need_action: '等待人工处理', service_unavailable: '服务容量不足', private_account_context: '含账号内部资料' }
 const sourceGroups = [{ key: 'citations', title: '正文引用' }, { key: 'displayed_sources', title: '界面搜索资料' }]
 watch(projectId, () => { if (!restoringWorkspace.value) { const selected=project.value;company.value=selected?.company||'';audience.value=selected?.audience||'';aliasesText.value=profileLines(selected?.aliases).join('\n');officialUrlsText.value=profileLines(selected?.official_urls).join('\n');plan.value=null } })
 watch([company, audience, aliasesText, officialUrlsText, caseCount], () => { if (!restoringWorkspace.value) plan.value = null })
