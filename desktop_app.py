@@ -323,13 +323,15 @@ def run_smoke_check(window, data: Path, url: str) -> None:
                     heading: document.querySelector('[data-testid="geo-journey"] h1')?.textContent,
                     steps: [...document.querySelectorAll('[data-testid="geo-journey"] .journey-steps > button')].map(e => e.textContent.trim()),
                     primary_action: !!document.querySelector('[data-testid="journey-primary"]'),
-                    native_bridge: ['open_login','plan_with_doubao','start_run','generate_research','get_task'].every(name => typeof window.pywebview?.api?.[name] === 'function')
+                    native_bridge: ['open_login','plan_with_doubao','start_run','generate_research','get_task','open_destination'].every(name => typeof window.pywebview?.api?.[name] === 'function'),
+                    destination_recheck_bridge: typeof window.pywebview?.api?.check_destination_session === 'function'
                 })""")
                 journey_observed = json.loads(journey_observed) if isinstance(journey_observed, str) else journey_observed
                 steps = journey_observed.get('steps') or []
                 if (str(journey_observed.get('heading') or '').strip() and len(steps) == 5
                         and all(label in actual for label, actual in zip(('品牌', '搜索基线', '内容', '发布', '反馈'), steps))
-                        and journey_observed.get('primary_action') and journey_observed.get('native_bridge')):
+                        and journey_observed.get('primary_action') and journey_observed.get('native_bridge')
+                        and journey_observed.get('destination_recheck_bridge')):
                     status['journey'] = journey_observed
                     status['journey_verified'] = True
                     break

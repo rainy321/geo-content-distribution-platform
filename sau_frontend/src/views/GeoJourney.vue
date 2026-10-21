@@ -10,7 +10,7 @@
     <el-alert v-if="error" type="error" :title="error" :closable="false" show-icon class="journey-alert"/>
     <el-alert v-if="saveError" type="warning" :title="saveError" :closable="false" show-icon/>
     <div v-if="recoveryDraft || recoveryFacts" class="recovery-note"><p>其他页面更新过资料，已保留服务端版本。冲突的本机编辑可先导出核对。</p><el-button v-if="recoveryDraft" text @click="exportRecovery('draft')">导出本机未保存稿</el-button><el-button v-if="recoveryFacts" text @click="exportRecovery('facts')">导出本机未保存资料</el-button></div>
-    <div v-if="nativeBusy" class="task-progress" role="status" aria-live="polite"><el-icon class="is-loading"><Loading /></el-icon><div><strong>{{ task.message || '任务执行中' }}</strong><p>遇到登录或人机验证，请在专用窗口正常完成。采集时保持窗口打开；专用登录完成后关闭登录窗口以保存会话。</p></div><el-button @click="stopTask">停止</el-button></div>
+    <div v-if="nativeBusy" class="task-progress" role="status" aria-live="polite"><el-icon class="is-loading"><Loading /></el-icon><div><strong>{{ isDestinationTask(task) ? '平台接入任务进行中' : task.message || '任务执行中' }}</strong><p>{{ isDestinationTask(task) ? '请在平台专用窗口正常完成登录、验证或绑定，再在对应平台卡检查并继续。请保持窗口打开。' : '请在豆包专用窗口正常完成登录或安全验证。采集或写作时保持窗口打开，软件继续同一条请求，请勿重复点开始。单独登录任务按提示结束窗口。' }}</p></div><el-button @click="stopTask">停止</el-button></div>
     <aside v-if="loginObservation" class="login-observation" :class="{mismatch:loginObservation.mismatch}" role="status" aria-live="polite" aria-label="本次登录观察">
       <strong>{{ loginObservation.mismatch ? '所选 / 实际界面不一致' : '登录窗口已结束，状态待核验' }}</strong>
       <p class="login-state"><span>本次所选：{{ loginObservation.selected }}</span><span>最后实际：{{ loginObservation.actual }}</span><span>{{ loginObservation.login }}</span><span>{{ loginObservation.challenge }}</span></p>
@@ -29,6 +29,7 @@
       </section>
       <section v-else-if="step===1" key="baseline" class="geo-surface step-panel">
         <div class="section-heading"><span class="step-kicker">02 / 搜索基线</span><h2>先看 AI 现在如何回答</h2><p>分别观察自然选型、品牌核验与官网核验。</p></div>
+        <DoubaoPreparation v-if="nativeAvailable && provider==='doubao'"/>
         <template v-if="!report">
           <ProviderChoice/>
           <div v-if="plan" class="plan-preview"><p class="small-label">请核对这 {{ plan.cases.length }} 个问题，再开始真实采集</p><p v-if="reportEntityContext(plan).legacy" class="hint">{{ reportEntityContext(plan).note }}</p><article v-for="item in plan.cases" :key="item.id"><el-tag size="small" effect="plain">{{ categoryNames[item.category] }}</el-tag><p>{{ item.question }}</p></article><el-checkbox v-model="planConfirmed" :disabled="busy">这些问题符合我的业务，可以开始测试</el-checkbox></div>
@@ -46,6 +47,7 @@
       </section>
       <section v-else-if="step===2 && cycle" key="content" class="geo-surface step-panel">
         <div class="section-heading"><span class="step-kicker">03 / 内容</span><h2>{{ activeDraft ? '核对这篇文章，再标记就绪' : '把来源发现变成一篇平台稿' }}</h2><p>来源决定调研方向，已经核对的事实才用于写作。</p></div>
+        <DoubaoPreparation v-if="nativeAvailable && provider==='doubao'"/>
         <BaselineContext/>
         <div class="diagnosis"><p>{{ diagnosisPreview }}</p><details v-if="cycle.analysis?.diagnosis?.length>180" class="hint"><summary>查看完整分析</summary><p>{{ cycle.analysis.diagnosis }}</p></details><span v-if="needsAnalysis" class="hint">当前是规则整理的观察记录，下一步用 AI 制定选题。</span></div>
         <el-collapse class="source-summary"><el-collapse-item :title="`来源线索：${sourceCounts.verified} 个网址平台候选 · ${sourceCounts.unknown} 组网址未知`" name="opportunities"><article v-for="item in cycle.opportunities || []" :key="item.id" class="source-row"><strong>{{ item.candidate?.name || item.domain || '网址未知' }}</strong><el-tag size="small" effect="plain">{{ surfaceLabels[item.surface] || '待核对' }}</el-tag><p>{{ item.note }}</p><p v-for="lead in item.title_leads || []" :key="lead.candidate.name" class="hint">标题线索：{{ lead.candidate.name }}，尚未核实网址。</p></article><el-button text @click="openDetails">接入或配置目标平台</el-button></el-collapse-item></el-collapse>
@@ -73,7 +75,7 @@
         <template v-if="needsReplacement"><el-alert type="warning" :closable="false" title="目标配置已更新，旧稿仍保留。请按当前目标另存新稿，再重新审稿；旧稿不会重新提交。"/><ProviderChoice/></template>
         <template v-if="lengthInvalid && !needsReplacement"><el-alert type="warning" :closable="false" :title="[lengthReview.titleIssue,lengthReview.bodyIssue].filter(Boolean).join(' ')"/><el-button text :disabled="busy" @click="step=2">返回内容精简并重新审稿</el-button></template>
         <template v-if="publisherPaused"><el-alert type="warning" :closable="false" :title="`${publisherName}发布器当前暂停，请先保留稿件，等待能力恢复。`"/><el-button text :disabled="busy" @click="refreshAccounts">刷新发布能力</el-button></template>
-        <template v-else-if="selectedTarget && !targetPublisher"><p v-if="!capabilitiesLoaded" class="hint">发布能力尚未读取，请刷新后选择发布方式。</p><template v-else><p class="hint">{{ selectedTarget.builtin_publisher?.reason || (platformCapability?.delivery_state==='assisted' ? '该渠道仍需人工复核，当前使用目标平台辅助填写。' : '尚未核验此目标与内置图文发布器的对应关系。') }} 该平台使用独立浏览器会话，填写后请核对并自行提交。</p><p v-if="!selectedTarget.config.title_selector" class="hint">尚未配置标题与正文编辑框，请先打开详细配置。</p></template><el-button text :disabled="busy" @click="refreshAccounts">刷新发布能力</el-button></template>
+        <template v-else-if="selectedTarget && !targetPublisher"><DestinationSessionCard :cycle-id="cycleId" :target="selectedTarget" :task="task" :busy="busy" :native-available="nativeAvailable" @open="openDestinationLogin" @checked="poll"/><p v-if="!capabilitiesLoaded" class="hint">发布能力尚未读取，请刷新后选择发布方式。</p><template v-else><p class="hint">{{ selectedTarget.builtin_publisher?.reason || (platformCapability?.delivery_state==='assisted' ? '该渠道仍需人工复核，当前使用目标平台辅助填写。' : '尚未核验此目标与内置图文发布器的对应关系。') }} 该平台使用独立浏览器会话，填写后请核对并自行提交。</p><p v-if="!destinationSupportsFill(selectedTarget)" class="hint">当前只有登录与导出能力，可先核对账号条件；辅助填写需接入编辑器。</p></template><el-button text :disabled="busy" @click="refreshAccounts">刷新发布能力</el-button></template>
         <template v-else-if="ownedDraft"><p class="hint">官网稿件可导出给网站编辑，或通过网站 CMS 发布。这里没有可执行的官网发布器，导出也不代表已经发布。</p><el-button text :disabled="busy" @click="openDetails">接入官网 CMS 或配置专用编辑入口</el-button></template>
         <template v-else><p v-if="targetPublisher" class="hint publisher-bridge">使用{{ publisherName }}发布器，保留这篇目标稿和来源记录。进入发布中心后核对账号与素材，再逐篇确认真实发布。</p><div class="subheading"><h3>平台账号</h3><el-button text :disabled="busy" @click="refreshAccounts">刷新账号</el-button></div><article v-for="account in matchingAccounts" :key="account.id" class="account-row"><div><strong>{{ account.account_name || `账号 #${account.id}` }}</strong><p>{{ account.status==='connected' ? '已连接（仍需发布前检查）' : '登录状态待处理' }} · {{ account.check_message || '尚无最新检测说明' }}</p></div><el-button :disabled="busy" @click="checkAccount(account.id)">检测登录</el-button></article><p v-if="!matchingAccounts.length" class="hint">尚未连接{{ publisherName }}账号。发布中心会保留这篇稿件，先连接账号再继续。</p><p v-if="platformCapability?.requires_images" class="hint">该平台需要图片。请在发布中心选择并核对配图，再执行真实发布。</p><el-button text @click="router.push('/account-management')">管理账号与登录</el-button></template>
         <el-alert type="info" :closable="false" :title="ownedDraft ? '请由网站编辑发布后，接入官网目标并登记公开文章链接；未登记前只显示采集观察。' : '在平台完成单篇真实发布后，返回“开始优化”的反馈步骤刷新记录。'"/>
@@ -106,6 +108,9 @@ import { geoTestApi } from '@/api/geoTest'
 import { geoContentApi } from '@/api/geoContent'
 import { accountApi } from '@/api/account'
 import { publishApi } from '@/api/publish'
+import DestinationSessionCard from '@/components/DestinationSessionCard.vue'
+import DoubaoPreparation from '@/components/DoubaoPreparation.vue'
+import { destinationContinuationText, destinationPreparationText, destinationSupportsFill, isDestinationTask } from '@/utils/geoDestinationSession'
 import { articleSnapshot, baselineEvidenceSummary, canRestoreArticleEdits, canRestoreFactEdits, entityLabel, entityProfileFields, entityType, journeyDate, journeyDraftLimits, journeyLengthReview, lastJourneyProject, normalizeWebsite, profileLines, readJourney, reportEntityContext, restoreEntityDraftFields, safeLink, sameBrand, targetDraftOutdated, writeJourney } from '@/utils/geoJourney'
 
 const route=useRoute(), router=useRouter(), steps=['品牌','搜索基线','内容','发布','反馈']
@@ -176,11 +181,11 @@ const platformBasis=computed(()=>{
 })
 const canVisit=index=>index===0||Boolean(project.value&&!profileDirty.value&&(index===1||cycle.value&&(index===2||reviewedDraft.value&&index===3||index===4)))
 const stepComplete=index=>index===0?Boolean(project.value):index===1?usableReport.value:index===2?reviewedDraft.value||publishedDraft.value:index===3?hasPublication.value:Boolean(cycle.value?.retests?.length)
-const primaryLabel=computed(()=>[2,3].includes(step.value)&&needsReplacement.value?'按当前目标另存新稿':step.value===0?'保存品牌并继续':step.value===1?(report.value?'分析这份报告':plan.value?'开始真实搜索测试':'生成 3 个测试问题'):step.value===2?(needsAnalysis.value?'分析来源并制定选题':!activeDraft.value?(!factsSaved.value?'保存已核对的事实':'生成平台草稿'):publishedDraft.value?'查看发布反馈':!reviewedDraft.value?'保存审稿并标记就绪':'继续发布'):step.value===3?(publisherPaused.value?'发布器当前暂停':targetPublisher.value?`使用${publisherName.value}发布器`:selectedTarget.value?(selectedTarget.value.config.title_selector?'打开目标平台并填写':'配置平台编辑入口'):ownedDraft.value?'导出官网稿件':'打开发布中心'):'开始同题复测')
+const primaryLabel=computed(()=>[2,3].includes(step.value)&&needsReplacement.value?'按当前目标另存新稿':step.value===0?'保存品牌并继续':step.value===1?(report.value?'分析这份报告':plan.value?'开始真实搜索测试':'生成 3 个测试问题'):step.value===2?(needsAnalysis.value?'分析来源并制定选题':!activeDraft.value?(!factsSaved.value?'保存已核对的事实':'生成平台草稿'):publishedDraft.value?'查看发布反馈':!reviewedDraft.value?'保存审稿并标记就绪':'继续发布'):step.value===3?(publisherPaused.value?'发布器当前暂停':targetPublisher.value?`使用${publisherName.value}发布器`:selectedTarget.value?(destinationSupportsFill(selectedTarget.value)?'打开目标平台并填写':'配置平台编辑入口'):ownedDraft.value?'导出官网稿件':'打开发布中心'):'开始同题复测')
 const primaryDisabled=computed(()=>{
   if(busy.value)return true
   if([2,3].includes(step.value)&&needsReplacement.value)return !factsSaved.value||provider.value==='doubao'&&!nativeAvailable.value
-  return step.value===0&&(!form.name.trim()||!form.website.trim()||!form.description.trim())||step.value===1&&(report.value?!usableReport.value:Boolean(plan.value)&&(!planConfirmed.value||!nativeAvailable.value))||step.value===2&&!needsAnalysis.value&&(!activeDraft.value?(!factsSaved.value?!confirmedFacts().length:!platform.value||!briefId.value):!publishedDraft.value&&(lengthInvalid.value||!reviewedDraft.value&&(!reviewConfirmed.value||!editor.title.trim()||!editor.content.trim())))||step.value===3&&(!reviewedDraft.value||lengthInvalid.value||publisherPaused.value||Boolean(selectedTarget.value)&&(!capabilitiesLoaded.value||!targetPublisher.value&&Boolean(selectedTarget.value.config.title_selector)&&!nativeAvailable.value))||step.value===4&&!nativeAvailable.value
+  return step.value===0&&(!form.name.trim()||!form.website.trim()||!form.description.trim())||step.value===1&&(report.value?!usableReport.value:Boolean(plan.value)&&(!planConfirmed.value||!nativeAvailable.value))||step.value===2&&!needsAnalysis.value&&(!activeDraft.value?(!factsSaved.value?!confirmedFacts().length:!platform.value||!briefId.value):!publishedDraft.value&&(lengthInvalid.value||!reviewedDraft.value&&(!reviewConfirmed.value||!editor.title.trim()||!editor.content.trim())))||step.value===3&&(!reviewedDraft.value||lengthInvalid.value||publisherPaused.value||Boolean(selectedTarget.value)&&(!capabilitiesLoaded.value||!targetPublisher.value&&destinationSupportsFill(selectedTarget.value)&&!nativeAvailable.value))||step.value===4&&!nativeAvailable.value
 })
 const actionHint=computed(()=>busy.value?'任务进行中，当前品牌和步骤已锁定':step.value===0?'品牌资料用于出题，不视为独立核验事实':step.value===1?report.value?'分析将使用上方标注时间的采集报告':plan.value?'检查问题并勾选确认后，才会访问豆包采集':'先生成问题，再确认采集':step.value===2?'草稿需要审稿，不会自动发布':step.value===3?'一次处理一篇，最终提交以平台结果为准':'复测记录变化，不承诺被索引或被引用')
 const rate=value=>typeof value==='number'&&Number.isFinite(value)?`${Math.round(value*100)}%`:'未知'
@@ -262,7 +267,7 @@ const saveBrand=async()=>{
   if(changed)resetRecords()
   projectId.value=saved.id;projectChoice.value=saved.id;projects.value=projects.value.filter(item=>item.id!==saved.id).concat(saved);Object.assign(form,{name:saved.name,website:saved.website,description:saved.description||'',entity_type:entityType(saved),company:saved.company??fields.company,audience:saved.audience??fields.audience,aliasesText:profileLines(saved.aliases??fields.aliases).join('\n'),officialUrlsText:profileLines(saved.official_urls??fields.official_urls).join('\n')});await loadReports();step.value=1
 }
-const startNative=async(kind,action)=>{const result=await action();if(result.error)throw new Error(result.error);task.value={...result,kind};taskId.value=result.id;liveTaskId=result.id;taskKind.value=kind;handledTask='';persist()}
+const startNative=async(kind,action)=>{const result=await action();if(result.error)throw new Error(result.error);task.value={...result,kind:result.kind||kind};taskId.value=result.id;liveTaskId=result.id;taskKind.value=kind;handledTask='';persist()}
 const login=()=>run(()=>startNative('login',()=>window.pywebview.api.open_login(options())))
 const makePlan=()=>run(async()=>{if(profileDirty.value)throw new Error('测试对象资料已变更，请先保存，再为该对象生成新问题');planConfirmed.value=false;const profile={...project.value,...formProfile()};if(provider.value==='doubao'){if(!nativeAvailable.value)throw new Error('桌面豆包采集服务尚未就绪');await startNative('plan',()=>window.pywebview.api.plan_with_doubao(profile,3,options()))}else plan.value=(await geoTestApi.generatePlan({project_id:projectId.value,case_count:3,...entityProfileFields(profile)})).data})
 const useHistory=()=>run(async()=>{const record=reports.value.find(item=>item.id===historyReportId.value);if(!record)throw new Error('报告不存在');report.value=record.report;reportId.value=record.id;reportOrigin.value='history';cycle.value=null;cycleId.value='';articleId.value=null;plan.value=null;planConfirmed.value=false})
@@ -288,6 +293,7 @@ const loadAccounts=async()=>{capabilitiesLoaded.value=false;const [overview,plat
 const refreshAccounts=()=>run(loadAccounts)
 const checkAccount=id=>run(async()=>{await accountApi.checkMediaAccount(id);await loadAccounts()})
 const openDetails=()=>router.push({path:'/geo-content',query:{cycle:cycleId.value,journey_project:String(projectId.value)}})
+const openDestinationLogin=()=>run(()=>startNative('destination',()=>window.pywebview.api.open_destination(cycleId.value,selectedTarget.value.id,null)))
 const openPublisher=async()=>{
   applyCycle((await geoContentApi.get(cycleId.value)).data,{keepEditor:true})
   if(needsReplacement.value)throw new Error('目标配置已变化，请先按当前目标另存新稿')
@@ -297,7 +303,7 @@ const openPublisher=async()=>{
   await loadAccounts()
   if(publisherPaused.value)throw new Error(`${publisherName.value}发布器当前暂停，稿件已保留，请等待能力恢复`)
   if(targetPublisher.value){await router.push({path:'/publish-center',query:{article_id:String(activeDraft.value.article_id),platform:publishChannel.value,journey_project:String(projectId.value)}});return}
-  if(selectedTarget.value){if(!selectedTarget.value.config.title_selector){openDetails();return}await ElMessageBox.confirm('将向目标平台的空白编辑器填写这篇已审稿文章，网站可能自动保存。请核对后自行提交，软件不会点击发布。','打开并填写',{confirmButtonText:'打开并填写',cancelButtonText:'取消'});await startNative('destination',()=>window.pywebview.api.open_destination(cycleId.value,selectedTarget.value.id,activeDraft.value.article_id))}
+  if(selectedTarget.value){if(!destinationSupportsFill(selectedTarget.value)){openDetails();return}await ElMessageBox.confirm(`${destinationPreparationText(selectedTarget.value)} 将填写这篇已审稿文章，其他已有内容会保留并暂停，网站可能自动保存。${destinationContinuationText(window.pywebview?.api)} 最终提交由你在平台确认。`,'打开并填写',{confirmButtonText:'打开并填写',cancelButtonText:'取消'});await startNative('destination',()=>window.pywebview.api.open_destination(cycleId.value,selectedTarget.value.id,activeDraft.value.article_id))}
   else router.push({path:'/publish-center',query:{article_id:String(activeDraft.value.article_id),platform:activeDraft.value.platform,journey_project:String(projectId.value)}})
 }
 const goFeedback=()=>run(async()=>{applyCycle((await geoContentApi.get(cycleId.value)).data,{keepEditor:true});step.value=4})

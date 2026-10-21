@@ -160,6 +160,68 @@ class TestDestinationState(ResearchFixture, unittest.TestCase):
         with self.assertRaisesRegex(ValueError, '24 小时'):
             destinations.reserve_fill(self.database, self.cycle['project_id'], target['id'], article_id)
 
+    def test_verified_editor_recovers_only_login_failure_without_claiming_authentication(self):
+        target = self.target()
+        failed = destinations.record_event(self.database, target['id'], 'login', 'need_action', '合成登录窗口打开失败，零写入')
+        for state in ('session_saved', 'window_closed', 'login_open'):
+            with self.subTest(state=state):
+                destinations.record_event(self.database, target['id'], 'login', state, '会话保存与认证未核验')
+                blocked = destinations.get_target(self.database, self.cycle['project_id'], target['id'])
+                self.assertEqual(blocked['state'], 'need_action')
+                self.assertTrue(blocked['blocked_reason'])
+        destinations.record_event(self.database, target['id'], 'login', 'editor_ready', '已只读核验编辑器可用，认证和发布未确认')
+        recovered = destinations.get_target(self.database, self.cycle['project_id'], target['id'])
+        self.assertEqual(recovered['state'], 'editor_ready')
+        self.assertEqual(recovered['blocked_reason'], '')
+        self.assertFalse(recovered['auto_publish_verified'])
+        self.assertEqual(next(event for event in recovered['events'] if event['id'] == failed)['state'], 'need_action')
+        self.assertEqual(store.get_cycle(self.database, self.cycle['id'])['publications'], [])
+
+    def test_verified_editor_never_clears_unreviewed_fill_or_nonlogin_failure(self):
+        for state in ('preparing', 'filled', 'need_action'):
+            with self.subTest(state=state):
+                target = self.target()
+                fill = destinations.record_event(self.database, target['id'], 'fill', state, '合成填写记录，内容与提交待核对')
+                destinations.record_event(self.database, target['id'], 'login', 'editor_ready', '编辑器可用，不能覆盖填写阶段')
+                preserved = destinations.get_target(self.database, self.cycle['project_id'], target['id'])
+                self.assertEqual(preserved['state'], state)
+                destinations.record_event(self.database, target['id'], 'login', 'need_action', '合成登录窗口打开失败')
+                before = destinations.get_target(self.database, self.cycle['project_id'], target['id'])
+                destinations.record_event(self.database, target['id'], 'login', 'editor_ready', '编辑器可用，但不能确认上次填写结果')
+                after = destinations.get_target(self.database, self.cycle['project_id'], target['id'])
+                self.assertEqual(after['state'], before['state'])
+                self.assertEqual(after['blocked_reason'], before['blocked_reason'])
+                self.assertTrue(after['blocked_reason'])
+                self.assertEqual(next(event for event in after['events'] if event['id'] == fill)['state'], state)
+        target = self.target()
+        destinations.record_event(self.database, target['id'], 'interrupted', 'need_action', '来源未知的旧尝试仍需核对')
+        destinations.record_event(self.database, target['id'], 'login', 'editor_ready', '编辑器可用')
+        self.assertTrue(destinations.get_target(self.database, self.cycle['project_id'], target['id'])['blocked_reason'])
+
+    def test_verified_editor_preserves_pending_real_publish_jobs_and_ignores_demo(self):
+        target = self.target()
+        article_id = self.article()
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            job_id = connection.execute("INSERT INTO publish_jobs(article_id,platform,status,demo) VALUES(?,'toutiao','queued',0)",
+                (article_id,)).lastrowid
+        for state, url in (('queued', ''), ('scheduled', ''), ('processing', ''),
+                           ('need_action', ''), ('failed', ''), ('success', '')):
+            with self.subTest(state=state):
+                with closing(sqlite3.connect(self.database)) as connection, connection:
+                    connection.execute('UPDATE publish_jobs SET status=?,result_url=? WHERE id=?', (state, url, job_id))
+                destinations.record_event(self.database, target['id'], 'login', 'need_action', '合成登录失败')
+                destinations.record_event(self.database, target['id'], 'login', 'editor_ready', '编辑器可用，发布结果待核对')
+                blocked = destinations.get_target(self.database, self.cycle['project_id'], target['id'])
+                self.assertEqual(blocked['state'], 'need_action')
+                self.assertTrue(blocked['blocked_reason'])
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("UPDATE publish_jobs SET status='processing',demo=1 WHERE id=?", (job_id,))
+        destinations.record_event(self.database, target['id'], 'login', 'editor_ready', '编辑器可用，演示记录不代表真实提交')
+        recovered = destinations.get_target(self.database, self.cycle['project_id'], target['id'])
+        self.assertEqual(recovered['state'], 'editor_ready')
+        self.assertEqual(recovered['blocked_reason'], '')
+        self.assertFalse(recovered['auto_publish_verified'])
+
     def test_rolling_quota_and_interval_survive_manual_review(self):
         self.target(daily_limit=2)
         article_id = self.article()
@@ -219,7 +281,7 @@ class TestDestinationState(ResearchFixture, unittest.TestCase):
 
 
 class TestEditorFilling(unittest.IsolatedAsyncioTestCase):
-    async def test_normal_user_window_close_preserves_session_saved_result(self):
+    async def test_normal_user_window_close_does_not_claim_saved_or_authenticated_session(self):
         from tempfile import TemporaryDirectory
         from pathlib import Path
         from types import SimpleNamespace
@@ -231,7 +293,11 @@ class TestEditorFilling(unittest.IsolatedAsyncioTestCase):
         factory = AsyncMock()
         with TemporaryDirectory() as root, patch('playwright.async_api.async_playwright', return_value=factory), patch('services.browser_runtime.launch_context', AsyncMock(return_value=context)):
             result = await open_session({'config': config()}, Path(root) / 'profile', 'synthetic-browser', wait_seconds=.01)
-        self.assertEqual(result['state'], 'session_saved')
+        self.assertEqual(result['state'], 'need_action')
+        self.assertIsNone(result['session_saved'])
+        self.assertEqual(result['destination_session']['state'], 'window_closed')
+        self.assertFalse(result['destination_session']['can_check'])
+        self.assertFalse(result['destination_session']['editor_ready'])
 
     async def test_browser_fallback_only_retries_launch_with_a_separate_profile(self):
         from pathlib import Path

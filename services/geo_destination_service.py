@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit, urlunsplit
 
 
-CATALOG_VERSION = '2026-10-21.1'
+CATALOG_VERSION = '2026-10-21.2'
 
 
 def _candidate(name, home, login, editor, style, channel='', rules_url='', **limits):
@@ -56,8 +56,11 @@ CATALOG = [
         '发文要求实名认证，当前账号的身份、投稿权限和编辑器能力仍需正常登录后核验。',
         rules_url='https://developer.aliyun.com/article/1639804')),
     ('csdn', ('blog.csdn.net',), '/', _candidate(
-        'CSDN 博客', 'https://blog.csdn.net/', 'https://passport.csdn.net/login', 'https://mp.csdn.net/',
-        '技术问题、环境、步骤、验证与局限依次展开；未实测的内容不能写成实测结果。')),
+        'CSDN 博客', 'https://blog.csdn.net/', 'https://passport.csdn.net/login', 'https://editor.csdn.net/md/',
+        '围绕技术问题提供步骤、设计检查和参考资料；未实测不能写成实测结果，不虚构人工审稿。'
+        '如实说明商业关系，避免硬广告与站外引流；使用平台可见创作声明标注 AI 辅助。'
+        '可能需要正常登录、安全验证及微信或手机号绑定，账号权限和额度以实际页面为准。',
+        rules_url='https://blog.csdn.net/blogdevteam/article/details/113122012')),
     ('cnblogs', ('cnblogs.com', 'www.cnblogs.com'), '/', _candidate(
         '博客园', 'https://www.cnblogs.com/', 'https://account.cnblogs.com/', 'https://i.cnblogs.com/',
         '工程实践与原理为主，说明复现条件和参考资料，避免广告堆砌。')),
@@ -202,11 +205,13 @@ def normalize_config(value):
 
 def _target(row):
     from services.geo_target_publish_guard import builtin_publisher, configuration_digest
+    from services.csdn_editor import supports as csdn_editor_supported
     value = dict(row)
     value['config'] = json.loads(value['config'])
     value['config_sha256'] = configuration_digest(value['config'])
     value['key'] = 'target_' + value['id']
-    value['capability'] = 'configured_fill' if value['config']['title_selector'] else 'login_and_export'
+    value['capability'] = ('platform_assisted_fill' if csdn_editor_supported(value['config']) else
+                           'configured_fill' if value['config']['title_selector'] else 'login_and_export')
     value['auto_publish_verified'] = False
     value['builtin_publisher'] = builtin_publisher(value['config'])
     if value['state'] in ('disabled', 'archived', 'deleted'):
@@ -269,8 +274,27 @@ def record_event(database, identifier, kind, state, message, article_id=None, ev
         else:
             event_id = uuid.uuid4().hex
             connection.execute('INSERT INTO geo_distribution_events VALUES(?,?,?,?,?,?,?)', (event_id, identifier, article_id, kind, state, message[:800], stamp))
-        # Session saving never clears an interrupted/blocked filling attempt.
-        if kind != 'login' or connection.execute('SELECT blocked_reason FROM geo_distribution_targets WHERE id=?', (identifier,)).fetchone()[0] == '':
+        current = connection.execute('SELECT state,blocked_reason FROM geo_distribution_targets WHERE id=?', (identifier,)).fetchone()
+        # A verified editor can supersede only a recorded login-only failure.
+        # Saved cookies/closed windows are not proof, and an empty editor says
+        # nothing about a previous fill or an unresolved publication.
+        editor_observed = kind == 'login' and state == 'editor_ready'
+        unresolved = False
+        if editor_observed:
+            unresolved = bool(connection.execute('''SELECT 1 FROM geo_distribution_events
+                WHERE target_id=? AND kind='fill' AND state IN ('preparing','filled','need_action') LIMIT 1''',
+                (identifier,)).fetchone() or connection.execute('''SELECT 1 FROM publish_jobs j
+                JOIN geo_content_drafts d ON d.article_id=j.article_id
+                WHERE d.platform=? AND j.demo=0
+                  AND (j.status!='success' OR j.result_url IS NULL OR TRIM(j.result_url)='') LIMIT 1''',
+                ('target_' + identifier,)).fetchone())
+        clear_login_failure = False
+        if editor_observed and not unresolved and current['state'] == 'need_action' and current['blocked_reason']:
+            clear_login_failure = bool(
+                connection.execute('''SELECT 1 FROM geo_distribution_events
+                    WHERE target_id=? AND kind='login' AND state='need_action' AND message=? LIMIT 1''',
+                    (identifier, current['blocked_reason'])).fetchone())
+        if kind != 'login' or (current['blocked_reason'] == '' and not (editor_observed and unresolved)) or clear_login_failure:
             connection.execute('UPDATE geo_distribution_targets SET state=?,blocked_reason=?,updated_at=? WHERE id=?',
                                (state, message[:800] if state == 'need_action' else '', stamp, identifier))
     return event_id
@@ -308,7 +332,8 @@ def reserve_fill(database, project_id, identifier, article_id):
         if not lineage or lineage['id'] != identifier:
             raise ValueError('缺少当前目标稿件的可核验关联，请重新生成并审稿')
         config = target['config']
-        if not config['title_selector']:
+        from services.csdn_editor import supports as csdn_editor_supported
+        if not config['title_selector'] and not csdn_editor_supported(config):
             raise ValueError('尚未配置标题和正文编辑框，当前只能打开登录或导出稿件')
         if len(row['title']) > config['title_limit'] or len(row['content']) > config['body_limit']:
             raise ValueError('文章超过当前平台配置的长度限制，请先编辑')

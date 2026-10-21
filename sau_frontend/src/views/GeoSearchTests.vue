@@ -9,6 +9,7 @@
 
     <el-card v-if="isDesktop" shadow="never">
       <h2>桌面自动测试</h2>
+      <DoubaoPreparation/>
       <div class="form-grid">
         <el-form-item label="豆包界面"><el-select v-model="desktopClientMode" :disabled="nativeBusy">
           <el-option label="豆包对话" value="consumer" /><el-option label="豆包工作" value="work" />
@@ -20,7 +21,7 @@
       <el-button type="primary" :disabled="nativeBusy || !plan || !planMatchesProject" @click="startNative('run')">开始测试</el-button>
       <el-button v-if="nativeBusy" type="warning" @click="stopNative">停止任务</el-button>
       <p class="context">{{ nativeMessage }}</p>
-      <p class="context">任务、计划和客户资料会自动保存，重开后恢复。登录或验证请在专用豆包窗口正常完成，登录完成后关闭登录窗口保存会话。</p>
+      <p class="context">任务、计划和客户资料会自动保存，重开后恢复。采集中的验证完成后保持窗口打开，继续同一请求；请勿反复开始新任务。</p>
       <p v-if="!project && report" class="context">当前出题客户：{{ report.profile.name }}。也可在下方选择其他品牌项目。</p>
     </el-card>
 
@@ -143,6 +144,7 @@ import { ElMessage } from 'element-plus'
 import { projectApi } from '@/api/project'
 import { geoTestApi } from '@/api/geoTest'
 import { geoContentApi } from '@/api/geoContent'
+import DoubaoPreparation from '@/components/DoubaoPreparation.vue'
 import { entityLabel, entityProfileFields, profileLines, reportEntityContext, restoreEntityDraftFields, sameBrand } from '@/utils/geoJourney'
 
 const projects = ref([]), projectId = ref(null), company = ref(''), audience = ref(''), aliasesText=ref(''), officialUrlsText=ref(''), caseCount = ref(4)

@@ -48,10 +48,17 @@ class DesktopGeoJobs:
         self.job = records[0] if records else {"status": "idle"}
         self.worker = self.loop = self.task = None
         self.cancel_requested = False
+        # Private controls stay off pywebview's recursive public API surface.
+        self._destination_check = self._destination_check_loop = None
+        self._destination_check_task_id = None
+        self._destination_check_pending = False
         for record in records:
             if record.get("status") == "running":
                 record.update(status="needs_review", updated_at=now(),
                               message="软件上次关闭时任务未完成，记录已保留；提交状态需检查，不会自动重发。")
+                session = (record.get('progress') or {}).get('destination_session')
+                if isinstance(session, dict):
+                    session.update(can_check=False, window_open=False)
                 if record.get("kind") == "run":
                     report = self._save_interrupted_run(record, reason="application_closed_submission_unknown")
                     if report:
@@ -180,7 +187,11 @@ class DesktopGeoJobs:
                 self.job['cycle_id'] = cycle_id
             if target_id:
                 self.job['target_id'] = target_id
+            self._destination_check = self._destination_check_loop = None
+            self._destination_check_task_id = None
+            self._destination_check_pending = False
             self._persist()
+            task_identifier = self.job['id']
 
         def run():
             async def execute():
@@ -220,7 +231,17 @@ class DesktopGeoJobs:
                     self.job.pop('wait_reason', None)
                     self._persist()
             finally:
-                self.task = self.loop = None
+                with self.lock:
+                    if self._destination_check_task_id == task_identifier:
+                        self._destination_check = self._destination_check_loop = None
+                        self._destination_check_task_id = None
+                        self._destination_check_pending = False
+                    if self.job.get('id') == task_identifier:
+                        session = (self.job.get('progress') or {}).get('destination_session')
+                        if isinstance(session, dict):
+                            session.update(can_check=False, window_open=False)
+                            self._persist()
+                        self.task = self.loop = None
         self.worker = threading.Thread(target=run, daemon=True, name="GEO native collector")
         self.worker.start()
         return {"id": self.job["id"], "status": "running"}
@@ -357,15 +378,32 @@ class DesktopGeoJobs:
                 current, article, event_id = geo_destination_service.reserve_fill(database, cycle['project_id'], target_id, article_id)
             else:
                 current = geo_destination_service.get_target(database, cycle['project_id'], target_id)
+            check_requested = asyncio.Event()
+            with self.lock:
+                self._destination_check = check_requested
+                self._destination_check_loop = asyncio.get_running_loop()
+                self._destination_check_task_id = self.job['id']
             def progress(value):
                 if kind == 'fill':
                     geo_destination_service.record_event(database, target_id, kind, value['state'], value['message'], article_id, event_id)
                 with self.lock:
                     self.job['message'] = value['message']
+                    session = value.get('destination_session')
+                    if isinstance(session, dict):
+                        # The browser emits fixed status/messages. Do not save
+                        # account fields, page HTML, URLs or arbitrary extras.
+                        names = {'state', 'message', 'can_check', 'window_open', 'content_write_attempted',
+                                 'editor_ready', 'login_required', 'challenge', 'binding_required', 'binding_kind', 'body_state'}
+                        safe = {key: copy.deepcopy(item) for key, item in session.items() if key in names}
+                        self.job['progress'] = {'destination_session': safe}
+                        self.job['waiting_for_user'] = bool(safe.get('can_check'))
+                        if safe.get('state') not in ('opening', 'checking'):
+                            self._destination_check_pending = False
                     self._persist()
             try:
                 result = await open_session(current, self.data / 'platform-profiles' / str(cycle['project_id']) / target_id,
-                    edge_executable(), fallback_executable_path=chrome_executable(), article=article, progress=progress)
+                    edge_executable(), fallback_executable_path=chrome_executable(), article=article, progress=progress,
+                    check_requested=check_requested)
                 geo_destination_service.record_event(database, target_id, kind, result['state'], result['message'], article_id, event_id)
                 return {'target_id': target_id, **result}
             except BaseException:
@@ -374,6 +412,34 @@ class DesktopGeoJobs:
                 raise
         return self._start('destination_fill' if article_id is not None else 'destination_login', operate,
                            client_name=cycle['profile']['name'], cycle_id=cycle_id, target_id=target_id)
+
+    def check_destination_session(self, task_id):
+        """Signal a single explicit, read-only check in the existing window."""
+        with self.lock:
+            if (not isinstance(task_id, str) or not task_id or len(task_id) > 128
+                    or self.job.get('id') != task_id or self.job.get('status') != 'running'
+                    or self.job.get('kind') not in ('destination_login', 'destination_fill')
+                    or self._destination_check_task_id != task_id):
+                return {'error': '仅能检查当前正在运行的平台接入任务；请保留原窗口。'}
+            loop, signal = self._destination_check_loop, self._destination_check
+            session = (self.job.get('progress') or {}).get('destination_session') or {}
+            if loop is None or signal is None or loop.is_closed() or not session.get('window_open'):
+                return {'error': '当前平台窗口尚未就绪或已结束，请查看任务提示。'}
+            if self._destination_check_pending:
+                return {'id': task_id, 'status': 'running', 'check_requested': True}
+            if session.get('can_check') is not True:
+                return {'error': '平台状态正在检查，请等待当前检查完成。'}
+            self._destination_check_pending = True
+            session.update(state='checking', can_check=False,
+                           message='正在检查当前平台会话和编辑器，不会提交文章或重复填写。')
+            self.job['message'] = session['message']
+            self._persist()
+            try:
+                loop.call_soon_threadsafe(signal.set)
+            except RuntimeError:
+                self._destination_check_pending = False
+                return {'error': '当前平台窗口已结束，请查看任务记录；不会自动重开。'}
+            return {'id': task_id, 'status': 'running', 'check_requested': True}
 
     def stop_task(self):
         self.cancel_requested = True

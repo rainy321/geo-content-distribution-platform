@@ -9,6 +9,7 @@
       <el-select v-model="cycleId" placeholder="打开已保存的任务单" aria-label="已保存的内容任务单" @change="loadCycle"><el-option v-for="item in cycles" :key="item.id" :value="item.id" :label="`${item.name} · ${item.draft_count} 份稿件 · ${date(item.updated_at)}`" /></el-select>
     </el-card>
     <el-card v-if="nativeAvailable" shadow="never">
+      <DoubaoPreparation/>
       <div class="row"><strong>豆包写作会话</strong><el-select v-model="clientMode" :disabled="busy" aria-label="写作豆包界面"><el-option label="豆包对话" value="consumer"/><el-option label="豆包工作" value="work"/></el-select><el-input v-model="model" :disabled="busy" placeholder="模型选项可留空" aria-label="写作模型选项"/><el-button :disabled="busy" @click="login">登录豆包</el-button><el-button v-if="nativeBusy" @click="stop">停止任务</el-button></div>
       <p class="hint" aria-live="polite">{{ currentTaskMessage }}</p>
     </el-card>
@@ -21,7 +22,7 @@
         <el-table :data="cycle.analysis.briefs" data-testid="research-briefs"><el-table-column label="优先级" width="90"><template #default="{row}">{{ row.priority === 'high' ? '优先' : '后续' }}</template></el-table-column><el-table-column prop="topic" label="选题" min-width="220"/><el-table-column label="采集依据 / 待补资料" min-width="300"><template #default="{row}"><p>{{ row.case_ids.join('、') }} · {{ row.why }}</p><p v-for="text in row.missing_evidence" :key="text" class="hint">待补：{{ text }}</p><p v-if="row.outline.length" class="hint">结构：{{ row.outline.join(' → ') }}</p></template></el-table-column></el-table>
         <el-collapse><el-collapse-item title="查看观察到的来源（网址未知仍保留未知）" name="sources"><p class="hint">{{ cycle.observations.source_note }}</p><ul><li v-for="source in cycle.observations.sources" :key="source.id">{{ source.id }} · {{ source.case_id }} · {{ source.kind === 'citations' ? '正文引用' : '界面资料' }} · <a v-if="source.url" :href="safeUrl(source.url)" target="_blank" rel="noopener noreferrer">{{ source.title || source.domain }}</a><span v-else>{{ source.title || '标题未知' }} · 网址未确认</span></li></ul></el-collapse-item></el-collapse>
       </el-card>
-      <GeoDestinations :cycle="cycle" :busy="busy" :native-available="nativeAvailable" @updated="applyCycle" @select="selectDestination" @open="openDestination"/>
+      <GeoDestinations :cycle="cycle" :task="task" :busy="busy" :native-available="nativeAvailable" @updated="applyCycle" @select="selectDestination" @open="openDestination" @checked="poll"/>
       <el-card shadow="never">
         <h2>3 · 补充可用于写作的事实</h2>
         <div v-if="cycle.fact_candidates && !cycle.facts.length" class="fact-reuse"><p>上轮 {{ date(cycle.fact_candidates.source_created_at) }} 核对过的资料可作为本轮候选，带入后仍需重新核对。</p><el-button :disabled="busy" @click="reuseFacts">带入上轮资料</el-button></div>
@@ -39,7 +40,8 @@
         <article v-for="draft in cycle.drafts" :key="draft.article_id" class="draft" data-testid="research-draft">
           <h3>{{ draft.title }}</h3><p>{{ cycle.channels[draft.platform] }} · {{ status[draft.status] || draft.status }} · 原始问题 {{ draft.provenance.brief.case_ids.join('、') }}</p>
           <p>{{ draft.summary }}</p>
-          <div class="row"><el-button @click="edit(draft)">审稿 / 编辑</el-button><el-button v-if="draft.provenance.destination" :disabled="busy || !nativeAvailable || draft.status !== 'ready'" @click="fillDestination(draft)">打开目标平台并填写</el-button><el-button v-if="draft.provenance.destination" :disabled="busy || !['ready','published'].includes(draft.status)" @click="openPublication(draft)">登记站内发布链接</el-button><el-button v-if="legacyChannel(draft) && legacyChannel(draft) !== 'owned_web'" :disabled="draft.status !== 'ready'" @click="publish(draft)">进入现有发布中心</el-button><el-button @click="downloadArticle(draft)">导出稿件</el-button></div>
+          <div class="row"><el-button @click="edit(draft)">审稿 / 编辑</el-button><el-button v-if="destinationSupportsFill(draftDestination(draft))" :disabled="busy || !nativeAvailable || draft.status !== 'ready'" @click="fillDestination(draft)">打开目标平台并填写</el-button><el-button v-if="draft.provenance.destination" :disabled="busy || !['ready','published'].includes(draft.status)" @click="openPublication(draft)">登记站内发布链接</el-button><el-button v-if="legacyChannel(draft) && legacyChannel(draft) !== 'owned_web'" :disabled="draft.status !== 'ready'" @click="publish(draft)">进入现有发布中心</el-button><el-button @click="downloadArticle(draft)">导出稿件</el-button></div>
+          <p v-if="draft.provenance.destination && !destinationSupportsFill(draftDestination(draft))" class="hint">该目标当前支持登录与导出，辅助填写尚未接入。可导出稿件后在平台编辑。</p>
           <p v-if="draft.provenance.destination" class="hint">来源匹配依据：{{ draft.provenance.distribution_basis?.source_ids.join('、') || '手动选择，当前选题未匹配来源网址' }}。填写可能触发网站自动保存；发布状态以实际结果为准。已有发布中心需另外绑定对应账号。</p>
           <p v-if="draft.platform === 'owned_web'" class="hint">官网稿可导出交给网站编辑发布。</p>
           <p v-for="job in draft.jobs" :key="job.id" class="hint">{{ job.demo ? '演示任务' : '发布任务' }} #{{ job.id }} · {{ job.platform }} · {{ jobStatus[job.status] || job.status }} <a v-if="safeUrl(job.result_url)" :href="safeUrl(job.result_url)" target="_blank" rel="noopener noreferrer">查看发布链接</a></p>
@@ -78,6 +80,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { geoContentApi } from '@/api/geoContent'
 import { geoTestApi } from '@/api/geoTest'
 import GeoDestinations from '@/components/GeoDestinations.vue'
+import DoubaoPreparation from '@/components/DoubaoPreparation.vue'
+import { destinationContinuationText, destinationPreparationText, destinationSupportsFill, isDestinationTask } from '@/utils/geoDestinationSession'
 
 const route = useRoute(), router = useRouter()
 const reports = ref([]), cycles = ref([]), cycle = ref(null), cycleId = ref(''), reportId = ref(''), retestReportId = ref('')
@@ -98,7 +102,7 @@ const selectedDestination = computed(() => cycle.value?.destinations.find(item =
 const journeyProjectId = computed(() => {const value=Number(route.query.journey_project);return Number.isSafeInteger(value)&&value>0?value:null})
 const returnToJourney = () => router.push({path:'/journey',query:{journey_project:String(journeyProjectId.value)}})
 const matchingRetests = computed(() => reports.value.filter(report => report.name === cycle.value?.profile.name && report.run_id !== cycle.value?.baseline.run_id))
-const currentTaskMessage = computed(() => task.value.cycle_id === cycleId.value ? (task.value.message || (nativeBusy.value ? '当前内容任务执行中，验证请在专用窗口完成。' : '本轮任务记录已保存。')) : (nativeBusy.value ? '另一个桌面任务正在执行，请完成后再开始写作。' : '平台登录、填写、写作与曝光采集分开记录。历史失败详情保留在任务记录。'))
+const currentTaskMessage = computed(() => task.value.cycle_id === cycleId.value ? (isDestinationTask(task.value) ? '平台任务的当前步骤与继续操作见下方对应平台准备卡。' : task.value.message || (nativeBusy.value ? '当前内容任务执行中，验证请在专用窗口完成。' : '本轮任务记录已保存。')) : (nativeBusy.value ? '另一个桌面任务正在执行，请完成后再开始写作。' : '平台登录、填写、写作与曝光采集分开记录。历史失败详情保留在任务记录。'))
 const feedbackStages = {collection_only:'尚无发布证据',conditions_mismatch:'复测条件不匹配',retest_precedes_publication:'复测早于发布时间',publication_time_unknown:'发布时间待核对',post_publication_observation:'发布后的采集观察'}
 const date = value => value ? new Date(value).toLocaleString('zh-CN', {timeZone:'Asia/Hong_Kong',hour12:false}) : '时间未知'
 const rate = value => typeof value === 'number' ? `${Math.round(value*100)}%` : '未知'
@@ -159,12 +163,15 @@ const login = async () => {
 }
 const stop = () => window.pywebview.api.stop_task()
 const selectDestination = key => {platform.value=key;ElMessage.success('已选择目标平台，请在下方生成平台稿')}
+const draftDestination = draft => cycle.value?.destinations.find(item=>item.id===draft.provenance.destination?.id)
 const openDestination = async ({target_id,article_id}) => {
   try {const result=await window.pywebview.api.open_destination(cycleId.value,target_id,article_id || null);if(result.error) throw new Error(result.error);task.value=result}
   catch(error) {ElMessage.error(error.message || '平台窗口未打开')}
 }
 const fillDestination = async draft => {
-  try {await ElMessageBox.confirm('将把已审稿的标题和正文填入该平台空白编辑器，网站可能自动保存。请在专用窗口核对格式与账号；最后提交由你确认。','打开平台填写',{confirmButtonText:'打开并填写',cancelButtonText:'取消'});await openDestination({target_id:draft.provenance.destination.id,article_id:draft.article_id})}
+  const target=draftDestination(draft)
+  if(!destinationSupportsFill(target)){ElMessage.info('该目标当前支持登录与导出，辅助填写尚未接入');return}
+  try {await ElMessageBox.confirm(`${destinationPreparationText(target)} 将填入已审稿的标题和正文，其他已有内容会保留并暂停，网站可能自动保存。${destinationContinuationText(window.pywebview?.api)} 最后提交由你确认。`,'打开平台填写',{confirmButtonText:'打开并填写',cancelButtonText:'取消'});await openDestination({target_id:draft.provenance.destination.id,article_id:draft.article_id})}
   catch(error) {if(error instanceof Error) ElMessage.error(error.message)}
 }
 const retest = async () => {
