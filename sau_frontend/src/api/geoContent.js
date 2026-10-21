@@ -9,6 +9,7 @@ export const geoContentApi = {
   generate: (id, data) => http.post(`/api/geo-content/cycles/${id}/generate`, withCustomAIConfig(data), { timeout: 150000 }),
   retest: (id, reportId) => http.post(`/api/geo-content/cycles/${id}/retests`, { report_id: reportId }),
   publication: (id, data) => http.post(`/api/geo-content/cycles/${id}/publications`, data),
+  moderation: (id, data) => http.post(`/api/geo-content/cycles/${id}/moderation-observations`, data),
   article: id => http.get(`/api/geo-content/articles/${id}`),
   saveDestination: (id, targetId, data) => targetId
     ? http.put(`/api/geo-content/cycles/${id}/destinations/${targetId}`, data)

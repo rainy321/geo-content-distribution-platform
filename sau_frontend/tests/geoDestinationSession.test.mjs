@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
-import { destinationContinuationText, destinationPreparation, destinationPreparationText, destinationSessionView, destinationSupportsFill, matchesDestinationTask, requestDestinationSessionCheck } from '../src/utils/geoDestinationSession.js'
+import { destinationContinuationText, destinationEventView, destinationPreparation, destinationPreparationText, destinationSessionView, destinationSupportsFill, matchesDestinationTask, requestDestinationSessionCheck } from '../src/utils/geoDestinationSession.js'
 
 const task = (session={}, values={}) => ({id:'live-task',kind:'destination_login',cycle_id:'cycle-a',target_id:'target-a',status:'running',progress:{destination_session:{state:'login_required',can_check:true,window_open:true,...session}},...values})
 const view = value => destinationSessionView(value,'cycle-a','target-a')
@@ -128,4 +128,35 @@ test('CSDN publish preparation reaches both the card field and shared native con
   const other={config:{editor_url:'https://example.org/editor'}}
   assert.equal(destinationPreparation(other).publishing,'')
   assert.doesNotMatch(destinationPreparationText(other),/自定义标签/)
+})
+
+test('known Tencent community preparation names account and editorial prerequisites before opening',()=>{
+  for(const url of ['https://cloud.tencent.com/developer/','https://cloud.tencent.com/developer/article/write']) {
+    const target={capability:'login_and_export',config:{editor_url:url}}
+    const text=destinationPreparationText(target)
+    for(const detail of ['手机验证','实名认证','专栏','自动保存草稿','较多段落为 AI 生成','封面','标注 AI 不代表'])assert.ok(text.includes(detail),detail)
+    assert.match(destinationPreparation(target).capability,/登录与导出/)
+    assert.equal(destinationSupportsFill(target),false)
+  }
+  for(const url of ['https://cloud.tencent.com/','https://cloud.tencent.com/document/product/1212/42695','https://cloud.tencent.com.attacker.test/developer/','https://cloud.tencent.com@attacker.test/developer/','https://attacker.test/?next=cloud.tencent.com/developer/','http://cloud.tencent.com/developer/','https://cloud.tencent.com:8443/developer/']) {
+    assert.doesNotMatch(destinationPreparationText({config:{name:'腾讯云开发者社区',editor_url:url}}),/腾讯云发文|当前社区规范/)
+  }
+})
+
+test('CSDN distinguishes initial binding from a possible per-submission WeChat confirmation',()=>{
+  const text=destinationPreparationText({config:{editor_url:'https://editor.csdn.net/md/'}})
+  assert.match(text,/绑定后仍可能需要用已绑定的微信扫码确认本次发布/)
+  assert.doesNotMatch(text,/绑定后.*自动发布成功/)
+})
+
+test('platform event history shows operator moderation notes without raw internal metadata',()=>{
+  const row={kind:'moderation',state:'rejected',message:JSON.stringify({schema_version:1,source:'operator_reported',note:'平台显示审核未通过',article_sha256:'a'.repeat(64),url:'https://example.org/article/1'})}
+  const shown=destinationEventView(row)
+  assert.equal(shown.operation,'审核观察')
+  assert.equal(shown.state,'审核未通过')
+  assert.match(shown.message,/平台显示审核未通过.*运营方观察.*未自动核验/)
+  assert.doesNotMatch(shown.message,/schema_version|article_sha256|https:|a{64}/)
+  assert.match(destinationEventView({...row,message:JSON.stringify({schema_version:1,source:'operator_reported',note:'长网址观察仍应可读',url:'https://example.org/article/'+ 'x'.repeat(1200)})}).message,/长网址观察仍应可读/)
+  for(const message of ['raw internal data','{"source":"unknown"}'])assert.match(destinationEventView({...row,message}).message,/需要核对/)
+  assert.equal(destinationEventView({kind:'submit',state:'need_action',message:'需要检查原页面'}).message,'需要检查原页面')
 })

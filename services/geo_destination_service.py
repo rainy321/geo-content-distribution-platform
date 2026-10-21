@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit, urlunsplit
 
 
-CATALOG_VERSION = '2026-10-21.2'
+CATALOG_VERSION = '2026-10-21.3'
 
 
 def _candidate(name, home, login, editor, style, channel='', rules_url='', **limits):
@@ -44,9 +44,14 @@ CATALOG = [
         '短段落和实用清单，不编造用户体验；商业关系如实说明，图片与平台规则另行检查。', 'xiaohongshu')),
     ('tencent_community', ('cloud.tencent.com', 'developer.cloud.tencent.com'), '/developer/', _candidate(
         '腾讯云开发者社区', 'https://cloud.tencent.com/developer/', 'https://cloud.tencent.com/developer/',
-        'https://cloud.tencent.com/developer/',
-        '面向开发者写技术问题、实现步骤、代码或可复现的检查方法；不虚构实验，缺少实测时明确说明。使用 Markdown。',
-        rules_url='https://cloud.tencent.com/developer/article/1005129')),
+        'https://cloud.tencent.com/developer/article/write',
+        '面向开发者提供原创技术信息与实际技术贡献，明确区分设计建议、假设示例和实测结果，使用 Markdown。'
+        '当前社区规范不鼓励较多段落为 AI 生成的内容，并禁止广告推广和站外引流；'
+        'AI 草稿或 AI 审校不能直接等同于实质人工贡献或获准自动投稿。'
+        '发文可能要求腾讯云账号实名、手机验证及开通专栏，后续需核对封面等发布设置。'
+        '编辑器可能自动保存草稿；权限、具体要求和内容是否可投须在当前账号页面核对。',
+        rules_url='https://cloud.tencent.com/developer/article/1006434',
+        publication_scope='https://cloud.tencent.com/developer/article/')),
     ('aliyun_community', ('developer.aliyun.com',), '/article/', _candidate(
         '阿里云开发者社区', 'https://developer.aliyun.com/', 'https://developer.aliyun.com/article/new',
         'https://developer.aliyun.com/article/new',
@@ -203,6 +208,14 @@ def normalize_config(value):
     return config
 
 
+INACTIVE_TARGET_STATES = frozenset(('disabled', 'archived', 'deleted'))
+
+
+def assert_target_enabled(target):
+    if target.get('config', {}).get('enabled', True) is not True or target.get('state') in INACTIVE_TARGET_STATES:
+        raise ValueError('平台已停用，记录仍保留；请在编辑接入配置中明确启用后再操作')
+
+
 def _target(row):
     from services.geo_target_publish_guard import builtin_publisher, configuration_digest
     from services.csdn_editor import supports as csdn_editor_supported
@@ -252,8 +265,15 @@ def save_target(database, project_id, value, identifier=None, revision=None):
                 raise ValueError('目标存在正在发布或最终状态未知的任务，请先核对结果；配置暂不能修改')
             if prior['revision'] != revision or prior['state'] == 'preparing':
                 raise ValueError('平台配置已变化或正在填写，请刷新后再修改')
-            connection.execute('UPDATE geo_distribution_targets SET config=?,revision=revision+1,updated_at=? WHERE id=?',
-                               (json.dumps(config, ensure_ascii=False), stamp, identifier))
+            # A normal edit must not revive an inactive record through the
+            # legacy default. Reactivation requires an explicit enabled flag.
+            state = prior['state']
+            if 'enabled' not in value and (state in INACTIVE_TARGET_STATES or json.loads(prior['config']).get('enabled', True) is not True):
+                config['enabled'] = False
+            if state in INACTIVE_TARGET_STATES and value.get('enabled') is True:
+                state = 'need_action' if prior['blocked_reason'] else 'configured'
+            connection.execute('UPDATE geo_distribution_targets SET config=?,state=?,revision=revision+1,updated_at=? WHERE id=?',
+                               (json.dumps(config, ensure_ascii=False), state, stamp, identifier))
         else:
             if updating or revision is not None:
                 raise ValueError('平台接入记录不存在，不能跨客户修改')
@@ -274,7 +294,10 @@ def record_event(database, identifier, kind, state, message, article_id=None, ev
         else:
             event_id = uuid.uuid4().hex
             connection.execute('INSERT INTO geo_distribution_events VALUES(?,?,?,?,?,?,?)', (event_id, identifier, article_id, kind, state, message[:800], stamp))
-        current = connection.execute('SELECT state,blocked_reason FROM geo_distribution_targets WHERE id=?', (identifier,)).fetchone()
+        current = connection.execute('SELECT state,blocked_reason,config FROM geo_distribution_targets WHERE id=?', (identifier,)).fetchone()
+        # A late browser result is history, never authorization to reactivate.
+        if current['state'] in INACTIVE_TARGET_STATES or json.loads(current['config']).get('enabled', True) is not True:
+            return event_id
         # A verified editor can supersede only a recorded login-only failure.
         # Saved cookies/closed windows are not proof, and an empty editor says
         # nothing about a previous fill or an unresolved publication.
@@ -306,7 +329,9 @@ def review_block(database, project_id, identifier, confirmed):
     target = get_target(database, project_id, identifier)
     with closing(_connect(database)) as connection, connection:
         connection.execute('BEGIN IMMEDIATE')
-        if connection.execute('SELECT state FROM geo_distribution_targets WHERE id=?', (identifier,)).fetchone()[0] == 'preparing':
+        current = connection.execute('SELECT * FROM geo_distribution_targets WHERE id=? AND project_id=?', (identifier, project_id)).fetchone()
+        assert_target_enabled(_target(current))
+        if current['state'] == 'preparing':
             raise ValueError('填写任务尚未结束，请先等待或停止；软件重启会把中断尝试标为待检查')
         connection.execute('UPDATE geo_distribution_events SET state=\'reviewed\' WHERE target_id=? AND kind=\'fill\' AND state IN (\'preparing\',\'filled\',\'need_action\')', (identifier,))
     record_event(database, identifier, 'manual_review', 'configured', '用户已检查页面状态并明确恢复；频率记录仍保留')
@@ -322,6 +347,7 @@ def reserve_fill(database, project_id, identifier, article_id):
         current = connection.execute('SELECT * FROM geo_distribution_targets WHERE id=?', (identifier,)).fetchone()
         if current['revision'] != target['revision']:
             raise ValueError('平台配置发生变化，请刷新')
+        assert_target_enabled(_target(current))
         if current['blocked_reason'] or current['state'] == 'preparing':
             raise ValueError('该平台存在待检查的尝试，请检查后明确恢复；不会自动重试')
         row = connection.execute('''SELECT a.*,d.platform FROM articles a JOIN geo_content_drafts d ON d.article_id=a.id

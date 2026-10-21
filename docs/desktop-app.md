@@ -24,6 +24,12 @@
 
 CSDN 专用辅助填写无需配置 CSS 选择器；仅确认空白或完整匹配已知欢迎示例后，才会通过平台正常 Markdown 导入新建文档，原文档保留，其他已有标题、草稿或未知示例会暂停处理。导入后逐字核对标题、全文及内部换行，不一致时不会再次导入。发布前需核对平台已有标签、AI 创作声明及可见范围；自定义标签可能受账号等级限制，跨站备份或同步由用户选择。最终提交由用户完成，填入不计为已发布。这些准备状态和同任务复检仅在实际包含新版界面及 `check_destination_session(task_id)` 原生接口的桌面构建中可用；旧版需按提示升级，可用版本以对应 Release 清单为准。
 
+“平台结果核对”可逐篇登记待审核、审核未通过、公开可查看或暂不确定，并记录平台原因。这些是运营方观察，软件不自动替代平台审核或公开页面核验。待审、拒绝的文章不能再登记为公开发布；旧提交记录会保留，但暂不进入发布后效果统计。“暂不确定”和提交成功提示不能清除已有保护；只有重新核对具体公开链接、标题与全文后，才能记录对应当前稿件的公开观察。保存结果不会重新投稿。
+
+写作会话初始使用本轮基线的豆包界面和请求模型选项，明确修改后的选择按任务单保留。切换任务单或刷新时不会把另一个任务单的选择、延迟结果带进来；实际模型仍以平台当前显示为准。
+
+腾讯云开发者社区接入前应核对实名认证、手机验证、首次专栏审核及封面要求，编辑器可能自动保存草稿。[社区规范](https://cloud.tencent.com/developer/article/1006434)不鼓励较多段落为 AI 生成的内容，并限制推广引流；标注 AI 或仅做 AI 审校不能据此认定允许发文。账号前提和编辑流程参见[发表文章文档](https://cloud.tencent.com/document/product/1212/42695)，最终按当前账号页面核对。该接入起点不表示已完成自动投稿适配。
+
 软件内可以选择客户资料、通过 AI API 或已登录豆包生成固定问题、预览确认后启动串行测试、停止任务及查看完整报告。首次使用豆包采集时点击“登录豆包”，在专用窗口正常登录/验证，完成后关闭专用登录窗口。主流程显示这次操作的“上次登录检查”摘要，直到开始新任务或切换对象；摘要显示所选与最后观察到的实际界面、登录及验证提示，关闭窗口本身不能证明登录成功或会话已保存。所选与实际不一致时先核对界面选项，采集前仍会检查并拦截错配。采集中出现验证时应保持采集窗口打开，软件等待同一条请求，不自动重发。选择与你实际账号对应的“豆包对话”或“豆包工作”；模型选项只选择正常可用项目。没有选择品牌项目时，豆包出题可以使用当前报告对应的客户资料。
 
 报告上的“用本报告制定内容任务”和侧栏“采集驱动内容”连接后续选题、写作事实、平台稿、内容库审稿、发布链接和同题复测。生成稿先保存为草稿；写作来源与曝光采集分开记录。详见[采集到发布说明](geo-content-loop.md)。
@@ -48,7 +54,7 @@ CSDN 专用辅助填写无需配置 CSS 选择器；仅确认空白或完整匹�
 
 ## 本机安装与数据
 
-从 [2026.10.21.2 Release](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.2) 下载 Windows x64 ZIP，完整解压后打开 `GEO_AI_Workbench/GEO_AI_Workbench.exe`，保留同级 `_internal` 目录。[2026.10.20.2 资料隔离版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.20.2)及[2026.10.20.1 对象独立测试版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.20.1)继续保留。[2026.10.20 五步流程版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.20)保留此前真实发布走查。更早版本在[旧版归档 Release](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-legacy-backup-2026.10.15)，仅用于备份恢复。
+从 [2026.10.21.4 Release](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.4) 下载 Windows x64 ZIP，完整解压后打开 `GEO_AI_Workbench/GEO_AI_Workbench.exe`，保留同级 `_internal` 目录。[2026.10.21.3 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.3)及[2026.10.20.2 资料隔离版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.20.2)继续保留。[2026.10.20 五步流程版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.20)保留此前真实发布走查。更早版本在[旧版归档 Release](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-legacy-backup-2026.10.15)，仅用于备份恢复。
 
 本机安装文件：`%LOCALAPPDATA%\Programs\GEO_AI_Workbench\GEO_AI_Workbench.exe`。桌面和开始菜单有“GEO AI搜索工作台”快捷方式。
 
@@ -59,6 +65,10 @@ CSDN 专用辅助填写无需配置 CSS 选择器；仅确认空白或完整匹�
 五步流程还会按品牌保存当前步骤、选题、未保存编辑和事实核对进度。恢复时核对服务器版本；出现冲突会保留两份并提供本机稿导出，不静默覆盖。旧事实重新作为待核对资料出现，不自动视为今天仍有效。“沿用问题新测一轮”明确开启独立新轮次，先检查模型和问题；发布后的效果观察则从原内容任务单执行同题复测。
 
 独立程序只监听本机回环地址。关闭窗口会停止内部服务。再次打开会使用已有数据；同一数据目录只允许一个窗口实例。
+
+平台可在接入配置中显式停用，历史来源、稿件与审核记录保留；停用后不再从该目标启动登录、写稿或填稿。发现某网站出现在 AI 来源中，只代表研究线索，不能据此认定适合投递推广内容。
+
+浏览器启动需要切换到独立 Chrome 会话时，成功启动后记录本机选择，之后沿用该会话目录。浏览器配置变化或会话目录无法确认时暂停并提示检查，避免打开另一套空会话造成登录丢失的错觉；不跨浏览器复制登录数据。
 
 ## 构建
 

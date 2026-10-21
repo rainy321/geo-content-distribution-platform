@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import uuid
 from contextlib import closing
@@ -21,6 +22,9 @@ from services.geo_test_reports import project_report_evaluation
 
 class ResearchNotFoundError(LookupError):
     pass
+
+
+MODERATION_STATES = frozenset(('pending', 'rejected', 'publicly_visible', 'unknown'))
 
 
 def _now():
@@ -154,6 +158,7 @@ def _drafts(connection, identifier):
             JOIN articles a ON a.id=d.article_id WHERE d.cycle_id=? ORDER BY d.created_at DESC''', (identifier,)):
         item = dict(row)
         item['tags'], item['provenance'] = json.loads(item['tags']), json.loads(item['provenance'])
+        item['article_sha256'] = fingerprint({'title': item['title'], 'content': item['content']})
         item['jobs'] = [dict(job) for job in connection.execute('''SELECT id,platform,status,result_url,message,demo,finished_at,
             platform_published_at,platform_published_precision,result_checked_at,result_check_evidence
             FROM publish_jobs WHERE article_id=? ORDER BY id DESC''', (item['article_id'],))]
@@ -161,14 +166,75 @@ def _drafts(connection, identifier):
     return result
 
 
+def _moderation_rows(connection, article_id, target_id):
+    if not target_id:
+        return []
+    return list(connection.execute('''SELECT rowid AS sequence,* FROM geo_distribution_events
+        WHERE article_id=? AND target_id=? AND kind='moderation'
+        ORDER BY created_at DESC,rowid DESC''', (article_id, target_id)))
+
+
+def _moderation_view(row):
+    value = {key: row[key] for key in ('id', 'article_id', 'target_id', 'state', 'created_at')}
+    try:
+        metadata = json.loads(row['message'])
+    except (ValueError, TypeError):
+        metadata = None
+    if (isinstance(metadata, dict) and metadata.get('schema_version') == 1 and metadata.get('source') == 'operator_reported'
+            and isinstance(metadata.get('note'), str) and isinstance(metadata.get('url'), str)
+            and isinstance(metadata.get('article_sha256'), str)
+            and re.fullmatch('[0-9a-f]{64}', metadata['article_sha256'])
+            and type(metadata.get('content_confirmed')) is bool):
+        value.update({key: metadata.get(key) for key in ('source', 'note', 'url', 'article_sha256', 'content_confirmed')})
+    else:
+        # Only fixed kind/state carry machine meaning. Never infer rejection
+        # or approval from a login failure, free-text note or malformed JSON.
+        value.update(source='unknown', note=row['message'], url='', article_sha256=None, content_confirmed=False)
+    return value
+
+
+def _publication_moderation(connection, article_id, target_id, article_sha256, url=None):
+    """Unknown observations do not erase a prior pending/rejected decision.
+
+    A public-content observation only supersedes a hold for the exact reviewed
+    article version and URL. It remains an operator statement, never a network
+    verifier or a synthetic successful publishing job.
+    """
+    for row in _moderation_rows(connection, article_id, target_id):
+        state = row['state']
+        if state in ('pending', 'rejected'):
+            return _moderation_view(row)
+        if state != 'publicly_visible':
+            continue
+        view = _moderation_view(row)
+        if (view['source'] == 'operator_reported' and view['content_confirmed'] is True
+                and view['article_sha256'] == article_sha256 and view['url']
+                and (url is None or view['url'] == url)):
+            return view
+    return None
+
+
+def _filter_publication_records(connection, records, drafts):
+    contexts = {draft['article_id']: draft for draft in drafts}
+    eligible, blocked = [], []
+    for item in records:
+        draft = contexts[item['article_id']]
+        target_id = item.get('target_id') or (draft['platform'][7:] if draft['platform'].startswith('target_') else None)
+        observation = _publication_moderation(connection, item['article_id'], target_id,
+                                               draft['article_sha256'], item['url'])
+        if observation and observation['state'] in ('pending', 'rejected'):
+            blocked.append({**item, 'moderation_state': observation['state'],
+                            'moderation_observation_id': observation['id']})
+        else:
+            eligible.append(item)
+    return eligible, blocked
+
+
 def get_cycle(database, identifier):
     with closing(_connect(database)) as connection:
         result = _cycle(connection, identifier)
         result['drafts'] = _drafts(connection, identifier)
-        publications = list(dict.fromkeys(job['result_url'] for draft in result['drafts'] for job in draft['jobs']
-                                         if job['status'] == 'success' and not job['demo'] and public_url(job['result_url'])))
-        result['publications'] = publications
-        result['reported_publications'] = [dict(row) for row in connection.execute('''
+        reported = [dict(row) for row in connection.execute('''
             SELECT id,article_id,target_id,target_revision,url,published_at,evidence_level,note,
                    baseline_run_id,report_digest,plan_sha256,article_sha256,created_at
             FROM geo_content_publications WHERE cycle_id=? ORDER BY created_at DESC,id DESC''', (identifier,))]
@@ -192,7 +258,20 @@ def get_cycle(database, identifier):
                     'published_at_precision': job['platform_published_precision'] or 'second',
                     'platform_published_at': job['platform_published_at'], 'result_checked_at': job['result_checked_at'],
                     'evidence_level': 'publisher_reported_success'})
-        publication_records += result['reported_publications']
+        publication_records += reported
+        publication_records, result['blocked_publications'] = _filter_publication_records(connection, publication_records, result['drafts'])
+        result['publications'] = list(dict.fromkeys(item['url'] for item in publication_records
+                                                   if item['evidence_level'] == 'publisher_reported_success'))
+        result['reported_publications'] = [item for item in publication_records if item['evidence_level'] == 'owner_reported']
+        result['moderation_observations'] = [_moderation_view(row) for row in connection.execute('''
+            SELECT e.* FROM geo_distribution_events e
+            JOIN geo_content_drafts d ON d.article_id=e.article_id
+            JOIN articles a ON a.id=d.article_id
+            JOIN geo_distribution_targets t ON t.id=e.target_id
+            WHERE d.cycle_id=? AND a.project_id=? AND t.project_id=?
+              AND d.platform='target_' || e.target_id AND e.kind='moderation'
+            ORDER BY e.created_at DESC,e.rowid DESC''', (identifier, result['project_id'], result['project_id']))
+            if row['state'] in MODERATION_STATES]
         publication_urls = list(dict.fromkeys(item['url'] for item in publication_records))
         result['retests'] = []
         for row in connection.execute('SELECT report FROM geo_content_retests WHERE cycle_id=? ORDER BY created_at DESC', (identifier,)):
@@ -282,6 +361,74 @@ def article_research(database, article_id):
         return result
 
 
+def save_moderation_observation(database, identifier, value):
+    """Save an idempotent operator observation, without claiming verification.
+
+    The account holder checks the ordinary platform page. This function never
+    accesses that page, changes article status, publishes, or clears a target's
+    existing interruption/block record.
+    """
+    if not isinstance(value, dict) or value.get('confirmed') is not True:
+        raise ValueError('请确认已在平台核对本篇文章；这条记录是运营方观察，软件未自动核验')
+    observation_id = value.get('observation_id')
+    if not isinstance(observation_id, str) or not re.fullmatch('[0-9a-f]{32}', observation_id):
+        raise ValueError('观察编号无效，请刷新后重新记录')
+    article_id, target_id, state = value.get('article_id'), value.get('target_id'), value.get('state')
+    if type(article_id) is not int or article_id <= 0 or not isinstance(target_id, str) or not target_id:
+        raise ValueError('请选择本轮文章和对应的目标平台')
+    if not isinstance(state, str) or state not in MODERATION_STATES:
+        raise ValueError('审核状态应为待审核、审核未通过、已查看公开正文或未知')
+    expected = value.get('expected_article_sha256')
+    if not isinstance(expected, str) or not re.fullmatch('[0-9a-f]{64}', expected):
+        raise ValueError('缺少当前文章内容检查点，请刷新后核对')
+    note = value.get('note', '')
+    if not isinstance(note, str) or len(note) > 400:
+        raise ValueError('观察备注不能超过 400 字')
+    url = value.get('url', '')
+    if not isinstance(url, str):
+        raise ValueError('请填写具体公开文章链接，或留空')
+    url = destinations.public_https(url) if url else ''
+    content_confirmed = value.get('content_confirmed') is True
+    if state == 'publicly_visible' and (not url or not content_confirmed):
+        raise ValueError('请在公开链接核对本篇文章的标题与正文，再确认已查看公开内容；成功提示或链接本身不能证明公开可访问')
+    message = _json({'schema_version': 1, 'source': 'operator_reported', 'note': note.strip(),
+                     'url': url, 'article_sha256': expected, 'content_confirmed': content_confirmed})
+    with closing(_connect(database)) as connection, connection:
+        connection.execute('BEGIN IMMEDIATE')
+        cycle = _cycle(connection, identifier)
+        article = connection.execute('''SELECT a.*,d.platform FROM articles a
+            JOIN geo_content_drafts d ON d.article_id=a.id
+            WHERE a.id=? AND d.cycle_id=? AND a.project_id=?''',
+            (article_id, identifier, cycle['project_id'])).fetchone()
+        target = connection.execute('SELECT * FROM geo_distribution_targets WHERE id=? AND project_id=?',
+                                    (target_id, cycle['project_id'])).fetchone()
+        if not article or not target or article['platform'] != 'target_' + target_id:
+            raise ValueError('文章必须属于本轮客户与所选目标平台，不能跨客户或跨平台登记')
+        config = json.loads(target['config'])
+        if url:
+            if (not destinations.scope_matches(url, config.get('publication_scope') or config['source_scope'])
+                    or url in [destinations.public_https(config[field]) for field in ('home_url', 'login_url', 'editor_url')]):
+                raise ValueError('请填写该平台范围内的具体公开文章链接，不能使用首页、登录页或编辑器入口')
+            prior_url = connection.execute('''SELECT article_id,target_id FROM geo_content_publications
+                WHERE url=? AND (article_id!=? OR target_id!=?) LIMIT 1''', (url, article_id, target_id)).fetchone()
+            if prior_url:
+                raise ValueError('该链接已经关联其他文章或目标，不能用作本篇文章的公开观察')
+        prior = connection.execute('SELECT * FROM geo_distribution_events WHERE id=?', (observation_id,)).fetchone()
+        if prior:
+            if ((prior['target_id'], prior['article_id'], prior['kind'], prior['state'], prior['message'])
+                    != (target_id, article_id, 'moderation', state, message)):
+                raise ValueError('这个观察编号已有不同记录，已保留原记录，不会覆盖')
+        else:
+            if fingerprint({'title': article['title'], 'content': article['content']}) != expected:
+                raise ValueError('文章内容已变更，请刷新后重新核对审核状态与公开正文')
+            stamp = _now()
+            connection.execute('''INSERT INTO geo_distribution_events
+                (id,target_id,article_id,kind,state,message,created_at) VALUES(?,?,?,?,?,?,?)''',
+                (observation_id, target_id, article_id, 'moderation', state, message, stamp))
+            connection.execute('UPDATE geo_content_cycles SET updated_at=? WHERE id=?', (stamp, identifier))
+    return get_cycle(database, identifier)
+
+
 def save_reported_publication(database, identifier, value):
     """Record an account owner's statement, never forge an adapter success job."""
     if not isinstance(value, dict) or value.get('confirmed') is not True:
@@ -322,6 +469,10 @@ def save_reported_publication(database, identifier, value):
             raise ValueError('发布链接不在该平台配置的公开网址范围内，请核对链接或平台配置')
         if url in [destinations.public_https(config[field]) for field in ('home_url', 'login_url', 'editor_url')]:
             raise ValueError('请填写具体的公开文章链接，不能使用平台首页、登录页或编辑器入口')
+        observation = _publication_moderation(connection, article_id, target_id,
+            fingerprint({'title': row['title'], 'content': row['content']}), url)
+        if observation and observation['state'] in ('pending', 'rejected'):
+            raise ValueError('本篇文章已记录待审核或审核未通过，不能登记为公开发布；请先核对该文章的公开正文，保留原审核记录')
         for case in cycle['baseline']['cases']:
             if not case['assessment']['answer_evaluable']:
                 continue

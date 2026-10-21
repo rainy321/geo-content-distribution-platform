@@ -10,7 +10,8 @@
     </el-card>
     <el-card v-if="nativeAvailable" shadow="never">
       <DoubaoPreparation/>
-      <div class="row"><strong>豆包写作会话</strong><el-select v-model="clientMode" :disabled="busy" aria-label="写作豆包界面"><el-option label="豆包对话" value="consumer"/><el-option label="豆包工作" value="work"/></el-select><el-input v-model="model" :disabled="busy" placeholder="模型选项可留空" aria-label="写作模型选项"/><el-button :disabled="busy" @click="login">登录豆包</el-button><el-button v-if="nativeBusy" @click="stop">停止任务</el-button></div>
+      <div class="row"><strong>豆包写作会话</strong><el-select :model-value="clientMode" :disabled="busy || writingContextPending" aria-label="写作豆包界面" @update:model-value="selectWritingMode"><el-option label="豆包对话" value="consumer"/><el-option label="豆包工作" value="work"/></el-select><el-input :model-value="model" :disabled="busy || writingContextPending" placeholder="模型选项可留空" aria-label="写作模型选项" @update:model-value="selectWritingModel"/><el-button :disabled="busy || writingContextPending" @click="login">登录豆包</el-button><el-button v-if="nativeBusy" @click="stop">停止任务</el-button></div>
+      <p class="hint">{{ writingContextPending ? '正在读取本轮写作选项，请稍候。' : '写作会话初始沿用本轮基线的界面和模型选项；你调整后的选择会按任务单保留。留空表示使用当前模型。' }}</p>
       <p class="hint" aria-live="polite">{{ currentTaskMessage }}</p>
     </el-card>
     <template v-if="cycle">
@@ -33,14 +34,15 @@
       </el-card>
       <el-card shadow="never">
         <h2>4 · 生成文章或帖子，进入现有发布流程</h2>
-        <div class="row"><el-select v-model="briefId" aria-label="内容选题"><el-option v-for="brief in cycle.analysis.briefs" :key="brief.id" :value="brief.id" :label="brief.topic"/></el-select><el-select v-model="platform" aria-label="目标发布渠道"><el-option v-for="(label,key) in cycle.channels" :key="key" :value="key" :label="label"/></el-select></div>
+        <div class="row"><el-select v-model="briefId" aria-label="内容选题"><el-option v-for="brief in cycle.analysis.briefs" :key="brief.id" :value="brief.id" :label="brief.topic"/></el-select><el-select v-model="platform" aria-label="目标发布渠道"><el-option v-for="(label,key) in cycle.channels" :key="key" :value="key" :label="writingChannelEnabled(cycle,key) ? label : `${label} · 已停用`" :disabled="!writingChannelEnabled(cycle,key)"/></el-select></div>
+        <p v-if="selectedDestination && !destinationEnabled(selectedDestination)" class="hint">{{ inactiveDestinationMessage }}</p>
         <p class="hint">{{ selectedDestination ? `已选择接入平台：${selectedDestination.config.name}；稿件将使用该平台的内容规范与长度限制。` : '当前为通用渠道稿。可在上方来源投放目标中接入并选择具体平台。' }}</p>
         <div class="row"><el-button v-if="nativeAvailable" type="primary" :disabled="busy || !canDraft" @click="generate('draft','doubao')">豆包生成并存入内容库</el-button><el-button :disabled="busy || !canDraft" @click="generate('draft','api')">AI API 生成并存入内容库</el-button></div>
         <p v-if="!canDraft" class="hint">请先保存核对后的事实资料，并保持输入与已保存内容一致。</p>
         <article v-for="draft in cycle.drafts" :key="draft.article_id" class="draft" data-testid="research-draft">
           <h3>{{ draft.title }}</h3><p>{{ cycle.channels[draft.platform] }} · {{ status[draft.status] || draft.status }} · 原始问题 {{ draft.provenance.brief.case_ids.join('、') }}</p>
           <p>{{ draft.summary }}</p>
-          <div class="row"><el-button @click="edit(draft)">审稿 / 编辑</el-button><el-button v-if="destinationSupportsFill(draftDestination(draft))" :disabled="busy || !nativeAvailable || draft.status !== 'ready'" @click="fillDestination(draft)">打开目标平台并填写</el-button><el-button v-if="draft.provenance.destination" :disabled="busy || !['ready','published'].includes(draft.status)" @click="openPublication(draft)">登记站内发布链接</el-button><el-button v-if="legacyChannel(draft) && legacyChannel(draft) !== 'owned_web'" :disabled="draft.status !== 'ready'" @click="publish(draft)">进入现有发布中心</el-button><el-button @click="downloadArticle(draft)">导出稿件</el-button></div>
+          <div class="row"><el-button @click="edit(draft)">审稿 / 编辑</el-button><el-button v-if="destinationSupportsFill(draftDestination(draft))" :disabled="busy || !nativeAvailable || draft.status !== 'ready' || !destinationEnabled(draftDestination(draft))" @click="fillDestination(draft)">打开目标平台并填写</el-button><el-button v-if="draft.provenance.destination" :disabled="busy || !['ready','published'].includes(draft.status)" @click="openPublication(draft)">登记站内发布链接</el-button><el-button v-if="legacyChannel(draft) && legacyChannel(draft) !== 'owned_web'" :disabled="draft.status !== 'ready'" @click="publish(draft)">进入现有发布中心</el-button><el-button @click="downloadArticle(draft)">导出稿件</el-button></div>
           <p v-if="draft.provenance.destination && !destinationSupportsFill(draftDestination(draft))" class="hint">该目标当前支持登录与导出，辅助填写尚未接入。可导出稿件后在平台编辑。</p>
           <p v-if="draft.provenance.destination" class="hint">来源匹配依据：{{ draft.provenance.distribution_basis?.source_ids.join('、') || '手动选择，当前选题未匹配来源网址' }}。填写可能触发网站自动保存；发布状态以实际结果为准。已有发布中心需另外绑定对应账号。</p>
           <p v-if="draft.platform === 'owned_web'" class="hint">官网稿可导出交给网站编辑发布。</p>
@@ -51,6 +53,7 @@
       </el-card>
       <el-card shadow="never">
         <h2>5 · 发布记录与同题复测</h2>
+        <GeoPublicationReview v-if="cycle" :cycle="cycle" :busy="busy" @updated="applyCycle"/>
         <p>发布器确认成功：{{ cycle.publications.length }} 条；用户登记：{{ cycle.reported_publications?.length || 0 }} 条（尚未独立核验）。演示和失败任务不计成功。</p>
         <p v-for="item in cycle.reported_publications" :key="item.id" class="hint"><el-tag type="info">用户登记，未核验</el-tag> {{ date(item.published_at) }} · <a :href="safeUrl(item.url)" target="_blank" rel="noopener noreferrer">查看登记链接</a></p>
         <p class="hint">复测使用原计划、原界面和原模型选项，新开一轮采集。发布不代表已被索引；条件相同也只能观察变化，不能证明因果。</p>
@@ -81,14 +84,30 @@ import { geoContentApi } from '@/api/geoContent'
 import { geoTestApi } from '@/api/geoTest'
 import GeoDestinations from '@/components/GeoDestinations.vue'
 import DoubaoPreparation from '@/components/DoubaoPreparation.vue'
+import GeoPublicationReview from '@/components/GeoPublicationReview.vue'
 import { destinationContinuationText, destinationPreparationText, destinationSupportsFill, isDestinationTask } from '@/utils/geoDestinationSession'
+import { createWritingPreferences } from '@/utils/geoWritingOptions'
+import { destinationEnabled, writingChannelEnabled, inactiveDestinationMessage } from '@/utils/geoDestinationAvailability'
 
 const route = useRoute(), router = useRouter()
 const reports = ref([]), cycles = ref([]), cycle = ref(null), cycleId = ref(''), reportId = ref(''), retestReportId = ref('')
 const loading = ref(false), working = ref(false), nativeAvailable = ref(false), task = ref({status:'idle'})
 const clientMode = ref('consumer'), model = ref(''), factsText = ref(''), confirmed = ref(false), briefId = ref(''), platform = ref('zhihu')
+const writingPreferences = createWritingPreferences({getItem:key=>window.localStorage.getItem(key),setItem:(key,value)=>window.localStorage.setItem(key,value)})
+const applyWritingOptions = value => {
+  const choice = writingPreferences.get(cycleId.value, value)
+  clientMode.value = choice.client_mode; model.value = choice.model_label
+}
+const rememberWritingOptions = () => writingPreferences.set(cycleId.value,{client_mode:clientMode.value,model_label:model.value})
+const selectWritingMode = value => {
+  if (!['consumer','work'].includes(value)) return
+  if (value !== clientMode.value) model.value = ''
+  clientMode.value = value; rememberWritingOptions()
+}
+const selectWritingModel = value => {model.value = typeof value === 'string' ? value : '';rememberWritingOptions()}
 const publicationVisible = ref(false), publication = ref({url:'',published_at:'',confirmed:false,note:''})
 const nativeBusy = computed(() => task.value.status === 'running'), busy = computed(() => working.value || nativeBusy.value)
+const writingContextPending = computed(() => Boolean(cycleId.value && cycle.value?.id !== cycleId.value))
 const loginScope = ref(null)
 let loginRequest = 0
 const scopedLoginMessage = (current, scope, currentCycleId, isWorking = false) => {
@@ -111,7 +130,7 @@ const factsValue = () => factsText.value.split('\n').filter(line => line.trim())
   return {text:text.trim(),source_url:url.join('|').trim(),confirmed:confirmed.value}
 })
 const factsStoredText = facts => facts.map(fact => `${fact.text} | ${fact.source_url || ''}`).join('\n')
-const canDraft = computed(() => Boolean(cycle.value?.facts.length && confirmed.value && factsStoredText(factsValue()) === factsStoredText(cycle.value.facts) && briefId.value))
+const canDraft = computed(() => Boolean(cycle.value?.facts.length && confirmed.value && factsStoredText(factsValue()) === factsStoredText(cycle.value.facts) && briefId.value && writingChannelEnabled(cycle.value,platform.value)))
 const selectedDestination = computed(() => cycle.value?.destinations.find(item => item.key === platform.value))
 const journeyProjectId = computed(() => {const value=Number(route.query.journey_project);return Number.isSafeInteger(value)&&value>0?value:null})
 const returnToJourney = () => router.push({path:'/journey',query:{journey_project:String(journeyProjectId.value)}})
@@ -121,27 +140,40 @@ const feedbackStages = {collection_only:'尚无发布证据',conditions_mismatch
 const date = value => value ? new Date(value).toLocaleString('zh-CN', {timeZone:'Asia/Hong_Kong',hour12:false}) : '时间未知'
 const rate = value => typeof value === 'number' ? `${Math.round(value*100)}%` : '未知'
 const safeUrl = value => { try { const url = new URL(value); return ['http:','https:'].includes(url.protocol) && !url.username && !url.password ? url.href : null } catch { return null } }
-let timer, handledTask
-const applyCycle = value => {
-  cycle.value = value; cycleId.value = value.id
+let timer, handledTask, cycleEpoch = 0, cycleLoadRequest = 0, reloadRequest = 0, pollRequest = 0
+const cycleScope = () => ({id:cycleId.value,epoch:cycleEpoch})
+const sameCycleScope = scope => scope.id === cycleId.value && scope.epoch === cycleEpoch
+const applyCycle = (value, {select=false,scope=null}={}) => {
+  if (!value?.id || (scope && !sameCycleScope(scope)) || (!select && value.id !== cycleId.value)) return false
+  cycle.value = value; if (select) cycleId.value = value.id
+  applyWritingOptions(value)
   factsText.value = factsStoredText(value.facts); confirmed.value = value.facts.length > 0
   if (!value.analysis.briefs.some(brief => brief.id === briefId.value)) briefId.value = value.analysis.briefs[0]?.id || ''
   if (!value.channels[platform.value]) platform.value = 'zhihu'
+  return true
 }
-const loadCycle = async () => { if (cycleId.value) applyCycle((await geoContentApi.get(cycleId.value)).data) }
+const loadCycle = async () => {
+  const scope = cycleScope(), request = ++cycleLoadRequest
+  if (!scope.id) return
+  const value = (await geoContentApi.get(scope.id)).data
+  if (request === cycleLoadRequest) applyCycle(value,{scope})
+}
 const reload = async () => {
+  const scope = cycleScope(), request = ++reloadRequest
   loading.value = true
-  try { const [r,c] = await Promise.all([geoTestApi.listReports(),geoContentApi.list()]); reports.value = r.data; cycles.value = c.data; await loadCycle() }
-  finally { loading.value = false }
+  try { const [r,c] = await Promise.all([geoTestApi.listReports(),geoContentApi.list()]); if(request!==reloadRequest)return;reports.value = r.data; cycles.value = c.data; if(sameCycleScope(scope))await loadCycle() }
+  finally { if(request===reloadRequest)loading.value = false }
 }
 const create = async () => {
+  const scope = cycleScope()
   working.value = true
-  try { applyCycle((await geoContentApi.create({report_id:reportId.value})).data); cycles.value = (await geoContentApi.list()).data; router.replace({path:'/geo-content',query:{cycle:cycleId.value}}) }
+  try { const value=(await geoContentApi.create({report_id:reportId.value})).data;if(!sameCycleScope(scope))return;applyCycle(value,{select:true});const selected=cycleScope(),items=(await geoContentApi.list()).data;if(sameCycleScope(selected)){cycles.value=items;router.replace({path:'/geo-content',query:{cycle:cycleId.value}})} }
   finally { working.value = false }
 }
 const saveFacts = async () => {
+  const scope = cycleScope()
   working.value = true
-  try { applyCycle((await geoContentApi.facts(cycleId.value,{facts:factsValue(),revision:cycle.value.revision})).data); ElMessage.success('事实资料已保存') }
+  try { if(applyCycle((await geoContentApi.facts(scope.id,{facts:factsValue(),revision:cycle.value.revision})).data,{scope}))ElMessage.success('事实资料已保存') }
   finally { working.value = false }
 }
 const reuseFacts = () => {factsText.value=factsStoredText(cycle.value.fact_candidates.facts);confirmed.value=false;ElMessage.info('已带入候选资料，请重新核对后勾选确认')}
@@ -150,60 +182,69 @@ const openPublication = draft => {
   publication.value={article_id:draft.article_id,target_id:draft.provenance.destination.id,url:'',published_at:local,confirmed:false,note:''};publicationVisible.value=true
 }
 const savePublication = async () => {
+  const scope = cycleScope()
   working.value=true
-  try {const timestamp=new Date(publication.value.published_at);if(!Number.isFinite(timestamp.getTime())) throw new Error('请填写平台实际发布时间');applyCycle((await geoContentApi.publication(cycleId.value,{...publication.value,published_at:timestamp.toISOString()})).data);publicationVisible.value=false;ElMessage.success('发布声明已保存，证据级别为用户登记')}
+  try {const timestamp=new Date(publication.value.published_at);if(!Number.isFinite(timestamp.getTime())) throw new Error('请填写平台实际发布时间');if(!applyCycle((await geoContentApi.publication(scope.id,{...publication.value,published_at:timestamp.toISOString()})).data,{scope}))return;publicationVisible.value=false;ElMessage.success('发布声明已保存，证据级别为用户登记')}
   catch(error) {if(!error.response) ElMessage.error(error.message)}
   finally {working.value=false}
 }
 const options = () => ({client_mode:clientMode.value,model_label:model.value.trim()})
 const generate = async (kind, provider) => {
+  const scope = cycleScope()
   working.value = true
   try {
     if (provider === 'doubao') {
-      const result = await window.pywebview.api.generate_research(cycleId.value,kind,briefId.value,platform.value,options())
+      const result = await window.pywebview.api.generate_research(scope.id,kind,briefId.value,platform.value,options())
       if (result.error) throw new Error(result.error)
-      task.value = result
+      if (sameCycleScope(scope)) task.value = result
     } else {
-      const result = (await geoContentApi.generate(cycleId.value,{kind,brief_id:briefId.value,platform:platform.value})).data
-      applyCycle(result.cycle); cycles.value = (await geoContentApi.list()).data
+      const result = (await geoContentApi.generate(scope.id,{kind,brief_id:briefId.value,platform:platform.value})).data
+      if(!applyCycle(result.cycle,{scope}))return
+      const items=(await geoContentApi.list()).data;if(!sameCycleScope(scope))return;cycles.value=items
       ElMessage.success(kind === 'draft' ? '草稿已存入内容库，请审稿' : '选题已保存')
     }
   } catch (error) { if (!error.response) ElMessage.error(error.message || '内容任务未完成') }
   finally { working.value = false }
 }
 const login = async () => {
+  if(cycleId.value && cycle.value?.id!==cycleId.value)return
   const currentCycleId = cycleId.value, request = ++loginRequest
   loginScope.value = null; working.value = true
   try {
     const result = await window.pywebview.api.open_login(options())
     if (result.error) throw new Error(result.error)
-    task.value = result
-    if (request === loginRequest && currentCycleId === cycleId.value) loginScope.value = {taskId:result.id,cycleId:currentCycleId}
+    if (request === loginRequest && currentCycleId === cycleId.value) {task.value = result;loginScope.value = {taskId:result.id,cycleId:currentCycleId}}
   } catch(error) { ElMessage.error(error.message || '登录窗口未打开') }
   finally { working.value = false }
 }
 const stop = () => window.pywebview.api.stop_task()
-const selectDestination = key => {platform.value=key;ElMessage.success('已选择目标平台，请在下方生成平台稿')}
+const selectDestination = key => {if(!writingChannelEnabled(cycle.value,key))return;platform.value=key;ElMessage.success('已选择目标平台，请在下方生成平台稿')}
 const draftDestination = draft => cycle.value?.destinations.find(item=>item.id===draft.provenance.destination?.id)
 const openDestination = async ({target_id,article_id}) => {
-  try {const result=await window.pywebview.api.open_destination(cycleId.value,target_id,article_id || null);if(result.error) throw new Error(result.error);task.value=result}
+  if(!destinationEnabled(cycle.value?.destinations.find(item=>item.id===target_id))){ElMessage.info(inactiveDestinationMessage);return}
+  const scope = cycleScope()
+  try {const result=await window.pywebview.api.open_destination(scope.id,target_id,article_id || null);if(result.error) throw new Error(result.error);if(sameCycleScope(scope))task.value=result}
   catch(error) {ElMessage.error(error.message || '平台窗口未打开')}
 }
 const fillDestination = async draft => {
+  const scope=cycleScope()
   const target=draftDestination(draft)
+  if(!destinationEnabled(target)){ElMessage.info(inactiveDestinationMessage);return}
   if(!destinationSupportsFill(target)){ElMessage.info('该目标当前支持登录与导出，辅助填写尚未接入');return}
-  try {await ElMessageBox.confirm(`${destinationPreparationText(target)} 将填入已审稿的标题和正文，其他已有内容会保留并暂停，网站可能自动保存。${destinationContinuationText(window.pywebview?.api)} 最后提交由你确认。`,'打开平台填写',{confirmButtonText:'打开并填写',cancelButtonText:'取消'});await openDestination({target_id:draft.provenance.destination.id,article_id:draft.article_id})}
+  try {await ElMessageBox.confirm(`${destinationPreparationText(target)} 将填入已审稿的标题和正文，其他已有内容会保留并暂停，网站可能自动保存。${destinationContinuationText(window.pywebview?.api)} 最后提交由你确认。`,'打开平台填写',{confirmButtonText:'打开并填写',cancelButtonText:'取消'});if(sameCycleScope(scope))await openDestination({target_id:draft.provenance.destination.id,article_id:draft.article_id})}
   catch(error) {if(error instanceof Error) ElMessage.error(error.message)}
 }
 const retest = async () => {
+  const scope = cycleScope()
   try {
     await ElMessageBox.confirm('将按基线问题开启新一轮豆包采集。发布后的索引时滞未知，采集结果只作观察。','开始同题复测',{type:'info'})
-    const result = await window.pywebview.api.start_research_retest(cycleId.value)
+    if(!sameCycleScope(scope))return
+    const result = await window.pywebview.api.start_research_retest(scope.id)
     if (result.error) throw new Error(result.error)
-    task.value = result
+    if(sameCycleScope(scope))task.value = result
   } catch(error) { if (error instanceof Error) ElMessage.error(error.message) }
 }
-const attachRetest = async () => { applyCycle((await geoContentApi.retest(cycleId.value,retestReportId.value)).data) }
+const attachRetest = async () => { const scope=cycleScope();applyCycle((await geoContentApi.retest(scope.id,retestReportId.value)).data,{scope}) }
 const edit = draft => router.push({path:'/content-create',query:{articleId:draft.article_id}})
 const legacyChannel = draft => draft.provenance.destination ? draft.provenance.destination.channel : draft.platform
 const publish = draft => router.push({path:'/publish-center',query:{article_id:draft.article_id,platform:legacyChannel(draft)}})
@@ -212,8 +253,10 @@ const download = (data,name) => downloadFile(JSON.stringify(data,null,2),name,'a
 const downloadArticle = draft => downloadFile(`# ${draft.title}\n\n${draft.content}`,`article-${draft.article_id}.md`,'text/markdown')
 const poll = async () => {
   if (!nativeAvailable.value) return
+  const request=++pollRequest,previousTaskId=task.value.id
   try {
     const current = await window.pywebview.api.get_task()
+    if(request!==pollRequest || task.value.id!==previousTaskId)return
     task.value = current
     if (current.status !== 'running' && current.id && handledTask !== current.id) {
       handledTask = current.id
@@ -221,8 +264,13 @@ const poll = async () => {
     }
   } catch { /* Native shutdown leaves the last durable task untouched. */ }
 }
-watch(clientMode, () => { model.value = '' })
-watch(cycleId, () => { loginRequest++; loginScope.value = null })
+watch(cycleId, () => { loginRequest++; loginScope.value = null },{flush:'sync'})
+watch(()=>cycleId.value, () => {
+  cycleEpoch++; cycleLoadRequest++
+  publicationVisible.value=false
+  if(cycle.value?.id!==cycleId.value){cycle.value=null;factsText.value='';confirmed.value=false;briefId.value='';platform.value='zhihu'}
+  applyWritingOptions(cycle.value)
+},{flush:'sync'})
 onMounted(async () => {
   cycleId.value = typeof route.query.cycle === 'string' ? route.query.cycle : ''
   reportId.value = typeof route.query.report === 'string' ? route.query.report : ''

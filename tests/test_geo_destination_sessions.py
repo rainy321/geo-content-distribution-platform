@@ -28,12 +28,34 @@ LOGIN_URL = 'https://editor.gates.example.org/login'
 EMPTY = '<input id="title" type="text"><textarea id="body"></textarea>'
 
 
-def csdn_document(body='', extra=''):
+def csdn_document(body='', extra='', images=()):
+    media = ''.join('<img src="' + html.escape(source, quote=True) + '">' for source in images)
     return '''<div class="article-bar__title-display" onclick="this.style.display='none';document.querySelector('input').style.display='block'">标题</div>
         <input type="text" class="article-bar__title article-bar__title--input text-input" style="display:none" value="【无标题】">
-        <pre contenteditable="true" style="min-height:100px" class="editor__inner markdown-highlighting"><div class="cledit-section">''' + html.escape(body) + '''</div></pre>
-        <script>document.querySelector('pre').addEventListener('input',e=>{const text=typeof e.data==='string'?e.data:e.currentTarget.innerText;
-        const section=document.createElement('div');section.className='cledit-section';section.textContent=text;e.currentTarget.replaceChildren(section);});</script>''' + extra
+        <pre contenteditable="true" style="min-height:100px" class="editor__inner markdown-highlighting"><div class="cledit-section">''' + html.escape(body) + media + '''</div></pre>
+        <button class="navigation_bar_more_actions_trigger" onclick="const popup=document.querySelector('.more-actions-popup');popup.hidden=!popup.hidden">更多操作</button>
+        <div class="more-actions-popup" hidden><button onclick="this.parentElement.hidden=true;document.getElementById('import-markdown-file-input').click()">导入</button></div>
+        <input id="import-markdown-file-input" type="file" accept=".md" hidden>
+        <script>
+        window.importCount=0;window.bodyInputEvents=0;
+        window.originalDocument={title:document.querySelector('input').value,text:document.querySelector('pre').textContent};
+        document.querySelector('pre').addEventListener('input',()=>window.bodyInputEvents++);
+        document.getElementById('import-markdown-file-input').addEventListener('change',event=>{
+            window.importCount++;const file=event.currentTarget.files[0];
+            window.importedName=file.name;window.importedMime=file.type;
+            const reader=new FileReader();
+            reader.onload=loaded=>{
+                const text=(loaded.target.result+'\\n').replace(/\\n\\n$/,'\\n');
+                const section=document.createElement('div');section.className='cledit-section';section.textContent=text;
+                document.querySelector('pre').replaceChildren(section);window.syntheticEditorModel=text;
+                window.newDocument={articleid:null,text};
+                const title=document.querySelector('input');title.value=file.name.replace(/\\.[^.]+$/,'');
+                title.style.display='none';document.querySelector('.article-bar__title-display').style.display='block';
+                event.target.value='';
+            };
+            reader.readAsText(file);
+        });
+        </script>''' + extra
 
 
 class DestinationSessionTests(unittest.IsolatedAsyncioTestCase):
@@ -232,7 +254,7 @@ class DestinationSessionTests(unittest.IsolatedAsyncioTestCase):
         await self.start_session(editor='<p>未配置通用选择器</p>')
         adapter = SimpleNamespace(supports=lambda _: True,
             probe_editor=AsyncMock(return_value={'phase': 'editor_ready', 'editor_ready': True,
-                'body_state': 'welcome_example', 'message': '编辑器可用；完整首次示例将由已审稿内容替换。'}))
+                'body_state': 'welcome_example', 'message': '编辑器可用；完整首次示例已识别，可将已审稿文章正常导入为新文档。'}))
         self.stack.enter_context(patch.object(services, 'csdn_editor', adapter))
         result = await self.request_check()
         self.assertEqual(result['state'], 'editor_ready')
@@ -248,22 +270,33 @@ class DestinationSessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.events[-1]['destination_session']['content_write_attempted'])
         self.assertEqual(self.events[-1]['state'], 'filled')
         self.assertEqual(await self.page.locator(csdn_editor.TITLE).input_value(), ARTICLE['title'])
-        self.assertEqual(await self.page.locator(csdn_editor.BODY).text_content(), ARTICLE['content'])
+        self.assertEqual(await self.page.locator(csdn_editor.BODY).text_content(), ARTICLE['content'] + '\n')
+        self.assertEqual(await self.page.evaluate('window.syntheticEditorModel'), ARTICLE['content'] + '\n')
+        self.assertEqual(await self.page.evaluate('window.importCount'), 1)
+        self.assertEqual(await self.page.evaluate('window.bodyInputEvents'), 0)
+        self.assertEqual(await self.page.evaluate('window.importedMime'), 'text/markdown')
+        self.assertRegex(await self.page.evaluate('window.importedName'), r'^geo-import-[a-f0-9]{32}\.md$')
+        self.assertEqual(await self.page.evaluate('window.originalDocument.text'), '')
+        self.assertIsNone(await self.page.evaluate('window.newDocument.articleid'))
         with patch.object(csdn_editor, 'fill_editor', AsyncMock(side_effect=AssertionError('No CSDN replay'))):
             await self.request_check()
+        self.assertEqual(await self.page.evaluate('window.importCount'), 1)
         self.assertEqual(len(self.context.pages), 1)
 
     async def test_csdn_cached_binding_with_verified_welcome_can_refresh_same_check_tab(self):
         from services import csdn_editor
         welcome = '隔离测试的完整欢迎示例，要求全文匹配。'
+        media = [['IMG', f'https://example.invalid/welcome-{index}.png', None, None] for index in range(4)]
+        images = [entry[1] for entry in media]
         url = 'https://editor.csdn.net/md/'
-        with patch.object(csdn_editor, 'WELCOME_SHA256', hashlib.sha256(welcome.encode()).hexdigest()):
+        with patch.object(csdn_editor, 'WELCOME_SHA256', hashlib.sha256(welcome.encode()).hexdigest()), \
+                patch.object(csdn_editor, 'WELCOME_MEDIA_SHA256', hashlib.sha256(json.dumps(media, separators=(',', ':')).encode()).hexdigest()):
             await self.start_session(login=iframe(BIND_WECHAT),
-                editor=csdn_document(welcome, iframe(BIND_WECHAT)),
+                editor=csdn_document(welcome, iframe(BIND_WECHAT), images),
                 session_config={'editor_url': url, 'title_selector': '', 'body_selector': ''})
             self.assertEqual((await self.request_check())['state'], 'binding_required')
             self.assertEqual(len(self.context.pages), 2)
-            self.documents[url] = csdn_document(welcome)
+            self.documents[url] = csdn_document(welcome, images=images)
             result = await self.request_check()
             self.assertEqual(result['state'], 'editor_ready')
             self.assertEqual(result['body_state'], 'welcome_example')

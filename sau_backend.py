@@ -988,6 +988,18 @@ def geo_content_report_publication(identifier):
         return jsonify(code=400, msg=str(error), data=None), 400
 
 
+@app.route('/api/geo-content/cycles/<identifier>/moderation-observations', methods=['POST'])
+def geo_content_report_moderation(identifier):
+    try:
+        cycle = geo_content_store.save_moderation_observation(
+            app.config['DATABASE_PATH'], identifier, request.get_json(silent=True))
+        return jsonify(code=200, msg='已保存运营方观察；审核和公开状态不等于自动核验结果，不会重新提交文章', data=cycle)
+    except geo_content_store.ResearchNotFoundError as error:
+        return jsonify(code=404, msg=str(error), data=None), 404
+    except ValueError as error:
+        return jsonify(code=400, msg=str(error), data=None), 400
+
+
 @app.route('/api/geo-content/cycles/<identifier>/destinations', methods=['POST'])
 @app.route('/api/geo-content/cycles/<identifier>/destinations/<target_id>', methods=['GET', 'PUT'])
 def geo_content_destinations(identifier, target_id=None):

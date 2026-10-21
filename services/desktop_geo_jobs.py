@@ -365,6 +365,7 @@ class DesktopGeoJobs:
         try:
             cycle = geo_content_store.get_cycle(database, cycle_id)
             target = geo_destination_service.get_target(database, cycle['project_id'], target_id)
+            geo_destination_service.assert_target_enabled(target)
             if article_id is not None and (type(article_id) is not int or article_id <= 0):
                 raise ValueError('文章编号无效')
         except (ValueError, geo_content_store.ResearchNotFoundError) as error:
@@ -378,6 +379,7 @@ class DesktopGeoJobs:
                 current, article, event_id = geo_destination_service.reserve_fill(database, cycle['project_id'], target_id, article_id)
             else:
                 current = geo_destination_service.get_target(database, cycle['project_id'], target_id)
+            geo_destination_service.assert_target_enabled(current)
             check_requested = asyncio.Event()
             with self.lock:
                 self._destination_check = check_requested
@@ -421,6 +423,12 @@ class DesktopGeoJobs:
                     or self.job.get('kind') not in ('destination_login', 'destination_fill')
                     or self._destination_check_task_id != task_id):
                 return {'error': '仅能检查当前正在运行的平台接入任务；请保留原窗口。'}
+            try:
+                cycle = geo_content_store.get_cycle(self.data / 'database.db', self.job.get('cycle_id'))
+                target = geo_destination_service.get_target(self.data / 'database.db', cycle['project_id'], self.job.get('target_id'))
+                geo_destination_service.assert_target_enabled(target)
+            except (ValueError, geo_content_store.ResearchNotFoundError) as error:
+                return {'error': str(error)}
             loop, signal = self._destination_check_loop, self._destination_check
             session = (self.job.get('progress') or {}).get('destination_session') or {}
             if loop is None or signal is None or loop.is_closed() or not session.get('window_open'):

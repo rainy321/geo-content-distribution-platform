@@ -296,6 +296,8 @@ async def _check_tab_has_content(page, config):
 
 async def open_session(target, profile_dir, executable_path, *, fallback_executable_path=None, article=None,
                        progress=None, check_requested=None, wait_seconds=None):
+    from services.geo_destination_service import assert_target_enabled
+    assert_target_enabled(target)
     from playwright.async_api import async_playwright
     from services.geo_test_runner import exclusive_lock
     from services.browser_runtime import launch_context

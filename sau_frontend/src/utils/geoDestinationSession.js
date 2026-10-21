@@ -13,16 +13,21 @@ export const matchesDestinationTask = (task, cycleId, targetId) => Boolean(
 
 export const destinationPreparation = target => {
   const config = target?.config || {}
-  const csdn = ['home_url','source_scope','login_url','editor_url'].some(key => {
-    try {const url = new URL(config[key]);return url.protocol === 'https:' && !url.username && !url.password && csdnHosts.has(url.hostname)}
+  const hasTrustedSurface = predicate => ['home_url','source_scope','login_url','editor_url'].some(key => {
+    try {const url = new URL(config[key]);return url.protocol === 'https:' && !url.username && !url.password && (!url.port || url.port === '443') && predicate(url)}
     catch {return false}
   })
+  const csdn = hasTrustedSurface(url=>csdnHosts.has(url.hostname))
+  const tencent = hasTrustedSurface(url=>['cloud.tencent.com','developer.cloud.tencent.com'].includes(url.hostname) && (url.pathname === '/developer' || url.pathname.startsWith('/developer/')))
   return {
-    login:'在平台专用窗口正常登录或注册；可能需要扫码或手机号。',
+    login:tencent ? '在腾讯云专用窗口使用已有账号正常登录或注册，可按页面选择微信扫码等方式。' : '在平台专用窗口正常登录或注册；可能需要扫码或手机号。',
     verification:'登录后或发文时仍可能要求安全验证，请在同一窗口正常完成。',
-    binding:csdn ? 'CSDN 发文可能要求微信或手机号绑定，以当前账号提示为准。' : '实名、账号绑定或投稿申请，以该平台当前账号提示为准。',
-    editor:csdn && target?.capability === 'platform_assisted_fill' ? '仅确认空白或完整欢迎示例后，才会将已审稿文章正常导入为新文档；其他已有草稿会保留并暂停填写。' : '',
-    publishing:csdn ? '发布前核对平台已有标签、AI创作声明和可见范围；自定义标签可能受账号等级限制，跨站备份或同步由你选择。' : '',
+    binding:csdn ? 'CSDN 发文可能要求微信或手机号绑定，以当前账号提示为准；绑定后仍可能需要用已绑定的微信扫码确认本次发布。'
+      : tencent ? '腾讯云发文可能需要手机验证、实名认证和开通专栏；首次专栏可能需审核，以当前账号页面为准。' : '实名、账号绑定或投稿申请，以该平台当前账号提示为准。',
+    editor:csdn && target?.capability === 'platform_assisted_fill' ? '仅确认空白或完整欢迎示例后，才会将已审稿文章正常导入为新文档；其他已有草稿会保留并暂停填写。'
+      : tencent ? '编辑器可能自动保存草稿；切换草稿或编辑器前先核对保存状态，已有内容不会自动覆盖。' : '',
+    publishing:csdn ? '发布前核对平台已有标签、AI创作声明和可见范围；自定义标签可能受账号等级限制，跨站备份或同步由你选择。'
+      : tencent ? '当前社区规范不鼓励较多段落为 AI 生成的内容，并限制商业推广。投稿前核对实际技术贡献、专栏及封面要求；标注 AI 不代表内容已获准发布。' : '',
     capability:target?.capability === 'platform_assisted_fill'
       ? '当前支持平台专用辅助填写；投稿条件需核对，最终提交由你在平台确认。'
       : target?.capability === 'configured_fill'
@@ -39,6 +44,22 @@ export const destinationPreparationText = target => {
 export const destinationContinuationText = api => typeof api?.check_destination_session === 'function'
   ? '完成登录、验证或绑定后保持窗口打开，在平台准备卡“检查并继续”。'
   : '当前桌面版本不支持窗口复检，请按原专用窗口提示正常完成操作；原任务记录保留，升级后可使用新的检查流程。'
+
+export const destinationEventView = event => {
+  const operations = {login:'登录与验证',fill:'填写文章',submit:'投稿尝试',moderation:'审核观察',fill_recovery:'填稿恢复',manual_review:'检查恢复',interrupted:'中断记录'}
+  const states = {configured:'已配置',session_saved:'会话已保留，状态待核对',login_open:'等待平台操作',editor_ready:'编辑器已检查',preparing:'尝试未结束',filled:'已填写，发布待确认',need_action:'待检查',reviewed:'已检查',pending:'待审核',rejected:'审核未通过',publicly_visible:'已查看公开正文，运营方观察',unknown:'暂不确定'}
+  const rawMessage = typeof event?.message === 'string' ? event.message : ''
+  let message = rawMessage.slice(0,800)
+  if(event?.kind === 'moderation') {
+    try {
+      const metadata = JSON.parse(rawMessage)
+      message = metadata?.schema_version === 1 && metadata?.source === 'operator_reported' && typeof metadata.note === 'string'
+        ? `${metadata.note.slice(0,400) || '已记录本次平台状态。'} 此为运营方观察，软件未自动核验。`
+        : '这条平台观察记录需要核对，请查看文章的审核观察。'
+    } catch {message = '这条平台观察记录需要核对，请查看文章的审核观察。'}
+  }
+  return {operation:operations[event?.kind] || '其他记录',state:states[event?.state] || '状态待核对',message}
+}
 
 // Only the live task for this cycle and target may be checked. Saved cookies,
 // a closed window and an old worker's can_check flag are not authentication.
