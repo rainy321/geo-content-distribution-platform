@@ -62,6 +62,8 @@ test('CSDN welcome example is described separately from an empty editor and neve
   const session=view(task({state:'editor_ready',editor_ready:true,body_state:'welcome_example'}))
   assert.match(session.title,/首次示例/)
   assert.match(session.detail,/已审稿填写任务/)
+  assert.match(session.detail,/导入文章为新文档/)
+  assert.match(session.detail,/原示例文档保留/)
   assert.doesNotMatch(session.detail,/空白|已发布|登录成功/)
 })
 
@@ -111,7 +113,19 @@ test('fixed platform assistance does not require customer CSS and login-only tar
   for(const target of [undefined,{capability:'login_export'},{config:{title_selector:'input'}}])assert.equal(destinationSupportsFill(target),false)
   const csdn={capability:'platform_assisted_fill',config:{editor_url:'https://editor.csdn.net/md/'}}
   assert.match(destinationPreparationText(csdn),/其他已有草稿会保留并暂停填写/)
+  assert.match(destinationPreparation(csdn).editor,/导入为新文档/)
   assert.match(destinationPreparation(csdn).capability,/最终提交由你/)
   assert.match(destinationPreparation({capability:'login_export'}).capability,/登录与导出/)
   assert.doesNotMatch(destinationPreparation({capability:'login_export'}).editor,/替换/)
+})
+
+test('CSDN publish preparation reaches both the card field and shared native confirmation text',()=>{
+  const csdn={capability:'platform_assisted_fill',config:{editor_url:'https://editor.csdn.net/md/'}}
+  const preparation=destinationPreparation(csdn)
+  for(const detail of ['平台已有标签','AI创作声明','可见范围','自定义标签可能受账号等级限制','跨站备份或同步由你选择'])assert.ok(preparation.publishing.includes(detail))
+  assert.ok(destinationPreparationText(csdn).includes(preparation.publishing))
+  assert.doesNotMatch(preparation.publishing,/3级|三级|必须.*自定义/)
+  const other={config:{editor_url:'https://example.org/editor'}}
+  assert.equal(destinationPreparation(other).publishing,'')
+  assert.doesNotMatch(destinationPreparationText(other),/自定义标签/)
 })

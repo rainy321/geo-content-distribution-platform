@@ -89,6 +89,20 @@ const loading = ref(false), working = ref(false), nativeAvailable = ref(false), 
 const clientMode = ref('consumer'), model = ref(''), factsText = ref(''), confirmed = ref(false), briefId = ref(''), platform = ref('zhihu')
 const publicationVisible = ref(false), publication = ref({url:'',published_at:'',confirmed:false,note:''})
 const nativeBusy = computed(() => task.value.status === 'running'), busy = computed(() => working.value || nativeBusy.value)
+const loginScope = ref(null)
+let loginRequest = 0
+const scopedLoginMessage = (current, scope, currentCycleId, isWorking = false) => {
+  if (isWorking || !scope?.taskId || scope.cycleId !== currentCycleId || current?.id !== scope.taskId || current.kind !== 'login') return ''
+  if (current.status === 'running') return '请在豆包专用窗口正常完成登录或安全验证，随后关闭这个单独登录窗口，返回软件核对状态；关闭不证明认证完成。'
+  if (current.status !== 'completed') return '本次登录操作已结束，登录与验证状态仍需核对。原任务记录已保留，请先检查原窗口。'
+  const result = current.result || {}, observed = result.login_observation || {}
+  const mode = value => ['consumer','work'].includes(value) ? value : null
+  const label = value => value === 'consumer' ? '豆包对话' : value === 'work' ? '豆包工作' : '未知'
+  const selected = mode(result.requested_client_mode), actual = mode(observed.client_mode)
+  const login = observed.login_required === true ? '仍需登录' : observed.login_required === false ? '未见登录提示，尚未核验' : '登录状态未知'
+  const challenge = observed.challenge === true ? '仍需安全验证' : observed.challenge === false ? '未见安全验证' : '验证状态未知'
+  return `${selected && actual && selected !== actual ? '所选 / 实际界面不一致。' : '本次登录窗口已结束。'}所选：${label(selected)}；最后实际：${label(actual)}；${login}；${challenge}。关闭窗口不证明认证完成，会话保存仍需核对；再次采集前会检查。`
+}
 const category = { discovery:'行业自然发现', brand_identity:'品牌核验', website_guided:'官网引导核验' }
 const status = { draft:'待审草稿', ready:'就绪', publishing:'发布中', published:'已发布' }
 const jobStatus = { success:'成功', failed:'失败', queued:'待执行', scheduled:'已计划', processing:'执行中', need_action:'待人工处理' }
@@ -102,7 +116,7 @@ const selectedDestination = computed(() => cycle.value?.destinations.find(item =
 const journeyProjectId = computed(() => {const value=Number(route.query.journey_project);return Number.isSafeInteger(value)&&value>0?value:null})
 const returnToJourney = () => router.push({path:'/journey',query:{journey_project:String(journeyProjectId.value)}})
 const matchingRetests = computed(() => reports.value.filter(report => report.name === cycle.value?.profile.name && report.run_id !== cycle.value?.baseline.run_id))
-const currentTaskMessage = computed(() => task.value.cycle_id === cycleId.value ? (isDestinationTask(task.value) ? '平台任务的当前步骤与继续操作见下方对应平台准备卡。' : task.value.message || (nativeBusy.value ? '当前内容任务执行中，验证请在专用窗口完成。' : '本轮任务记录已保存。')) : (nativeBusy.value ? '另一个桌面任务正在执行，请完成后再开始写作。' : '平台登录、填写、写作与曝光采集分开记录。历史失败详情保留在任务记录。'))
+const currentTaskMessage = computed(() => scopedLoginMessage(task.value,loginScope.value,cycleId.value,working.value) || (task.value.cycle_id === cycleId.value ? (isDestinationTask(task.value) ? '平台任务的当前步骤与继续操作见下方对应平台准备卡。' : task.value.message || (nativeBusy.value ? '当前内容任务执行中，验证请在专用窗口完成。' : '本轮任务记录已保存。')) : (nativeBusy.value ? '另一个桌面任务正在执行，请完成后再开始写作。' : '平台登录、填写、写作与曝光采集分开记录。历史失败详情保留在任务记录。')))
 const feedbackStages = {collection_only:'尚无发布证据',conditions_mismatch:'复测条件不匹配',retest_precedes_publication:'复测早于发布时间',publication_time_unknown:'发布时间待核对',post_publication_observation:'发布后的采集观察'}
 const date = value => value ? new Date(value).toLocaleString('zh-CN', {timeZone:'Asia/Hong_Kong',hour12:false}) : '时间未知'
 const rate = value => typeof value === 'number' ? `${Math.round(value*100)}%` : '未知'
@@ -158,8 +172,15 @@ const generate = async (kind, provider) => {
   finally { working.value = false }
 }
 const login = async () => {
-  const result = await window.pywebview.api.open_login(options())
-  if (result.error) ElMessage.error(result.error); else task.value = result
+  const currentCycleId = cycleId.value, request = ++loginRequest
+  loginScope.value = null; working.value = true
+  try {
+    const result = await window.pywebview.api.open_login(options())
+    if (result.error) throw new Error(result.error)
+    task.value = result
+    if (request === loginRequest && currentCycleId === cycleId.value) loginScope.value = {taskId:result.id,cycleId:currentCycleId}
+  } catch(error) { ElMessage.error(error.message || '登录窗口未打开') }
+  finally { working.value = false }
 }
 const stop = () => window.pywebview.api.stop_task()
 const selectDestination = key => {platform.value=key;ElMessage.success('已选择目标平台，请在下方生成平台稿')}
@@ -201,6 +222,7 @@ const poll = async () => {
   } catch { /* Native shutdown leaves the last durable task untouched. */ }
 }
 watch(clientMode, () => { model.value = '' })
+watch(cycleId, () => { loginRequest++; loginScope.value = null })
 onMounted(async () => {
   cycleId.value = typeof route.query.cycle === 'string' ? route.query.cycle : ''
   reportId.value = typeof route.query.report === 'string' ? route.query.report : ''

@@ -1,7 +1,7 @@
 <template>
   <section class="destination-session" aria-label="平台接入准备" data-testid="destination-session-card">
     <strong class="preparation-title">打开平台前，先准备好</strong>
-    <ol class="preparation-list"><li>{{ preparation.login }}</li><li>{{ preparation.verification }}</li><li>{{ preparation.binding }}</li><li v-if="preparation.editor">{{ preparation.editor }}</li></ol>
+    <ol class="preparation-list"><li>{{ preparation.login }}</li><li>{{ preparation.verification }}</li><li>{{ preparation.binding }}</li><li v-if="preparation.editor">{{ preparation.editor }}</li><li v-if="preparation.publishing">{{ preparation.publishing }}</li></ol>
     <p class="capability-note">{{ preparation.capability }}</p>
     <Transition name="destination-status" mode="out-in">
       <div v-if="session" :key="`${session.taskId}:${session.state}`" class="session-state" role="status" aria-live="polite" data-testid="destination-session-state">

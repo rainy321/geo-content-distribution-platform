@@ -84,6 +84,7 @@
       </section>
       <section v-else-if="step===4 && cycle" key="feedback" class="geo-surface step-panel">
         <div class="section-heading"><span class="step-kicker">05 / 反馈</span><h2>用同一组问题观察变化</h2><p>发布成功、被索引、被 AI 引用，是不同的结果。</p></div>
+        <DoubaoPreparation v-if="nativeAvailable"/>
         <BaselineContext/>
         <div class="metric-grid feedback-metrics"><article><span>发布器成功回报</span><strong>{{ cycle.publications?.length || 0 }}</strong><small>排除演示任务与无链接任务</small></article><article><span>运营方自报提交</span><strong>{{ cycle.reported_publications?.length || 0 }}</strong><small>尚未独立核验发布成功</small></article><article><span>同题复测</span><strong>{{ cycle.retests?.length || 0 }}</strong><small>按计划、界面、模型和时间检查</small></article></div>
         <p v-if="!hasPublication" class="hint">{{ unfinishedPublications.length ? '尚无公开成功记录，请先查看以下原发布任务。待确认不等于失败，现在复测只记录新的采集观察。' : '当前没有可用于发布后分析的提交记录。现在复测只会记录新的采集观察。' }}</p>

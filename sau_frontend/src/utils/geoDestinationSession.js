@@ -21,7 +21,8 @@ export const destinationPreparation = target => {
     login:'在平台专用窗口正常登录或注册；可能需要扫码或手机号。',
     verification:'登录后或发文时仍可能要求安全验证，请在同一窗口正常完成。',
     binding:csdn ? 'CSDN 发文可能要求微信或手机号绑定，以当前账号提示为准。' : '实名、账号绑定或投稿申请，以该平台当前账号提示为准。',
-    editor:csdn && target?.capability === 'platform_assisted_fill' ? '首次编辑器可能带有欢迎示例；仅完整确认的预置示例可由已审稿内容替换，其他已有草稿会保留并暂停填写。' : '',
+    editor:csdn && target?.capability === 'platform_assisted_fill' ? '仅确认空白或完整欢迎示例后，才会将已审稿文章正常导入为新文档；其他已有草稿会保留并暂停填写。' : '',
+    publishing:csdn ? '发布前核对平台已有标签、AI创作声明和可见范围；自定义标签可能受账号等级限制，跨站备份或同步由你选择。' : '',
     capability:target?.capability === 'platform_assisted_fill'
       ? '当前支持平台专用辅助填写；投稿条件需核对，最终提交由你在平台确认。'
       : target?.capability === 'configured_fill'
@@ -32,7 +33,7 @@ export const destinationPreparation = target => {
 
 export const destinationPreparationText = target => {
   const preparation = destinationPreparation(target)
-  return [preparation.login,preparation.verification,preparation.binding,preparation.editor].filter(Boolean).join(' ')
+  return [preparation.login,preparation.verification,preparation.binding,preparation.editor,preparation.publishing].filter(Boolean).join(' ')
 }
 
 export const destinationContinuationText = api => typeof api?.check_destination_session === 'function'
@@ -64,7 +65,7 @@ export const destinationSessionView = (task, cycleId, targetId) => {
   const [title,detail] = labels[state]
   const welcomeExample = state === 'editor_ready' && observation.body_state === 'welcome_example'
   return {taskId:task.id,state,title:welcomeExample ? (active ? '编辑器可用，带有首次示例' : '上次检查编辑器带有首次示例') : title,
-    detail:welcomeExample ? '已识别平台预置欢迎示例，只有已审稿填写任务会替换该示例；其他已有内容会保留，提交仍由你确认。' : detail,active,contentWriteAttempted,
+    detail:welcomeExample ? '已确认完整预置欢迎示例；已审稿填写任务会正常导入文章为新文档，原示例文档保留；其他已有内容会暂停处理，最终提交由你确认。' : detail,active,contentWriteAttempted,
     canCheck:active && observation.can_check === true && observation.window_open === true && !['opening','checking','window_closed'].includes(state),
     checkLabel:contentWriteAttempted ? '检查当前窗口' : '检查并继续'}
 }
