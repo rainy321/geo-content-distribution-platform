@@ -26,9 +26,11 @@
           <el-form-item label="用一句话介绍业务" required><el-input v-model="form.description" type="textarea" :rows="3" maxlength="4000" show-word-limit placeholder="提供什么产品，帮助哪些客户解决什么问题？" :disabled="busy" data-testid="journey-description"/></el-form-item>
           <el-collapse class="advanced"><el-collapse-item title="补充公司、客户、别名与官方页面" name="brand-options"><div class="form-pair"><el-form-item :label="form.entity_type==='company' ? '关联公司（可选）' : '运营公司（可选）'"><el-input v-model="form.company" maxlength="300" :disabled="busy"/></el-form-item><el-form-item label="目标客户（可选）"><el-input v-model="form.audience" maxlength="300" :disabled="busy"/></el-form-item></div><div class="form-pair"><el-form-item label="当前对象别名（每行一个，可选）"><el-input v-model="form.aliasesText" type="textarea" :rows="3" :disabled="busy" placeholder="仅填写这个公司或产品自己的其他名称"/><p class="hint">产品别名不应填写运营公司或其他产品。</p></el-form-item><el-form-item label="额外官方页面 / 服务网址（每行一个，可选）"><el-input v-model="form.officialUrlsText" type="textarea" :rows="3" :disabled="busy" placeholder="填写这个对象的具体官方页面"/><p class="hint">产品请填对应介绍、文档或服务入口；不自动扩展到整站。</p></el-form-item></div><ModelOptions/></el-collapse-item></el-collapse>
         </el-form>
+        <el-button v-if="project && !profileDirty" text :disabled="busy" @click="step=1">继续这个对象的历史内容</el-button>
       </section>
       <section v-else-if="step===1" key="baseline" class="geo-surface step-panel">
         <div class="section-heading"><span class="step-kicker">02 / 搜索基线</span><h2>先看 AI 现在如何回答</h2><p>分别观察自然选型、品牌核验与官网核验。</p></div>
+        <JourneySavedCycles v-if="project" :project="project" :busy="busy" :current-cycle-id="cycleId || undefined" @selected="continueSavedCycle"/>
         <DoubaoPreparation v-if="nativeAvailable && provider==='doubao'"/>
         <template v-if="!report">
           <ProviderChoice/>
@@ -54,6 +56,7 @@
         <template v-if="!needsAnalysis">
           <div class="form-pair"><el-form-item label="这次写什么"><el-select :model-value="briefId" :disabled="busy" aria-label="内容选题" @change="selectContent('brief', $event)"><el-option v-for="brief in cycle.analysis.briefs" :key="brief.id" :value="brief.id" :label="brief.topic"/></el-select></el-form-item><el-form-item label="写给哪个平台"><el-select :model-value="platform" :disabled="busy" placeholder="选择渠道或已接入平台" aria-label="目标平台" @change="selectContent('platform', $event)"><el-option v-for="(label,key) in cycle.channels" :key="key" :value="key" :label="channelOptionLabel(key,label)" :disabled="!writingChannelEnabled(cycle,key)"/></el-select></el-form-item></div>
           <p class="hint platform-basis">{{ platformBasis }}</p>
+          <DestinationUseReview v-if="selectedTarget && destinationEnabled(selectedTarget)" :cycle="cycle" :target="selectedTarget" :busy="busy" @updated="applyReviewCycle"/>
           <template v-if="!activeDraft">
             <div class="subheading"><h3>核对写作事实</h3><el-button text :disabled="busy" @click="factRows.push({text:'',source_url:'',confirmed:false})">添加一条</el-button></div><p class="hint">{{ cycle.fact_candidates && !cycle.facts.length ? '下面包含同品牌上轮资料，请重新核对后勾选。' : '运营方说明没有独立核验；填写来源网址也不代表软件已抓取验证。' }}</p>
             <div v-for="(fact,index) in factRows" :key="index" class="fact-row"><el-checkbox v-model="fact.confirmed" :disabled="busy" :aria-label="`已核对第 ${index+1} 条事实`"/><div><el-input v-model="fact.text" :disabled="busy" type="textarea" :autosize="{minRows:1,maxRows:4}" :aria-label="`第 ${index+1} 条事实`" placeholder="可用于写作的真实信息"/><el-input v-model="fact.source_url" :disabled="busy" :aria-label="`第 ${index+1} 条事实来源网址`" placeholder="来源网址可留空，留空按运营方说明处理"/></div><el-button text :disabled="busy" :aria-label="`移除第 ${index+1} 条事实`" @click="factRows.splice(index,1)"><el-icon><Close/></el-icon></el-button></div>
@@ -74,7 +77,9 @@
         <BaselineContext/>
         <template v-if="needsReplacement"><el-alert type="warning" :closable="false" title="目标配置已更新，旧稿仍保留。请按当前目标另存新稿，再重新审稿；旧稿不会重新提交。"/><ProviderChoice/></template>
         <template v-if="lengthInvalid && !needsReplacement"><el-alert type="warning" :closable="false" :title="[lengthReview.titleIssue,lengthReview.bodyIssue].filter(Boolean).join(' ')"/><el-button text :disabled="busy" @click="step=2">返回内容精简并重新审稿</el-button></template>
+        <DestinationUseReview v-if="selectedTarget && destinationEnabled(selectedTarget)" :cycle="cycle" :target="selectedTarget" :busy="busy" @updated="applyReviewCycle"/>
         <template v-if="platformInactive"><el-alert type="info" :closable="false" :title="inactiveDestinationMessage"/><el-button text :disabled="busy" @click="openDetails">编辑平台接入配置</el-button></template>
+        <template v-else-if="platformUnprepared"><p class="hint">原稿仍可编辑或导出；核对用途前先保留为研究资料。</p></template>
         <template v-else-if="publisherPaused"><el-alert type="warning" :closable="false" :title="`${publisherName}发布器当前暂停，请先保留稿件，等待能力恢复。`"/><el-button text :disabled="busy" @click="refreshAccounts">刷新发布能力</el-button></template>
         <template v-else-if="selectedTarget && !targetPublisher"><DestinationSessionCard :cycle-id="cycleId" :target="selectedTarget" :task="task" :busy="busy" :native-available="nativeAvailable" @open="openDestinationLogin" @checked="poll"/><p v-if="!capabilitiesLoaded" class="hint">发布能力尚未读取，请刷新后选择发布方式。</p><template v-else><p class="hint">{{ selectedTarget.builtin_publisher?.reason || (platformCapability?.delivery_state==='assisted' ? '该渠道仍需人工复核，当前使用目标平台辅助填写。' : '尚未核验此目标与内置图文发布器的对应关系。') }} 该平台使用独立浏览器会话，填写后请核对并自行提交。</p><p v-if="!destinationSupportsFill(selectedTarget)" class="hint">当前只有登录与导出能力，可先核对账号条件；辅助填写需接入编辑器。</p></template><el-button text :disabled="busy" @click="refreshAccounts">刷新发布能力</el-button></template>
         <template v-else-if="ownedDraft"><p class="hint">官网稿件可导出给网站编辑，或通过网站 CMS 发布。这里没有可执行的官网发布器，导出也不代表已经发布。</p><el-button text :disabled="busy" @click="openDetails">接入官网 CMS 或配置专用编辑入口</el-button></template>
@@ -113,10 +118,14 @@ import { geoContentApi } from '@/api/geoContent'
 import { accountApi } from '@/api/account'
 import { publishApi } from '@/api/publish'
 import DestinationSessionCard from '@/components/DestinationSessionCard.vue'
+import DestinationUseReview from '@/components/DestinationUseReview.vue'
+import JourneySavedCycles from '@/components/JourneySavedCycles.vue'
+import { savedCycleContinuation, savedCycleFactEdits } from '@/utils/geoSavedCycles'
+import { baselineWritingOptions } from '@/utils/geoWritingOptions'
 import GeoPublicationReview from '@/components/GeoPublicationReview.vue'
 import DoubaoPreparation from '@/components/DoubaoPreparation.vue'
 import { destinationContinuationText, destinationPreparationText, destinationSupportsFill, isDestinationTask } from '@/utils/geoDestinationSession'
-import { destinationEnabled, writingChannelEnabled, inactiveDestinationMessage } from '@/utils/geoDestinationAvailability'
+import { destinationEnabled, destinationCanPrepare, destinationPublicationGate, writingChannelEnabled, writingChannelLabel, inactiveDestinationMessage } from '@/utils/geoDestinationAvailability'
 import { articleSnapshot, baselineEvidenceSummary, canRestoreArticleEdits, canRestoreFactEdits, entityLabel, entityProfileFields, entityType, journeyDate, journeyDraftLimits, journeyLengthReview, lastJourneyProject, normalizeWebsite, profileLines, readJourney, reportEntityContext, restoreEntityDraftFields, safeLink, sameBrand, targetDraftOutdated, writeJourney } from '@/utils/geoJourney'
 
 const route=useRoute(), router=useRouter(), steps=['品牌','搜索基线','内容','发布','反馈']
@@ -154,10 +163,11 @@ const profileDirty=computed(()=>{if(!project.value)return true;try{return !sameB
 const needsAnalysis=computed(()=>cycle.value?.analysis?.method==='rule_observations_not_ai')
 const diagnosisPreview=computed(()=>{const text=cycle.value?.analysis?.diagnosis||'';return text.length>180?`${text.slice(0,180).trim()}…`:text})
 const matchingDrafts=computed(()=>(cycle.value?.drafts||[]).filter(item=>item.platform===platform.value&&item.brief_id===briefId.value))
-const channelOptionLabel=(key,label)=>!writingChannelEnabled(cycle.value,key)?`${label} · 已停用`:cycle.value?.destinations?.some(item=>item.key===key)?`${label} · 已接入目标`:`${label} · 通用渠道`
+const channelOptionLabel=(key,label)=>cycle.value?.destinations?.some(item=>item.key===key)?writingChannelLabel(cycle.value,key,`${label} · 已接入目标`):`${label} · 通用格式`
 const activeDraft=computed(()=>matchingDrafts.value.find(item=>item.article_id===articleId.value)||null)
 const selectedTarget=computed(()=>(cycle.value?.destinations||[]).find(item=>item.key===(activeDraft.value?.platform||platform.value)))
 const platformInactive=computed(()=>Boolean(selectedTarget.value && !destinationEnabled(selectedTarget.value)))
+const platformUnprepared=computed(()=>Boolean(selectedTarget.value && !destinationCanPrepare(selectedTarget.value)))
 const needsReplacement=computed(()=>targetDraftOutdated(activeDraft.value,selectedTarget.value))
 const ownedDraft=computed(()=>activeDraft.value?.platform==='owned_web'&&!selectedTarget.value)
 const publishChannel=computed(()=>selectedTarget.value?.config.channel||activeDraft.value?.platform||'')
@@ -184,6 +194,7 @@ const platformBasis=computed(()=>{
   if(!platform.value)return '尚未选择平台。平台候选只表示值得调研，不表示可以自动投稿。'
   const target=selectedTarget.value, matched=(cycle.value?.opportunities||[]).some(item=>item.matches?.some(value=>value.key===platform.value))
   if(target && !destinationEnabled(target))return inactiveDestinationMessage
+  if(target && !destinationCanPrepare(target))return destinationPublicationGate(target).reason
   if(target)return matched?`已接入 ${target.config.name}，来源网址与配置范围匹配；投稿资格仍需确认。`:`手动选择 ${target.config.name}；本轮尚无匹配的来源网址。`
   return '手动选择通用渠道稿；这不表示豆包已引用或推荐该平台。'
 })
@@ -192,7 +203,7 @@ const stepComplete=index=>index===0?Boolean(project.value):index===1?usableRepor
 const primaryLabel=computed(()=>[2,3].includes(step.value)&&needsReplacement.value?'按当前目标另存新稿':step.value===0?'保存品牌并继续':step.value===1?(report.value?'分析这份报告':plan.value?'开始真实搜索测试':'生成 3 个测试问题'):step.value===2?(needsAnalysis.value?'分析来源并制定选题':!activeDraft.value?(!factsSaved.value?'保存已核对的事实':'生成平台草稿'):publishedDraft.value?'查看发布反馈':!reviewedDraft.value?'保存审稿并标记就绪':'继续发布'):step.value===3?(publisherPaused.value?'发布器当前暂停':targetPublisher.value?`使用${publisherName.value}发布器`:selectedTarget.value?(destinationSupportsFill(selectedTarget.value)?'打开目标平台并填写':'配置平台编辑入口'):ownedDraft.value?'导出官网稿件':'打开发布中心'):'开始同题复测')
 const primaryDisabled=computed(()=>{
   if(busy.value)return true
-  if(platformInactive.value && (step.value===3 || step.value===2 && (!activeDraft.value || needsReplacement.value)))return true
+  if(platformUnprepared.value && (step.value===3 || step.value===2 && !needsAnalysis.value && (!activeDraft.value || needsReplacement.value)))return true
   if([2,3].includes(step.value)&&needsReplacement.value)return !factsSaved.value||provider.value==='doubao'&&!nativeAvailable.value
   return step.value===0&&(!form.name.trim()||!form.website.trim()||!form.description.trim())||step.value===1&&(report.value?!usableReport.value:Boolean(plan.value)&&(!planConfirmed.value||!nativeAvailable.value))||step.value===2&&!needsAnalysis.value&&(!activeDraft.value?(!factsSaved.value?!confirmedFacts().length:!platform.value||!briefId.value):!publishedDraft.value&&(lengthInvalid.value||!reviewedDraft.value&&(!reviewConfirmed.value||!editor.title.trim()||!editor.content.trim())))||step.value===3&&(!reviewedDraft.value||lengthInvalid.value||publisherPaused.value||Boolean(selectedTarget.value)&&(!capabilitiesLoaded.value||!targetPublisher.value&&destinationSupportsFill(selectedTarget.value)&&!nativeAvailable.value))||step.value===4&&!nativeAvailable.value
 })
@@ -221,17 +232,39 @@ const loadEditor=()=>{const draft=activeDraft.value;if(draft)Object.assign(edito
 const selectContent=async(field,value)=>{if(busy.value)return;try{if(editorDirty.value)await ElMessageBox.confirm('当前文章有未保存的修改。切换后将打开另一份内容，未保存修改会被放弃。','切换内容',{confirmButtonText:'放弃修改并切换',cancelButtonText:'继续编辑'});if(field==='brief')briefId.value=value;else if(field==='article'){articleId.value=value;loadEditor()}else platform.value=value}catch{}}
 const applyCycle=(value,{keepEditor=false}={})=>{
   if(value.project_id!==projectId.value||!sameBrand(value.profile,project.value))throw new Error('内容任务与当前品牌或官网不一致，已阻止混用')
+  const previous=activeDraft.value,hadEdits=Boolean(editorDirty.value)
+  const incoming=value.drafts.find(item=>item.article_id===articleId.value && item.platform===platform.value && item.brief_id===briefId.value)
+  const keepBoundEditor=keepEditor && cycle.value?.id===value.id && previous && incoming && value.analysis.briefs.some(item=>item.id===briefId.value) && JSON.stringify(articleSnapshot(previous))===JSON.stringify(articleSnapshot(incoming))
+  if(keepEditor && hadEdits && !keepBoundEditor){
+    recoveryDraft.value={previous:recoveryDraft.value || undefined,cycle_id:cycleId.value,article_id:articleId.value,editor:{...editor,tags:[...editor.tags]},baseline:articleSnapshot(previous)}
+    error.value='服务端文章或选题已变化，已打开当前内容；未保存修改保留为本机副本，可先导出核对。'
+  }
   const keepFactRows=keepEditor&&cycle.value?.id===value.id&&JSON.stringify(cycle.value.facts)===JSON.stringify(value.facts)
   cycle.value=value;cycleId.value=value.id
   if(!value.analysis.briefs.some(item=>item.id===briefId.value))briefId.value=value.analysis.briefs[0]?.id||''
   if(!value.channels[platform.value])platform.value=''
   if(!matchingDrafts.value.some(item=>item.article_id===articleId.value))articleId.value=matchingDrafts.value[0]?.article_id||null
-  if(!keepEditor)loadEditor()
+  if(!keepBoundEditor || !hadEdits)loadEditor()
   const facts=value.facts.length?value.facts:value.fact_candidates?.facts||[{text:project.value.description,source_url:'',confirmed:false}]
   if(!keepFactRows)factRows.value=facts.map(item=>({text:item.text,source_url:item.source_url||'',confirmed:value.facts.length>0&&item.confirmed===true}))
 }
 const refreshCycle=()=>run(async()=>{if(cycleId.value)applyCycle((await geoContentApi.get(cycleId.value)).data,{keepEditor:true});await loadAccounts()})
 const applyReviewCycle=value=>{if(value.id===cycleId.value)applyCycle(value,{keepEditor:true})}
+const continueSavedCycle=value=>run(async()=>{
+  if(profileDirty.value)throw new Error('品牌资料已修改，请先保存或重新选择对象，再继续已有内容。')
+  const selection=savedCycleContinuation(value,project.value),sameCycle=cycleId.value===value.id
+  if(!sameCycle && editorDirty.value)recoveryDraft.value={previous:recoveryDraft.value || undefined,cycle_id:cycleId.value,article_id:articleId.value,editor:{...editor,tags:[...editor.tags]},baseline:articleSnapshot(activeDraft.value)}
+  if(!sameCycle && savedCycleFactEdits(cycle.value,factRows.value,project.value))recoveryFacts.value={previous:recoveryFacts.value || undefined,cycle_id:cycleId.value,facts:factRows.value.map(item=>({...item}))}
+  restoring=true
+  try {
+    report.value=selection.report;reportId.value=selection.reportId;historyReportId.value=selection.reportId;reportOrigin.value='history'
+    plan.value=null;planConfirmed.value=false;replacementSourceId.value=null
+    if(!sameCycle){briefId.value=selection.briefId;platform.value=selection.platform;articleId.value=selection.articleId}
+    applyCycle(selection.cycle,{keepEditor:sameCycle})
+    if(!sameCycle){const options=baselineWritingOptions(selection.cycle);clientMode.value=options.client_mode;model.value=options.model_label}
+    step.value=2
+  } finally {restoring=false}
+})
 const loadReports=async()=>{
   const all=(await geoTestApi.listReports()).data||[], sameName=all.filter(item=>item.name?.trim().toLocaleLowerCase()===project.value?.name.trim().toLocaleLowerCase())
   const results=await Promise.allSettled(sameName.map(async item=>({...item,report:(await geoTestApi.getReport(item.id)).data})))
@@ -286,7 +319,7 @@ const resetBaseline=async reuse=>{try{await ElMessageBox.confirm(reuse?'将用�
 const newBaseline=()=>resetBaseline(false)
 const repeatBaseline=()=>resetBaseline(true)
 const createCycle=async()=>{if(!sameBrand(report.value.profile,project.value))throw new Error('采集报告与当前品牌不一致');if(!usableReport.value)throw new Error('当前报告没有有效回答，请新建一轮基线');applyCycle((await geoContentApi.create({report_id:reportId.value,project_id:projectId.value})).data);step.value=2}
-const generateResearch=async kind=>{if(kind==='draft' && !writingChannelEnabled(cycle.value,platform.value))throw new Error(inactiveDestinationMessage);if(provider.value==='doubao')await startNative(kind,()=>window.pywebview.api.generate_research(cycleId.value,kind,briefId.value,platform.value,options()));else{const result=(await geoContentApi.generate(cycleId.value,{kind,brief_id:briefId.value,platform:platform.value})).data;applyCycle(result.cycle);if(result.article_id){articleId.value=result.article_id;loadEditor()}}}
+const generateResearch=async kind=>{if(kind==='draft' && !writingChannelEnabled(cycle.value,platform.value))throw new Error(destinationPublicationGate(selectedTarget.value).reason);if(provider.value==='doubao')await startNative(kind,()=>window.pywebview.api.generate_research(cycleId.value,kind,briefId.value,platform.value,options()));else{const result=(await geoContentApi.generate(cycleId.value,{kind,brief_id:briefId.value,platform:platform.value})).data;applyCycle(result.cycle);if(result.article_id){articleId.value=result.article_id;loadEditor()}}}
 const replaceTargetDraft=async()=>{
   applyCycle((await geoContentApi.get(cycleId.value)).data,{keepEditor:true})
   if(!needsReplacement.value)throw new Error('目标配置与这份稿件没有版本差异，请继续核对当前稿件')
@@ -303,10 +336,10 @@ const loadAccounts=async()=>{capabilitiesLoaded.value=false;const [overview,plat
 const refreshAccounts=()=>run(loadAccounts)
 const checkAccount=id=>run(async()=>{await accountApi.checkMediaAccount(id);await loadAccounts()})
 const openDetails=()=>router.push({path:'/geo-content',query:{cycle:cycleId.value,journey_project:String(projectId.value)}})
-const openDestinationLogin=()=>run(()=>{if(!destinationEnabled(selectedTarget.value))throw new Error(inactiveDestinationMessage);return startNative('destination',()=>window.pywebview.api.open_destination(cycleId.value,selectedTarget.value.id,null))})
+const openDestinationLogin=()=>run(()=>{if(!destinationCanPrepare(selectedTarget.value))throw new Error(destinationPublicationGate(selectedTarget.value).reason);return startNative('destination',()=>window.pywebview.api.open_destination(cycleId.value,selectedTarget.value.id,null))})
 const openPublisher=async()=>{
   applyCycle((await geoContentApi.get(cycleId.value)).data,{keepEditor:true})
-  if(selectedTarget.value && !destinationEnabled(selectedTarget.value))throw new Error(inactiveDestinationMessage)
+  if(selectedTarget.value && !destinationCanPrepare(selectedTarget.value))throw new Error(destinationPublicationGate(selectedTarget.value).reason)
   if(needsReplacement.value)throw new Error('目标配置已变化，请先按当前目标另存新稿')
   if(!reviewedDraft.value)throw new Error('稿件尚未审稿就绪，或已有内容变更，请返回内容步骤重新核对')
   if(lengthInvalid.value)throw new Error([lengthReview.value.titleIssue,lengthReview.value.bodyIssue].filter(Boolean).join(' '))

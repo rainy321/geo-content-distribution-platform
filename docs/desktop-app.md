@@ -2,7 +2,7 @@
 
 桌面程序名为“GEO AI 搜索工作台”，启动文件为 `GEO_AI_Workbench.exe`。使用独立 WebView2 窗口，包含 Python 后端和已构建的界面。需要 Windows x64、Microsoft WebView2 和可用的 Edge 或 Chrome。
 
-本文对应 **2026.10.21.2 登录状态与内部资料隔离版**。本轮补充登录后的实际界面观察、主流程中的登录检查摘要、出题与写稿的名称保留提示，以及实际来源中发现的阿里云开发者社区目录；实测发现的新内部资料检索句式也会排除，历史内容周期读取时同步投影最新评估。准确检查结果、软件哈希及源码提交以对应 Release 清单为准。
+本文对应 **2026.10.21.5 平台用途与历史恢复版**。先判断平台适合来源研究、原创投稿还是商业投放，再准备账号；五步页可显式继续服务器保存的整轮内容。原有内部资料隔离、逐篇审核记录和正常登录会话继续保留。准确检查结果、软件哈希及源码提交以对应 Release 清单为准。
 
 软件可分别建立公司与产品档案，填写当前对象别名、运营公司与额外官方页面。公司提及不会自动计入旗下产品；同域不同产品路径分别匹配，主网址和额外官方页面不自动扩展到整站或其他子域。此次按更新后的官网分别测试北京同于野科技有限公司、懂AI中转站、同于野软件，详见[测试方法与配置](geo-search-testing.md)。这些工作模式测试与普通对话基线分别保存；公司回答中声称使用账号内部资料的一题已排除公开曝光统计。账号登录成功仍可能进入工作界面，普通对话基线需要实际可用的普通对话入口，不能用工作模式结果代替。
 
@@ -12,6 +12,8 @@
 
 默认首页为“开始优化”，按品牌、搜索基线、内容、发布、反馈五步推进。输入品牌名称、官网和一句话业务介绍即可开始；运营公司、目标客户与模型设置可展开补充。原来的采集报告、内容任务单、内容库和发布中心仍可从侧栏打开，管理配置收在“管理工具”。界面有短时淡入和位移动效，并尊重系统减少动态效果设置。
 
+已有内容不依赖本机进度缓存才能找回。在“搜索基线”步骤的“继续已有内容”中选择该对象的原报告与稿件，点击继续后整体恢复同一轮基线、分析和文章，不另建任务。多个周期明确选择；同名项目按对象类型与完整网址区分。切换周期时保留未保存编辑的本机副本。
+
 | 步骤 | 用户操作与得到的结果 |
 | --- | --- |
 | 1 品牌 | 填写公司、品牌或产品资料，选择自己的项目；资料按品牌保存。 |
@@ -20,7 +22,9 @@
 | 4 发布 | 审稿就绪后选择已具备能力的内置发布器，或打开已配置目标辅助填写；官网稿可导出。提交和公开结果分别记录。 |
 | 5 反馈 | 查看文章、发布证据与原基线的关联，按原计划开展新的同题复测，保留失败、未知和条件差异。 |
 
-发布前先查看目标平台的“平台接入准备”，备好正常登录方式，并按平台提示完成安全验证、实名或微信、手机号绑定。在专用窗口操作后保持原窗口打开，返回软件点击“检查并继续”；软件沿用同一任务和账号会话，在一个可复用的检查标签核对编辑入口，检查期间保留原登录、验证或绑定页面。关窗不能证明已登录或会话已保存；需要处理的要求会继续显示，已写入后的按钮为“检查当前窗口”，只读检查，不重新填写。
+先在“来源与平台用途”核对使用方式。新平台和未核对的旧配置默认仅研究，保留原稿、导出与审核记录；不会直接要求登录、实名或发稿。选择投稿或商业用途后，需登记运营方对该栏目的规则核对；固定栏目限制仍由软件检查，勾选不能覆盖。这个记录不是平台许可或自动核验。平台用途、规则网址或入口改变后应重新核对。
+
+用途可继续时，再查看“平台接入准备”，备好正常登录方式，并按实际平台提示完成安全验证、实名或微信、手机号绑定。在专用窗口操作后保持原窗口打开，返回软件点击“检查并继续”；软件沿用同一任务和账号会话，在一个可复用的检查标签核对编辑入口，检查期间保留原登录、验证或绑定页面。关窗不能证明已登录或会话已保存；需要处理的要求会继续显示，已写入后的按钮为“检查当前窗口”，只读检查，不重新填写。
 
 CSDN 专用辅助填写无需配置 CSS 选择器；仅确认空白或完整匹配已知欢迎示例后，才会通过平台正常 Markdown 导入新建文档，原文档保留，其他已有标题、草稿或未知示例会暂停处理。导入后逐字核对标题、全文及内部换行，不一致时不会再次导入。发布前需核对平台已有标签、AI 创作声明及可见范围；自定义标签可能受账号等级限制，跨站备份或同步由用户选择。最终提交由用户完成，填入不计为已发布。这些准备状态和同任务复检仅在实际包含新版界面及 `check_destination_session(task_id)` 原生接口的桌面构建中可用；旧版需按提示升级，可用版本以对应 Release 清单为准。
 
@@ -54,7 +58,7 @@ CSDN 专用辅助填写无需配置 CSS 选择器；仅确认空白或完整匹�
 
 ## 本机安装与数据
 
-从 [2026.10.21.4 Release](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.4) 下载 Windows x64 ZIP，完整解压后打开 `GEO_AI_Workbench/GEO_AI_Workbench.exe`，保留同级 `_internal` 目录。[2026.10.21.3 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.3)及[2026.10.20.2 资料隔离版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.20.2)继续保留。[2026.10.20 五步流程版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.20)保留此前真实发布走查。更早版本在[旧版归档 Release](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-legacy-backup-2026.10.15)，仅用于备份恢复。
+从 [2026.10.21.5 Release](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.5) 下载 Windows x64 ZIP，完整解压后打开 `GEO_AI_Workbench/GEO_AI_Workbench.exe`，保留同级 `_internal` 目录。[2026.10.21.4 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.4)及[2026.10.21.3 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.3)继续保留。[2026.10.20 五步流程版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.20)保留此前真实发布走查。更早版本在[旧版归档 Release](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-legacy-backup-2026.10.15)，仅用于备份恢复。
 
 本机安装文件：`%LOCALAPPDATA%\Programs\GEO_AI_Workbench\GEO_AI_Workbench.exe`。桌面和开始菜单有“GEO AI搜索工作台”快捷方式。
 

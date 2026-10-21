@@ -12,7 +12,9 @@ from services.geo_destination_browser import fill_editor
 
 EDITOR_URL = 'https://editor.gates.example.org/editor'
 FRAME_URL = 'https://accounts.gates.example.org/requirement'
-CONFIG = {'editor_url': EDITOR_URL, 'title_selector': '#title', 'body_selector': '#body'}
+CONFIG = {'editor_url': EDITOR_URL, 'title_selector': '#title', 'body_selector': '#body',
+          'publication_use': 'editorial', 'rule_review': {'state': 'suitable', 'operator_confirmed': True,
+              'note': 'Synthetic operator review for isolated browser fixtures.'}}
 ARTICLE = {'title': '合成技术文章', 'content': '合成正文，仅用于隔离浏览器回归，不发布到任何平台。'}
 BIND_WECHAT = ('终于等到你~\n账号安全提示\n'
               '为了提升账号安全等级，保障每位创作用户的数字资产与创作权益，'

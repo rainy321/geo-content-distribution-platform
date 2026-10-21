@@ -172,6 +172,8 @@ async def _editor_fields(page, config):
 
 async def fill_editor(page, config, article, *, before_write=None):
     """Only fill once; durable reservation and write marker precede any write."""
+    from services.geo_publication_suitability import assert_publication_allowed
+    assert_publication_allowed({'config': config})
     fields = await _editor_fields(page, config)
     # Recheck after field inspection so a gate loaded in the meantime prevents
     # the very first write, rather than being discovered after a draft is saved.
@@ -296,8 +298,8 @@ async def _check_tab_has_content(page, config):
 
 async def open_session(target, profile_dir, executable_path, *, fallback_executable_path=None, article=None,
                        progress=None, check_requested=None, wait_seconds=None):
-    from services.geo_destination_service import assert_target_enabled
-    assert_target_enabled(target)
+    from services.geo_publication_suitability import assert_publication_allowed
+    assert_publication_allowed(target)
     from playwright.async_api import async_playwright
     from services.geo_test_runner import exclusive_lock
     from services.browser_runtime import launch_context

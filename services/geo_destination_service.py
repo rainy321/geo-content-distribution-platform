@@ -14,6 +14,11 @@ from contextlib import closing
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit, urlunsplit
 
+from services.geo_publication_suitability import (
+    normalize_publication_intent, publication_gate, publication_policy, assert_publication_allowed,
+)
+from services.geo_source_url import trusted_source_url
+
 
 CATALOG_VERSION = '2026-10-21.3'
 
@@ -126,24 +131,28 @@ def opportunities(observations, targets, website=''):
         if source['case_id'] not in usable:
             continue
         url = source.get('url')
-        host = (urlsplit(url).hostname or '').lower() if url else ''
+        identity = trusted_source_url(url)
+        host = (urlsplit(identity).hostname or '') if identity else ''
         candidate, surface, note = None, 'unknown', '还需核对作者入口、准入条件和平台规则。'
-        key = host or 'url_unknown'
+        key = host or ('url_untrusted' if url else 'url_unknown')
         if not url:
             surface, note = 'url_unknown', '只有标题，不能据此认定平台；需要补采来源网址。'
-        elif scope_matches(url, website):
+        elif not identity:
+            note = '原始来源网址未通过平台身份检查，仅保留研究证据，不能据此推断接入平台。'
+        elif scope_matches(identity, trusted_source_url(website)):
             surface, note = 'owned_site', '客户官网，可通过网站 CMS 或交给网站编辑更新。'
             key += ':owned'
         else:
             for catalog_key, hosts, path, entry in CATALOG:
-                if host in hosts and (path == '/' or urlsplit(url).path.startswith(path)):
+                if host in hosts and (path == '/' or urlsplit(identity).path.startswith(path)):
                     key, surface, candidate = catalog_key, 'community_candidate', dict(entry)
                     # Bind only the observed surface, never all pages of a vendor domain.
                     candidate['source_scope'] = f'https://{host}{path}'
+                    candidate['publication_policy'] = publication_policy(candidate)
                     note = '已匹配公开内容平台；账号是否获准投稿、当前入口和自动发布能力仍需验证。'
                     break
             if surface == 'unknown' and (host in ('cloud.tencent.com', 'help.aliyun.com', 'support.huaweicloud.com', 'support.huawei.com', 'www.huaweicloud.com', 'docs.newapi.pro')
-                                         or host.startswith(('docs.', 'support.')) or '/document/' in urlsplit(url).path):
+                                         or host.startswith(('docs.', 'support.')) or '/document/' in urlsplit(identity).path):
                 surface, note = 'vendor_documentation', '厂商文档或自有资料，不能当作可注册发文的平台；优先做引用关系或合作调研。'
                 key += ':docs'
         item = grouped.setdefault(key, dict(id=key, domain=host or None, surface=surface, note=note,
@@ -151,12 +160,13 @@ def opportunities(observations, targets, website=''):
         item['source_ids'].append(source['id'])
         if source['case_id'] not in item['case_ids']:
             item['case_ids'].append(source['case_id'])
-        pair = (source['case_id'], url.split('#')[0] if url else source.get('title'))
+        pair = (source['case_id'], url.split('#')[0] if isinstance(url, str) and url else source.get('title'))
         if pair not in item['_pairs']:
             item['_pairs'].add(pair)
             item['examples'].append({'title': source.get('title'), 'url': url})
         for target in targets:
-            if scope_matches(url, target['config']['source_scope']) and target['id'] not in [match['id'] for match in item['matches']]:
+            if (identity and scope_matches(identity, trusted_source_url(target['config']['source_scope']))
+                    and target['id'] not in [match['id'] for match in item['matches']]):
                 item['matches'].append({'id': target['id'], 'key': target['key'], 'name': target['config']['name'], 'basis': 'user_configured_scope'})
     result = []
     for item in grouped.values():
@@ -168,6 +178,7 @@ def opportunities(observations, targets, website=''):
                 references = [source['id'] for source in observations['sources'] if source['id'] in item['source_ids'] and any(word in source['title'] for word in words)]
                 if references:
                     candidate = next(dict(entry) for key, _, _, entry in CATALOG if key == catalog_key)
+                    candidate['publication_policy'] = publication_policy(candidate)
                     item['title_leads'].append({'candidate': candidate, 'source_ids': references, 'basis': 'title_only_unverified',
                                                 'note': '仅标题包含平台名称，未确认原网址；不计为已核实平台命中'})
         result.append(item)
@@ -205,6 +216,7 @@ def normalize_config(value):
             raise ValueError('只允许普通 CSS 选择器，不执行脚本或点击发布按钮')
     if bool(config['title_selector']) != bool(config['body_selector']):
         raise ValueError('标题和正文选择器需要同时配置，或同时留空')
+    config.update(normalize_publication_intent(value))
     return config
 
 
@@ -222,13 +234,15 @@ def _target(row):
     value = dict(row)
     value['config'] = json.loads(value['config'])
     value['config_sha256'] = configuration_digest(value['config'])
+    value['publication_gate'] = publication_gate(value['config'], value['state'])
+    value['publication_policy'] = publication_policy(value['config'])
     value['key'] = 'target_' + value['id']
     value['capability'] = ('platform_assisted_fill' if csdn_editor_supported(value['config']) else
                            'configured_fill' if value['config']['title_selector'] else 'login_and_export')
     value['auto_publish_verified'] = False
     value['builtin_publisher'] = builtin_publisher(value['config'])
-    if value['state'] in ('disabled', 'archived', 'deleted'):
-        value['builtin_publisher'] = {**value['builtin_publisher'], 'available': False, 'reason': '目标已停用'}
+    if not value['publication_gate']['allowed']:
+        value['builtin_publisher'] = {**value['builtin_publisher'], 'available': False, 'reason': value['publication_gate']['reason']}
     return value
 
 
@@ -347,7 +361,7 @@ def reserve_fill(database, project_id, identifier, article_id):
         current = connection.execute('SELECT * FROM geo_distribution_targets WHERE id=?', (identifier,)).fetchone()
         if current['revision'] != target['revision']:
             raise ValueError('平台配置发生变化，请刷新')
-        assert_target_enabled(_target(current))
+        assert_publication_allowed(_target(current))
         if current['blocked_reason'] or current['state'] == 'preparing':
             raise ValueError('该平台存在待检查的尝试，请检查后明确恢复；不会自动重试')
         row = connection.execute('''SELECT a.*,d.platform FROM articles a JOIN geo_content_drafts d ON d.article_id=a.id

@@ -218,8 +218,8 @@ def draft_input(cycle, brief_id, platform):
     if not isinstance(platform, str) or (platform not in CHANNELS and target is None):
         raise ValueError('请选择支持的文章或帖子渠道')
     if target is not None:
-        from services.geo_destination_service import assert_target_enabled
-        assert_target_enabled(target)
+        from services.geo_publication_suitability import assert_publication_allowed
+        assert_publication_allowed(target)
     brief = next((brief for brief in cycle['analysis']['briefs'] if brief['id'] == brief_id), None)
     if not brief:
         raise ValueError('内容选题不存在')

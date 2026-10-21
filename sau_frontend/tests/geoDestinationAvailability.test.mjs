@@ -3,9 +3,10 @@ import fs from 'node:fs'
 import test from 'node:test'
 import { reactive, ref, computed } from 'vue'
 import { parse, compileScript, compileTemplate, compileStyle } from '@vue/compiler-sfc'
-import { destinationEnabled, writingChannelEnabled, inactiveDestinationMessage } from '../src/utils/geoDestinationAvailability.js'
+import { destinationEnabled, destinationCanPrepare, destinationPublicationGate, writingChannelEnabled, inactiveDestinationMessage } from '../src/utils/geoDestinationAvailability.js'
+import { destinationUseValues } from '../src/utils/geoDestinationUse.js'
 
-const target = (state='configured', enabled=true) => ({id:'t1',key:'target_t1',state,config:{name:'合成社区',enabled},capability:'configured_fill'})
+const target = (state='configured', enabled=true) => ({id:'t1',key:'target_t1',state,config:{name:'合成社区',enabled},publication_gate:{allowed:true,code:'allowed'},capability:'configured_fill'})
 const cycle = value => ({id:'cycle-a',channels:{owned_web:'官网',zhihu:'知乎',target_t1:'合成社区'},destinations:[value],facts:[{text:'已核对事实',confirmed:true}],analysis:{briefs:[]}})
 const source = path => {
   const filename=new URL(path,import.meta.url),{descriptor,errors}=parse(fs.readFileSync(filename,'utf8'),{filename:filename.pathname})
@@ -41,10 +42,11 @@ test('writing choices resolve the actual target and never authorize a missing ta
 
 const destinationHarness = (value,confirm=async()=>{}) => {
   const props=reactive({cycle:cycle(value),busy:false}),emitted=[],form=reactive({}),editing=ref(null),show=ref(false),calls=[]
-  const functions=new Function('props','emit','form','editing','show','destinationEnabled','writingChannelEnabled','ElMessageBox','geoContentApi','ElMessage',`
+  const functions=new Function('props','emit','form','editing','show','destinationEnabled','destinationCanPrepare','destinationUseValues','formPolicy','writingChannelEnabled','ElMessageBox','geoContentApi','ElMessage',`
+    let configEpoch=0;
     const defaults=${destinations.expression('defaults')};
     return {configure:(${destinations.expression('configure')}),select:(${destinations.expression('selectTarget')}),open:(${destinations.expression('openTarget')}),review:(${destinations.expression('review')})}
-  `)(props,(...args)=>emitted.push(args),form,editing,show,destinationEnabled,writingChannelEnabled,{confirm},
+  `)(props,(...args)=>emitted.push(args),form,editing,show,destinationEnabled,destinationCanPrepare,destinationUseValues,ref(null),writingChannelEnabled,{confirm},
     {reviewDestination:async(...args)=>calls.push(args),get:async()=>({data:props.cycle})},{error(){}})
   return {...functions,props,emitted,form,editing,show,calls}
 }
@@ -83,9 +85,9 @@ test('busy platform actions cannot open a login or select a writing target',()=>
 
 test('the content page blocks stale buttons before native calls or a fill confirmation',async()=>{
   const calls=[],value=target('configured',false)
-  const actions=new Function('cycle','destinationEnabled','inactiveDestinationMessage','ElMessage','draftDestination','cycleScope',`
+  const actions=new Function('cycle','destinationCanPrepare','destinationPublicationGate','ElMessage','draftDestination','cycleScope',`
     return {open:(${content.expression('openDestination')}),fill:(${content.expression('fillDestination')})}
-  `)(ref(cycle(value)),destinationEnabled,inactiveDestinationMessage,{info:message=>calls.push(message)},()=>value,()=>({id:'cycle-a',epoch:0}))
+  `)(ref(cycle(value)),destinationCanPrepare,destinationPublicationGate,{info:message=>calls.push(message)},()=>value,()=>({id:'cycle-a',epoch:0}))
   await actions.open({target_id:value.id})
   await actions.fill({article_id:1,provenance:{destination:{id:value.id}}})
   assert.deepEqual(calls,[inactiveDestinationMessage,inactiveDestinationMessage])
@@ -93,9 +95,9 @@ test('the content page blocks stale buttons before native calls or a fill confir
 
 test('the guided journey blocks writing, login and publishing for a preserved stopped draft',async()=>{
   const value=target('configured',false),selectedTarget=ref(value),calls=[]
-  const actions=new Function('cycle','platform','selectedTarget','writingChannelEnabled','destinationEnabled','inactiveDestinationMessage','run','geoContentApi','applyCycle','cycleId',`
+  const actions=new Function('cycle','platform','selectedTarget','writingChannelEnabled','destinationCanPrepare','destinationPublicationGate','run','geoContentApi','applyCycle','cycleId',`
     return {generate:(${journey.expression('generateResearch')}),login:(${journey.expression('openDestinationLogin')}),publish:(${journey.expression('openPublisher')})}
-  `)(ref(cycle(value)),ref(value.key),selectedTarget,writingChannelEnabled,destinationEnabled,inactiveDestinationMessage,action=>action(),
+  `)(ref(cycle(value)),ref(value.key),selectedTarget,writingChannelEnabled,destinationCanPrepare,destinationPublicationGate,action=>action(),
     {get:async()=>{calls.push('read current cycle');return {data:cycle(value)}}},()=>{},ref('cycle-a'))
   await assert.rejects(actions.generate('draft'),/已停用/)
   assert.throws(actions.login,/已停用/)

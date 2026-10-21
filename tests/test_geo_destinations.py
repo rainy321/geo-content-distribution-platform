@@ -17,6 +17,8 @@ def config(**changes):
     return {'name': '合成小众技术社区', 'home_url': 'https://niche.example.org/',
             'login_url': 'https://niche.example.org/login', 'editor_url': 'https://niche.example.org/editor',
             'source_scope': 'https://niche.example.org/blog/', 'style': '面向工程师：问题、条件、步骤、验证与局限。',
+            'publication_use': 'editorial', 'rule_review': {'state': 'suitable', 'operator_confirmed': True,
+                'note': 'Synthetic operator review for isolated tests; not platform verification.'},
             'title_selector': 'input[name=title]', 'body_selector': 'textarea[name=body]', **changes}
 
 

@@ -145,11 +145,24 @@ def create_cycle(database, report, report_ref, project_id=None):
 
 def list_cycles(database):
     with closing(_connect(database)) as connection:
-        return [dict(row) for row in connection.execute('''
-            SELECT c.id,c.project_id,c.report_ref,c.created_at,c.updated_at,p.name,
+        result = []
+        for row in connection.execute('''
+            SELECT c.id,c.project_id,c.report_ref,c.created_at,c.updated_at,p.name,c.baseline,
                 (SELECT COUNT(*) FROM geo_content_drafts d WHERE d.cycle_id=c.id) AS draft_count
             FROM geo_content_cycles c JOIN projects p ON p.id=c.project_id ORDER BY c.updated_at DESC
-        ''')]
+        '''):
+            item = dict(row)
+            try:
+                baseline = json.loads(item.pop('baseline'))
+                profile = baseline.get('profile', {}) if isinstance(baseline, dict) else {}
+                if not isinstance(profile, dict):
+                    profile = {}
+            except (TypeError, ValueError):
+                profile = {}
+            item['website'] = profile.get('website') if isinstance(profile.get('website'), str) else ''
+            item['entity_type'] = profile.get('entity_type') if profile.get('entity_type') in ('company', 'product') else ''
+            result.append(item)
+        return result
 
 
 def _drafts(connection, identifier):

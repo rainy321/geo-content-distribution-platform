@@ -5,11 +5,13 @@ from contextlib import closing
 
 from services import geo_destination_service as destinations, geo_content_store as store
 from tests.test_geo_content_loop import ResearchFixture, draft, facts
+from tests.test_geo_destinations import config as reviewed_config
 
 
 class CsdnDestinationTests(ResearchFixture, unittest.TestCase):
     def ready_article(self, editor='https://editor.csdn.net/md/'):
         config=copy.deepcopy(next(row[3] for row in destinations.CATALOG if row[0]=='csdn'))
+        config.update({key: reviewed_config()[key] for key in ('publication_use', 'rule_review')})
         config['editor_url']=editor
         target=destinations.save_target(self.database,self.cycle['project_id'],config)
         cycle=store.get_cycle(self.database,self.cycle['id'])
@@ -30,7 +32,7 @@ class CsdnDestinationTests(ResearchFixture, unittest.TestCase):
         self.assertEqual(store.get_cycle(self.database,self.cycle['id'])['publications'],[])
 
     def test_similar_host_never_receives_the_fixed_recipe(self):
-        target,article=self.ready_article('https://editor.csdn.net.evil.example/md/')
+        target,article=self.ready_article('https://editor.csdn.net.evil.example.org/md/')
         self.assertEqual(target['capability'],'login_and_export')
         with self.assertRaisesRegex(ValueError,'尚未配置'):
             destinations.reserve_fill(self.database,self.cycle['project_id'],target['id'],article)

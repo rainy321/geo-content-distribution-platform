@@ -91,7 +91,10 @@ class DestinationSessionTests(unittest.IsolatedAsyncioTestCase):
         await asyncio.gather(self.session_task, return_exceptions=True)
 
     async def wait_until(self, predicate):
-        deadline = asyncio.get_running_loop().time() + 5
+        # The real isolated CSDN import/probe can take just over five seconds
+        # on Windows. Keep a bounded fixture budget without changing product
+        # waits, readiness checks, write markers or the no-replay assertions.
+        deadline = asyncio.get_running_loop().time() + 10
         while not predicate():
             if self.session_task.done():
                 await self.session_task

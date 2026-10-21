@@ -58,6 +58,25 @@ class ResearchFixture:
 
 
 class TestResearchLoop(ResearchFixture, unittest.TestCase):
+    def test_cycle_list_identity_keeps_the_stored_baseline_instead_of_current_project(self):
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            stored = json.loads(connection.execute('SELECT baseline FROM geo_content_cycles WHERE id=?', (self.cycle['id'],)).fetchone()[0])
+            stored['profile'].update(website='https://example.org/original-product', entity_type='product')
+            connection.execute('UPDATE geo_content_cycles SET baseline=? WHERE id=?', (json.dumps(stored), self.cycle['id']))
+            connection.execute('UPDATE projects SET website=?,entity_type=? WHERE id=?',
+                               ('https://example.org/current-company', 'company', self.cycle['project_id']))
+        item = next(row for row in store.list_cycles(self.database) if row['id'] == self.cycle['id'])
+        self.assertEqual(item['website'], 'https://example.org/original-product')
+        self.assertEqual(item['entity_type'], 'product')
+        self.assertEqual(item['draft_count'], 0)
+        self.assertNotIn('baseline', item)
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            stored['profile'].pop('website')
+            stored['profile'].pop('entity_type')
+            connection.execute('UPDATE geo_content_cycles SET baseline=? WHERE id=?', (json.dumps(stored), self.cycle['id']))
+        legacy = next(row for row in store.list_cycles(self.database) if row['id'] == self.cycle['id'])
+        self.assertEqual((legacy['website'], legacy['entity_type']), ('', ''))
+
     def test_later_cited_community_remains_available_to_editorial_planning(self):
         baseline = copy.deepcopy(self.baseline)
         baseline['cases'][0]['citations'] = [

@@ -1,14 +1,14 @@
 <template>
   <el-card shadow="never" data-testid="source-destinations">
-    <div class="row"><h2>来源投放目标</h2><el-button :disabled="busy" @click="configure()">添加其他平台</el-button></div>
-    <p class="hint">先看 AI 引用了哪个具体栏目，再核对能否投稿。排序依据是本次有效问题中的来源线索，不能代表收录概率。</p>
+    <div class="row"><h2>来源与平台用途</h2><el-button :disabled="busy" @click="configure()">添加其他平台</el-button></div>
+    <p class="hint">先看 AI 引用了哪个栏目，再判断适合资料参考、原创投稿还是商业投放。用途核对后才准备账号；被引用不代表允许推广。</p>
     <el-table :data="cycle.opportunities" data-testid="source-opportunities">
       <el-table-column label="观察来源" min-width="190"><template #default="{row}"><strong>{{ row.domain || '网址未确认' }}</strong><p>{{ surfaces[row.surface] || '待调研网站' }}</p><p class="hint">{{ row.case_ids.join('、') }} · {{ row.observed_pairs }} 条去重线索</p></template></el-table-column>
-      <el-table-column label="接入判断" min-width="260"><template #default="{row}"><p>{{ row.note }}</p><a v-if="row.examples[0]?.url" :href="row.examples[0].url" target="_blank" rel="noopener noreferrer">核对观察网址</a><p v-for="match in row.matches" :key="match.id">已配置：{{ match.name }}（用户配置的网址范围）</p></template></el-table-column>
+      <el-table-column label="接入判断" min-width="260"><template #default="{row}"><p>{{ row.note }}</p><a v-if="safeResearchLink(row.examples[0]?.url)" :href="safeResearchLink(row.examples[0].url)" target="_blank" rel="noopener noreferrer">核对观察网址</a><p v-else-if="row.examples[0]?.url" class="hint">原网址格式待核对</p><p v-for="match in row.matches" :key="match.id">已配置：{{ match.name }}（用户配置的网址范围）</p></template></el-table-column>
       <el-table-column label="下一步" min-width="170"><template #default="{row}">
-        <el-button v-if="row.candidate && !row.matches.length" :disabled="busy" @click="configure(row.candidate)">接入{{ row.candidate.name }}</el-button>
+        <el-button v-if="row.candidate && !row.matches.length" :disabled="busy" @click="configure(row.candidate)">判断{{ row.candidate.name }}用途</el-button>
         <el-button v-else-if="row.surface === 'unknown' && !row.matches.length" :disabled="busy" @click="configure(unknownCandidate(row))">核对后添加平台</el-button>
-        <el-button v-for="match in row.matches" :key="match.id" :disabled="busy || !writingChannelEnabled(cycle,match.key)" @click="selectTarget(match.key)">{{ writingChannelEnabled(cycle,match.key) ? '为此平台写稿' : '平台已停用' }}</el-button>
+        <el-button v-for="match in row.matches" :key="match.id" :disabled="busy || !writingChannelEnabled(cycle,match.key)" @click="selectTarget(match.key)">{{ writingChannelEnabled(cycle,match.key) ? '为此平台写稿' : '先核对平台用途' }}</el-button>
         <span v-if="row.surface === 'vendor_documentation'">先调研合作或其他开放栏目</span><span v-if="row.surface === 'url_unknown'">补采来源网址</span><span v-if="row.surface === 'owned_site'">对接网站 CMS</span>
         <div v-for="lead in row.title_leads" :key="lead.candidate.name" class="hint"><p>标题线索：{{ lead.source_ids.join('、') }}，原网址未核实</p><el-button :disabled="busy" @click="configure(lead.candidate)">调研接入{{ lead.candidate.name }}</el-button></div>
       </template></el-table-column>
@@ -19,18 +19,19 @@
       <p class="hint">{{ target.config.editor_url }}<br/>内部阈值：每 24 小时 {{ target.config.daily_limit }} 次填写，至少间隔 {{ target.config.interval_hours }} 小时。该阈值不是平台官方额度，也不保证免封号。</p>
       <p v-if="target.blocked_reason" class="blocked">{{ target.blocked_reason }}</p>
       <p v-if="!destinationEnabled(target)" class="hint" role="status">{{ inactiveDestinationMessage }}</p>
-      <DestinationSessionCard v-else :cycle-id="cycle.id" :target="target" :task="task" :busy="busy" :native-available="nativeAvailable" @open="openTarget(target)" @checked="$emit('checked')"/>
-      <div class="row"><el-button :disabled="busy || !destinationEnabled(target)" @click="selectTarget(target.key)">选择此平台写稿</el-button><el-button :disabled="busy" @click="configure(target.config, target)">编辑接入配置</el-button><el-button @click="events(target)">尝试记录</el-button><el-button v-if="destinationEnabled(target) && (target.blocked_reason || ['preparing','filled'].includes(target.state))" :disabled="busy" @click="review(target)">检查后恢复</el-button></div>
+      <DestinationUseReview v-else :cycle="cycle" :target="target" :busy="busy" @updated="$emit('updated',$event)"/>
+      <DestinationSessionCard v-if="destinationCanPrepare(target)" :cycle-id="cycle.id" :target="target" :task="task" :busy="busy" :native-available="nativeAvailable" @open="openTarget(target)" @checked="$emit('checked')"/>
+      <div class="row"><el-button :disabled="busy || !destinationCanPrepare(target)" @click="selectTarget(target.key)">选择此平台写稿</el-button><el-button :disabled="busy" @click="configure(target.config, target)">编辑接入配置</el-button><el-button @click="events(target)">尝试记录</el-button><el-button v-if="destinationEnabled(target) && (target.blocked_reason || ['preparing','filled'].includes(target.state))" :disabled="busy" @click="review(target)">检查后恢复</el-button></div>
     </article>
     <p v-if="!nativeAvailable" class="hint">保存配置和写稿可在网页中操作；专用平台浏览器需使用桌面软件。</p>
     <el-dialog v-model="show" :title="editing ? '编辑平台接入' : '接入一个平台'" width="760px" :close-on-click-modal="false">
       <el-form label-position="top" @submit.prevent>
         <el-form-item label="平台名称"><el-input v-model="form.name" aria-label="接入平台名称" maxlength="80"/></el-form-item>
         <el-form-item label="平台状态"><el-switch v-model="form.enabled" aria-label="启用此平台" active-text="启用此平台" inactive-text="停用，保留原稿与记录"/><p class="hint">停用后不再写稿、打开登录或辅助填写。启用不会清除原来的审核、频率与待检查记录。</p></el-form-item>
-        <div class="grid"><el-form-item label="平台首页 HTTPS"><el-input v-model="form.home_url" aria-label="平台首页网址"/></el-form-item><el-form-item label="用于匹配来源的具体网址范围"><el-input v-model="form.source_scope" aria-label="来源网址范围" placeholder="https://平台/开放栏目/"/></el-form-item><el-form-item label="正常注册 / 登录入口"><el-input v-model="form.login_url" aria-label="平台登录入口"/></el-form-item><el-form-item label="作者编辑器入口"><el-input v-model="form.editor_url" aria-label="平台编辑器入口"/></el-form-item></div>
-        <el-form-item label="发布后公开网址范围，可与编辑器、来源栏目不同"><el-input v-model="form.publication_scope" aria-label="发布后公开网址范围" placeholder="留空沿用来源范围，例如 https://zhuanlan.zhihu.com/"/></el-form-item>
+        <DestinationUseFields :model-value="form" :policy="formPolicy" :disabled="saving" @update:model-value="Object.assign(form,$event)"/>
+        <div class="grid"><el-form-item label="平台首页 HTTPS"><el-input v-model="form.home_url" aria-label="平台首页网址" @update:model-value="resetUseReview"/></el-form-item><el-form-item label="用于匹配来源的具体网址范围"><el-input v-model="form.source_scope" aria-label="来源网址范围" placeholder="https://平台/开放栏目/" @update:model-value="resetUseReview"/></el-form-item><el-form-item label="正常注册 / 登录入口"><el-input v-model="form.login_url" aria-label="平台登录入口" @update:model-value="resetUseReview"/></el-form-item><el-form-item label="作者编辑器入口"><el-input v-model="form.editor_url" aria-label="平台编辑器入口" @update:model-value="resetUseReview"/></el-form-item></div>
+        <el-form-item label="发布后公开网址范围，可与编辑器、来源栏目不同"><el-input v-model="form.publication_scope" aria-label="发布后公开网址范围" placeholder="留空沿用来源范围，例如 https://zhuanlan.zhihu.com/" @update:model-value="resetUseReview"/></el-form-item>
         <el-form-item label="平台风格、受众与内容要求（需核对，AI 不会自行验证平台规则）"><el-input v-model="form.style" type="textarea" :rows="3" aria-label="平台内容规范" maxlength="3000"/></el-form-item>
-        <el-form-item label="平台规则原文网址，可留空"><el-input v-model="form.rules_url" aria-label="平台规则网址"/></el-form-item>
         <div class="grid"><el-form-item label="标题字数上限"><el-input-number v-model="form.title_limit" :min="10" :max="180"/></el-form-item><el-form-item label="正文字数上限"><el-input-number v-model="form.body_limit" :min="100" :max="30000"/></el-form-item><el-form-item label="本软件每 24 小时填写上限"><el-input-number v-model="form.daily_limit" :min="1" :max="20"/></el-form-item><el-form-item label="两次填写最小间隔（小时）"><el-input-number v-model="form.interval_hours" :min="1" :max="168"/></el-form-item></div>
         <el-collapse><el-collapse-item title="高级：配置自动填写（当前由实施人员配置 CSS 编辑框）" name="selectors">
           <p v-if="editing?.capability === 'platform_assisted_fill'" class="hint">此平台已有专用辅助填写，编辑框配置可以留空，无需填写 CSS。</p>
@@ -45,34 +46,58 @@
 </template>
 
 <script setup>
-import { reactive, ref } from 'vue'
+import { reactive, ref, watch } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { geoContentApi } from '@/api/geoContent'
 import DestinationSessionCard from '@/components/DestinationSessionCard.vue'
+import DestinationUseFields from '@/components/DestinationUseFields.vue'
+import DestinationUseReview from '@/components/DestinationUseReview.vue'
+import { destinationUseValues, safeResearchLink } from '@/utils/geoDestinationUse'
 import { destinationEventView } from '@/utils/geoDestinationSession'
-import { destinationEnabled, writingChannelEnabled, inactiveDestinationMessage } from '@/utils/geoDestinationAvailability'
+import { destinationEnabled, destinationCanPrepare, writingChannelEnabled, inactiveDestinationMessage } from '@/utils/geoDestinationAvailability'
 const props = defineProps({cycle:{type:Object,required:true},task:{type:Object,default:()=>({})},busy:Boolean,nativeAvailable:Boolean})
 const emit = defineEmits(['updated','select','open','checked'])
-const show=ref(false), saving=ref(false), editing=ref(null), showEvents=ref(false), eventRows=ref([])
-const defaults = () => ({enabled:true,name:'',home_url:'',source_scope:'',publication_scope:'',login_url:'',editor_url:'',style:'先回答读者的问题，再说明依据、适用条件和局限。不要复制来源文章或编造体验；按平台现行规范核对商业内容。',rules_url:'',channel:'',title_limit:100,body_limit:15000,daily_limit:1,interval_hours:6,title_selector:'',body_selector:''})
+const show=ref(false), saving=ref(false), editing=ref(null), showEvents=ref(false), eventRows=ref([]), formPolicy=ref(null)
+const defaults = () => ({...destinationUseValues(),enabled:true,name:'',home_url:'',source_scope:'',publication_scope:'',login_url:'',editor_url:'',style:'先回答读者的问题，再说明依据、适用条件和局限。不要复制来源文章或编造体验；按平台现行规范核对商业内容。',channel:'',title_limit:100,body_limit:15000,daily_limit:1,interval_hours:6,title_selector:'',body_selector:''})
 const form = reactive(defaults())
+const resetUseReview=()=>{form.rule_review={...form.rule_review,state:'unknown',operator_confirmed:false};formPolicy.value=null}
 const surfaces = {community_candidate:'开放内容平台候选，权限待核对',vendor_documentation:'厂商文档 / 自有资料',url_unknown:'仅有标题',owned_site:'客户官网',unknown:'未知网站，需调研'}
 const states = {configured:'已配置',session_saved:'会话已保存，权限未验证',login_open:'等待平台操作',editor_ready:'编辑器已检查',preparing:'尝试未结束',filled:'已填写，发布未确认',need_action:'待检查',reviewed:'已人工检查'}
-const configure = (config, target) => { editing.value=target || null; Object.assign(form,defaults(),config || {}); if (target && !destinationEnabled(target)) form.enabled=false; if (!form.publication_scope && form.channel === 'zhihu') form.publication_scope='https://zhuanlan.zhihu.com/'; show.value=true }
+let configEpoch=0
+const configure = (config, target) => { configEpoch++;editing.value=target || null; formPolicy.value=target?.publication_policy || config?.publication_policy || null; Object.assign(form,defaults(),config || {},destinationUseValues(config)); if (target && !destinationEnabled(target)) form.enabled=false; if (!form.publication_scope && form.channel === 'zhihu') form.publication_scope='https://zhuanlan.zhihu.com/'; show.value=true }
 const selectTarget = key => {if(!props.busy && writingChannelEnabled(props.cycle,key))emit('select',key)}
-const openTarget = target => {const current=props.cycle.destinations.find(item=>item.id===target.id);if(!props.busy && destinationEnabled(current))emit('open',{target_id:current.id})}
+const openTarget = target => {const current=props.cycle.destinations.find(item=>item.id===target.id);if(!props.busy && destinationCanPrepare(current))emit('open',{target_id:current.id})}
 const unknownCandidate = row => {const home=`https://${row.domain}/`;return {name:row.domain,home_url:home,source_scope:home,login_url:home,editor_url:home}}
 const save = async () => {
+  if(props.busy || saving.value)return
+  const cycleId=props.cycle.id,request=configEpoch,payload={config:{...form,rule_review:{...form.rule_review}},revision:editing.value?.revision},targetId=editing.value?.id
   saving.value=true
-  try {const result=(await geoContentApi.saveDestination(props.cycle.id,editing.value?.id,{config:{...form},revision:editing.value?.revision})).data;emit('updated',result.cycle);show.value=false;ElMessage.success(form.enabled ? '平台已启用，登录与发布权限仍需核对' : '平台已停用，原稿与记录仍保留')}
-  finally {saving.value=false}
+  try {const result=(await geoContentApi.saveDestination(cycleId,targetId,payload)).data;if(request!==configEpoch || cycleId!==props.cycle.id)return;emit('updated',result.cycle);show.value=false;ElMessage.success(payload.config.enabled ? '平台已保存，先核对用途再准备账号' : '平台已停用，原稿与记录仍保留')}
+  finally {if(request===configEpoch)saving.value=false}
 }
-const events = async target => {eventRows.value=(await geoContentApi.destination(props.cycle.id,target.id)).data.target.events;showEvents.value=true}
+let eventRequest=0
+const events = async target => {
+  const cycleId=props.cycle.id,epoch=configEpoch,request=++eventRequest
+  const result=(await geoContentApi.destination(cycleId,target.id)).data
+  if(cycleId!==props.cycle.id || epoch!==configEpoch || request!==eventRequest || result?.target?.id!==target.id)return
+  eventRows.value=result.target.events;showEvents.value=true
+}
 const review = async target => {
   if(props.busy || !destinationEnabled(props.cycle.destinations.find(item=>item.id===target.id)))return
-  try {await ElMessageBox.confirm('请先检查该平台是否已有自动保存草稿或发布记录，并核对账号限制。恢复后仍保留原来的频率与尝试记录。','确认已检查平台状态',{confirmButtonText:'已检查，恢复',cancelButtonText:'取消'});if(!destinationEnabled(props.cycle.destinations.find(item=>item.id===target.id)))return;await geoContentApi.reviewDestination(props.cycle.id,target.id);emit('updated',(await geoContentApi.get(props.cycle.id)).data)}
+  const cycleId=props.cycle.id,epoch=configEpoch,revision=target.revision,previousState=target.state,previousReason=target.blocked_reason
+  const current=()=>cycleId===props.cycle.id && epoch===configEpoch && props.cycle.destinations.some(item=>item.id===target.id && item.revision===revision)
+  try {
+    await ElMessageBox.confirm('请先检查该平台是否已有自动保存草稿或发布记录，并核对账号限制。恢复后仍保留原来的频率与尝试记录。','确认已检查平台状态',{confirmButtonText:'已检查，恢复',cancelButtonText:'取消'})
+    const latest=props.cycle.destinations.find(item=>item.id===target.id)
+    if(props.busy || !current() || !destinationEnabled(latest) || latest.state!==previousState || latest.blocked_reason!==previousReason)return
+    await geoContentApi.reviewDestination(cycleId,target.id)
+    if(!current())return
+    const result=(await geoContentApi.get(cycleId)).data
+    if(current() && result?.id===cycleId)emit('updated',result)
+  }
   catch(error) {if(error instanceof Error && !error.response) ElMessage.error(error.message)}
 }
+watch(()=>props.cycle.id,()=>{configEpoch++;eventRequest++;show.value=false;showEvents.value=false;saving.value=false;editing.value=null},{flush:'sync'})
 </script>
 
 <style scoped>

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from services.platform_capability_service import get_platform_capability
+from services.geo_publication_suitability import assert_publication_allowed, publication_gate
 from services.publish_policy_service import (
     COUNTED_JOB_STATUSES, PublishPolicyViolation, _job_effective_time,
     _max_existing_in_rolling_window, _normalize_reference_time,
@@ -32,8 +33,9 @@ def builtin_publisher(config):
     channel = config.get('channel') or ''
     result = {'available': False, 'platform': channel, 'reason': ''}
     capability = get_platform_capability(channel)
-    if config.get('enabled', True) is not True:
-        return {**result, 'reason': '目标已停用'}
+    gate = publication_gate(config)
+    if not gate['allowed']:
+        return {**result, 'reason': gate['reason']}
     if not capability or channel not in PUBLIC_HOSTS:
         return {**result, 'reason': '此渠道没有已核验的内置文章发布器，可使用辅助填写或导出'}
     if capability.get('delivery_state') != 'verified' or capability.get('requires_video') or capability.get('content_mode') not in ('article', 'image_article'):
@@ -79,8 +81,7 @@ def article_target_context(connection, article_id, *, platform=None, require_bui
         config = json.loads(target['config'])
         if not isinstance(config, dict):
             raise ValueError('目标配置证据格式无效')
-        if config.get('enabled', True) is not True or target['state'] in ('disabled', 'archived', 'deleted'):
-            raise ValueError('目标已停用')
+        assert_publication_allowed({'config': config, 'state': target['state']})
         digest = configuration_digest(config)
         if (type(destination.get('revision')) is not int or destination['revision'] != target['revision']
                 or provenance.get('destination_config_sha256') != digest):

@@ -365,7 +365,7 @@ class DesktopGeoJobs:
         try:
             cycle = geo_content_store.get_cycle(database, cycle_id)
             target = geo_destination_service.get_target(database, cycle['project_id'], target_id)
-            geo_destination_service.assert_target_enabled(target)
+            geo_destination_service.assert_publication_allowed(target)
             if article_id is not None and (type(article_id) is not int or article_id <= 0):
                 raise ValueError('文章编号无效')
         except (ValueError, geo_content_store.ResearchNotFoundError) as error:
@@ -379,7 +379,7 @@ class DesktopGeoJobs:
                 current, article, event_id = geo_destination_service.reserve_fill(database, cycle['project_id'], target_id, article_id)
             else:
                 current = geo_destination_service.get_target(database, cycle['project_id'], target_id)
-            geo_destination_service.assert_target_enabled(current)
+            geo_destination_service.assert_publication_allowed(current)
             check_requested = asyncio.Event()
             with self.lock:
                 self._destination_check = check_requested
@@ -426,7 +426,7 @@ class DesktopGeoJobs:
             try:
                 cycle = geo_content_store.get_cycle(self.data / 'database.db', self.job.get('cycle_id'))
                 target = geo_destination_service.get_target(self.data / 'database.db', cycle['project_id'], self.job.get('target_id'))
-                geo_destination_service.assert_target_enabled(target)
+                geo_destination_service.assert_publication_allowed(target)
             except (ValueError, geo_content_store.ResearchNotFoundError) as error:
                 return {'error': str(error)}
             loop, signal = self._destination_check_loop, self._destination_check

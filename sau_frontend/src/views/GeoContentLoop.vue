@@ -1,12 +1,12 @@
 <template>
   <main class="content-loop" data-testid="geo-content-loop">
     <div v-if="journeyProjectId" class="journey-return"><span>这里保留详细来源和平台接入配置，品牌资料与稿件会延续到同一轮流程。</span><el-button @click="returnToJourney">返回优化流程</el-button></div>
-    <header><div><h1>采集驱动内容</h1><p>从引用来源找到投放目标，接入平台、适配内容，再追踪发布与复测。</p></div><el-button :loading="loading" @click="reload">刷新</el-button></header>
+    <header><div><h1>采集驱动内容</h1><p>从来源发现内容机会，先核对平台用途，再准备稿件与反馈。</p></div><el-button :loading="loading" @click="reload">刷新</el-button></header>
     <el-card shadow="never">
       <h2>1 · 选择采集依据</h2>
       <div class="row"><el-select v-model="reportId" placeholder="选择采集报告" aria-label="选择采集报告"><el-option v-for="report in reports" :key="report.id" :value="report.id" :label="`${report.name} · ${report.case_count} 题 · ${date(report.updated_at)}`" /></el-select><el-button type="primary" :disabled="!reportId || busy" @click="create">建立内容任务单</el-button></div>
       <p class="hint">使用报告里的原始问题与来源。不同客户各建任务单，自动关联同名品牌项目。</p>
-      <el-select v-model="cycleId" placeholder="打开已保存的任务单" aria-label="已保存的内容任务单" @change="loadCycle"><el-option v-for="item in cycles" :key="item.id" :value="item.id" :label="`${item.name} · ${item.draft_count} 份稿件 · ${date(item.updated_at)}`" /></el-select>
+      <el-select v-model="cycleId" placeholder="打开已保存的任务单" aria-label="已保存的内容任务单" @change="loadCycle"><el-option v-for="item in cycles" :key="item.id" :value="item.id" :label="`${item.entity_type==='company'?'公司':item.entity_type==='product'?'产品':'旧对象口径'} · ${item.name} · ${item.website || `项目 #${item.project_id}`} · ${item.draft_count} 份稿件 · ${date(item.updated_at)}`" /></el-select>
     </el-card>
     <el-card v-if="nativeAvailable" shadow="never">
       <DoubaoPreparation/>
@@ -34,15 +34,15 @@
       </el-card>
       <el-card shadow="never">
         <h2>4 · 生成文章或帖子，进入现有发布流程</h2>
-        <div class="row"><el-select v-model="briefId" aria-label="内容选题"><el-option v-for="brief in cycle.analysis.briefs" :key="brief.id" :value="brief.id" :label="brief.topic"/></el-select><el-select v-model="platform" aria-label="目标发布渠道"><el-option v-for="(label,key) in cycle.channels" :key="key" :value="key" :label="writingChannelEnabled(cycle,key) ? label : `${label} · 已停用`" :disabled="!writingChannelEnabled(cycle,key)"/></el-select></div>
-        <p v-if="selectedDestination && !destinationEnabled(selectedDestination)" class="hint">{{ inactiveDestinationMessage }}</p>
+        <div class="row"><el-select v-model="briefId" aria-label="内容选题"><el-option v-for="brief in cycle.analysis.briefs" :key="brief.id" :value="brief.id" :label="brief.topic"/></el-select><el-select v-model="platform" aria-label="目标发布渠道"><el-option v-for="(label,key) in cycle.channels" :key="key" :value="key" :label="writingChannelLabel(cycle,key,label)" :disabled="!writingChannelEnabled(cycle,key)"/></el-select></div>
+        <p v-if="selectedDestination && !destinationCanPrepare(selectedDestination)" class="hint">{{ destinationPublicationGate(selectedDestination).reason }}</p>
         <p class="hint">{{ selectedDestination ? `已选择接入平台：${selectedDestination.config.name}；稿件将使用该平台的内容规范与长度限制。` : '当前为通用渠道稿。可在上方来源投放目标中接入并选择具体平台。' }}</p>
         <div class="row"><el-button v-if="nativeAvailable" type="primary" :disabled="busy || !canDraft" @click="generate('draft','doubao')">豆包生成并存入内容库</el-button><el-button :disabled="busy || !canDraft" @click="generate('draft','api')">AI API 生成并存入内容库</el-button></div>
-        <p v-if="!canDraft" class="hint">请先保存核对后的事实资料，并保持输入与已保存内容一致。</p>
+        <p v-if="!canDraft && (!selectedDestination || destinationCanPrepare(selectedDestination))" class="hint">请先保存核对后的事实资料，并保持输入与已保存内容一致。</p>
         <article v-for="draft in cycle.drafts" :key="draft.article_id" class="draft" data-testid="research-draft">
           <h3>{{ draft.title }}</h3><p>{{ cycle.channels[draft.platform] }} · {{ status[draft.status] || draft.status }} · 原始问题 {{ draft.provenance.brief.case_ids.join('、') }}</p>
           <p>{{ draft.summary }}</p>
-          <div class="row"><el-button @click="edit(draft)">审稿 / 编辑</el-button><el-button v-if="destinationSupportsFill(draftDestination(draft))" :disabled="busy || !nativeAvailable || draft.status !== 'ready' || !destinationEnabled(draftDestination(draft))" @click="fillDestination(draft)">打开目标平台并填写</el-button><el-button v-if="draft.provenance.destination" :disabled="busy || !['ready','published'].includes(draft.status)" @click="openPublication(draft)">登记站内发布链接</el-button><el-button v-if="legacyChannel(draft) && legacyChannel(draft) !== 'owned_web'" :disabled="draft.status !== 'ready'" @click="publish(draft)">进入现有发布中心</el-button><el-button @click="downloadArticle(draft)">导出稿件</el-button></div>
+          <div class="row"><el-button @click="edit(draft)">审稿 / 编辑</el-button><el-button v-if="destinationSupportsFill(draftDestination(draft))" :disabled="busy || !nativeAvailable || draft.status !== 'ready' || !destinationCanPrepare(draftDestination(draft))" @click="fillDestination(draft)">打开目标平台并填写</el-button><el-button v-if="draft.provenance.destination" :disabled="busy || !['ready','published'].includes(draft.status)" @click="openPublication(draft)">登记站内发布链接</el-button><el-button v-if="legacyChannel(draft) && legacyChannel(draft) !== 'owned_web'" :disabled="draft.status !== 'ready' || Boolean(draft.provenance.destination) && !destinationCanPrepare(draftDestination(draft))" @click="publish(draft)">进入现有发布中心</el-button><el-button @click="downloadArticle(draft)">导出稿件</el-button></div>
           <p v-if="draft.provenance.destination && !destinationSupportsFill(draftDestination(draft))" class="hint">该目标当前支持登录与导出，辅助填写尚未接入。可导出稿件后在平台编辑。</p>
           <p v-if="draft.provenance.destination" class="hint">来源匹配依据：{{ draft.provenance.distribution_basis?.source_ids.join('、') || '手动选择，当前选题未匹配来源网址' }}。填写可能触发网站自动保存；发布状态以实际结果为准。已有发布中心需另外绑定对应账号。</p>
           <p v-if="draft.platform === 'owned_web'" class="hint">官网稿可导出交给网站编辑发布。</p>
@@ -87,7 +87,7 @@ import DoubaoPreparation from '@/components/DoubaoPreparation.vue'
 import GeoPublicationReview from '@/components/GeoPublicationReview.vue'
 import { destinationContinuationText, destinationPreparationText, destinationSupportsFill, isDestinationTask } from '@/utils/geoDestinationSession'
 import { createWritingPreferences } from '@/utils/geoWritingOptions'
-import { destinationEnabled, writingChannelEnabled, inactiveDestinationMessage } from '@/utils/geoDestinationAvailability'
+import { destinationEnabled, destinationCanPrepare, destinationPublicationGate, writingChannelEnabled, writingChannelLabel, inactiveDestinationMessage } from '@/utils/geoDestinationAvailability'
 
 const route = useRoute(), router = useRouter()
 const reports = ref([]), cycles = ref([]), cycle = ref(null), cycleId = ref(''), reportId = ref(''), retestReportId = ref('')
@@ -221,7 +221,8 @@ const stop = () => window.pywebview.api.stop_task()
 const selectDestination = key => {if(!writingChannelEnabled(cycle.value,key))return;platform.value=key;ElMessage.success('已选择目标平台，请在下方生成平台稿')}
 const draftDestination = draft => cycle.value?.destinations.find(item=>item.id===draft.provenance.destination?.id)
 const openDestination = async ({target_id,article_id}) => {
-  if(!destinationEnabled(cycle.value?.destinations.find(item=>item.id===target_id))){ElMessage.info(inactiveDestinationMessage);return}
+  const candidate=cycle.value?.destinations.find(item=>item.id===target_id)
+  if(!destinationCanPrepare(candidate)){ElMessage.info(destinationPublicationGate(candidate).reason);return}
   const scope = cycleScope()
   try {const result=await window.pywebview.api.open_destination(scope.id,target_id,article_id || null);if(result.error) throw new Error(result.error);if(sameCycleScope(scope))task.value=result}
   catch(error) {ElMessage.error(error.message || '平台窗口未打开')}
@@ -229,7 +230,7 @@ const openDestination = async ({target_id,article_id}) => {
 const fillDestination = async draft => {
   const scope=cycleScope()
   const target=draftDestination(draft)
-  if(!destinationEnabled(target)){ElMessage.info(inactiveDestinationMessage);return}
+  if(!destinationCanPrepare(target)){ElMessage.info(destinationPublicationGate(target).reason);return}
   if(!destinationSupportsFill(target)){ElMessage.info('该目标当前支持登录与导出，辅助填写尚未接入');return}
   try {await ElMessageBox.confirm(`${destinationPreparationText(target)} 将填入已审稿的标题和正文，其他已有内容会保留并暂停，网站可能自动保存。${destinationContinuationText(window.pywebview?.api)} 最后提交由你确认。`,'打开平台填写',{confirmButtonText:'打开并填写',cancelButtonText:'取消'});if(sameCycleScope(scope))await openDestination({target_id:draft.provenance.destination.id,article_id:draft.article_id})}
   catch(error) {if(error instanceof Error) ElMessage.error(error.message)}
@@ -247,7 +248,7 @@ const retest = async () => {
 const attachRetest = async () => { const scope=cycleScope();applyCycle((await geoContentApi.retest(scope.id,retestReportId.value)).data,{scope}) }
 const edit = draft => router.push({path:'/content-create',query:{articleId:draft.article_id}})
 const legacyChannel = draft => draft.provenance.destination ? draft.provenance.destination.channel : draft.platform
-const publish = draft => router.push({path:'/publish-center',query:{article_id:draft.article_id,platform:legacyChannel(draft)}})
+const publish = draft => {if(draft.provenance.destination && !destinationCanPrepare(draftDestination(draft))){ElMessage.info(destinationPublicationGate(draftDestination(draft)).reason);return}router.push({path:'/publish-center',query:{article_id:draft.article_id,platform:legacyChannel(draft)}})}
 const downloadFile = (data,name,type) => { const url = URL.createObjectURL(new Blob([data],{type})); const a=document.createElement('a'); a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000) }
 const download = (data,name) => downloadFile(JSON.stringify(data,null,2),name,'application/json')
 const downloadArticle = draft => downloadFile(`# ${draft.title}\n\n${draft.content}`,`article-${draft.article_id}.md`,'text/markdown')
