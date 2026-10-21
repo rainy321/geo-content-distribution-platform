@@ -88,6 +88,50 @@ class TestNativeGeoJobs(unittest.TestCase):
         self.assertEqual(len(result['result']['report']['cases']), 4)
         self.assertTrue((Path(result['run_dir']) / 'report.json').is_file())
 
+    def test_login_reports_actual_work_mode_without_changing_selected_mode_or_claiming_save(self):
+        async def manual_login(_config, _wait):
+            return {'client_mode': 'work', 'login_required': False, 'challenge': False,
+                    'close_reason': 'window_closed', 'session_saved': True,
+                    'account': 'synthetic-private-account'}
+        with patch('services.desktop_geo_jobs.open_doubao_session', manual_login):
+            self.jobs.open_login({'client_mode': 'consumer'})
+            result = self.wait_finished()
+        self.assertEqual(result['result']['requested_client_mode'], 'consumer')
+        self.assertEqual(result['result']['login_observation'], {
+            'client_mode': 'work', 'login_required': False, 'challenge': False})
+        self.assertIn('所选豆包对话，最后观察到豆包工作', result['message'])
+        self.assertIn('界面不匹配', result['message'])
+        self.assertIn('登录状态尚未核验', result['message'])
+        self.assertIsNone(result['result']['session_saved'])
+        self.assertNotIn('会话已保存', result['message'])
+        self.assertNotIn('synthetic-private-account', json.dumps(result))
+
+    def test_legacy_login_return_keeps_all_observation_states_unknown(self):
+        async def legacy_login(_config, _wait):
+            return None
+        with patch('services.desktop_geo_jobs.open_doubao_session', legacy_login):
+            self.jobs.open_login({'client_mode': 'consumer'})
+            result = self.wait_finished()
+        self.assertEqual(result['result']['login_observation'], {
+            'client_mode': None, 'login_required': None, 'challenge': None})
+        self.assertIn('实际界面未知', result['message'])
+        self.assertIn('登录状态未知', result['message'])
+        self.assertIn('验证状态未知', result['message'])
+        self.assertNotIn('会话已保存', result['message'])
+
+    def test_crashed_login_does_not_turn_last_visible_prompt_state_into_success(self):
+        async def crashed_login(_config, _wait):
+            return {'client_mode': 'work', 'login_required': True, 'challenge': True,
+                    'close_reason': 'page_crashed', 'session_saved': None}
+        with patch('services.desktop_geo_jobs.open_doubao_session', crashed_login):
+            self.jobs.open_login({'client_mode': 'work'})
+            result = self.wait_finished()
+        self.assertIn('异常退出', result['message'])
+        self.assertIn('最后仍显示登录提示', result['message'])
+        self.assertIn('最后仍显示安全验证', result['message'])
+        self.assertIn('会话保存状态未确认', result['message'])
+        self.assertNotIn('会话已保存', result['message'])
+
     def test_native_retest_keeps_case_scoped_source_progress_without_resubmitting(self):
         value=plan()
         calls, observations=[],[]

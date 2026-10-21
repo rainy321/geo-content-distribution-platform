@@ -1214,8 +1214,38 @@ async def _wait_for_manual_verification(page: Any, config: CollectorConfig, run_
         event["finished_at"] = datetime.now(HK_TIME).isoformat()
 
 
-async def open_doubao_session(config: CollectorConfig, wait_seconds: float | None = 300, *, playwright_factory: Callable | None = None) -> None:
-    """Open a dedicated normal browser for the user to log in/verify manually."""
+_LOGIN_OBSERVATION_JS = r"""s => {
+    const unknown = {client_mode: null, login_required: null, challenge: null};
+    if (!['doubao.com', 'www.doubao.com'].includes(location.hostname)) return unknown;
+    const visible = e => !!e && e.getClientRects().length > 0
+        && getComputedStyle(e).visibility !== 'hidden' && getComputedStyle(e).display !== 'none';
+    const any = selector => [...document.querySelectorAll(selector)].some(visible);
+    const chip = [...document.querySelectorAll('[data-testid="workspace-switch-chip"]')].find(visible);
+    // Read only this UI label. Account names, conversation text and DOM never leave the page.
+    const label = chip ? (chip.textContent || '').replace(/\s+/g, '') : '';
+    const mode = /工作/.test(label) ? 'work' : /^豆包(?:对话)?$/.test(label) ? 'consumer' : null;
+    const login = any(s.login_dialog) || any('[data-testid="to_login_button"]');
+    const challenge = any(s.challenge);
+    const recognized = !!mode || login || challenge || any(s.editor);
+    return {client_mode: mode, login_required: recognized ? login : null,
+        challenge: recognized ? challenge : null};
+}"""
+
+
+async def _read_login_observation(page: Any, config: CollectorConfig) -> dict[str, Any]:
+    """Read only safe UI state; absence of a login prompt is not authentication proof."""
+    value = await page.evaluate(_LOGIN_OBSERVATION_JS, {
+        'login_dialog': config.selectors.login_dialog, 'challenge': config.selectors.challenge,
+        'editor': config.selectors.editor,
+    })
+    value = value if isinstance(value, dict) else {}
+    return {'client_mode': value.get('client_mode') if value.get('client_mode') in ('consumer', 'work') else None,
+            'login_required': value.get('login_required') if type(value.get('login_required')) is bool else None,
+            'challenge': value.get('challenge') if type(value.get('challenge')) is bool else None}
+
+
+async def open_doubao_session(config: CollectorConfig, wait_seconds: float | None = 300, *, playwright_factory: Callable | None = None) -> dict[str, Any]:
+    """Wait for manual login and return only last-observed UI state, not login/save proof."""
     from playwright.async_api import async_playwright
 
     async with (playwright_factory or async_playwright)() as playwright:
@@ -1224,20 +1254,56 @@ async def open_doubao_session(config: CollectorConfig, wait_seconds: float | Non
         if config.executable_path:
             options["executable_path"] = config.executable_path
         context = await launch_context(playwright, config.profile_dir.resolve(), options, config.fallback_executable_path)
+        observation = {'client_mode': None, 'login_required': None, 'challenge': None}
+        close_reason = 'wait_elapsed'
+        page_crashed = False
+        disconnected = False
+
+        def crash(_page):
+            nonlocal page_crashed
+            page_crashed = True
+
+        def disconnect(_browser):
+            nonlocal disconnected
+            disconnected = True
+
+        browser = context.browser
+        if browser:
+            browser.on('disconnected', disconnect)
         try:
             page = context.pages[0] if context.pages else await context.new_page()
+            page.on('crash', crash)
             try:
                 await page.goto(DOUBAO_URL, wait_until="domcontentloaded", timeout=config.navigation_timeout_seconds * 1000)
             except Exception as exc:
-                if page.is_closed():
-                    return
-                # The user may navigate during startup; a cancelled navigation
-                # must not close their login window or discard the session.
-                error_match = re.search(r"net::[A-Z_]+", str(exc))
-                reason = error_match.group(0) if error_match else type(exc).__name__
-                print(f"页面跳转未完成（{reason}）；浏览器保持打开，可正常刷新或登录。", flush=True)
+                if 'Target page, context or browser has been closed' in str(exc):
+                    disconnected = not page.is_closed()
+                if not page.is_closed() and not page_crashed and not disconnected:
+                    # A user navigation must not close their manual-login window.
+                    error_match = re.search(r"net::[A-Z_]+", str(exc))
+                    reason = error_match.group(0) if error_match else type(exc).__name__
+                    print(f"页面跳转未完成（{reason}）；浏览器保持打开，可正常刷新或登录。", flush=True)
             deadline = time.monotonic() + wait_seconds if wait_seconds is not None else None
-            while (deadline is None or time.monotonic() < deadline) and not page.is_closed():
+            while True:
+                if page_crashed:
+                    close_reason = 'page_crashed'
+                    break
+                if disconnected or (browser and not browser.is_connected()):
+                    close_reason = 'browser_disconnected'
+                    break
+                if page.is_closed():
+                    close_reason = 'window_closed'
+                    break
+                try:
+                    observation = await _read_login_observation(page, config)
+                except Exception as exc:
+                    # Navigation and normal page closure can interrupt evaluate.
+                    # Keep the last actual observation, never invent a new state.
+                    if 'Target page, context or browser has been closed' in str(exc):
+                        close_reason = 'window_closed' if page.is_closed() else 'browser_disconnected'
+                        break
+                if deadline is not None and time.monotonic() >= deadline:
+                    break
                 await asyncio.sleep(0.5)
         finally:
             try:
@@ -1245,3 +1311,5 @@ async def open_doubao_session(config: CollectorConfig, wait_seconds: float | Non
             except Exception as exc:
                 if "Target page, context or browser has been closed" not in str(exc):
                     raise
+        # Even a clean close is not proof of cookie persistence or authentication.
+        return {**observation, 'close_reason': close_reason, 'session_saved': None}

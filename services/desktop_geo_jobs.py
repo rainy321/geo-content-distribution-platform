@@ -232,8 +232,33 @@ class DesktopGeoJobs:
             return {"error": str(error)}
         async def login():
             with exclusive_lock(config.profile_dir / ".geo-test.lock"):
-                await open_doubao_session(config, None)
-            return {"message": "登录窗口已关闭，会话已保存"}
+                result = await open_doubao_session(config, None)
+            result = result if isinstance(result, dict) else {}
+            mode = result.get('client_mode') if result.get('client_mode') in ('consumer', 'work') else None
+            observation = {'client_mode': mode,
+                           'login_required': result.get('login_required') if type(result.get('login_required')) is bool else None,
+                           'challenge': result.get('challenge') if type(result.get('challenge')) is bool else None}
+            labels = {'consumer': '豆包对话', 'work': '豆包工作'}
+            reason = result.get('close_reason') if result.get('close_reason') in (
+                'window_closed', 'wait_elapsed', 'page_crashed', 'browser_disconnected') else None
+            message = ('豆包页面异常退出。' if reason == 'page_crashed' else
+                       '豆包浏览器连接已结束。' if reason == 'browser_disconnected' else '登录窗口已结束。')
+            if mode:
+                message += f'所选{labels[config.client_mode]}，最后观察到{labels[mode]}。'
+                if mode != config.client_mode:
+                    message += '界面不匹配，请确认采集界面选项；软件不会自动切换。'
+            else:
+                message += '实际界面未知。'
+            message += ('最后仍显示登录提示。' if observation['login_required'] is True else
+                        '最后未见登录提示，登录状态尚未核验。' if observation['login_required'] is False else '登录状态未知。')
+            if observation['challenge'] is True:
+                message += '最后仍显示安全验证。'
+            elif observation['challenge'] is None:
+                message += '验证状态未知。'
+            message += '会话保存状态未确认；再次采集前会检查界面、登录与验证状态。'
+            return {'message': message, 'login_observation': observation,
+                    'requested_client_mode': config.client_mode, 'close_reason': reason,
+                    'session_saved': None}
         return self._start("login", login)
 
     def plan_with_doubao(self, profile, case_count, options):

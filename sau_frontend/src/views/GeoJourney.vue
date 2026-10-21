@@ -11,6 +11,11 @@
     <el-alert v-if="saveError" type="warning" :title="saveError" :closable="false" show-icon/>
     <div v-if="recoveryDraft || recoveryFacts" class="recovery-note"><p>其他页面更新过资料，已保留服务端版本。冲突的本机编辑可先导出核对。</p><el-button v-if="recoveryDraft" text @click="exportRecovery('draft')">导出本机未保存稿</el-button><el-button v-if="recoveryFacts" text @click="exportRecovery('facts')">导出本机未保存资料</el-button></div>
     <div v-if="nativeBusy" class="task-progress" role="status" aria-live="polite"><el-icon class="is-loading"><Loading /></el-icon><div><strong>{{ task.message || '任务执行中' }}</strong><p>遇到登录或人机验证，请在专用窗口正常完成。采集时保持窗口打开；专用登录完成后关闭登录窗口以保存会话。</p></div><el-button @click="stopTask">停止</el-button></div>
+    <aside v-if="loginObservation" class="login-observation" :class="{mismatch:loginObservation.mismatch}" role="status" aria-live="polite" aria-label="本次登录观察">
+      <strong>{{ loginObservation.mismatch ? '所选 / 实际界面不一致' : '登录窗口已结束，状态待核验' }}</strong>
+      <p class="login-state"><span>本次所选：{{ loginObservation.selected }}</span><span>最后实际：{{ loginObservation.actual }}</span><span>{{ loginObservation.login }}</span><span>{{ loginObservation.challenge }}</span></p>
+      <details><summary>查看登录说明</summary><p>{{ loginObservation.explanation }}</p></details>
+    </aside>
     <Transition name="geo-reveal" mode="out-in" @before-enter="resetStageScroll">
       <section v-if="step===0" key="brand" class="geo-surface step-panel">
         <div class="section-heading"><span class="step-kicker">01 / 品牌</span><h2>先让软件认识你的业务</h2><p>三个基本信息就能开始，后续资料按需要补充。</p></div>
@@ -122,6 +127,17 @@ let timer, bridgeTimer, pollPending=false, handledTask='', restoring=false, dest
 const nativeMethodsReady=()=>['get_task','plan_with_doubao','start_run','open_login','generate_research','start_research_retest','open_destination','stop_task'].every(name=>typeof window.pywebview?.api?.[name]==='function')
 const activateNative=()=>{if(destroyed||!nativeMethodsReady())return false;nativeAvailable.value=true;if(initialized&&!timer){void poll();timer=setInterval(poll,1000)}clearInterval(bridgeTimer);return true}
 const project=computed(()=>projects.value.find(item=>item.id===projectId.value)), nativeBusy=computed(()=>task.value.status==='running'), busy=computed(()=>working.value||nativeBusy.value||finishingTask.value)
+const completedLoginObservation=(current,currentId,currentKind,isWorking=false)=>{
+  if(isWorking||!currentId||current?.id!==currentId||currentKind!=='login'||current.kind!=='login'||current.status!=='completed')return null
+  const result=current.result||{}, observed=result.login_observation||{}
+  const mode=value=>['consumer','work'].includes(value)?value:null, label=value=>value==='consumer'?'豆包对话':value==='work'?'豆包工作':'未知'
+  const selected=mode(result.requested_client_mode), actual=mode(observed.client_mode)
+  return {selected:label(selected),actual:label(actual),mismatch:Boolean(selected&&actual&&selected!==actual),
+    login:observed.login_required===true?'仍需登录':observed.login_required===false?'未见登录提示，尚未核验':'登录状态未知',
+    challenge:observed.challenge===true?'仍需安全验证':observed.challenge===false?'未见安全验证':'验证状态未知',
+    explanation:result.close_reason==='page_crashed'?'页面异常退出，登录与会话保存状态未知。':result.close_reason==='browser_disconnected'?'浏览器连接已结束，登录与会话保存状态仍需核验。':'关闭窗口只结束本次登录操作，登录与会话保存状态仍需核验。'}
+}
+const loginObservation=computed(()=>completedLoginObservation(task.value,taskId.value,taskKind.value,working.value))
 const formProfile=()=>entityProfileFields({...form,aliases:form.aliasesText,official_urls:form.officialUrlsText})
 const profileDirty=computed(()=>{if(!project.value)return true;try{return !sameBrand(form,project.value)||form.description.trim()!==String(project.value.description||'').trim()||JSON.stringify(formProfile())!==JSON.stringify(entityProfileFields(project.value))}catch{return true}})
 const needsAnalysis=computed(()=>cycle.value?.analysis?.method==='rule_observations_not_ai')
@@ -345,6 +361,7 @@ onUnmounted(()=>{persist();destroyed=true;clearInterval(timer);clearInterval(bri
 </script>
 
 <style scoped>
+.login-observation{display:grid;gap:8px;padding:16px 20px;border:1px solid var(--geo-border);border-radius:12px;background:#f6f9f8;font-size:13px;line-height:1.8}.login-observation>strong{color:var(--geo-text);font-size:13px}.login-observation.mismatch{border-color:#e7d4b3;background:#fffaf1}.login-observation.mismatch>strong{color:#7b5b26}.login-state{display:flex;flex-wrap:wrap;gap:4px 18px;color:var(--geo-muted)}.login-observation details{font-size:12px;color:var(--geo-muted)}.login-observation summary{cursor:pointer;width:fit-content}.login-observation details p{margin-top:8px}
 .entity-hint{flex-basis:100%;margin-bottom:0}
 .baseline-context{display:grid;gap:6px;padding:12px 16px;margin:16px 0;border-left:3px solid #bcd9d2;background:#f6f9f8;color:var(--geo-muted);font-size:12px;line-height:1.8}.publication-tasks h3{margin-top:12px}.publication-tasks .el-button{margin-top:12px}
 .recovery-note{padding:16px 20px;border:1px solid #e7d4b3;border-radius:12px;background:#fffaf1;color:#7b5b26;font-size:12px;line-height:1.8}.recovery-note .el-button{margin-top:6px}

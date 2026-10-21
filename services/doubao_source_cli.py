@@ -55,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
     except (ValueError, OSError) as exc:
         parser.error(str(exc))
     if args.action == "login":
-        print("请在专用浏览器完成正常登录/验证；关闭页面或到时会保存会话。")
+        print("请在专用浏览器完成正常登录/验证；关闭页面或到时会结束等待，登录与会话保存状态仍需核验。")
         try:
             with exclusive_lock(config.profile_dir / ".geo-test.lock"):
                 asyncio.run(open_doubao_session(config, args.login_wait))

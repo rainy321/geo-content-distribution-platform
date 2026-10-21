@@ -13,6 +13,7 @@ from services.doubao_source_collector import (
     DOUBAO_URL, CollectorConfig, CompletionTracker, _blocked_reason, _browser_error_reason, _expand_sources,
     _inspect_citation_destination, _navigate_to_doubao, collect_doubao_sources,
     normalize_ui_sources, open_doubao_session, read_snapshot, write_evidence_result, _citation_title_match,
+    _read_login_observation,
 )
 from services.doubao_source_cli import main
 from services.doubao_submission_transport import EDITOR_READBACK_JS, LITERAL_PREAMBLE, submission_fence, submission_text
@@ -262,6 +263,39 @@ class BrowserExtractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(snapshot["sources"]), 1)
         self.assertEqual(snapshot["sources"][0]["href"], "https://source.example.org/article")
         self.assertIn("被引用的回答片段", snapshot["sources"][0]["linked_answer_text"])
+
+    async def test_login_observation_reads_only_the_work_chip_and_visible_state_markers(self):
+        await self.page.route('https://www.doubao.com/**', lambda route: route.fulfill(status=200, body=''))
+        await self.page.goto(DOUBAO_URL)
+        await self.page.set_content('''<button data-testid="workspace-switch-chip">豆包 <span>\n 工作</span></button>
+            <div>synthetic-private-account and synthetic-private-answer</div>
+            <div data-testid="login_modal" hidden></div><div id="captcha-test-only" hidden></div>
+            <script>Object.defineProperty(document.body, 'innerText', {get(){throw Error('body text must not be read')}})</script>''')
+        self.assertEqual(await _read_login_observation(self.page, self.config), {
+            'client_mode': 'work', 'login_required': False, 'challenge': False,
+        })
+        await self.page.locator('[data-testid="login_modal"]').evaluate('e=>e.hidden=false')
+        await self.page.locator('#captcha-test-only').evaluate('e=>e.hidden=false')
+        self.assertEqual(await _read_login_observation(self.page, self.config), {
+            'client_mode': 'work', 'login_required': True, 'challenge': True,
+        })
+
+    async def test_login_observation_does_not_infer_consumer_or_authentication_from_missing_work_chip(self):
+        await self.page.route('https://www.doubao.com/**', lambda route: route.fulfill(status=200, body=''))
+        await self.page.goto(DOUBAO_URL)
+        await self.page.set_content('<main>unrecognized loading page</main>')
+        self.assertEqual(await _read_login_observation(self.page, self.config), {
+            'client_mode': None, 'login_required': None, 'challenge': None,
+        })
+        await self.page.set_content('<button data-testid="workspace-switch-chip">豆 包</button>')
+        self.assertEqual(await _read_login_observation(self.page, self.config), {
+            'client_mode': 'consumer', 'login_required': False, 'challenge': False,
+        })
+        await self.page.goto('about:blank')
+        await self.page.set_content('<button data-testid="workspace-switch-chip">豆包工作</button>')
+        self.assertEqual(await _read_login_observation(self.page, self.config), {
+            'client_mode': None, 'login_required': None, 'challenge': None,
+        })
 
     async def test_literal_code_dom_does_not_normalize_quotes_backslashes_punctuation_or_extra_content(self):
         question = '{"quoted":"\\\"same\\\"","url":"https://example.org/a?x=1"}'

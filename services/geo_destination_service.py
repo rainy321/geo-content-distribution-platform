@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlsplit, urlunsplit
 
 
-CATALOG_VERSION = '2026-10-20.1'
+CATALOG_VERSION = '2026-10-21.1'
 
 
 def _candidate(name, home, login, editor, style, channel='', rules_url='', **limits):
@@ -47,6 +47,14 @@ CATALOG = [
         'https://cloud.tencent.com/developer/',
         '面向开发者写技术问题、实现步骤、代码或可复现的检查方法；不虚构实验，缺少实测时明确说明。使用 Markdown。',
         rules_url='https://cloud.tencent.com/developer/article/1005129')),
+    ('aliyun_community', ('developer.aliyun.com',), '/article/', _candidate(
+        '阿里云开发者社区', 'https://developer.aliyun.com/', 'https://developer.aliyun.com/article/new',
+        'https://developer.aliyun.com/article/new',
+        '围绕开发者技术问题提供有依据、原创且有信息增量的内容，不虚构实测或案例。'
+        '官方博文规范将机器人生成、软文推广和单纯站外引流列为低质或受限内容；'
+        'AI 草稿须经人工实质审稿，不能据此直接自动发布。'
+        '发文要求实名认证，当前账号的身份、投稿权限和编辑器能力仍需正常登录后核验。',
+        rules_url='https://developer.aliyun.com/article/1639804')),
     ('csdn', ('blog.csdn.net',), '/', _candidate(
         'CSDN 博客', 'https://blog.csdn.net/', 'https://passport.csdn.net/login', 'https://mp.csdn.net/',
         '技术问题、环境、步骤、验证与局限依次展开；未实测的内容不能写成实测结果。')),
@@ -126,7 +134,7 @@ def opportunities(observations, targets, website=''):
                     candidate['source_scope'] = f'https://{host}{path}'
                     note = '已匹配公开内容平台；账号是否获准投稿、当前入口和自动发布能力仍需验证。'
                     break
-            if surface == 'unknown' and (host in ('cloud.tencent.com', 'support.huaweicloud.com', 'support.huawei.com', 'www.huaweicloud.com', 'docs.newapi.pro')
+            if surface == 'unknown' and (host in ('cloud.tencent.com', 'help.aliyun.com', 'support.huaweicloud.com', 'support.huawei.com', 'www.huaweicloud.com', 'docs.newapi.pro')
                                          or host.startswith(('docs.', 'support.')) or '/document/' in urlsplit(url).path):
                 surface, note = 'vendor_documentation', '厂商文档或自有资料，不能当作可注册发文的平台；优先做引用关系或合作调研。'
                 key += ':docs'

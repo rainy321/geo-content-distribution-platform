@@ -21,6 +21,43 @@ def config(**changes):
 
 
 class TestSourceOpportunities(unittest.TestCase):
+    def test_aliyun_article_is_a_login_export_candidate_with_no_assumed_publish_permission(self):
+        observed = {'cases': [{'id': 'q01', 'usable': True}], 'sources': [
+            {'id': 's1', 'case_id': 'q01', 'url': 'https://developer.aliyun.com/article/1768112', 'title': '合成社区文章'}]}
+        rows = destinations.opportunities(observed, [])
+        self.assertEqual(len(rows), 1)
+        row = rows[0]
+        self.assertEqual(row['id'], 'aliyun_community')
+        self.assertEqual(row['surface'], 'community_candidate')
+        self.assertEqual(row['source_ids'], ['s1'])
+        normalized = destinations.normalize_config(row['candidate'])
+        self.assertEqual(normalized['home_url'], 'https://developer.aliyun.com/')
+        self.assertEqual(normalized['source_scope'], 'https://developer.aliyun.com/article/')
+        self.assertEqual(normalized['publication_scope'], 'https://developer.aliyun.com/article/')
+        self.assertEqual(normalized['login_url'], 'https://developer.aliyun.com/article/new')
+        self.assertEqual(normalized['editor_url'], normalized['login_url'])
+        self.assertEqual(normalized['rules_url'], 'https://developer.aliyun.com/article/1639804')
+        self.assertEqual(normalized['channel'], '')
+        self.assertEqual(normalized['title_selector'], '')
+        self.assertEqual(normalized['body_selector'], '')
+        from services.geo_target_publish_guard import builtin_publisher
+        self.assertFalse(builtin_publisher(normalized)['available'])
+
+    def test_aliyun_help_docs_and_nonarticle_or_similar_hosts_do_not_become_community_candidates(self):
+        observed = {'cases': [{'id': 'q01', 'usable': True}], 'sources': [
+            {'id': 's1', 'case_id': 'q01', 'url': 'https://help.aliyun.com/zh/model-studio/overview', 'title': '合成厂商文档'},
+            {'id': 's2', 'case_id': 'q01', 'url': 'https://developer.aliyun.com/topic/example', 'title': '合成专题'},
+            {'id': 's3', 'case_id': 'q01', 'url': 'https://developer.aliyun.com/articlex/123', 'title': '路径相似'},
+            {'id': 's4', 'case_id': 'q01', 'url': 'https://developer.aliyun.com.evil.example.org/article/123', 'title': '域名相似'},
+            {'id': 's5', 'case_id': 'q01', 'url': 'https://www.developer.aliyun.com/article/123', 'title': '未核验子域'},
+            {'id': 's6', 'case_id': 'q01', 'url': 'https://help.aliyun.com/article/123', 'title': '文档域文章形路径'}]}
+        rows = destinations.opportunities(observed, [])
+        docs = next(row for row in rows if row['domain'] == 'help.aliyun.com')
+        self.assertEqual(docs['surface'], 'vendor_documentation')
+        self.assertIsNone(docs['candidate'])
+        self.assertFalse(any(row['surface'] == 'community_candidate' for row in rows))
+        self.assertTrue(all(row['surface'] == 'unknown' for row in rows if row is not docs))
+
     def test_vendor_documents_are_not_open_communities_and_host_spoofing_fails(self):
         observed = {'cases': [{'id': 'q01', 'usable': True}], 'sources': [
             {'id': 's1', 'case_id': 'q01', 'url': 'https://cloud.tencent.com/document/product/1/2', 'title': '文档'},
