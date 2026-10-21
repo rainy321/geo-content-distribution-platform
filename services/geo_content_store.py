@@ -16,6 +16,7 @@ from services.geo_content_research import (
 from services.geo_score_service import score_geo_content
 from services import geo_destination_service as destinations
 from services.geo_entity_identity import same_entity_target, entity_measurement_signature
+from services.geo_test_reports import project_report_evaluation
 
 
 class ResearchNotFoundError(LookupError):
@@ -44,6 +45,9 @@ def _cycle(connection, identifier):
     result = dict(row)
     for field in ('baseline', 'observations', 'analysis', 'facts'):
         result[field] = json.loads(result[field])
+    # Re-evaluate the view, preserving the stored cycle identity, digest, plan,
+    # timestamps and raw answer evidence. Existing cycles are never recreated.
+    result['baseline'] = project_report_evaluation(result['baseline'])
     result['profile'] = result['baseline']['profile']
     result['test_plan'] = plan_from_report(result['baseline'])
     result['observations'] = public_research_observations(result['baseline'], result['observations'])
@@ -102,6 +106,27 @@ def create_cycle(database, report, report_ref, project_id=None):
                     _json(profile.get('aliases', [])), _json(profile.get('official_urls', [])))).lastrowid
         report_hash = fingerprint(report)
         prior = connection.execute('SELECT id FROM geo_content_cycles WHERE project_id=? AND report_digest=?', (project_id, report_hash)).fetchone()
+        if not prior:
+            # Assessment upgrades change a report view, not its original run.
+            # Keep the stored digest and lineage; reuse only the same source
+            # whose complete evidence still matches under the current rules.
+            current_view = project_report_evaluation(report)
+            current_view.pop('evaluation_projection', None)
+            current_hash = fingerprint(current_view)
+            for candidate in connection.execute('''SELECT id,baseline FROM geo_content_cycles
+                    WHERE project_id=? AND report_ref=? ORDER BY created_at,id''', (project_id, report_ref)):
+                try:
+                    stored = json.loads(candidate['baseline'])
+                    if (stored.get('run_id') != report['run_id']
+                            or stored.get('plan_sha256') != report['plan_sha256']):
+                        continue
+                    stored_view = project_report_evaluation(stored)
+                    stored_view.pop('evaluation_projection', None)
+                    if fingerprint(stored_view) == current_hash:
+                        prior = candidate
+                        break
+                except (ValueError, TypeError, KeyError, AttributeError):
+                    continue
         if prior:
             identifier = prior['id']
         else:

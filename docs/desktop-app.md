@@ -2,7 +2,7 @@
 
 桌面程序名为“GEO AI 搜索工作台”，启动文件为 `GEO_AI_Workbench.exe`。使用独立 WebView2 窗口，包含 Python 后端和已构建的界面。需要 Windows x64、Microsoft WebView2 和可用的 Edge 或 Chrome。
 
-本文对应 **2026.10.21.1 登录状态核对与名称保留版**。本轮补充登录后的实际界面观察、主流程中的登录检查摘要、出题与写稿的名称保留提示，以及实际来源中发现的阿里云开发者社区目录。准确检查结果、软件哈希及源码提交以对应 Release 清单为准。
+本文对应 **2026.10.21.2 登录状态与内部资料隔离版**。本轮补充登录后的实际界面观察、主流程中的登录检查摘要、出题与写稿的名称保留提示，以及实际来源中发现的阿里云开发者社区目录；实测发现的新内部资料检索句式也会排除，历史内容周期读取时同步投影最新评估。准确检查结果、软件哈希及源码提交以对应 Release 清单为准。
 
 软件可分别建立公司与产品档案，填写当前对象别名、运营公司与额外官方页面。公司提及不会自动计入旗下产品；同域不同产品路径分别匹配，主网址和额外官方页面不自动扩展到整站或其他子域。此次按更新后的官网分别测试北京同于野科技有限公司、懂AI中转站、同于野软件，详见[测试方法与配置](geo-search-testing.md)。这些工作模式测试与普通对话基线分别保存；公司回答中声称使用账号内部资料的一题已排除公开曝光统计。账号登录成功仍可能进入工作界面，普通对话基线需要实际可用的普通对话入口，不能用工作模式结果代替。
 
@@ -44,7 +44,7 @@
 
 ## 本机安装与数据
 
-从 [2026.10.21.1 Release](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.1) 下载 Windows x64 ZIP，完整解压后打开 `GEO_AI_Workbench/GEO_AI_Workbench.exe`，保留同级 `_internal` 目录。[2026.10.20.2 资料隔离版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.20.2)及[2026.10.20.1 对象独立测试版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.20.1)继续保留。[2026.10.20 五步流程版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.20)保留此前真实发布走查。更早版本在[旧版归档 Release](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-legacy-backup-2026.10.15)，仅用于备份恢复。
+从 [2026.10.21.2 Release](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.2) 下载 Windows x64 ZIP，完整解压后打开 `GEO_AI_Workbench/GEO_AI_Workbench.exe`，保留同级 `_internal` 目录。[2026.10.20.2 资料隔离版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.20.2)及[2026.10.20.1 对象独立测试版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.20.1)继续保留。[2026.10.20 五步流程版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.20)保留此前真实发布走查。更早版本在[旧版归档 Release](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-legacy-backup-2026.10.15)，仅用于备份恢复。
 
 本机安装文件：`%LOCALAPPDATA%\Programs\GEO_AI_Workbench\GEO_AI_Workbench.exe`。桌面和开始菜单有“GEO AI搜索工作台”快捷方式。
 

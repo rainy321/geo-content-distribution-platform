@@ -30,6 +30,12 @@ class PrivateAccountContextTests(unittest.TestCase):
             '我已查阅了企业内部知识库，找到相关业务说明。',
             '根据你们的飞书文档，样例服务近期已有更新。',
             '我查询了飞书内部文档，补充了业务信息。',
+            '我先在企业内部资料中检索样例产品。',
+            '我已在企业内部知识库中检索到样例产品的信息。',
+            '内部资料中检索到了样例产品的说明。',
+            '企业内部资料中已检索到样例产品。',
+            '基于企业内部官方资料检索，下面整理样例产品的信息。',
+            '我从团队内部官方文档里查询了样例产品的使用范围。',
         )
         for claim in claims:
             with self.subTest(claim=claim):
@@ -55,6 +61,19 @@ class PrivateAccountContextTests(unittest.TestCase):
             '建议结合企业内部知识库确认后再决策。',
             '后续可以根据内部资料再进行内部评审。',
             '公开新闻提到飞书升级了企业搜索功能。',
+            '仅使用公开信息，不在企业内部资料中检索。',
+            '我不能在企业内部资料中检索，仅核对公开官网。',
+            '我未在企业内部资料中检索任何文档，仅使用公开来源。',
+            '我在企业内部资料中未检索到相关内容，以下仅依据公开官网。',
+            '我在企业内部资料中检索不到相关内容，以下仅依据公开官网。',
+            '请你在企业内部资料中检索样例产品，再核对公开来源。',
+            '请你根据企业内部官方资料检索结果作出内部判断。',
+            '如果我先在企业内部资料中检索，再核对官网是否更好？',
+            '如果使用企业内部官方资料检索，需要获得额外权限。',
+            '产品支持基于企业内部官方资料检索，本文只介绍公开功能。',
+            '产品具备基于企业内部官方资料检索的能力。',
+            '产品能在企业内部资料中检索到相关文档，官网介绍的是这项功能。',
+            '后续将在企业内部资料中检索，当前尚未访问。',
         )
         for response in public:
             with self.subTest(response=response):
@@ -127,3 +146,26 @@ class PrivateAccountContextTests(unittest.TestCase):
             self.assertEqual(projected['evaluation_projection']['changed_case_ids'], ['q01'])
             self.assertFalse(projected['evaluation_projection']['new_collection_performed'])
             self.assertTrue(projected['evaluation_projection']['source_file_unchanged'])
+
+    def test_version_14_retrieval_claim_is_downgraded_read_only_by_15(self):
+        report, _ = self.report()
+        first = report['cases'][0]
+        first.update(status='success', response='基于企业内部官方资料检索，合成结果仅用于回归。')
+        first['assessment'].update(answer_evaluable=True, answer_error=None, brand_mentioned=True)
+        report['evaluation_version'] = '1.4'
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root/'synthetic-14-report/report.json'
+            path.parent.mkdir()
+            path.write_text(json.dumps(report, ensure_ascii=False), encoding='utf-8')
+            before = (path.read_bytes(), path.stat().st_mtime_ns)
+            projected = read_saved_report(root, list_saved_reports(root)[0]['id'])
+            self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
+            self.assertEqual(projected['evaluation_version'], '1.5')
+            self.assertEqual(projected['evaluation_projection']['stored_evaluation_version'], '1.4')
+            self.assertFalse(projected['cases'][0]['assessment']['answer_evaluable'])
+            self.assertEqual(projected['cases'][0]['assessment']['answer_error'], 'private_account_context')
+            self.assertEqual(projected['plan_sha256'], report['plan_sha256'])
+            self.assertEqual(projected['run_id'], report['run_id'])
+            self.assertEqual(projected['updated_at'], report['updated_at'])
+            self.assertEqual(projected['cases'][0]['response'], first['response'])
