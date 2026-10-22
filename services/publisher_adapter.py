@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import logging
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
@@ -264,14 +265,15 @@ class ZhihuPublisherAdapter(PublisherAdapter):
         try:
             verified = self._find_publication(content.title, attempts=3)
         except Exception as exc:
-            detail = str(exc).strip() or exc.__class__.__name__
+            logging.warning("Zhihu publication check failed stage=after_publish exception_type=%s",
+                            type(exc).__name__)
             return PublishResult(
                 success=result.success,
                 platform=result.platform,
                 status=result.status,
                 url=result.url,
                 message=(
-                    f"{result.message}；发布后公开文章核验失败：{detail}"
+                    f"{result.message}；发布后公开文章核验未完成，请到知乎核对最终状态；不会自动重发"
                 ).strip("；"),
                 published_at=result.published_at,
             )
@@ -384,11 +386,32 @@ class ZhihuPublisherAdapter(PublisherAdapter):
     def _exception_result(self, exc: Exception, *, prefix: str) -> PublishResult:
         detail = str(exc).strip() or exc.__class__.__name__
         status = classify_publisher_error(detail)
+        from services.login_runtime import login_error_code
+        reason = login_error_code(exc)
+        stage = {
+            "知乎登录状态检查失败": "login_check",
+            "知乎公开文章幂等检查失败": "before_publish",
+            "知乎发布失败": "publish",
+        }.get(prefix, "unknown")
+        logging.warning("Zhihu publisher error stage=%s code=%s exception_type=%s",
+                        stage, reason, type(exc).__name__)
+        if reason == "browser_not_found":
+            status = "failed"
+            hint = "未找到可用浏览器，请安装 Microsoft Edge 或 Google Chrome 后再操作"
+        elif reason == "browser_launch_failed":
+            status = "failed"
+            hint = "浏览器未能启动，请检查本机浏览器组件后再操作"
+        elif status == "need_action":
+            hint = "请检查知乎登录或安全验证，并在浏览器中正常完成"
+        else:
+            hint = "请检查网络与浏览器组件后再操作"
+        boundary = ("平台提交状态未知，请先到知乎核对最终状态；不会自动重发"
+                    if stage == "publish" else "已阻止本次发布，未执行发布点击")
         return PublishResult(
             success=False,
             platform=self.platform,
             status=status,
-            message=f"{prefix}：{detail}",
+            message=f"{prefix}：{hint}；{boundary}",
         )
 
     def _failed(self, message: str) -> PublishResult:

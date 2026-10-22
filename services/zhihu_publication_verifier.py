@@ -8,6 +8,7 @@ from urllib.parse import quote
 from playwright.async_api import async_playwright
 
 from conf import LOCAL_CHROME_PATH
+from services.browser_executable import browser_executable_options
 
 
 ZHIHU_ME_URL = "https://www.zhihu.com/api/v4/me"
@@ -15,6 +16,19 @@ ZHIHU_MEMBER_ARTICLES_URL = (
     "https://www.zhihu.com/api/v4/members/{url_token}/articles"
     "?offset=0&limit=20&sort_by=created"
 )
+
+
+def _launch_options() -> dict[str, Any]:
+    """Use the same ordinary local browser selection as the media login flow."""
+    return {
+        "headless": True,
+        "args": [
+            "--disable-blink-features=AutomationControlled",
+            "--lang=zh-CN",
+            "--disable-infobars",
+        ],
+        **browser_executable_options(LOCAL_CHROME_PATH),
+    }
 
 
 async def find_public_zhihu_article(
@@ -43,26 +57,17 @@ async def find_public_zhihu_article(
         raise ValueError("知乎公开文章核验间隔不能为负数")
 
     async with async_playwright() as playwright:
-        launch_options: dict[str, Any] = {
-            "headless": True,
-            "args": [
-                "--disable-blink-features=AutomationControlled",
-                "--lang=zh-CN",
-                "--disable-infobars",
-            ],
-        }
-        if LOCAL_CHROME_PATH:
-            launch_options["executable_path"] = LOCAL_CHROME_PATH
-        browser = await playwright.chromium.launch(**launch_options)
-        browser_context = await browser.new_context(
-            storage_state=str(cookie_path),
-            extra_http_headers={
-                "Accept": "application/json, text/plain, */*",
-                "Referer": "https://www.zhihu.com/creator",
-            },
-        )
-        request_context = browser_context.request
+        browser = await playwright.chromium.launch(**_launch_options())
+        browser_context = None
         try:
+            browser_context = await browser.new_context(
+                storage_state=str(cookie_path),
+                extra_http_headers={
+                    "Accept": "application/json, text/plain, */*",
+                    "Referer": "https://www.zhihu.com/creator",
+                },
+            )
+            request_context = browser_context.request
             me_response = await _safe_get(
                 request_context,
                 ZHIHU_ME_URL,
@@ -101,8 +106,13 @@ async def find_public_zhihu_article(
                 if attempt_index + 1 < int(attempts):
                     await asyncio.sleep(interval_seconds)
         finally:
-            await browser_context.close()
-            await browser.close()
+            # Cleanup cannot turn a failed check into permission to publish,
+            # and a context initialization error still closes its browser.
+            try:
+                if browser_context is not None:
+                    await browser_context.close()
+            finally:
+                await browser.close()
     return None
 
 

@@ -58,6 +58,20 @@ class ResearchFixture:
 
 
 class TestResearchLoop(ResearchFixture, unittest.TestCase):
+    def test_cycle_jobs_project_legacy_browser_errors_without_rewriting_evidence(self):
+        self.prepare_facts()
+        created = store.save_draft(self.database, self.cycle['id'], 'b01', 'zhihu', draft(), {'method': 'fixture_not_real_ai'}, self.cycle['revision'])
+        article_id = created['article_id']
+        raw = "知乎公开文章幂等检查失败：BrowserType.launch: Executable doesn't exist at C:\\Users\\private-test\\headless_shell.exe"
+        with closing(sqlite3.connect(self.database)) as connection, connection:
+            connection.execute("INSERT INTO publish_jobs(article_id,platform,status,message,demo) VALUES(?,'zhihu','failed',?,0)", (article_id,raw))
+        cycle = store.get_cycle(self.database, self.cycle['id'])
+        job = next(item for item in cycle['drafts'] if item['article_id']==article_id)['jobs'][0]
+        self.assertIn('尚未进入填稿或发布', job['message'])
+        self.assertNotIn('private-test', job['message'])
+        with closing(sqlite3.connect(self.database)) as connection:
+            self.assertEqual(connection.execute('SELECT message FROM publish_jobs WHERE article_id=?', (article_id,)).fetchone()[0],raw)
+
     def test_cycle_list_identity_keeps_the_stored_baseline_instead_of_current_project(self):
         with closing(sqlite3.connect(self.database)) as connection, connection:
             stored = json.loads(connection.execute('SELECT baseline FROM geo_content_cycles WHERE id=?', (self.cycle['id'],)).fetchone()[0])

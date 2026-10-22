@@ -207,7 +207,7 @@ class ZhihuPublisherAdapterTests(unittest.TestCase):
         result = self._adapter(publish_runner=raise_expired_cookie).publish(self.content)
 
         self.assertEqual(result.status, "need_action")
-        self.assertIn("cookie 已失效", result.message)
+        self.assertIn("请检查知乎登录或安全验证", result.message)
 
     def test_ordinary_errors_are_failed(self):
         def raise_network_error(*_args):
@@ -216,7 +216,60 @@ class ZhihuPublisherAdapterTests(unittest.TestCase):
         result = self._adapter(publish_runner=raise_network_error).publish(self.content)
 
         self.assertEqual(result.status, "failed")
-        self.assertIn("连接被重置", result.message)
+        self.assertIn("请检查网络与浏览器组件", result.message)
+        self.assertNotIn("连接被重置", result.message)
+
+    def test_missing_browser_preflight_is_fixed_and_never_calls_publisher(self):
+        calls = []
+        def missing_browser(*_args):
+            raise RuntimeError("BrowserType.launch: Executable doesn't exist at C:/Users/PRIVATE_NAME/headless_shell.exe")
+        result = self._adapter(publication_checker=missing_browser,
+                               publish_runner=lambda *_args: calls.append('published')).publish(self.content)
+        self.assertEqual(result.status, 'failed')
+        self.assertEqual(calls, [])
+        self.assertIn('未找到可用浏览器', result.message)
+        self.assertIn('已阻止本次发布', result.message)
+        for private in ('PRIVATE_NAME', 'headless_shell.exe', 'BrowserType', 'C:/Users'):
+            self.assertNotIn(private, result.message)
+
+    def test_preflight_and_login_exceptions_never_leak_private_details(self):
+        for key in ('publication_checker', 'login_checker'):
+            calls = []
+            def fail(*_args):
+                raise RuntimeError('PRIVATE_PATH cookie=PRIVATE_COOKIE account=PRIVATE_ACCOUNT')
+            with self.subTest(stage=key):
+                result = self._adapter(**{key: fail},
+                                       publish_runner=lambda *_args: calls.append('published')).publish(self.content)
+                self.assertFalse(result.success)
+                self.assertEqual(calls, [])
+                self.assertIn('已阻止本次发布', result.message)
+                self.assertNotIn('PRIVATE', result.message)
+
+    def test_post_publish_check_failure_keeps_unknown_without_exception_details(self):
+        checks = []
+        publications = []
+        def checker(_title, _account_file, attempts):
+            checks.append(attempts)
+            if attempts == 3:
+                raise RuntimeError('PRIVATE_PATH PRIVATE_ACCOUNT cookie=PRIVATE_COOKIE')
+            return None
+        result = self._adapter(publication_checker=checker,
+                               publish_runner=lambda *_args: publications.append('one click')).publish(self.content)
+        self.assertEqual(checks, [1, 3])
+        self.assertEqual(publications, ['one click'])
+        self.assertEqual(result.status, 'processing')
+        self.assertFalse(result.success)
+        self.assertIn('核验未完成', result.message)
+        self.assertIn('不会自动重发', result.message)
+        self.assertNotIn('PRIVATE', result.message)
+
+    def test_publish_exception_preserves_unknown_state_without_leaking_details(self):
+        def fail(*_args):
+            raise RuntimeError('PRIVATE_FILE PRIVATE_BODY')
+        result = self._adapter(publish_runner=fail).publish(self.content)
+        self.assertFalse(result.success)
+        self.assertIn('平台提交状态未知', result.message)
+        self.assertNotIn('PRIVATE', result.message)
 
     def test_timeout_is_failed_without_leaking_exception(self):
         async def slow_publish(*_args):

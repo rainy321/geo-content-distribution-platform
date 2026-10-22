@@ -279,6 +279,7 @@
         <div class="dispatch-actions">
           <p>
             执行模式由服务端控制。Demo 任务会走完整状态链，但不会访问真实平台。
+            <span v-if="hasExhaustedQuota" class="quota-retry-hint" role="status">24h额度按本系统已有任务预留；重试请使用下方原任务，真实发布仍需再次确认。</span>
           </p>
           <el-button
             type="primary"
@@ -446,7 +447,7 @@
               :loading="busyJobIds.has(job.job_id)"
               @click="retryJob(job)"
             >
-              {{ job.status === 'need_action' ? '确认后继续' : '重新发布' }}
+              {{ job.demo ? (job.status === 'need_action' ? '确认后继续' : '重新发布') : '重新检查 / 排队' }}
             </el-button>
             <el-button
               v-else-if="job.demo && job.status === 'queued'"
@@ -1006,9 +1007,11 @@ const executeDemoJob = async (job) => {
 }
 
 const executeRealJob = async (job) => {
+  if(pollingStopped || busyJobIds.value.has(job.job_id))return
+  markJobBusy(job.job_id, true)
   const policy = platforms.value.find(platform => platform.key === job.platform)
   try {
-    await ElMessageBox.confirm(
+    try {await ElMessageBox.confirm(
       `将使用已连接的${platformName(job.platform)}账号真实发布《${job.article_title || `文章 #${job.article_id}`}》。本系统建议每个新账号滚动 24 小时不超过 ${policy?.safe_daily_new || 1} 条，间隔至少 ${policy?.min_interval_hours || 6} 小时；平台后台手工发布量未知。平台可能要求扫码、验证码或人工确认，且无法承诺账号安全或 AI 收录。是否继续？`,
       '确认真实发布',
       {
@@ -1017,14 +1020,10 @@ const executeRealJob = async (job) => {
         type: 'warning',
         distinguishCancelAndClose: true
       }
-    )
-  } catch {
-    return
-  }
-
-  markJobBusy(job.job_id, true)
-  try {
+    )}catch{return}
+    if(pollingStopped)return
     const response = await publishApi.executeRealJob(job.job_id)
+    if(pollingStopped)return
     const result = response.data
     if (result.status === 'success') ElMessage.success(`${platformName(job.platform)}真实发布成功`)
     else if (result.status === 'need_action') ElMessage.warning(result.message || '需要人工确认后继续')
@@ -1039,9 +1038,11 @@ const executeRealJob = async (job) => {
 }
 
 const retryJob = async (job) => {
+  if(pollingStopped || busyJobIds.value.has(job.job_id))return
   markJobBusy(job.job_id, true)
   try {
     const response = await publishApi.retryJob(job.job_id)
+    if(pollingStopped)return
     const retried = response.data
     if (retried.demo) {
       await publishApi.executeDemoJob(retried.job_id)
@@ -1184,6 +1185,7 @@ onBeforeUnmount(() => {
 
 <style lang="scss" scoped>
 .journey-return{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 20px;margin-bottom:24px;border:1px solid var(--geo-border,#dce6e5);border-radius:14px;background:#fff}.journey-return strong{font-size:15px}.journey-return p{margin:5px 0 0;color:var(--geo-muted,#52676d);font-size:13px;line-height:1.6}@media(max-width:600px){.journey-return{align-items:flex-start;flex-direction:column}}
+.quota-retry-hint{display:block;margin-top:6px;line-height:1.6}
 .distribution-center {
   --harbor: #102b31;
   --harbor-deep: #0a2227;

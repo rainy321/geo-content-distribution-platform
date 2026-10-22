@@ -1808,13 +1808,14 @@ def execute_real_publish_task(job_id):
 
 def _publish_job_payload(job):
     from services.toutiao_result_check import result_check_running
+    from services.publish_messages import public_publish_message
     payload = {
         "job_id": job["id"],
         "article_id": job["article_id"],
         "account_id": job.get("account_id"),
         "platform": job["platform"],
         "status": job["status"],
-        "message": job["message"],
+        "message": public_publish_message(job["message"], job["platform"]),
         "url": job["result_url"],
         "images": list(job.get("images") or ()),
         "video": str(job.get("video") or ""),

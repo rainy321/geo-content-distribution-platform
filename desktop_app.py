@@ -429,6 +429,26 @@ def run_smoke_check(window, data: Path, url: str) -> None:
         status['media_login_browser_ready'] = asyncio.run(check_media_login_browser())
         if not status['media_login_browser_ready']:
             raise RuntimeError('媒体登录浏览器未就绪')
+        # The read-only Zhihu publication precheck uses a separate headless
+        # launcher. Exercise its exact options in the packaged runtime too.
+        async def check_zhihu_preflight_browser():
+            from services.zhihu_publication_verifier import _launch_options
+            async with async_playwright() as playwright:
+                browser = await playwright.chromium.launch(**_launch_options())
+                try:
+                    context = await browser.new_context()
+                    try:
+                        page = await context.new_page()
+                        await page.goto(url)
+                        await page.locator('[data-testid="geo-journey"] .journey-steps > button').last.wait_for()
+                        return await page.locator('[data-testid="geo-journey"] .journey-steps > button').count() == 5
+                    finally:
+                        await context.close()
+                finally:
+                    await browser.close()
+        status['zhihu_preflight_browser_ready'] = asyncio.run(check_zhihu_preflight_browser())
+        if not status['zhihu_preflight_browser_ready']:
+            raise RuntimeError('知乎发文前检查浏览器未就绪')
         # Exercise the same worker/login path that failed for the user. The
         # browser is real; only the URL and wait budget use a local QA page.
         import services.desktop_geo_jobs as native_jobs

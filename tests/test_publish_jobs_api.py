@@ -72,6 +72,21 @@ class PublishJobsApiTests(unittest.TestCase):
         self.assertEqual(detail_response.status_code, 200)
         self.assertEqual(detail_response.get_json()["data"], job)
 
+    def test_legacy_zhihu_browser_error_is_projected_without_rewriting_ledger(self):
+        job = self._create_job()
+        raw = "知乎公开文章幂等检查失败：BrowserType.launch: Executable doesn't exist at C:\\Users\\private-test\\headless_shell.exe"
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            with conn:
+                conn.execute("UPDATE publish_jobs SET status='failed', message=? WHERE id=?", (raw, job['job_id']))
+        detail = self.client.get(f"/api/publish/jobs/{job['job_id']}").get_json()['data']
+        listing = self.client.get('/api/publish/jobs').get_json()['data']['items']
+        self.assertEqual(detail['status'], 'failed')
+        self.assertIn('尚未进入填稿或发布', detail['message'])
+        self.assertNotIn('private-test', detail['message'])
+        self.assertEqual(listing[0]['message'], detail['message'])
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(conn.execute('SELECT message FROM publish_jobs WHERE id=?', (job['job_id'],)).fetchone()[0], raw)
+
     def test_executes_demo_job_through_full_state_flow(self):
         job = self._create_job()
 

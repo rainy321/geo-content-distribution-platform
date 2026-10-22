@@ -166,6 +166,7 @@ def list_cycles(database):
 
 
 def _drafts(connection, identifier):
+    from services.publish_messages import public_publish_message
     result = []
     for row in connection.execute('''SELECT d.*,a.title,a.summary,a.content,a.tags,a.status FROM geo_content_drafts d
             JOIN articles a ON a.id=d.article_id WHERE d.cycle_id=? ORDER BY d.created_at DESC''', (identifier,)):
@@ -175,6 +176,8 @@ def _drafts(connection, identifier):
         item['jobs'] = [dict(job) for job in connection.execute('''SELECT id,platform,status,result_url,message,demo,finished_at,
             platform_published_at,platform_published_precision,result_checked_at,result_check_evidence
             FROM publish_jobs WHERE article_id=? ORDER BY id DESC''', (item['article_id'],))]
+        for job in item['jobs']:
+            job['message'] = public_publish_message(job['message'], job['platform'])
         result.append(item)
     return result
 
