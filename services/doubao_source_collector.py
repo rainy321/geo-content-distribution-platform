@@ -94,6 +94,9 @@ class ManualWindowClosedError(ValueError):
     """The owner closed the current request instead of continuing verification."""
 
 
+MANUAL_AUTH_REASONS = frozenset(('human_verification_required', 'login_required', 'session_redirected_to_logout'))
+
+
 class SubmissionReceipt:
     """Bind a disappeared user bubble to one narrowly observed conversation.
 
@@ -369,6 +372,14 @@ SNAPSHOT_JS = r"""({s, question, allowExternalPanels, submissionFormat, literalP
     const controls = answerRoot ? all(answerRoot, 'button,[role="button"]') : [];
     const triggerCount = answerRoot ? all(answerRoot, s.source_trigger).length +
         controls.filter(e => /^(查看)?(全部)?(\d+\s*(个|篇|条))?\s*(参考资料|搜索来源|来源|引用)(\s*\d+\s*(个|篇|条)?)?$/.test(text(e))).length : 0;
+    // from_logout is historical URL evidence, not an authentication verdict.
+    // A visible input alone is insufficient: require the normal chat composer
+    // and visible model control on the expected chat origin and route.
+    const modelControl = all(document, s.model_label)[0];
+    const chatInterfaceReady = location.origin === 'https://www.doubao.com'
+        && /^\/chat(?:\/|$)/.test(location.pathname)
+        && !!modelControl && !!text(modelControl)
+        && all(document, s.editor).some(e => e.isContentEditable || (e.tagName === 'TEXTAREA' && !e.disabled && !e.readOnly));
     return {
         page_url: location.href, page_title: document.title,
         assistant_count: assistants.length, answer, question_verified: questionVerified, user_message_count: users.length,
@@ -380,6 +391,7 @@ SNAPSHOT_JS = r"""({s, question, allowExternalPanels, submissionFormat, literalP
         challenge: all(document, s.challenge).length > 0 || /请选择所有符合|拖拽到这里|请完成安全验证/.test(document.body.innerText),
         login_required: all(document, s.login_dialog).length > 0 || all(document, '[data-testid="to_login_button"]').length > 0,
         session_reset: new URLSearchParams(location.search).get('from_logout') === '1',
+        chat_interface_ready: chatInterfaceReady,
         rate_limited: /请求过于频繁|操作频繁，请|访问过于频繁/.test(document.body.innerText),
         service_unavailable: /^算力紧张，办公能力得晚点才能用了/.test(answer.trim()),
         login_state: all(document, '[data-testid="to_login_button"]').length ? 'guest' : 'unknown',
@@ -919,7 +931,8 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
         "collection_status": "failed", "failure_reason": None,
         "manual_verification": {"wait_budget_seconds": config.manual_wait_seconds, "waited_seconds": 0, "events": []},
         "environment": {"locale": "zh-CN", "timezone": "Asia/Hong_Kong", "model_version": None,
-                        "session": "dedicated_persistent_profile", "new_conversation": False},
+                        "session": "dedicated_persistent_profile", "new_conversation": False,
+                        "requested_client_mode": config.client_mode, "requested_model_label": config.requested_model_label},
     }
     page = None
     context = None
@@ -1024,6 +1037,16 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                     submitted_text=sent_text, editor_readback=readback, submission_format=config.submission_format,
                     baseline_user_count=baseline.get('user_message_count'))
                 submission.attempted()
+                # Persist conservative attempt state before the first operation
+                # that can submit. If either evidence or the native task store
+                # cannot persist it, the Enter press must never occur.
+                stage = 'submission_checkpoint'
+                result['submission_receipt'] = submission.evidence()
+                checkpoint_path = write_evidence_result(run_dir, result)
+                if progress:
+                    progress({'event': 'question_submission_started', 'state': 'submitting_question',
+                              'question_submission_attempted': True, 'question_submitted': False,
+                              'evidence_path': str(checkpoint_path)})
                 stage = "submit_question"
                 await editor.press("Enter")  # exactly one submission, never an automatic retry
                 if progress:
@@ -1138,7 +1161,11 @@ def _blocked_reason(snapshot: dict[str, Any]) -> str | None:
         return "human_verification_required"
     if snapshot.get("login_required"):
         return "login_required"
-    if snapshot.get("session_reset"):
+    try:
+        logout_path = urlsplit(snapshot.get('page_url') or '').path.rstrip('/') in ('/logout', '/chat/logout')
+    except (ValueError, TypeError):
+        logout_path = False
+    if logout_path or (snapshot.get("session_reset") and snapshot.get('chat_interface_ready') is not True):
         return "session_redirected_to_logout"
     if snapshot.get("rate_limited"):
         return "rate_limited"
@@ -1162,7 +1189,7 @@ async def _wait_for_manual_verification(page: Any, config: CollectorConfig, run_
     reason = _blocked_reason(snapshot)
     record = result["manual_verification"]
     remaining = None if config.manual_wait_seconds is None else config.manual_wait_seconds - record["waited_seconds"]
-    if reason not in {"human_verification_required", "login_required"} or (remaining is not None and remaining <= 0):
+    if reason not in MANUAL_AUTH_REASONS or (remaining is not None and remaining <= 0):
         return snapshot
     event = {"reason": reason, "started_at": datetime.now(HK_TIME).isoformat(), "cleared": False}
     record["events"].append(event)
@@ -1185,10 +1212,10 @@ async def _wait_for_manual_verification(page: Any, config: CollectorConfig, run_
             snapshot = await read_snapshot(page, config)
             if submission:
                 _capture_submission(page, config, run_dir, result, snapshot, submission)
-            if _blocked_reason(snapshot) not in {"human_verification_required", "login_required"}:
+            if _blocked_reason(snapshot) not in MANUAL_AUTH_REASONS:
                 break
         event["cleared"] = _blocked_reason(snapshot) is None
-        event['exit_reason'] = 'cleared' if event['cleared'] else 'wait_budget_exhausted' if _blocked_reason(snapshot) in {'human_verification_required', 'login_required'} else 'different_blocker'
+        event['exit_reason'] = 'cleared' if event['cleared'] else 'wait_budget_exhausted' if _blocked_reason(snapshot) in MANUAL_AUTH_REASONS else 'different_blocker'
         if progress:
             progress({'event': 'manual_action_cleared' if event['cleared'] else 'manual_action_ended',
                       'state': 'waiting_for_answer' if event['cleared'] else 'need_action', 'reason': reason,

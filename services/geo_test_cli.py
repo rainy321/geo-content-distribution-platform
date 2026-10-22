@@ -51,6 +51,11 @@ async def _plan_with_doubao(profile, args, config, *, progress=None):
             output_root=args.output.parent / (args.output.stem + "-planner-evidence")),
             **({'progress': progress} if progress is not None else {}))
     _print({"event": "planner_collected", "status": result["collection_status"], "result_path": str(path)})
+    if progress:
+        progress({'event': 'collector_finished', 'failure_reason': result.get('failure_reason'),
+                  'collection_status': result.get('collection_status'), 'evidence_path': str(path),
+                  'question_submission_attempted': result.get('question_submission_attempted'),
+                  'question_submitted': result.get('question_submitted')})
     if not result.get("answer_completed") or not result.get("question_submitted") or result.get("question") != prompt:
         reason = result.get("failure_reason") or "answer_incomplete"
         messages = {"playwright_not_installed": "浏览器采集组件未加载，本次没有发送问题。请重新打开更新后的软件。",

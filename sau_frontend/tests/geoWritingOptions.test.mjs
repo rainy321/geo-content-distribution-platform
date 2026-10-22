@@ -2,8 +2,9 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import test from 'node:test'
 import { parse, compileScript } from '@vue/compiler-sfc'
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { baselineWritingOptions, createWritingPreferences } from '../src/utils/geoWritingOptions.js'
+import { doubaoTaskRecovery, scopedRecoveryCheckpoint } from '../src/utils/geoTaskRecovery.js'
 
 const storage = () => {
   const values = new Map()
@@ -58,26 +59,32 @@ assert.ok(modeWatcher)
 const loginWatcher=script.scriptSetupAst.find(node=>node.type==='ExpressionStatement'&&node.expression?.callee?.name==='watch'&&node.expression.arguments[0]?.name==='cycleId')
 assert.ok(loginWatcher)
 
-const harness = api => {
-  const names=['applyWritingOptions','rememberWritingOptions','selectWritingMode','selectWritingModel','cycleScope','sameCycleScope','applyCycle','loadCycle','options','generate','login','poll']
-  const make=new Function('ref','watch','createWritingPreferences','geoContentApi',`
-    const cycleId=ref(''),cycle=ref(null),clientMode=ref('consumer'),model=ref(''),factsText=ref(''),confirmed=ref(false),briefId=ref(''),platform=ref('zhihu'),publicationVisible=ref(false),working=ref(false),task=ref({status:'idle'}),loginScope=ref(null),cycles=ref([]),nativeAvailable=ref(true);
+const harness = (api,local=storage()) => {
+  const names=['applyWritingOptions','rememberWritingOptions','selectWritingMode','selectWritingModel','cycleScope','sameCycleScope','recoveryStorageKey','loadContentRecovery','storeContentRecovery','rememberContentRecovery','contentRecovery','applyCycle','loadCycle','options','generate','login','poll','retest']
+  const make=new Function('ref','computed','watch','createWritingPreferences','geoContentApi','doubaoTaskRecovery','scopedRecoveryCheckpoint','local',`
+    const cycleId=ref(''),cycle=ref(null),clientMode=ref('consumer'),model=ref(''),factsText=ref(''),confirmed=ref(false),factsConflict=ref(''),briefId=ref(''),platform=ref('zhihu'),publicationVisible=ref(false),working=ref(false),task=ref({status:'idle'}),loginScope=ref(null),cycles=ref([]),nativeAvailable=ref(true);
+    const recoveryTask=ref(null),recoveryStorageError=ref(''),recoveryUnreadable=ref(false),recoveryMemory=new Map();
+    const busy=computed(()=>working.value||task.value.status==='running');
     const writingPreferences=createWritingPreferences();
     const factsStoredText=facts=>facts.map(f=>f.text).join('');
-    let cycleEpoch=0,cycleLoadRequest=0,loginRequest=0,pollRequest=0,handledTask;
-    const ElMessage={success(){},error(){}};
+    let cycleEpoch=0,cycleLoadRequest=0,loginRequest=0,pollRequest=0,handledTask,destroyed=false;
+    const messages=[],ElMessage={success(){},error:value=>messages.push(value)};
+    const ElMessageBox={confirm:async()=>{}};
     const reload=async()=>{};
-    let window={pywebview:{api:{}}};
+    let window={localStorage:local,pywebview:{api:{}}};
     ${names.map(name=>`const ${name}=${expression(name)};`).join('\n')}
     const stopMode=${source.slice(modeWatcher.start,modeWatcher.end).replace(/;$/,'')};
     const stopLogin=${source.slice(loginWatcher.start,loginWatcher.end).replace(/;$/,'')};
-    const stop=()=>{stopMode();stopLogin()};
-    return {cycleId,cycle,clientMode,model,task,loginScope,working,cycleScope,sameCycleScope,applyCycle,loadCycle,selectWritingMode,selectWritingModel,generate,login,poll,stop,
+    const stop=()=>{destroyed=true;cycleEpoch++;stopMode();stopLogin()};
+    return {cycleId,cycle,clientMode,model,task,loginScope,working,factsText,confirmed,factsConflict,recoveryTask,recoveryStorageError,recoveryUnreadable,contentRecovery,messages,ElMessageBox,cycleScope,sameCycleScope,applyCycle,loadCycle,selectWritingMode,selectWritingModel,generate,login,poll,retest,stop,
       native:value=>{window.pywebview.api=value}};
   `)
-  return make(ref,watch,createWritingPreferences,api)
+  return make(ref,computed,watch,createWritingPreferences,api,doubaoTaskRecovery,scopedRecoveryCheckpoint,local)
 }
 const deferred = () => {let resolve;const promise=new Promise(done=>{resolve=done});return {promise,resolve}}
+const interrupted=(id='failed-a',cycle_id='a')=>({id,kind:'draft',cycle_id,status:'need_action',message:'private account text',
+  recovery:{failure_reason:'login_required',question_submission_attempted:null,question_submitted:null,
+    requested_client_mode:'work',raw:'private evidence'}})
 
 test('the actual content flow initializes WORK plus requested model and preserves explicit changes on refresh',()=>{
   const page=harness({})
@@ -167,4 +174,140 @@ test('task polling keeps the newest observation when response order changes',asy
   requests[0].resolve({id:'task-a',status:'running'});await first
   assert.equal(page.task.value.id,'task-b')
   page.stop()
+})
+
+test('platform saves and refreshes preserve unsaved facts in the same cycle',()=>{
+  const page=harness({}),value={...cycle('a'),facts:[{text:'已保存的事实'}]}
+  page.cycleId.value='a';page.applyCycle(value)
+  page.factsText.value='尚未保存的新资料';page.confirmed.value=false
+  page.applyCycle({...value,destinations:[{id:'updated-platform'}]})
+  assert.equal(page.factsText.value,'尚未保存的新资料');assert.equal(page.confirmed.value,false)
+  assert.equal(page.factsConflict.value,'')
+  page.stop()
+})
+
+test('a concurrent server fact update retains input and requires a fresh review',()=>{
+  const page=harness({}),value={...cycle('a'),facts:[{text:'原资料'}]}
+  page.cycleId.value='a';page.applyCycle(value)
+  page.factsText.value='我的未保存资料';page.confirmed.value=true
+  const server={...value,facts:[{text:'其他页面的新资料'}]}
+  page.applyCycle(server)
+  assert.equal(page.factsText.value,'我的未保存资料');assert.equal(page.confirmed.value,false)
+  assert.match(page.factsConflict.value,/输入未丢失/)
+  page.applyCycle({...server,facts:[{text:'我的未保存资料'}]},{factsSaved:true})
+  assert.equal(page.factsText.value,'我的未保存资料');assert.equal(page.confirmed.value,true)
+  assert.equal(page.factsConflict.value,'')
+  page.stop()
+})
+
+test('the detail page cancellation keeps the failed task and sends no uncertain repeat',async()=>{
+  const page=harness({});page.cycleId.value='a';page.applyCycle(cycle('a'))
+  page.task.value={id:'failed',kind:'draft',cycle_id:'a',status:'need_action',recovery:{failure_reason:'login_required',question_submitted:true}}
+  let calls=0;page.native({generate_research:async()=>{calls++;return {id:'new',status:'running'}}})
+  page.ElMessageBox.confirm=async()=>{throw 'cancel'}
+  await page.generate('draft','doubao')
+  assert.equal(calls,0);assert.equal(page.task.value.id,'failed');assert.equal(page.working.value,false)
+  page.stop()
+})
+
+test('rapid detail-page generation clicks start only one native request',async()=>{
+  const page=harness({}),response=deferred();page.cycleId.value='a';page.applyCycle(cycle('a'))
+  let calls=0;page.native({generate_research:()=>{calls++;return response.promise}})
+  const first=page.generate('draft','doubao');await page.generate('draft','doubao')
+  assert.equal(calls,1);response.resolve({id:'new-draft',status:'running'});await first
+  assert.equal(page.task.value.id,'new-draft')
+  page.stop()
+})
+
+test('failed content keeps its typed warning across login, cancellation and reopening without touching unsaved facts',async()=>{
+  const local=storage(),page=harness({},local);page.cycleId.value='a';page.applyCycle(cycle('a'))
+  page.factsText.value='我的未保存资料';page.confirmed.value=false;page.task.value=interrupted()
+  let generated=0;page.native({open_login:async()=>({id:'separate-login',kind:'login',status:'completed'}),
+    generate_research:async()=>{generated++;return {id:'new-draft',status:'running'}}})
+  await page.login()
+  assert.equal(page.task.value.id,'separate-login');assert.equal(page.contentRecovery.value.taskId,'failed-a')
+  assert.equal(page.contentRecovery.value.submission,'unknown')
+  const saved=local.getItem('geo-content-recovery:v1:a');assert.doesNotMatch(saved,/private|raw|account|evidence/)
+  page.ElMessageBox.confirm=async()=>{throw 'cancel'}
+  await page.generate('draft','doubao')
+  assert.equal(generated,0);assert.equal(page.task.value.id,'separate-login')
+  assert.equal(page.contentRecovery.value.taskId,'failed-a');assert.deepEqual(page.messages,[])
+  assert.equal(page.factsText.value,'我的未保存资料');assert.equal(page.confirmed.value,false)
+  page.stop()
+  const reopened=harness({},local);reopened.cycleId.value='a';reopened.applyCycle(cycle('a'))
+  assert.equal(reopened.contentRecovery.value.taskId,'failed-a');assert.equal(reopened.contentRecovery.value.requiresConfirmation,true)
+  reopened.stop()
+})
+
+test('content recovery is cleared only after a confirmed new native task, never an error or missing acknowledgement',async()=>{
+  const local=storage(),page=harness({},local);page.cycleId.value='a';page.applyCycle(cycle('a'));page.task.value=interrupted()
+  page.native({open_login:async()=>({id:'separate-login',kind:'login',status:'completed'}),generate_research:async()=>({error:'启动失败'})})
+  await page.login();await page.generate('draft','doubao')
+  assert.equal(page.contentRecovery.value.taskId,'failed-a')
+  page.native({generate_research:async()=>({})});await page.generate('draft','doubao')
+  assert.equal(page.contentRecovery.value.taskId,'failed-a')
+  page.native({generate_research:async()=>({id:'confirmed-new-draft',kind:'draft',cycle_id:'a',status:'running'})})
+  await page.generate('draft','doubao');assert.equal(page.contentRecovery.value,null)
+  assert.deepEqual(JSON.parse(local.getItem('geo-content-recovery:v1:a')),{version:1,checkpoint:null})
+  page.stop()
+  const reopened=harness({},local);reopened.cycleId.value='a';assert.equal(reopened.contentRecovery.value,null);reopened.stop()
+})
+
+test('per-cycle checkpoints do not leak and A to B to A rejects a late poll before it can replace a warning',async()=>{
+  const local=storage(),page=harness({},local);page.cycleId.value='a';page.applyCycle(cycle('a'));page.task.value=interrupted()
+  page.native({open_login:async()=>({id:'login-a',kind:'login',status:'completed'})});await page.login()
+  page.cycleId.value='b';page.applyCycle(cycle('b'));assert.equal(page.contentRecovery.value,null)
+  page.task.value=interrupted('failed-b','b');page.native({open_login:async()=>({id:'login-b',kind:'login',status:'completed'})});await page.login()
+  page.cycleId.value='a';page.applyCycle(cycle('a'));assert.equal(page.contentRecovery.value.taskId,'failed-a')
+  const response=deferred();page.native({get_task:()=>response.promise});const pending=page.poll()
+  page.cycleId.value='b';assert.equal(page.contentRecovery.value.taskId,'failed-b')
+  page.cycleId.value='a';response.resolve(interrupted('late-old-a'));await pending
+  assert.equal(page.contentRecovery.value.taskId,'failed-a');assert.equal(page.task.value.id,'login-b')
+  assert.equal(JSON.parse(local.getItem('geo-content-recovery:v1:a')).checkpoint.id,'failed-a')
+  page.stop()
+})
+
+test('unavailable or malformed checkpoint storage never claims persistence or proves an unsent request',async()=>{
+  for(const local of [{getItem(){throw Error('denied')},setItem(){throw Error('denied')}},
+    {getItem:()=>'{broken',setItem(){throw Error('full')}},
+    {getItem:()=>JSON.stringify({version:1,checkpoint:interrupted('foreign','b')}),setItem(){}}]){
+    const page=harness({},local);page.cycleId.value='a';page.applyCycle(cycle('a'))
+    assert.equal(page.recoveryUnreadable.value,true);assert.match(page.recoveryStorageError.value,/未能读取/)
+    let sent=0;page.native({generate_research:async()=>{sent++;return {id:'must-not-send'}}})
+    page.ElMessageBox.confirm=async()=>{throw 'cancel'};await page.generate('draft','doubao')
+    assert.equal(sent,0);assert.equal(page.contentRecovery.value,null);page.stop()
+  }
+  const page=harness({},{getItem:()=>null,setItem(){throw Error('full')}})
+  page.cycleId.value='a';page.applyCycle(cycle('a'));page.task.value=interrupted()
+  page.native({open_login:async()=>({id:'separate-login',kind:'login',status:'completed'})});await page.login()
+  assert.equal(page.contentRecovery.value.taskId,'failed-a');assert.match(page.recoveryStorageError.value,/未能保存/)
+  page.cycleId.value='b';page.cycleId.value='a';assert.equal(page.contentRecovery.value.taskId,'failed-a')
+  assert.match(page.recoveryStorageError.value,/未能保存/);page.stop()
+})
+
+test('rapid login clicks preserve the warning and open only one separate login task',async()=>{
+  const response=deferred(),page=harness({});page.cycleId.value='a';page.applyCycle(cycle('a'));page.task.value=interrupted()
+  let opened=0;page.native({open_login:()=>{opened++;return response.promise}})
+  const first=page.login();await page.login();assert.equal(opened,1)
+  response.resolve({id:'separate-login',kind:'login',status:'completed'});await first
+  assert.equal(page.contentRecovery.value.taskId,'failed-a');page.stop()
+})
+
+test('unmounting during a poll prevents late checkpoint and task replacement',async()=>{
+  const local=storage(),response=deferred(),page=harness({},local)
+  page.cycleId.value='a';page.applyCycle(cycle('a'));page.task.value={id:'initial',status:'running'}
+  page.native({get_task:()=>response.promise});const pending=page.poll();page.stop()
+  response.resolve(interrupted());await pending
+  assert.equal(page.task.value.id,'initial');assert.equal(local.getItem('geo-content-recovery:v1:a'),null)
+})
+
+test('confirmed retests explain repeated submission, latch duplicate clicks and clear the old warning only on acknowledgement',async()=>{
+  const response=deferred(),page=harness({});page.cycleId.value='a';page.applyCycle(cycle('a'));page.task.value=interrupted()
+  let started=0,confirmation='';page.native({start_research_retest:()=>{started++;return response.promise}})
+  page.ElMessageBox.confirm=async text=>{confirmation=text}
+  const first=page.retest();await Promise.resolve();await page.retest()
+  assert.equal(started,1);assert.match(confirmation,/发送尚未确认|可能重复提问/);assert.match(confirmation,/会再次提问/)
+  assert.equal(page.contentRecovery.value.taskId,'failed-a')
+  response.resolve({id:'new-retest',kind:'retest',cycle_id:'a',status:'running'});await first
+  assert.equal(page.contentRecovery.value,null);assert.equal(page.task.value.id,'new-retest');page.stop()
 })

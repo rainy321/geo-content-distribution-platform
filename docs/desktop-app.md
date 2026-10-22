@@ -2,7 +2,7 @@
 
 桌面程序名为“GEO AI 搜索工作台”，启动文件为 `GEO_AI_Workbench.exe`。使用独立 WebView2 窗口，包含 Python 后端和已构建的界面。需要 Windows x64、Microsoft WebView2 和可用的 Edge 或 Chrome。
 
-本文对应 **2026.10.21.5 平台用途与历史恢复版**。先判断平台适合来源研究、原创投稿还是商业投放，再准备账号；五步页可显式继续服务器保存的整轮内容。原有内部资料隔离、逐篇审核记录和正常登录会话继续保留。准确检查结果、软件哈希及源码提交以对应 Release 清单为准。
+本文对应 **2026.10.22.1 登录恢复与操作检查版**。内容页可直接选择写作会话并登录；已结束的会话失败显示具体处理方法，发送状态不明确时，重新开始前先核对原会话。平台用途检查、历史整轮恢复、内部资料隔离与逐篇审核记录继续保留。准确检查结果、软件哈希及源码提交以对应 Release 清单为准。
 
 软件可分别建立公司与产品档案，填写当前对象别名、运营公司与额外官方页面。公司提及不会自动计入旗下产品；同域不同产品路径分别匹配，主网址和额外官方页面不自动扩展到整站或其他子域。此次按更新后的官网分别测试北京同于野科技有限公司、懂AI中转站、同于野软件，详见[测试方法与配置](geo-search-testing.md)。这些工作模式测试与普通对话基线分别保存；公司回答中声称使用账号内部资料的一题已排除公开曝光统计。账号登录成功仍可能进入工作界面，普通对话基线需要实际可用的普通对话入口，不能用工作模式结果代替。
 
@@ -32,6 +32,14 @@ CSDN 专用辅助填写无需配置 CSS 选择器；仅确认空白或完整匹�
 
 写作会话初始使用本轮基线的豆包界面和请求模型选项，明确修改后的选择按任务单保留。切换任务单或刷新时不会把另一个任务单的选择、延迟结果带进来；实际模型仍以平台当前显示为准。
 
+内容步骤顶部的“豆包写作会话”可选择豆包对话或豆包工作，并直接打开对应登录窗口；模型选项和详细登录说明可展开。已有报告的搜索基线页也保留登录入口。反馈页的登录入口使用原基线的复测会话，与当前写作选项分开。
+
+登录失效、安全验证等待结束、界面不匹配等已知情况会显示中文处理卡；内部原因码放在任务详情中。登录操作与生成操作分别记录，重新登录不会自动生成文章，也不自动重发旧问题。只有证据明确显示未尝试且未提交，才说明“问题尚未发送”；已发送或发送状态未知时，重新开始前须核对原会话。桌面的“新测一轮”会再次提问，不等于 CLI 的只续未提交问题。
+
+网页的历史 `from_logout` 参数本身不能证明当前仍未登录；需要结合当前登录/验证提示、实际界面及可用编辑器判断。真实退出页、未知页面或提交身份无法确认时继续暂停。正常登录解除后，已尝试的问题仍沿用原提交证据，不因页面恢复而再次发送。
+
+测试页重开时，匹配同一对象的终态计划和报告不会被本机空缓存盖掉，用户明确选择的报告优先。后台已结束不代表报告全部成功，报告自身的停止原因和未完成题仍保留。内容明细页更新同一轮平台配置或刷新时保留未保存的事实输入；其他页面改动了已保存事实时，要求重新核对后保存。
+
 腾讯云开发者社区接入前应核对实名认证、手机验证、首次专栏审核及封面要求，编辑器可能自动保存草稿。[社区规范](https://cloud.tencent.com/developer/article/1006434)不鼓励较多段落为 AI 生成的内容，并限制推广引流；标注 AI 或仅做 AI 审校不能据此认定允许发文。账号前提和编辑流程参见[发表文章文档](https://cloud.tencent.com/document/product/1212/42695)，最终按当前账号页面核对。该接入起点不表示已完成自动投稿适配。
 
 软件内可以选择客户资料、通过 AI API 或已登录豆包生成固定问题、预览确认后启动串行测试、停止任务及查看完整报告。首次使用豆包采集时点击“登录豆包”，在专用窗口正常登录/验证，完成后关闭专用登录窗口。主流程显示这次操作的“上次登录检查”摘要，直到开始新任务或切换对象；摘要显示所选与最后观察到的实际界面、登录及验证提示，关闭窗口本身不能证明登录成功或会话已保存。所选与实际不一致时先核对界面选项，采集前仍会检查并拦截错配。采集中出现验证时应保持采集窗口打开，软件等待同一条请求，不自动重发。选择与你实际账号对应的“豆包对话”或“豆包工作”；模型选项只选择正常可用项目。没有选择品牌项目时，豆包出题可以使用当前报告对应的客户资料。
@@ -58,7 +66,7 @@ CSDN 专用辅助填写无需配置 CSS 选择器；仅确认空白或完整匹�
 
 ## 本机安装与数据
 
-从 [2026.10.21.5 Release](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.5) 下载 Windows x64 ZIP，完整解压后打开 `GEO_AI_Workbench/GEO_AI_Workbench.exe`，保留同级 `_internal` 目录。[2026.10.21.4 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.4)及[2026.10.21.3 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.3)继续保留。[2026.10.20 五步流程版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.20)保留此前真实发布走查。更早版本在[旧版归档 Release](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-legacy-backup-2026.10.15)，仅用于备份恢复。
+从 [2026.10.22.1 Release](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.22.1) 下载 Windows x64 ZIP，完整解压后打开 `GEO_AI_Workbench/GEO_AI_Workbench.exe`，保留同级 `_internal` 目录。[2026.10.21.5 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.5)、[2026.10.21.4 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.4)及[2026.10.21.3 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.3)继续保留。[2026.10.20 五步流程版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.20)保留此前真实发布走查。更早版本在[旧版归档 Release](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-legacy-backup-2026.10.15)，仅用于备份恢复。
 
 本机安装文件：`%LOCALAPPDATA%\Programs\GEO_AI_Workbench\GEO_AI_Workbench.exe`。桌面和开始菜单有“GEO AI搜索工作台”快捷方式。
 

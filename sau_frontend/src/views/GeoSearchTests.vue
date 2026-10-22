@@ -20,7 +20,8 @@
       <el-button :disabled="nativeBusy || (!project && !report)" @click="startNative('plan')">用豆包生成问题</el-button>
       <el-button type="primary" :disabled="nativeBusy || !plan || !planMatchesProject" @click="startNative('run')">开始测试</el-button>
       <el-button v-if="nativeBusy" type="warning" @click="stopNative">停止任务</el-button>
-      <p class="context">{{ nativeMessage }}</p>
+      <DoubaoTaskRecovery v-if="taskRecovery" :recovery="taskRecovery" :busy="nativeBusy" :native-available="nativeReady" @login="startNative('login')"/>
+      <p v-if="nativeMessage" class="context">{{ nativeMessage }}</p>
       <p class="context">任务、计划和客户资料会自动保存，重开后恢复。采集中的验证完成后保持窗口打开，继续同一请求；请勿反复开始新任务。</p>
       <p v-if="!project && report" class="context">当前出题客户：{{ report.profile.name }}。也可在下方选择其他品牌项目。</p>
     </el-card>
@@ -31,7 +32,7 @@
         <el-table-column label="时间" min-width="155"><template #default="{ row }">{{ reportDate(row.created_at) }}</template></el-table-column>
         <el-table-column prop="client_name" label="客户" min-width="140" />
         <el-table-column label="任务" width="100"><template #default="{ row }">{{ taskNames[row.kind] || row.kind }}</template></el-table-column>
-        <el-table-column label="状态" width="110"><template #default="{ row }">{{ statusNames[row.status] || row.status }}</template></el-table-column>
+        <el-table-column label="状态" width="130"><template #default="{ row }">{{ nativeStatusLabel(row) }}</template></el-table-column>
         <el-table-column label="详情" min-width="220"><template #default="{ row }">{{ row.message || '记录已保存' }}</template></el-table-column>
         <el-table-column width="80"><template #default="{ row }"><el-button link :disabled="nativeBusy" @click="showNativeTask(row.id)">查看</el-button></template></el-table-column>
       </el-table>
@@ -140,12 +141,15 @@ python -m services.geo_test_cli plan --profile client-profile.json --planner dou
 <script setup>
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { projectApi } from '@/api/project'
 import { geoTestApi } from '@/api/geoTest'
 import { geoContentApi } from '@/api/geoContent'
 import DoubaoPreparation from '@/components/DoubaoPreparation.vue'
+import DoubaoTaskRecovery from '@/components/DoubaoTaskRecovery.vue'
 import { entityLabel, entityProfileFields, profileLines, reportEntityContext, restoreEntityDraftFields, sameBrand } from '@/utils/geoJourney'
+import { restoredSearchRecords, sameSearchProject, searchProjectSnapshot, searchTaskMatchesContext, searchTaskMatchesProject, searchTaskRecoverySource } from '@/utils/geoSearchRestore'
+import { doubaoTaskRecovery } from '@/utils/geoTaskRecovery'
 
 const projects = ref([]), projectId = ref(null), company = ref(''), audience = ref(''), aliasesText=ref(''), officialUrlsText=ref(''), caseCount = ref(4)
 const loading = ref(false), generating = ref(false), plan = ref(null), report = ref(null), importInput = ref(null)
@@ -159,63 +163,114 @@ const useReport = async () => {
 const desktopClientMode = ref('consumer'), desktopModel = ref(''), nativeTask = ref({ status: 'idle' })
 const nativeHistory = ref([]), nativeDetails = ref(null), restoringWorkspace = ref(false)
 const workspaceSaveError = ref('')
-const nativeStarting=ref(false)
+const nativeStarting=ref(false),nativeReady=ref(Boolean(window.pywebview?.api))
+const taskBinding=ref(null),recoveryRecord=ref(null),reportChoice=ref('automatic')
 const taskNames = { login: '登录豆包', plan: '生成问题', run: '采集测试', research: '采集内容策划', draft: '生成平台稿' }
 let workspaceSaveTimer = null, workspaceReady = false
-const nativeBusy = computed(() => nativeStarting.value || nativeTask.value.status === 'running')
-const nativeMessage = computed(() => `${nativeTask.value.restored_from_disk ? '上次任务：' : ''}${nativeTask.value.message || ({ idle: '先生成并检查问题，再开始测试。', running: `任务执行中${nativeTask.value.progress?.case_id ? ` · ${nativeTask.value.progress.case_id}` : ''}。`, completed: '任务已完成。', stopped: '任务已停止。', failed: '任务未完成。', needs_review: '上次任务未完成，记录已保留，请检查后再执行。' }[nativeTask.value.status] || '')}`)
-let nativeTimer = null, handledNativeTask = null
+const nativeBusy = computed(() => restoringWorkspace.value || nativeStarting.value || nativeTask.value.status === 'running')
+const taskRecovery=computed(()=>{
+  if(taskMatchesCurrent(nativeTask.value)) {
+    const current=doubaoTaskRecovery(searchTaskRecoverySource(nativeTask.value));if(current)return current
+  }
+  const prior=recoveryRecord.value
+  return (sameSearchProject(prior?.project,project.value) || !project.value && prior?.project===null
+    && prior.intent===recordIntent.value && sameBrand(prior.profile,prior.profile))?prior.recovery:null
+})
+const nativeMessage = computed(() => {
+  if(taskRecovery.value?.taskId===nativeTask.value.id)return ''
+  const current=nativeTask.value,foreign=current.id && !taskMatchesCurrent(current)
+  const interrupted=current.status==='completed' && ['stopped','failed','need_action','needs_review'].includes(current.result?.report?.status)
+  return `${foreign?'其他或未绑定对象的桌面任务：':current.restored_from_disk?'上次任务：':''}${interrupted?'采集已中断，完整原因及有效结果见原报告。':current.message || ({idle:'先生成并检查问题，再开始测试。',running:'任务执行中，请等待原任务。',completed:'任务已结束，请核对结果。',stopped:'任务已停止。',failed:'任务未完成。',needs_review:'上次任务未完成，记录已保留，请检查后再执行。'}[current.status] || '')}`
+})
+const nativeStatusLabel=row=>row.kind==='run' && row.status==='completed'
+  ? statusNames[row.id===nativeTask.value.id?nativeTask.value.result?.report?.status:''] || '已结束，查看报告'
+  : statusNames[row.status] || row.status
+const recordIntent=ref(0)
+let nativeTimer = null, handledNativeTask = null,searchEpoch=0,nativeRequest=0,reportRequest=0,detailRequest=0,restoreRequest=0,destroyed=false
+const searchScope=()=>({epoch:searchEpoch,project:searchProjectSnapshot(project.value)})
+const sameSearchScope=scope=>!destroyed && scope.epoch===searchEpoch && (scope.project?sameSearchProject(scope.project,project.value):!project.value)
+const taskMatchesCurrent=task=>searchTaskMatchesContext(task,project.value,taskBinding.value,recordIntent.value)
+const rememberRecovery=task=>{
+  if(!taskMatchesCurrent(task))return
+  const recovery=doubaoTaskRecovery(searchTaskRecoverySource(task))
+  if(recovery)recoveryRecord.value={project:searchProjectSnapshot(project.value),profile:taskBinding.value?.profile,intent:recordIntent.value,recovery}
+}
 const nativeBridge = () => {
   if (!window.pywebview?.api) throw new Error('桌面采集服务尚未就绪，请稍后重试')
   return window.pywebview.api
 }
 const startNative = async kind => {
   if(nativeBusy.value || generating.value)return
+  const scope=searchScope(),request=++nativeRequest,intent=recordIntent.value
   nativeStarting.value=true
   try {
+    if(kind!=='login' && taskRecovery.value?.requiresConfirmation) {
+      try {await ElMessageBox.confirm(`${taskRecovery.value.submissionText} 此操作会新建一轮，不是继续原请求。`,'重新开始前核对原会话',{confirmButtonText:'确认新开一轮',cancelButtonText:'保留原任务'})}catch{return}
+      if(!sameSearchScope(scope))return
+    }
+    rememberRecovery(nativeTask.value)
     const options = { client_mode: desktopClientMode.value, model_label: desktopModel.value.trim() }
     const api = nativeBridge()
-    const source = kind==='plan' ? await persistProfile() : project.value || report.value?.profile
+    const source = kind==='plan' ? await persistProfile() : kind==='run'?plan.value?.profile:project.value || report.value?.profile || plan.value?.profile
+    if(!sameSearchScope(scope) || request!==nativeRequest || intent!==recordIntent.value)return
     if(kind==='run'&&!planMatchesProject.value)throw new Error('测试计划与当前对象不一致，请重新生成问题')
     const result = kind === 'login' ? await api.open_login(options)
       : kind === 'plan' ? await api.plan_with_doubao({ ...source,...entityProfileFields(source) }, caseCount.value, options)
         : await api.start_run(plan.value, options)
     if (result.error) throw new Error(result.error)
+    if(!sameSearchScope(scope) || request!==nativeRequest || intent!==recordIntent.value)return
     nativeTask.value = { ...result, kind }
-    nativeHistory.value = await api.list_tasks()
-    if (kind === 'run') report.value = null
+    if(kind!=='login'){recordIntent.value++;reportRequest++;detailRequest++;reportChoice.value='task';recoveryRecord.value=null}
+    taskBinding.value={taskId:result.id,project:searchProjectSnapshot(project.value),profile:searchProjectSnapshot(source),intent:recordIntent.value};handledNativeTask=null
+    if (kind === 'run') {report.value = null;selectedReportId.value=''}
+    const history=await api.list_tasks()
+    if(sameSearchScope(scope) && request===nativeRequest)nativeHistory.value=history
   } catch (error) { ElMessage.error(error.response?.data?.msg || error.message || '任务无法启动') }
-  finally {nativeStarting.value=false}
+  finally {if(request===nativeRequest)nativeStarting.value=false}
 }
 const stopNative = async () => {
   try { await nativeBridge().stop_task() }
   catch (error) { ElMessage.error(error.message || '停止失败') }
 }
 const pollNative = async () => {
-  if (!nativeBusy.value || nativeStarting.value) return
+  if(restoringWorkspace.value || nativeStarting.value || !nativeTask.value.id || nativeTask.value.status!=='running' && handledNativeTask===nativeTask.value.id)return
+  const scope=searchScope(),request=++nativeRequest,previousTaskId=nativeTask.value.id,intent=recordIntent.value
+  const current=()=>sameSearchScope(scope) && request===nativeRequest && nativeTask.value.id===previousTaskId
   try {
     const task = await nativeBridge().get_task()
+    if(!current())return
     nativeTask.value = task
+    rememberRecovery(task)
     if (task.status !== 'running' && handledNativeTask !== task.id) {
-      handledNativeTask = task.id
-      if (task.result?.plan) setRecord(task.result.plan)
-      if (task.result?.report) setRecord(task.result.report)
-      if (task.kind === 'run') {
-        savedReports.value = (await geoTestApi.listReports()).data
-        const saved = savedReports.value.find(item => item.run_id === task.result?.report?.run_id)
-        if (saved) selectedReportId.value = saved.id
+      const belongs=taskMatchesCurrent(task)
+      if(belongs && intent===recordIntent.value && reportChoice.value!=='explicit') {
+        if(task.result?.plan)setRecord(task.result.plan)
+        if(task.result?.report){setRecord(task.result.report);reportChoice.value='task'}
       }
-      nativeHistory.value = await nativeBridge().list_tasks()
-      if (task.status === 'failed') ElMessage.error(task.message || '采集未完成')
+      if (task.kind === 'run') {
+        const reports=(await geoTestApi.listReports()).data
+        if(!sameSearchScope(scope) || request!==nativeRequest || nativeTask.value.id!==task.id)return
+        savedReports.value=reports
+        const saved = savedReports.value.find(item => item.run_id === task.result?.report?.run_id)
+        if (belongs && intent===recordIntent.value && reportChoice.value!=='explicit' && saved) selectedReportId.value = saved.id
+      }
+      const history=await nativeBridge().list_tasks()
+      if(!sameSearchScope(scope) || request!==nativeRequest || nativeTask.value.id!==task.id)return
+      nativeHistory.value=history;handledNativeTask=task.id
+      if (belongs && task.status === 'failed' && !taskRecovery.value) ElMessage.error(task.message || '采集未完成')
     }
   } catch { /* Keep the last task state if the desktop window is closing. */ }
 }
 const showNativeTask = async id => {
+  if(nativeBusy.value)return
+  const scope=searchScope(),request=++detailRequest,intent=++recordIntent.value
   try {
     const task = await nativeBridge().get_task(id)
+    if(!sameSearchScope(scope) || request!==detailRequest || intent!==recordIntent.value || task.id!==id)return
     nativeDetails.value = task
+    reportChoice.value='explicit'
     if (task.result?.plan) setRecord(task.result.plan)
-    if (task.result?.report) setRecord(task.result.report)
+    if (task.result?.report) {setRecord(task.result.report);selectedReportId.value=savedReports.value.find(item=>item.run_id===task.result.report.run_id)?.id || ''}
     if (task.message) ElMessage.info(task.message)
   } catch (error) { ElMessage.error(error.message || '读取任务记录失败') }
 }
@@ -237,7 +292,10 @@ const categories = ['discovery', 'brand_identity', 'website_guided']
 const categoryNames = { discovery: '行业自然发现', brand_identity: '品牌核验', website_guided: '官网引导核验' }
 const statusNames = { completed: '全部完成', completed_with_gaps: '完成（有缺口）', running: '采集中', pending: '待采集', stopped: '已停止', needs_review: '需要检查', success: '完成', partial: '来源不完整', failed: '失败', need_action: '等待人工处理', service_unavailable: '服务容量不足', private_account_context: '含账号内部资料' }
 const sourceGroups = [{ key: 'citations', title: '正文引用' }, { key: 'displayed_sources', title: '界面搜索资料' }]
-watch(projectId, () => { if (!restoringWorkspace.value) { const selected=project.value;company.value=selected?.company||'';audience.value=selected?.audience||'';aliasesText.value=profileLines(selected?.aliases).join('\n');officialUrlsText.value=profileLines(selected?.official_urls).join('\n');plan.value=null } })
+watch([projectId,()=>project.value?.name,()=>project.value?.website,()=>project.value?.entity_type], () => {
+  searchEpoch++;nativeRequest++;reportRequest++;detailRequest++;recordIntent.value++
+  if(!restoringWorkspace.value){nativeStarting.value=false;reportLoading.value=false;reportChoice.value='automatic';const selected=project.value;company.value=selected?.company||'';audience.value=selected?.audience||'';aliasesText.value=profileLines(selected?.aliases).join('\n');officialUrlsText.value=profileLines(selected?.official_urls).join('\n');plan.value=null;if(report.value&&!sameBrand(report.value.profile,selected)){report.value=null;selectedReportId.value=''}}
+},{flush:'sync'})
 watch([company, audience, aliasesText, officialUrlsText, caseCount], () => { if (!restoringWorkspace.value) plan.value = null })
 watch(desktopClientMode, () => { if (!restoringWorkspace.value) desktopModel.value = '' })
 const rate = value => typeof value === 'number' && Number.isFinite(value) ? `${Math.round(value * 100)}%` : '未知'
@@ -261,45 +319,59 @@ const saveWorkspace = () => {
 watch([projectId, company, audience, aliasesText, officialUrlsText, caseCount, desktopClientMode, desktopModel, selectedReportId, plan, report], saveWorkspace, { deep: true })
 const restoreWorkspace = async () => {
   if (!isDesktop.value) return
+  const request=++restoreRequest,initialEpoch=searchEpoch
+  restoringWorkspace.value=true
   for (let attempt = 0; attempt < 20 && !window.pywebview?.api; attempt++) await new Promise(resolve => setTimeout(resolve, 100))
-  if (!window.pywebview?.api) return
+  if (!window.pywebview?.api || destroyed) {if(request===restoreRequest)restoringWorkspace.value=false;return}
+  nativeReady.value=true
   const api = nativeBridge()
   try {
     const saved = await api.get_workspace_state()
-    restoringWorkspace.value = true
+    if(destroyed || request!==restoreRequest || initialEpoch!==searchEpoch)return
     if (saved.project_id != null && projects.value.some(item => item.id === saved.project_id)) projectId.value = saved.project_id
     else {const prior=saved.plan?.profile||saved.report?.profile;projectId.value=prior?projects.value.find(item=>sameBrand(item,prior))?.id||null:null}
+    const scope=searchScope(),intent=recordIntent.value
     const draft=restoreEntityDraftFields(project.value,saved)
     company.value=draft.company
     audience.value=draft.audience
     aliasesText.value=profileLines(draft.aliases).join('\n')
     officialUrlsText.value=profileLines(draft.official_urls).join('\n')
     if (typeof saved.case_count === 'number') caseCount.value = saved.case_count
-    if (saved.plan) setRecord(saved.plan)
-    if (saved.report) setRecord(saved.report)
-    else if ('report' in saved) report.value = null
-    if (typeof saved.selected_report_id === 'string') selectedReportId.value = saved.selected_report_id
     if (['consumer', 'work'].includes(saved.client_mode)) desktopClientMode.value = saved.client_mode
     if (typeof saved.model_label === 'string') desktopModel.value = saved.model_label
+    const [task,history]=await Promise.all([api.get_task(),api.list_tasks()])
+    if(!sameSearchScope(scope) || request!==restoreRequest || intent!==recordIntent.value)return
+    const matches=searchTaskMatchesProject(task,project.value)
+    const records=restoredSearchRecords({saved,project:project.value,currentReport:report.value,
+      explicitReport:reportChoice.value==='explicit',task:matches?task:null})
+    plan.value=null;if(records.plan)setRecord(records.plan)
+    if(!records.report)report.value=null
+    if(records.report) {
+      setRecord(records.report)
+      if(reportChoice.value!=='explicit') {
+        reportChoice.value=records.report===saved.report && saved.selected_report_id?'explicit':records.report===task.result?.report?'task':'workspace'
+        selectedReportId.value=savedReports.value.find(item=>item.run_id===records.report.run_id)?.id || (records.report===saved.report?saved.selected_report_id || '':'')
+      }
+    } else selectedReportId.value=''
+    nativeTask.value=task;nativeHistory.value=history;handledNativeTask=null
+    if(matches)taskBinding.value={taskId:task.id,project:searchProjectSnapshot(project.value)}
+    rememberRecovery(task)
     await nextTick()
-    restoringWorkspace.value = false
-    nativeTask.value = await api.get_task()
-    if (!('plan' in saved) && nativeTask.value.result?.plan) setRecord(nativeTask.value.result.plan)
-    if (!('report' in saved) && nativeTask.value.result?.report) setRecord(nativeTask.value.result.report)
-    nativeHistory.value = await api.list_tasks()
     workspaceReady = true
   } catch { workspaceSaveError.value = '未能恢复上次工作区。已保存报告仍可从列表查看，请检查软件日志。' }
-  finally { restoringWorkspace.value = false }
+  finally {if(request===restoreRequest)restoringWorkspace.value = false}
 }
-const loadSavedReport = async () => {
+const loadSavedReport = async (mode='explicit') => {
   const id = selectedReportId.value
   if (!id) return
+  const scope=searchScope(),request=++reportRequest,intent=++recordIntent.value
+  reportChoice.value=mode==='automatic'?'automatic':'explicit'
   reportLoading.value = true
   try {
     const response = await geoTestApi.getReport(id)
-    if (id === selectedReportId.value) { setRecord(response.data); plan.value = null }
+    if (sameSearchScope(scope) && request===reportRequest && intent===recordIntent.value && id === selectedReportId.value) { setRecord(response.data); plan.value = null }
   } catch { /* Request interceptor presents the error. */ }
-  finally { reportLoading.value = false }
+  finally {if(request===reportRequest)reportLoading.value = false}
 }
 const safeLink = value => {
   try {
@@ -339,14 +411,18 @@ const setRecord = value => {
 const importRecord = async event => {
   const file = event.target.files?.[0]
   if (!file) return
+  const scope=searchScope(),intent=++recordIntent.value
   try {
     if (file.size > 5 * 1024 * 1024) throw new Error('文件不能超过 5 MB')
-    setRecord(JSON.parse(await file.text()))
+    const value=JSON.parse(await file.text());if(!sameSearchScope(scope) || intent!==recordIntent.value)return
+    setRecord(value);reportChoice.value='explicit'
+    if(value.kind==='geo_search_test_report')selectedReportId.value=savedReports.value.find(item=>item.run_id===value.run_id)?.id || ''
     ElMessage.success('已导入')
   } catch (error) { ElMessage.error(error.message || '导入失败') }
   finally { event.target.value = '' }
 }
 onMounted(async () => {
+  restoringWorkspace.value=isDesktop.value
   if (isDesktop.value) nativeTimer = setInterval(pollNative, 1000)
   loading.value = true
   try { projects.value = (await projectApi.getProjects()).data }
@@ -359,13 +435,13 @@ onMounted(async () => {
       || savedReports.value.find(item => item.status === 'completed') || savedReports.value[0]
     if (selected) {
       selectedReportId.value = selected.id
-      await loadSavedReport()
+      await loadSavedReport(requested?'explicit':'automatic')
       if (requested && !isDesktop.value) { await nextTick(); reportCard.value?.$el.scrollIntoView({ block: 'start' }) }
     }
   } catch { /* Request interceptor presents the error. */ }
   await restoreWorkspace()
 })
-onUnmounted(() => { if (nativeTimer) clearInterval(nativeTimer); if (workspaceSaveTimer) clearTimeout(workspaceSaveTimer) })
+onUnmounted(() => {destroyed=true;searchEpoch++;nativeRequest++;restoreRequest++;reportRequest++;detailRequest++;if (nativeTimer) clearInterval(nativeTimer); if (workspaceSaveTimer) clearTimeout(workspaceSaveTimer) })
 </script>
 
 <style scoped>

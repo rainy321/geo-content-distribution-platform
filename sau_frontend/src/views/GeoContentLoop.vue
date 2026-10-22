@@ -12,7 +12,9 @@
       <DoubaoPreparation/>
       <div class="row"><strong>豆包写作会话</strong><el-select :model-value="clientMode" :disabled="busy || writingContextPending" aria-label="写作豆包界面" @update:model-value="selectWritingMode"><el-option label="豆包对话" value="consumer"/><el-option label="豆包工作" value="work"/></el-select><el-input :model-value="model" :disabled="busy || writingContextPending" placeholder="模型选项可留空" aria-label="写作模型选项" @update:model-value="selectWritingModel"/><el-button :disabled="busy || writingContextPending" @click="login">登录豆包</el-button><el-button v-if="nativeBusy" @click="stop">停止任务</el-button></div>
       <p class="hint">{{ writingContextPending ? '正在读取本轮写作选项，请稍候。' : '写作会话初始沿用本轮基线的界面和模型选项；你调整后的选择会按任务单保留。留空表示使用当前模型。' }}</p>
-      <p class="hint" aria-live="polite">{{ currentTaskMessage }}</p>
+      <p v-if="!contentRecovery || (task.kind==='login' && loginScope?.taskId===task.id && loginScope?.cycleId===cycleId)" class="hint" aria-live="polite">{{ currentTaskMessage }}</p>
+      <DoubaoTaskRecovery v-if="contentRecovery" :recovery="contentRecovery" :busy="busy" :native-available="nativeAvailable" @login="login"/>
+      <p v-if="recoveryStorageError" class="hint" role="status">{{ recoveryStorageError }}</p>
     </el-card>
     <template v-if="cycle">
       <el-card shadow="never">
@@ -29,6 +31,7 @@
         <div v-if="cycle.fact_candidates && !cycle.facts.length" class="fact-reuse"><p>上轮 {{ date(cycle.fact_candidates.source_created_at) }} 核对过的资料可作为本轮候选，带入后仍需重新核对。</p><el-button :disabled="busy" @click="reuseFacts">带入上轮资料</el-button></div>
         <p class="hint">每行“事实内容 | 来源网址”，没有公开网址时留空，稿件须注明据运营方说明。采集回答不会自动变成事实库。</p>
         <el-input v-model="factsText" type="textarea" :rows="6" :disabled="busy" data-testid="research-facts" placeholder="例如：官网明确标注运营公司全称 | https://客户官网/关于我们" />
+        <p v-if="factsConflict" class="hint" role="status">{{ factsConflict }}</p>
         <div class="row"><el-checkbox v-model="confirmed" :disabled="busy">我已核对这些资料，允许据此起草</el-checkbox><el-button :disabled="busy || !confirmed || !factsText.trim()" @click="saveFacts">保存事实资料</el-button></div>
         <p class="hint">资料修改后请先保存；新的事实或选题会生成独立版本。AI 稿件仍需要审稿。</p>
       </el-card>
@@ -84,6 +87,8 @@ import { geoContentApi } from '@/api/geoContent'
 import { geoTestApi } from '@/api/geoTest'
 import GeoDestinations from '@/components/GeoDestinations.vue'
 import DoubaoPreparation from '@/components/DoubaoPreparation.vue'
+import DoubaoTaskRecovery from '@/components/DoubaoTaskRecovery.vue'
+import { doubaoTaskRecovery, scopedRecoveryCheckpoint } from '@/utils/geoTaskRecovery'
 import GeoPublicationReview from '@/components/GeoPublicationReview.vue'
 import { destinationContinuationText, destinationPreparationText, destinationSupportsFill, isDestinationTask } from '@/utils/geoDestinationSession'
 import { createWritingPreferences } from '@/utils/geoWritingOptions'
@@ -93,6 +98,7 @@ const route = useRoute(), router = useRouter()
 const reports = ref([]), cycles = ref([]), cycle = ref(null), cycleId = ref(''), reportId = ref(''), retestReportId = ref('')
 const loading = ref(false), working = ref(false), nativeAvailable = ref(false), task = ref({status:'idle'})
 const clientMode = ref('consumer'), model = ref(''), factsText = ref(''), confirmed = ref(false), briefId = ref(''), platform = ref('zhihu')
+const factsConflict = ref('')
 const writingPreferences = createWritingPreferences({getItem:key=>window.localStorage.getItem(key),setItem:(key,value)=>window.localStorage.setItem(key,value)})
 const applyWritingOptions = value => {
   const choice = writingPreferences.get(cycleId.value, value)
@@ -108,6 +114,10 @@ const selectWritingModel = value => {model.value = typeof value === 'string' ? v
 const publicationVisible = ref(false), publication = ref({url:'',published_at:'',confirmed:false,note:''})
 const nativeBusy = computed(() => task.value.status === 'running'), busy = computed(() => working.value || nativeBusy.value)
 const writingContextPending = computed(() => Boolean(cycleId.value && cycle.value?.id !== cycleId.value))
+const recoveryTask=ref(null),recoveryStorageError=ref(''),recoveryUnreadable=ref(false)
+const recoveryMemory=new Map()
+const contentRecovery = computed(() => cycleId.value ? doubaoTaskRecovery(scopedRecoveryCheckpoint(task.value,cycleId.value))
+  || doubaoTaskRecovery(scopedRecoveryCheckpoint(recoveryTask.value,cycleId.value)) : null)
 const loginScope = ref(null)
 let loginRequest = 0
 const scopedLoginMessage = (current, scope, currentCycleId, isWorking = false) => {
@@ -140,14 +150,48 @@ const feedbackStages = {collection_only:'尚无发布证据',conditions_mismatch
 const date = value => value ? new Date(value).toLocaleString('zh-CN', {timeZone:'Asia/Hong_Kong',hour12:false}) : '时间未知'
 const rate = value => typeof value === 'number' ? `${Math.round(value*100)}%` : '未知'
 const safeUrl = value => { try { const url = new URL(value); return ['http:','https:'].includes(url.protocol) && !url.username && !url.password ? url.href : null } catch { return null } }
-let timer, handledTask, cycleEpoch = 0, cycleLoadRequest = 0, reloadRequest = 0, pollRequest = 0
+let timer, handledTask, cycleEpoch = 0, cycleLoadRequest = 0, reloadRequest = 0, pollRequest = 0, destroyed=false
 const cycleScope = () => ({id:cycleId.value,epoch:cycleEpoch})
-const sameCycleScope = scope => scope.id === cycleId.value && scope.epoch === cycleEpoch
-const applyCycle = (value, {select=false,scope=null}={}) => {
+const sameCycleScope = scope => !destroyed && scope.id === cycleId.value && scope.epoch === cycleEpoch
+const recoveryStorageKey=id=>typeof id==='string'&&/^[\w-]{1,100}$/.test(id)?`geo-content-recovery:v1:${id}`:null
+const loadContentRecovery=()=>{
+  recoveryTask.value=null;recoveryStorageError.value='';recoveryUnreadable.value=false
+  const id=cycleId.value,key=recoveryStorageKey(id)
+  if(!key)return
+  if(recoveryMemory.has(id)){const cached=recoveryMemory.get(id);recoveryTask.value=cached.checkpoint;recoveryStorageError.value=cached.error;recoveryUnreadable.value=cached.unreadable;return}
+  try{
+    const raw=window.localStorage.getItem(key)
+    if(raw==null)return
+    const stored=JSON.parse(raw)
+    if(stored?.version!==1 || !Object.hasOwn(stored,'checkpoint'))throw new Error('invalid checkpoint')
+    const checkpoint=stored.checkpoint===null?null:scopedRecoveryCheckpoint(stored.checkpoint,id)
+    if(stored.checkpoint!==null&&!checkpoint)throw new Error('invalid checkpoint')
+    recoveryTask.value=checkpoint;recoveryMemory.set(id,{checkpoint,error:'',unreadable:false})
+  }catch{
+    recoveryUnreadable.value=true;recoveryStorageError.value='上次任务提醒未能读取，请先核对豆包原会话；重新开始可能重复提问。'
+    recoveryMemory.set(id,{checkpoint:null,error:recoveryStorageError.value,unreadable:true})
+  }
+}
+const storeContentRecovery=(checkpoint,scope)=>{
+  if(!sameCycleScope(scope)||!recoveryStorageKey(scope.id))return
+  recoveryTask.value=checkpoint;recoveryUnreadable.value=false
+  try{window.localStorage.setItem(recoveryStorageKey(scope.id),JSON.stringify({version:1,checkpoint}));recoveryStorageError.value=''}
+  catch{recoveryStorageError.value=checkpoint?'本轮任务提醒未能保存，当前窗口仍会保留；关闭软件前请保留原任务记录并核对豆包原会话。':'新任务已开始，但旧提醒未能清除；重开后请先核对原任务，避免重复提问。'}
+  recoveryMemory.set(scope.id,{checkpoint,error:recoveryStorageError.value,unreadable:false})
+}
+const rememberContentRecovery=(current,scope=cycleScope())=>{
+  const checkpoint=scopedRecoveryCheckpoint(current,scope.id)
+  if(checkpoint)storeContentRecovery(checkpoint,scope)
+}
+const applyCycle = (value, {select=false,scope=null,factsSaved=false}={}) => {
   if (!value?.id || (scope && !sameCycleScope(scope)) || (!select && value.id !== cycleId.value)) return false
+  const previous=cycle.value, same=previous?.id===value.id
+  const edited=same&&(factsText.value!==factsStoredText(previous.facts)||confirmed.value!==(previous.facts.length>0))
+  const changed=same&&factsStoredText(previous.facts)!==factsStoredText(value.facts)
   cycle.value = value; if (select) cycleId.value = value.id
   applyWritingOptions(value)
-  factsText.value = factsStoredText(value.facts); confirmed.value = value.facts.length > 0
+  if(!edited||factsSaved){factsText.value=factsStoredText(value.facts);confirmed.value=value.facts.length>0;factsConflict.value=''}
+  else if(changed){confirmed.value=false;factsConflict.value='已保存资料有更新，当前输入未丢失。请核对后重新保存。'}
   if (!value.analysis.briefs.some(brief => brief.id === briefId.value)) briefId.value = value.analysis.briefs[0]?.id || ''
   if (!value.channels[platform.value]) platform.value = 'zhihu'
   return true
@@ -173,7 +217,7 @@ const create = async () => {
 const saveFacts = async () => {
   const scope = cycleScope()
   working.value = true
-  try { if(applyCycle((await geoContentApi.facts(scope.id,{facts:factsValue(),revision:cycle.value.revision})).data,{scope}))ElMessage.success('事实资料已保存') }
+  try { if(applyCycle((await geoContentApi.facts(scope.id,{facts:factsValue(),revision:cycle.value.revision})).data,{scope,factsSaved:true}))ElMessage.success('事实资料已保存') }
   finally { working.value = false }
 }
 const reuseFacts = () => {factsText.value=factsStoredText(cycle.value.fact_candidates.facts);confirmed.value=false;ElMessage.info('已带入候选资料，请重新核对后勾选确认')}
@@ -190,31 +234,40 @@ const savePublication = async () => {
 }
 const options = () => ({client_mode:clientMode.value,model_label:model.value.trim()})
 const generate = async (kind, provider) => {
+  if(working.value||task.value.status==='running'||(cycleId.value&&cycle.value?.id!==cycleId.value))return
   const scope = cycleScope()
   working.value = true
   try {
     if (provider === 'doubao') {
+      rememberContentRecovery(task.value,scope)
+      const recovery=contentRecovery.value
+      if(recovery?.requiresConfirmation||recoveryUnreadable.value){
+        try{await ElMessageBox.confirm(`${recovery?.submissionText||'上次任务的发送状态未能读取，请先核对豆包原会话。'} 这会新建一次请求，不是继续原问题。`,'重新开始前核对原会话',{confirmButtonText:'已核对，重新开始',cancelButtonText:'保留原任务'})}catch{return}
+        if(!sameCycleScope(scope))return
+      }
       const result = await window.pywebview.api.generate_research(scope.id,kind,briefId.value,platform.value,options())
       if (result.error) throw new Error(result.error)
-      if (sameCycleScope(scope)) task.value = result
+      if(typeof result.id!=='string'||!result.id)throw new Error('桌面任务尚未确认启动，原任务提醒仍保留')
+      if (sameCycleScope(scope)) {task.value = result;storeContentRecovery(null,scope)}
     } else {
       const result = (await geoContentApi.generate(scope.id,{kind,brief_id:briefId.value,platform:platform.value})).data
       if(!applyCycle(result.cycle,{scope}))return
       const items=(await geoContentApi.list()).data;if(!sameCycleScope(scope))return;cycles.value=items
       ElMessage.success(kind === 'draft' ? '草稿已存入内容库，请审稿' : '选题已保存')
     }
-  } catch (error) { if (!error.response) ElMessage.error(error.message || '内容任务未完成') }
+  } catch (error) { if (sameCycleScope(scope)&&!error.response) ElMessage.error(error.message || '内容任务未完成') }
   finally { working.value = false }
 }
 const login = async () => {
-  if(cycleId.value && cycle.value?.id!==cycleId.value)return
-  const currentCycleId = cycleId.value, request = ++loginRequest
+  if(busy.value || cycleId.value && cycle.value?.id!==cycleId.value)return
+  const scope=cycleScope(),currentCycleId = cycleId.value, request = ++loginRequest
+  rememberContentRecovery(task.value,scope)
   loginScope.value = null; working.value = true
   try {
     const result = await window.pywebview.api.open_login(options())
     if (result.error) throw new Error(result.error)
-    if (request === loginRequest && currentCycleId === cycleId.value) {task.value = result;loginScope.value = {taskId:result.id,cycleId:currentCycleId}}
-  } catch(error) { ElMessage.error(error.message || '登录窗口未打开') }
+    if (request === loginRequest && sameCycleScope(scope)) {task.value = result;loginScope.value = {taskId:result.id,cycleId:currentCycleId}}
+  } catch(error) { if(sameCycleScope(scope))ElMessage.error(error.message || '登录窗口未打开') }
   finally { working.value = false }
 }
 const stop = () => window.pywebview.api.stop_task()
@@ -236,14 +289,21 @@ const fillDestination = async draft => {
   catch(error) {if(error instanceof Error) ElMessage.error(error.message)}
 }
 const retest = async () => {
+  if(busy.value||!cycleId.value||cycle.value?.id!==cycleId.value)return
   const scope = cycleScope()
+  working.value=true
   try {
-    await ElMessageBox.confirm('将按基线问题开启新一轮豆包采集。发布后的索引时滞未知，采集结果只作观察。','开始同题复测',{type:'info'})
+    rememberContentRecovery(task.value,scope)
+    const recovery=contentRecovery.value
+    const reminder=recovery?.requiresConfirmation?`${recovery.submissionText} `:recoveryUnreadable.value?'上次任务的发送状态未能读取，请先核对豆包原会话。 ':''
+    await ElMessageBox.confirm(`${reminder}将按基线问题开启新一轮豆包采集，会再次提问。发布后的索引时滞未知，采集结果只作观察。`,'开始同题复测',{type:'info'})
     if(!sameCycleScope(scope))return
     const result = await window.pywebview.api.start_research_retest(scope.id)
     if (result.error) throw new Error(result.error)
-    if(sameCycleScope(scope))task.value = result
-  } catch(error) { if (error instanceof Error) ElMessage.error(error.message) }
+    if(typeof result.id!=='string'||!result.id)throw new Error('复测任务尚未确认启动，原任务提醒仍保留')
+    if(sameCycleScope(scope)){task.value = result;storeContentRecovery(null,scope)}
+  } catch(error) { if (sameCycleScope(scope)&&error instanceof Error) ElMessage.error(error.message) }
+  finally {working.value=false}
 }
 const attachRetest = async () => { const scope=cycleScope();applyCycle((await geoContentApi.retest(scope.id,retestReportId.value)).data,{scope}) }
 const edit = draft => router.push({path:'/content-create',query:{articleId:draft.article_id}})
@@ -254,22 +314,24 @@ const download = (data,name) => downloadFile(JSON.stringify(data,null,2),name,'a
 const downloadArticle = draft => downloadFile(`# ${draft.title}\n\n${draft.content}`,`article-${draft.article_id}.md`,'text/markdown')
 const poll = async () => {
   if (!nativeAvailable.value) return
-  const request=++pollRequest,previousTaskId=task.value.id
+  const scope=cycleScope(),request=++pollRequest,previousTaskId=task.value.id
   try {
     const current = await window.pywebview.api.get_task()
-    if(request!==pollRequest || task.value.id!==previousTaskId)return
+    if(!sameCycleScope(scope)||request!==pollRequest || task.value.id!==previousTaskId)return
     task.value = current
+    rememberContentRecovery(current,scope)
     if (current.status !== 'running' && current.id && handledTask !== current.id) {
+      if (current.cycle_id === cycleId.value) { await reload(); if(!sameCycleScope(scope)||request!==pollRequest||task.value.id!==current.id)return;if (current.status === 'failed'&&!contentRecovery.value) ElMessage.error(current.message || '任务未完成') }
       handledTask = current.id
-      if (current.cycle_id === cycleId.value) { await reload(); if (current.status === 'failed') ElMessage.error(current.message || '任务未完成') }
     }
   } catch { /* Native shutdown leaves the last durable task untouched. */ }
 }
 watch(cycleId, () => { loginRequest++; loginScope.value = null },{flush:'sync'})
 watch(()=>cycleId.value, () => {
   cycleEpoch++; cycleLoadRequest++
+  loadContentRecovery()
   publicationVisible.value=false
-  if(cycle.value?.id!==cycleId.value){cycle.value=null;factsText.value='';confirmed.value=false;briefId.value='';platform.value='zhihu'}
+  if(cycle.value?.id!==cycleId.value){cycle.value=null;factsText.value='';confirmed.value=false;factsConflict.value='';briefId.value='';platform.value='zhihu'}
   applyWritingOptions(cycle.value)
 },{flush:'sync'})
 onMounted(async () => {
@@ -281,7 +343,7 @@ onMounted(async () => {
   nativeAvailable.value = Boolean(window.pywebview?.api)
   if (nativeAvailable.value) { await poll(); timer=setInterval(poll,1000) }
 })
-onUnmounted(()=>clearInterval(timer))
+onUnmounted(()=>{destroyed=true;cycleEpoch++;cycleLoadRequest++;reloadRequest++;pollRequest++;loginRequest++;clearInterval(timer)})
 </script>
 
 <style scoped>

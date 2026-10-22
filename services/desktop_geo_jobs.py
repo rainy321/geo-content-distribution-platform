@@ -18,7 +18,8 @@ from services.geo_test_runner import RunConfig, exclusive_lock, run_test_plan, w
 from services.geo_test_service import build_report, normalize_profile, validate_plan
 from services.desktop_task_store import DesktopTaskStore, now
 from services import geo_content_store, geo_content_research, geo_destination_service
-from services.doubao_source_collector import collect_doubao_sources
+from services.doubao_source_collector import collect_doubao_sources, MANUAL_AUTH_REASONS
+from services.doubao_task_recovery import recovery_view, safe_reason, action_required, recovery_message
 
 
 def edge_executable() -> str | None:
@@ -74,8 +75,15 @@ class DesktopGeoJobs:
     def get_task(self, identifier=None):
         with self.lock:
             value = copy.deepcopy(self.store.read(identifier) if identifier else self.job)
+            live_window = bool(value and value.get('id') == self.job.get('id') and value.get('status') == 'running'
+                               and value.get('waiting_for_user') is True and self.worker and self.worker.is_alive()
+                               and self.task is not None and not self.task.done())
         if isinstance(value, dict) and isinstance(value.get('result'), dict):
             self._project_report_view(value['result'])
+        if isinstance(value, dict):
+            recovery = recovery_view(value, self.data, live_window=live_window)
+            if recovery:
+                value['recovery'] = recovery
         return value
 
     @staticmethod
@@ -124,12 +132,33 @@ class DesktopGeoJobs:
     def _collector_progress(self, event):
         """Persist only known phase fields; raw DOM, URLs and prompts stay in evidence."""
         names = {'manual_action_required', 'manual_action_cleared', 'manual_action_ended',
-                 'question_sent', 'case_started', 'case_finished', 'background_task_waiting', 'background_task_cleared',
-                 'answer_completed', 'source_progress'}
+                 'question_submission_started', 'question_sent', 'case_started', 'case_finished', 'background_task_waiting', 'background_task_cleared',
+                 'answer_completed', 'source_progress', 'collector_finished'}
         if not isinstance(event, dict) or event.get('event') not in names:
             return
         name = event['event']
-        reason = event.get('reason') if event.get('reason') in {'human_verification_required', 'login_required'} else None
+        reason = event.get('reason') if event.get('reason') in MANUAL_AUTH_REASONS else None
+        if name == 'collector_finished':
+            with self.lock:
+                if self.job.get('status') != 'running':
+                    return
+                for field in ('question_submission_attempted', 'question_submitted'):
+                    if type(event.get(field)) is bool:
+                        self.job.setdefault('submission_state', {})[field] = event[field]
+                failure = safe_reason(event.get('failure_reason'))
+                if failure:
+                    self.job['failure_reason'] = failure
+                path = event.get('evidence_path')
+                if isinstance(path, str):
+                    try:
+                        Path(path).resolve().relative_to(self.data.resolve())
+                        self.job['evidence_path'] = path
+                    except ValueError:
+                        pass
+                self.job['collector_need_action'] = action_required(failure, event.get('collection_status'))
+                self.job['collector_finished'] = True
+                self._persist()
+            return
         safe = {'event': name}
         if name == 'source_progress':
             phase, processed, total = event.get('phase'), event.get('processed'), event.get('total')
@@ -152,6 +181,7 @@ class DesktopGeoJobs:
             'manual_action_cleared': '正常验证或登录已解除，继续当前请求；不会重新发送问题。',
             'manual_action_ended': '当前验证等待已结束，请核对窗口与提交状态；不会自动重发。',
             'question_sent': '问题已发送，正在等待豆包当前回答；无需重复发送。',
+            'question_submission_started': '已保留本次发送尝试，正在提交当前问题；请勿重复开始。',
             'background_task_waiting': '豆包已委托后台调研，尚未返回最终回答；保留当前请求等待，不作为曝光结果，无需重新发送。',
             'background_task_cleared': '豆包后台调研已返回当前请求的最终回答，继续保存证据。',
             'answer_completed': '回答已完成，正在检查可见引用和网址；每条来源需要单独核对，请保持窗口打开。',
@@ -168,6 +198,15 @@ class DesktopGeoJobs:
         with self.lock:
             if self.job.get('status') != 'running':
                 return
+            for field in ('question_submission_attempted', 'question_submitted'):
+                if field in safe:
+                    self.job.setdefault('submission_state', {})[field] = safe[field]
+            if name == 'question_submission_started' and isinstance(event.get('evidence_path'), str):
+                try:
+                    Path(event['evidence_path']).resolve().relative_to(self.data.resolve())
+                    self.job['evidence_path'] = event['evidence_path']
+                except ValueError:
+                    pass
             self.job['waiting_for_user'] = name == 'manual_action_required'
             if name == 'manual_action_required' and reason:
                 self.job['wait_reason'] = reason
@@ -176,13 +215,16 @@ class DesktopGeoJobs:
             self.job.update(progress=safe, message=messages[name])
             self._persist()
 
-    def _start(self, kind, operation, *, client_name="", cycle_id=None, target_id=None):
+    def _start(self, kind, operation, *, client_name="", cycle_id=None, target_id=None, collector_config=None):
         with self.lock:
             if self.job["status"] == "running":
                 return {"error": "已有任务正在执行，请先等待或停止"}
             self.cancel_requested = False
             self.job = {"id": uuid.uuid4().hex, "kind": kind, "status": "running",
                         "created_at": now(), "client_name": client_name}
+            if collector_config is not None:
+                self.job.update(requested_client_mode=collector_config.client_mode,
+                                requested_model_label=collector_config.requested_model_label)
             if cycle_id:
                 self.job['cycle_id'] = cycle_id
             if target_id:
@@ -222,12 +264,18 @@ class DesktopGeoJobs:
                     self.job.pop('wait_reason', None)
                     self._persist()
             except Exception as error:
-                logging.exception("Native GEO task failed")
+                if self.job.get('collector_need_action') is True:
+                    logging.warning('Native GEO task needs user action: %s', self.job.get('failure_reason') or 'unknown')
+                else:
+                    logging.exception("Native GEO task failed")
                 with self.lock:
                     message = str(error) if isinstance(error, ValueError) else f"任务失败（{type(error).__name__}），请检查软件日志"
                     if isinstance(error, ImportError):
                         message = f"软件采集组件加载失败（{getattr(error, 'name', None) or '运行库'}），本次未发送问题。请重新打开更新后的软件。"
-                    self.job.update(status="failed", waiting_for_user=False, message=message)
+                    needs_action = self.job.get('collector_need_action') is True
+                    if needs_action:
+                        message = recovery_message(self.job.get('failure_reason'))
+                    self.job.update(status="need_action" if needs_action else "failed", waiting_for_user=False, message=message)
                     self.job.pop('wait_reason', None)
                     self._persist()
             finally:
@@ -294,7 +342,7 @@ class DesktopGeoJobs:
             value = await _plan_with_doubao(profile, args, config, progress=self._collector_progress)
             write_json(output, value)
             return {"plan": value}
-        return self._start("plan", plan, client_name=profile["name"])
+        return self._start("plan", plan, client_name=profile["name"], collector_config=config)
 
     def start_run(self, plan, options, cycle_id=None):
         try:
@@ -311,7 +359,7 @@ class DesktopGeoJobs:
             if cycle_id:
                 geo_content_store.attach_retest(self.data / 'database.db', cycle_id, report)
             return {"report": report}
-        return self._start("run", run, client_name=plan["profile"]["name"], cycle_id=cycle_id)
+        return self._start("run", run, client_name=plan["profile"]["name"], cycle_id=cycle_id, collector_config=config)
 
     def start_research_retest(self, cycle_id):
         try:
@@ -343,6 +391,10 @@ class DesktopGeoJobs:
             with exclusive_lock(config.profile_dir / '.geo-test.lock'):
                 result, path = await collect_doubao_sources(replace(config, question=prompt, submission_format='verbatim_fenced',
                     output_root=self.data / 'geo-content/evidence' / uuid.uuid4().hex), progress=self._collector_progress)
+            self._collector_progress({'event': 'collector_finished', 'failure_reason': result.get('failure_reason'),
+                'collection_status': result.get('collection_status'), 'evidence_path': str(path),
+                'question_submission_attempted': result.get('question_submission_attempted'),
+                'question_submitted': result.get('question_submitted')})
             if not result.get('answer_completed') or not result.get('question_submitted') or result.get('question') != prompt:
                 if (result.get('failure_reason') in {'editor_readback_mismatch_not_submitted', 'submission_fresh_user_context_not_confirmed'}
                         and result.get('question_submission_attempted') is False):
@@ -358,7 +410,8 @@ class DesktopGeoJobs:
             else:
                 geo_content_store.save_draft(database, cycle_id, brief_id, platform, result['response'], provenance, cycle['revision'])
             return {'cycle_id': cycle_id}
-        return self._start('research' if kind == 'analysis' else 'draft', generate, client_name=cycle['profile']['name'], cycle_id=cycle_id)
+        return self._start('research' if kind == 'analysis' else 'draft', generate, client_name=cycle['profile']['name'],
+                           cycle_id=cycle_id, collector_config=config)
 
     def open_destination(self, cycle_id, target_id, article_id=None):
         database = self.data / 'database.db'
