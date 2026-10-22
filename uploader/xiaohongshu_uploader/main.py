@@ -12,6 +12,7 @@ from patchright.async_api import Playwright
 from patchright.async_api import async_playwright
 
 from conf import DEBUG_MODE, LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
+from services.browser_executable import browser_executable_options
 from uploader.base_video import BaseVideoUploader
 from utils.base_social_media import set_init_script
 from utils.login_qrcode import build_login_qrcode_path
@@ -203,10 +204,8 @@ async def cookie_auth(account_file):
         return False
 
     async with async_playwright() as playwright:
-        if LOCAL_CHROME_PATH:
-            browser = await playwright.chromium.launch(headless=True, executable_path=LOCAL_CHROME_PATH)
-        else:
-            browser = await playwright.chromium.launch(headless=True, channel="chrome")
+        options = browser_executable_options(LOCAL_CHROME_PATH) or {"channel": "chrome"}
+        browser = await playwright.chromium.launch(headless=True, **options)
         try:
             context = await browser.new_context(storage_state=account_file)
             context = await set_init_script(context)
@@ -273,7 +272,8 @@ async def xiaohongshu_cookie_gen(
     account_path.parent.mkdir(parents=True, exist_ok=True)
 
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=headless, channel="chrome")
+        options = browser_executable_options(LOCAL_CHROME_PATH) or {"channel": "chrome"}
+        browser = await playwright.chromium.launch(headless=headless, **options)
         context = await browser.new_context()
         context = await set_init_script(context)
         qrcode_path = None

@@ -8,6 +8,7 @@ import os
 import asyncio
 
 from conf import LOCAL_CHROME_PATH, LOCAL_CHROME_HEADLESS
+from services.browser_executable import browser_executable_options
 from uploader.tk_uploader.tk_config import Tk_Locator
 from utils.base_social_media import set_init_script
 
@@ -21,7 +22,7 @@ from utils.log import tiktok_logger
 
 async def cookie_auth(account_file):
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=LOCAL_CHROME_HEADLESS)
+        browser = await playwright.chromium.launch(headless=LOCAL_CHROME_HEADLESS, **browser_executable_options(LOCAL_CHROME_PATH))
         context = await browser.new_context(storage_state=account_file)
         context = await set_init_script(context)
         try:

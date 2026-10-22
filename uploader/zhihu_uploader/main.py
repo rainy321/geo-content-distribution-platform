@@ -12,6 +12,8 @@ from playwright.async_api import Page, async_playwright
 from conf import LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
 from utils.base_social_media import set_init_script
 from utils.log import zhihu_logger
+from services.browser_executable import browser_executable_options
+from services.login_runtime import LoginCancelled
 
 ZHIHU_LOGIN_URL = "https://www.zhihu.com/signin"
 ZHIHU_WRITE_URL = "https://zhuanlan.zhihu.com/write"
@@ -42,8 +44,7 @@ def _build_launch_kwargs(headless: bool) -> dict:
             "--start-maximized",
         ],
     }
-    if LOCAL_CHROME_PATH:
-        options["executable_path"] = LOCAL_CHROME_PATH
+    options.update(browser_executable_options(LOCAL_CHROME_PATH))
     return options
 
 
@@ -61,20 +62,28 @@ async def _has_auth_cookie(context) -> bool:
     return any(c.get("name") == "z_c0" for c in cookies)
 
 
-async def _wait_until_logged_in(page: Page, context, timeout_ms: int = 200_000) -> bool:
+async def _wait_until_logged_in(page: Page, context, timeout_ms: int = 200_000, *, cancel_event=None) -> bool:
     """等待人工登录完成（优先检测 z_c0）。"""
     elapsed = 0
     step = 1000
     while elapsed < timeout_ms:
+        if cancel_event is not None and cancel_event.is_set():
+            raise LoginCancelled()
+        if page.is_closed():
+            raise RuntimeError("Target page, context or browser has been closed")
         if await _has_auth_cookie(context):
             return True
         if (not _is_login_url(page.url)) and ("zhihu.com" in (page.url or "")):
             # 已离开登录页时再确认一次 cookie
             await page.wait_for_timeout(500)
+            if cancel_event is not None and cancel_event.is_set():
+                raise LoginCancelled()
             if await _has_auth_cookie(context):
                 return True
         await page.wait_for_timeout(step)
         elapsed += step
+    if cancel_event is not None and cancel_event.is_set():
+        raise LoginCancelled()
     return await _has_auth_cookie(context)
 
 
@@ -109,8 +118,8 @@ async def cookie_auth(account_file) -> bool:
                 return True
             zhihu_logger.error("[+] 知乎 cookie 失效")
             return False
-        except Exception as exc:
-            zhihu_logger.warning(f"[+] cookie 校验异常，按失效处理: {exc}")
+        except Exception:
+            zhihu_logger.warning("[+] cookie 校验未完成，保存后仍需重新验证")
             return False
         finally:
             await browser.close()

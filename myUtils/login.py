@@ -11,6 +11,8 @@ import uuid
 from pathlib import Path
 from conf import BASE_DIR, LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
 from uploader.bilibili_uploader.runtime import run_biliup_command
+from services.browser_executable import browser_executable_options
+from services.login_runtime import check_login_cancelled, report_login_error
 
 
 def _login_database_path(database_path=None):
@@ -61,8 +63,7 @@ def get_browser_options():
         ]
     }
     # 如果用户在 conf.py 里配置了本地 Chrome，就用本地的，这样成功率极高
-    if LOCAL_CHROME_PATH:
-        options['executable_path'] = LOCAL_CHROME_PATH
+    options.update(browser_executable_options(LOCAL_CHROME_PATH))
 
     return options
 
@@ -195,6 +196,7 @@ async def get_tencent_cookie(
             ],
             'headless': False,
         }
+        options.update(browser_executable_options(LOCAL_CHROME_PATH))
         # Make sure to run headed.
         browser = await playwright.chromium.launch(**options)
         # Setup context however you like.
@@ -265,6 +267,7 @@ async def get_ks_cookie(
             ],
             'headless': False,
         }
+        options.update(browser_executable_options(LOCAL_CHROME_PATH))
         # Make sure to run headed.
         browser = await playwright.chromium.launch(**options)
         # Setup context however you like.
@@ -330,17 +333,20 @@ async def xiaohongshu_cookie_gen(
         xiaohongshu_cookie_gen as run_xiaohongshu_login,
     )
 
-    status_queue.put("MANUAL_LOGIN")
     uuid_v1 = uuid.uuid1()
     file_name = f"{uuid_v1}.json"
     cookies_dir = _login_cookies_directory(cookies_directory)
     cookies_dir.mkdir(parents=True, exist_ok=True)
     account_file = cookies_dir / file_name
 
+    def on_qrcode(_payload):
+        status_queue.put("MANUAL_LOGIN")
+
     try:
         result = await run_xiaohongshu_login(
             str(account_file),
             headless=False,
+            qrcode_callback=on_qrcode,
         )
         if not result.get("success"):
             print(f"❌ 小红书登录失败: {result.get('message')}")
@@ -351,8 +357,7 @@ async def xiaohongshu_cookie_gen(
         status_queue.put("200")
         return True
     except Exception as exc:
-        print(f"❌ 小红书登录异常: {exc}")
-        status_queue.put("500")
+        report_login_error(status_queue, exc)
         return None
 
 # 百家号登录（手动登录，非二维码）
@@ -363,7 +368,6 @@ async def baijiahao_cookie_gen(
     context = None
     page = None
     try:
-        status_queue.put("MANUAL_LOGIN")
         print(f"🟢 开始百家号登录: id={id}")
         async with async_playwright() as playwright:
             options = get_browser_options()
@@ -378,6 +382,7 @@ async def baijiahao_cookie_gen(
                 wait_until="domcontentloaded",
             )
             print(f"🟢 百家号登录页已打开: {page.url}")
+            status_queue.put("MANUAL_LOGIN")
             try:
                 await page.wait_for_url(
                     "https://baijiahao.baidu.com/builder/rc/**",
@@ -405,13 +410,7 @@ async def baijiahao_cookie_gen(
             status_queue.put("200")
             return True
     except Exception as e:
-        print(f"❌ 百家号登录异常: {e}")
-        import traceback
-        traceback.print_exc()
-        try:
-            status_queue.put("500")
-        except Exception:
-            pass
+        report_login_error(status_queue, e)
         return None
     finally:
         try:
@@ -439,8 +438,6 @@ async def toutiao_cookie_gen(
     context = None
     page = None
     try:
-        # 尽早通知前端进入「手动登录」态，避免浏览器启动慢时一直转圈
-        status_queue.put("MANUAL_LOGIN")
         print(f"🟢 开始今日头条登录: id={id}")
         async with async_playwright() as playwright:
             # 登录必须有头模式，方便用户扫码
@@ -454,6 +451,7 @@ async def toutiao_cookie_gen(
             print("🟢 打开今日头条登录页...")
             await page.goto("https://mp.toutiao.com/auth/page/login", timeout=60000, wait_until="domcontentloaded")
             print(f"🟢 登录页已打开: {page.url}")
+            status_queue.put("MANUAL_LOGIN")
             if await wait_for_toutiao_creator_backend(page, timeout_seconds=200):
                 print("✅ 今日头条登录成功，检测到进入创作者后台")
             else:
@@ -478,14 +476,8 @@ async def toutiao_cookie_gen(
             status_queue.put("200")
             return True
     except Exception as e:
-        print(f"❌ 今日头条登录异常: {e}")
-        import traceback
-        traceback.print_exc()
-        try:
-            status_queue.put("500")
-        except Exception:
-            pass
-            return None
+        report_login_error(status_queue, e)
+        return None
     finally:
         try:
             if page:
@@ -511,7 +503,6 @@ async def sohu_cookie_gen(
     context = None
     page = None
     try:
-        status_queue.put("MANUAL_LOGIN")
         print(f"🟢 开始搜狐号登录: id={id}")
         async with async_playwright() as playwright:
             options = get_browser_options()
@@ -524,6 +515,7 @@ async def sohu_cookie_gen(
             print("🟢 打开搜狐号登录页...")
             await page.goto("https://mp.sohu.com/mpfe/v4/login", timeout=60000, wait_until="domcontentloaded")
             print(f"🟢 登录页已打开: {page.url}")
+            status_queue.put("MANUAL_LOGIN")
             try:
                 await page.wait_for_url(
                     lambda url: (
@@ -555,13 +547,7 @@ async def sohu_cookie_gen(
             status_queue.put("200")
             return True
     except Exception as e:
-        print(f"❌ 搜狐号登录异常: {e}")
-        import traceback
-        traceback.print_exc()
-        try:
-            status_queue.put("500")
-        except Exception:
-            pass
+        report_login_error(status_queue, e)
         return None
     finally:
         try:
@@ -587,52 +573,50 @@ async def zhihu_cookie_gen(
     browser = None
     context = None
     page = None
+    stage = "launch"
     try:
-        status_queue.put("MANUAL_LOGIN")
-        print(f"🟢 开始知乎登录: id={id}")
+        check_login_cancelled(status_queue)
         async with async_playwright() as playwright:
             options = get_browser_options()
             options['headless'] = False
-            print(f"🟢 启动浏览器 options={ {k: v for k, v in options.items() if k != 'args'} }")
             browser = await playwright.chromium.launch(**options)
+            check_login_cancelled(status_queue)
             context = await browser.new_context()
             context = await set_init_script(context)
             page = await context.new_page()
-            print("🟢 打开知乎登录页...")
+            stage = "navigation"
             await page.goto("https://www.zhihu.com/signin", timeout=60000, wait_until="domcontentloaded")
-            print(f"🟢 登录页已打开: {page.url}")
-            print("🟢 请在浏览器完成登录，等待登录凭证 z_c0…")
+            check_login_cancelled(status_queue)
+            status_queue.put("MANUAL_LOGIN")
+            stage = "login"
             from uploader.zhihu_uploader.main import _wait_until_logged_in
-            ok = await _wait_until_logged_in(page, context, timeout_ms=200_000)
+            ok = await _wait_until_logged_in(
+                page, context, timeout_ms=600_000,
+                cancel_event=getattr(status_queue, "cancel_event", None),
+            )
             if not ok:
-                print("❌ 知乎登录超时：未检测到 z_c0")
-                status_queue.put("500")
+                report_login_error(status_queue, code="login_timeout")
                 return None
-            print("✅ 知乎登录成功，已检测到 z_c0")
-
+            check_login_cancelled(status_queue)
             uuid_v1 = uuid.uuid1()
-            print(f"UUID v1: {uuid_v1}")
             cookies_dir = _login_cookies_directory(cookies_directory)
             cookies_dir.mkdir(parents=True, exist_ok=True)
             await context.storage_state(path=cookies_dir / f"{uuid_v1}.json")
-
-            result = await check_cookie(
-                9, f"{uuid_v1}.json", cookies_directory=cookies_dir
-            )
-            if not result:
-                print("⚠️ cookie 即时校验未通过，仍保存账号，请稍后刷新验证")
-
+            check_login_cancelled(status_queue)
+            try:
+                result = await check_cookie(
+                    9, f"{uuid_v1}.json", cookies_directory=cookies_dir
+                )
+            except Exception:
+                # Manual authentication was observed, but a runtime/network
+                # validation failure does not establish a verified account.
+                result = False
+            check_login_cancelled(status_queue)
             _save_login_account(database_path, 9, f"{uuid_v1}.json", id, result, account_id=account_id)
             status_queue.put("200")
             return True
-    except Exception as e:
-        print(f"❌ 知乎登录异常: {e}")
-        import traceback
-        traceback.print_exc()
-        try:
-            status_queue.put("500")
-        except Exception:
-            pass
+    except Exception as exc:
+        report_login_error(status_queue, exc, stage=stage)
         return None
     finally:
         try:
@@ -710,7 +694,6 @@ async def tiktok_cookie_gen(
 ):
     """Open a headed TikTok login and persist the browser session for Web use."""
 
-    status_queue.put("MANUAL_LOGIN")
     cookies_dir = _login_cookies_directory(cookies_directory)
     cookies_dir.mkdir(parents=True, exist_ok=True)
     file_name = f"tiktok_{uuid.uuid1()}.json"
@@ -741,6 +724,7 @@ async def tiktok_cookie_gen(
                         await page.wait_for_timeout(2000)
                 if navigation_error is not None:
                     raise RuntimeError("TikTok 登录页连续三次连接失败") from navigation_error
+                status_queue.put("MANUAL_LOGIN")
                 authenticated = False
                 for _ in range(max(30, int(timeout_seconds))):
                     cookies = await context.cookies()
@@ -762,8 +746,7 @@ async def tiktok_cookie_gen(
         status_queue.put("200" if result else "500")
         return bool(result)
     except Exception as exc:
-        print(f"❌ TikTok登录异常: {exc}")
-        status_queue.put("500")
+        report_login_error(status_queue, exc)
         return None
 
 

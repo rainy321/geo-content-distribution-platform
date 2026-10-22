@@ -106,6 +106,7 @@ from services.real_publisher_factory import (
     create_real_publisher_factory,
 )
 from services.request_guard import create_rate_limiter_from_environment
+from services.login_runtime import LoginStatusQueue, check_login_cancelled, report_login_error
 
 active_queues = {}
 active_queues_lock = threading.Lock()
@@ -2429,7 +2430,7 @@ def login():
     print(f"登录请求: type={login_type}, account_id={reconnect_id or 'new'}")
 
     # 模拟一个用于异步通信的队列
-    status_queue = Queue()
+    status_queue = LoginStatusQueue()
     session_key = (login_type, f"account:{reconnect_id}" if reconnect_id is not None else account_name)
     with active_queues_lock:
         if session_key in active_queues:
@@ -2438,22 +2439,34 @@ def login():
             ), 409
         active_queues[session_key] = status_queue
 
-    def on_close():
+    def release_session():
         with active_queues_lock:
             if active_queues.get(session_key) is status_queue:
                 active_queues.pop(session_key, None)
         print(f"清理登录会话: type={login_type}, account_id={reconnect_id or 'new'}")
+    def on_close():
+        # Closing an SSE response does not mean its browser worker has exited.
+        # Keep the duplicate guard until cleanup really completes.
+        if not status_queue.terminal_sent:
+            status_queue.cancel_event.set()
+
+    def registered_worker(*args):
+        try:
+            run_async_function(*args)
+        finally:
+            release_session()
+
     # 启动异步任务线程
     try:
         thread = threading.Thread(
-            target=run_async_function,
+            target=registered_worker,
             args=(login_type, account_name, status_queue, reconnect_id),
             daemon=True,
         )
         thread.start()
     except Exception:
-        on_close()
-        raise
+        release_session()
+        return jsonify({"code": 500, "msg": "登录组件启动失败，请重试", "data": None}), 500
     response = Response(
         sse_stream(status_queue, on_close=on_close),
         mimetype='text/event-stream',
@@ -3109,117 +3122,51 @@ def download_cookie():
 
 # 包装函数：在线程中运行异步函数
 def run_async_function(type,id,status_queue,account_id=None):
-    # Login helpers launch real browsers and belong to the local worker runtime.
-    from myUtils.login import (
-        baijiahao_cookie_gen,
-        bilibili_cookie_gen,
-        douyin_cookie_gen,
-        get_ks_cookie,
-        get_tencent_cookie,
-        sohu_cookie_gen,
-        toutiao_cookie_gen,
-        tiktok_cookie_gen,
-        xiaohongshu_cookie_gen,
-        zhihu_cookie_gen,
-    )
-
-    print(f"🧵 登录线程启动: type={type}, id={id}", flush=True)
-    login_storage = {
-        "database_path": app.config["DATABASE_PATH"],
-        "cookies_directory": app.config["COOKIES_DIRECTORY"],
-    }
-    if account_id is not None:
-        login_storage["account_id"] = account_id
+    status_queue.put("LOGIN_OPENING")
     try:
-        match str(type):
-            case '1':
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(
-                    xiaohongshu_cookie_gen(id, status_queue, **login_storage)
-                )
-                loop.close()
-            case '2':
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(
-                    get_tencent_cookie(id, status_queue, **login_storage)
-                )
-                loop.close()
-            case '3':
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(
-                    douyin_cookie_gen(id, status_queue, **login_storage)
-                )
-                loop.close()
-            case '4':
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(
-                    get_ks_cookie(id, status_queue, **login_storage)
-                )
-                loop.close()
-            case '5':
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(
-                    baijiahao_cookie_gen(id, status_queue, **login_storage)
-                )
-                loop.close()
-            case '6':
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(
-                    bilibili_cookie_gen(id, status_queue, **login_storage)
-                )
-                loop.close()
-            case '7':
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(
-                    toutiao_cookie_gen(id, status_queue, **login_storage)
-                )
-                loop.close()
-            case '8':
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(
-                    sohu_cookie_gen(id, status_queue, **login_storage)
-                )
-                loop.close()
-            case '9':
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(
-                    zhihu_cookie_gen(id, status_queue, **login_storage)
-                )
-                loop.close()
-            case '10':
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                loop.run_until_complete(
-                    tiktok_cookie_gen(id, status_queue, **login_storage)
-                )
-                loop.close()
-            case _:
-                print(f"❌ 不支持的登录平台类型: {type}", flush=True)
-                status_queue.put("500")
-    except ModuleNotFoundError as exc:
-        component = re.sub(r"[^A-Za-z0-9_.-]", "", str(exc.name or "browser-runtime"))[:80]
+        # Optional browser/platform dependencies must fail through the SSE stream,
+        # including imports that fail before any platform coroutine starts.
+        from myUtils.login import (
+            baijiahao_cookie_gen,
+            bilibili_cookie_gen,
+            douyin_cookie_gen,
+            get_ks_cookie,
+            get_tencent_cookie,
+            sohu_cookie_gen,
+            toutiao_cookie_gen,
+            tiktok_cookie_gen,
+            xiaohongshu_cookie_gen,
+            zhihu_cookie_gen,
+        )
+        check_login_cancelled(status_queue)
+        runners = {
+            "1": xiaohongshu_cookie_gen, "2": get_tencent_cookie,
+            "3": douyin_cookie_gen, "4": get_ks_cookie,
+            "5": baijiahao_cookie_gen, "6": bilibili_cookie_gen,
+            "7": toutiao_cookie_gen, "8": sohu_cookie_gen,
+            "9": zhihu_cookie_gen, "10": tiktok_cookie_gen,
+        }
+        runner = runners.get(str(type))
+        if runner is None:
+            report_login_error(status_queue, code="login_failed")
+            return
+        login_storage = {
+            "database_path": app.config["DATABASE_PATH"],
+            "cookies_directory": app.config["COOKIES_DIRECTORY"],
+        }
+        if account_id is not None:
+            login_storage["account_id"] = account_id
+        asyncio.run(runner(id, status_queue, **login_storage))
+    except (ModuleNotFoundError, ImportError) as exc:
+        # Retain the existing safe component hint for older clients.
+        component = re.sub(r"[^A-Za-z0-9_.-]", "", str(getattr(exc, "name", None) or "browser-runtime"))[:80]
         status_queue.put(f"COMPONENT_MISSING:{component}")
-        status_queue.put("500")
-    except Exception as e:
-        print(f"❌ 登录线程异常 type={type}, id={id}: {e}", flush=True)
-        import traceback
-        traceback.print_exc()
-        try:
-            status_queue.put("500")
-        except Exception:
-            pass
+        report_login_error(status_queue, code="component_missing")
+    except Exception as exc:
+        report_login_error(status_queue, exc)
     finally:
-        if 'loop' in locals() and not loop.is_closed():
-            loop.close()
+        if isinstance(status_queue, LoginStatusQueue) and not status_queue.terminal_sent:
+            report_login_error(status_queue, code="login_failed")
 
 # SSE 流生成器函数
 def sse_stream(status_queue, *, on_close=None):

@@ -405,6 +405,30 @@ def run_smoke_check(window, data: Path, url: str) -> None:
                     await browser.close()
         import asyncio
         status["collector_engine_ready"] = asyncio.run(check_browser_engine())
+        # Media login uses a fresh headed browser, whereas the collector uses
+        # persistent contexts. Exercise both installed runtime paths: one can
+        # fail even when the other succeeds. This check never opens a platform.
+        async def check_media_login_browser():
+            from myUtils.login import get_browser_options
+            from utils.base_social_media import set_init_script
+            async with async_playwright() as playwright:
+                options = {**get_browser_options(), 'headless': False}
+                browser = await playwright.chromium.launch(**options)
+                try:
+                    context = await browser.new_context()
+                    context = await set_init_script(context)
+                    page = await context.new_page()
+                    await page.set_content('<title>Synthetic media-login browser check</title>')
+                    if await page.title() != 'Synthetic media-login browser check':
+                        return False
+                    await page.goto(url)
+                    await page.locator('[data-testid="geo-journey"] .journey-steps > button').last.wait_for()
+                    return await page.locator('[data-testid="geo-journey"] .journey-steps > button').count() == 5
+                finally:
+                    await browser.close()
+        status['media_login_browser_ready'] = asyncio.run(check_media_login_browser())
+        if not status['media_login_browser_ready']:
+            raise RuntimeError('媒体登录浏览器未就绪')
         # Exercise the same worker/login path that failed for the user. The
         # browser is real; only the URL and wait budget use a local QA page.
         import services.desktop_geo_jobs as native_jobs

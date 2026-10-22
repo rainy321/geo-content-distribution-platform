@@ -14,6 +14,7 @@ from patchright.async_api import Playwright
 from patchright.async_api import async_playwright
 
 from conf import BASE_DIR, DEBUG_MODE, LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
+from services.browser_executable import browser_executable_options
 from uploader.base_video import BaseVideoUploader
 from utils.base_social_media import set_init_script
 from utils.log import tencent_logger
@@ -69,9 +70,8 @@ def _build_login_result(
 
 def _build_launch_kwargs(headless: bool) -> dict:
     launch_kwargs = {"headless": headless}
-    if LOCAL_CHROME_PATH:
-        launch_kwargs["executable_path"] = LOCAL_CHROME_PATH
-    else:
+    launch_kwargs.update(browser_executable_options(LOCAL_CHROME_PATH))
+    if "executable_path" not in launch_kwargs:
         launch_kwargs["channel"] = "chrome"
     return launch_kwargs
 

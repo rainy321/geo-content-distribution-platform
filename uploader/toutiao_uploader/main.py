@@ -10,6 +10,7 @@ from pathlib import Path
 from playwright.async_api import Page, Playwright, async_playwright
 
 from conf import LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
+from services.browser_executable import browser_executable_options
 from utils.base_social_media import set_init_script
 from utils.log import toutiao_logger
 
@@ -31,8 +32,7 @@ def _build_launch_kwargs(headless: bool) -> dict:
             "--start-maximized",
         ],
     }
-    if LOCAL_CHROME_PATH:
-        options["executable_path"] = LOCAL_CHROME_PATH
+    options.update(browser_executable_options(LOCAL_CHROME_PATH))
     return options
 
 

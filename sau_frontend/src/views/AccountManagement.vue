@@ -27,7 +27,7 @@
       <article class="warning">
         <span>03 / ACTION</span>
         <strong>{{ overview.summary.needs_action }}</strong>
-        <p>需要重新登录</p>
+        <p>需要处理</p>
       </article>
     </section>
 
@@ -116,10 +116,10 @@
     </template>
 
     <el-dialog
-      v-model="loginDialogVisible"
+      :model-value="loginDialogVisible"
       width="min(520px, calc(100vw - 32px))"
       :close-on-click-modal="false"
-      @closed="resetLoginDialog"
+      :before-close="requestLoginDialogClose"
     >
       <template #header>
         <div class="dialog-heading">
@@ -163,11 +163,13 @@
           </div>
           <strong>{{ loginStageTitle }}</strong>
           <p>{{ loginStageMessage }}</p>
+          <p v-if="pendingLogin" class="login-detach-note">关闭面板会结束本次等待。原浏览器可能仍在运行，请先核对原窗口，待原流程结束后再重试。</p>
+          <details v-if="loginFailureCode"><summary>查看原因代码</summary><p>{{ loginFailureCode }}</p></details>
         </div>
       </div>
 
       <template #footer>
-        <el-button v-if="loginStage === 'idle'" @click="loginDialogVisible = false">取消</el-button>
+        <el-button v-if="loginStage === 'idle'" @click="closeLoginDialog">取消</el-button>
         <el-button
           v-if="loginStage === 'idle'"
           type="primary"
@@ -177,8 +179,8 @@
           打开登录流程
         </el-button>
         <el-button v-else-if="loginStage === 'failed'" type="primary" @click="retryLogin">重新尝试</el-button>
-        <el-button v-else-if="loginStage === 'success'" type="primary" @click="loginDialogVisible = false">完成</el-button>
-        <el-button v-else @click="loginDialogVisible = false">取消登录</el-button>
+        <el-button v-else-if="loginStage === 'success'" type="primary" @click="closeLoginDialog">完成</el-button>
+        <el-button v-else @click="closeLoginDialog">关闭等待</el-button>
       </template>
     </el-dialog>
   </main>
@@ -200,7 +202,7 @@ const emptyOverview = () => ({
 
 const statusCopy = {
   connected: { label: '已连接', note: '本地 Cookie 状态正常' },
-  expired: { label: '已失效', note: '需要重新登录' },
+  expired: { label: '需要确认', note: '请检测登录，必要时重新登录' },
   missing_cookie: { label: '缺少 Cookie', note: '凭证文件不存在' },
   checking: { label: '检测中', note: '正在确认平台状态' }
 }
@@ -300,7 +302,19 @@ const loginStage = ref('idle')
 const qrCodeData = ref('')
 const loginForm = reactive({ platformType: null, accountName: '', existingAccountId: null })
 const loginFailureReason = ref('')
-let eventSource = null
+const loginFailureCode = ref('')
+let eventSource = null,loginEpoch=0,overviewRequest=0,destroyed=false
+const pendingLogin=computed(()=>['connecting','opening','manual'].includes(loginStage.value))
+const loginErrorCopy={
+  browser_not_found:'未找到可用于登录的浏览器，平台窗口尚未打开。请安装本机 Chrome 或 Edge，或联系维护者检查软件的浏览器组件后重试。',
+  browser_launch_failed:'登录浏览器未能启动。请先关闭残留的登录窗口，再重试；持续失败时请联系维护者检查浏览器组件。',
+  browser_closed:'登录浏览器已关闭，尚未确认登录完成。请核对原窗口，再重新尝试。',
+  navigation_failed:'浏览器未能打开平台登录页。请检查网络和平台是否可以正常访问，再重新尝试。',
+  login_timeout:'等待平台登录超时。请先核对并关闭原登录窗口，再重新尝试。',
+  login_failed:'登录流程未完成，账号是否已登录尚未确认。请核对原浏览器中的提示后重试。',
+  component_missing:'缺少此平台的登录组件，请联系软件维护者补齐组件后重试。',
+  login_cancelled:'登录流程已结束，尚未确认会话保存。原浏览器如仍在运行，请先核对原窗口。',
+}
 
 const primaryPlatforms = computed(() => overview.platforms.filter(item => ['P0', 'P1'].includes(item.priority)))
 const secondaryPlatforms = computed(() => overview.platforms.filter(item => !['P0', 'P1'].includes(item.priority)))
@@ -310,72 +324,99 @@ const syncLabel = computed(() => lastSyncedAt.value
 const selectedPlatform = computed(() => overview.platforms.find(item => item.type === loginForm.platformType))
 const loginDialogTitle = computed(() => `${loginForm.existingAccountId ? '重新登录' : '连接'}${selectedPlatform.value ? ` · ${selectedPlatform.value.name}` : '媒体账号'}`)
 const loginStageTitle = computed(() => ({
-  connecting: '登录流程已启动', manual: '等待你完成平台登录', success: '会话已保存', failed: '登录没有完成'
+  connecting: '正在连接本机登录服务', opening:'正在打开登录浏览器', manual: '等待你完成平台登录', success: '会话已保存', failed: '登录没有完成'
 }[loginStage.value] || '准备登录'))
 const loginStageMessage = computed(() => {
   if (loginStage.value === 'success') return '本地账号记录已刷新，可以返回媒体账号页继续检测。'
   if (loginStage.value === 'failed') return loginFailureReason.value || '登录未完成，请检查浏览器中的提示后重试。'
   if (qrCodeData.value) return '请使用对应平台 App 扫描二维码，并在平台侧完成确认。'
-  if (loginStage.value === 'manual') return '请在已打开的浏览器或终端中完成登录，系统会等待结果。'
-  return '正在等待平台返回二维码或人工登录窗口。'
+  if (loginStage.value === 'manual') return Number(loginForm.platformType) === 9
+    ? '知乎登录页已打开，请在该浏览器正常完成扫码或安全验证，并保持窗口打开。最多等待10分钟，检测到登录后会自动保存会话。'
+    : '平台登录页已打开，请在该浏览器正常完成扫码或安全验证，并保持窗口打开，系统会等待保存结果。'
+  if (loginStage.value === 'opening') return '本机服务正在启动浏览器，尚未确认平台登录页已打开。'
+  return '正在等待本机登录服务响应，尚未确认浏览器已打开。'
 })
 
 const fetchOverview = async () => {
+  if(destroyed)return
+  const request=++overviewRequest
   loading.value = true
   loadError.value = false
   try {
     const response = await accountApi.getMediaAccounts()
+    if(destroyed||request!==overviewRequest)return
     Object.assign(overview, response.data || emptyOverview())
     loaded.value = true
     lastSyncedAt.value = new Date()
   } catch (error) {
+    if(destroyed||request!==overviewRequest)return
     loadError.value = true
     console.error('加载媒体账号失败:', error)
   } finally {
-    loading.value = false
+    if(!destroyed&&request===overviewRequest)loading.value = false
   }
 }
 
 const checkAccount = async account => {
-  if (checkingIds.value.has(account.id)) return
+  if (destroyed||checkingIds.value.has(account.id)) return
   checkingIds.value = new Set([...checkingIds.value, account.id])
   try {
     const response = await accountApi.checkMediaAccount(account.id)
+    if(destroyed)return
     ElMessage.success(response.data?.check_message || '登录状态检测完成')
     await fetchOverview()
   } catch (error) {
-    ElMessage.error(error?.message || '平台状态检测失败，请稍后重试')
+    if(!destroyed)ElMessage.error(error?.message || '平台状态检测失败，请稍后重试')
   } finally {
-    const next = new Set(checkingIds.value)
-    next.delete(account.id)
-    checkingIds.value = next
+    if(!destroyed){const next = new Set(checkingIds.value);next.delete(account.id);checkingIds.value = next}
   }
 }
 
 const openLogin = (platform = null, account = null) => {
+  if(destroyed)return
+  closeEventSource()
   loginForm.platformType = platform?.type || null
   loginForm.accountName = account?.account_name || ''
   loginForm.existingAccountId = account?.id || null
   loginStage.value = 'idle'
   loginFailureReason.value = ''
+  loginFailureCode.value = ''
   qrCodeData.value = ''
   loginDialogVisible.value = true
 }
 
 const startLogin = () => {
+  if(destroyed||!loginDialogVisible.value||pendingLogin.value)return
+  const platform=Number(loginForm.platformType),name=loginForm.accountName.trim()
+  if(!Number.isInteger(platform)||platform<1||platform>10||!name){loginStage.value='idle';ElMessage.error('请选择媒体平台并填写账号备注名');return}
   closeEventSource()
+  const epoch=loginEpoch,snapshot={platformType:loginForm.platformType,accountName:loginForm.accountName,existingAccountId:loginForm.existingAccountId}
   loginStage.value = 'connecting'
   loginFailureReason.value = ''
+  loginFailureCode.value = ''
   qrCodeData.value = ''
   const query = new URLSearchParams({ type: String(loginForm.platformType), id: loginForm.accountName.trim() })
   if (loginForm.existingAccountId) query.set('account_id', String(loginForm.existingAccountId))
   const url = apiUrl(`/login?${query.toString()}`)
-  eventSource = new EventSource(url, { withCredentials: true })
-  eventSource.onmessage = event => {
+  let source
+  try{source=new EventSource(url, { withCredentials: true })}
+  catch{loginStage.value='failed';loginFailureReason.value='无法连接本机登录服务，尚未确认浏览器已打开。请检查软件服务后重试。';return}
+  eventSource=source
+  const current=()=>!destroyed&&loginDialogVisible.value&&epoch===loginEpoch&&eventSource===source
+    && Object.keys(snapshot).every(key=>snapshot[key]===loginForm[key])
+  const fail=(reason,code='')=>{if(!current())return;loginFailureReason.value=reason;loginFailureCode.value=code;qrCodeData.value='';loginStage.value='failed';closeEventSource()}
+  source.onmessage = event => {
+    if(!current()||typeof event.data!=='string')return
     const data = event.data
+    if(data==='LOGIN_OPENING'){loginStage.value='opening';return}
+    if(data.startsWith('LOGIN_ERROR:')){
+      const code=data.slice('LOGIN_ERROR:'.length).toLowerCase()
+      fail(Object.hasOwn(loginErrorCopy,code)?loginErrorCopy[code]:loginErrorCopy.login_failed,Object.hasOwn(loginErrorCopy,code)?code:'login_failed')
+      return
+    }
     if (data.startsWith('COMPONENT_MISSING:')) {
       const component = data.slice('COMPONENT_MISSING:'.length)
-      loginFailureReason.value = `缺少此平台的登录组件（${component}），请联系软件维护者补齐组件后重试。`
+      fail(/^[A-Za-z0-9_.-]{1,80}$/.test(component)?`缺少此平台的登录组件（${component}），请联系软件维护者补齐组件后重试。`:'缺少此平台的登录组件，请联系软件维护者补齐后重试。','component_missing')
       return
     }
     if (data === 'MANUAL_LOGIN') {
@@ -384,46 +425,50 @@ const startLogin = () => {
     }
     if (data === '200') {
       loginStage.value = 'success'
+      qrCodeData.value=''
       closeEventSource()
       fetchOverview()
       return
     }
     if (data === '500') {
-      loginStage.value = 'failed'
-      closeEventSource()
+      fail(loginFailureReason.value || loginErrorCopy.login_failed,loginFailureCode.value || 'login_failed')
       return
     }
-    if (data.length > 100) {
-      qrCodeData.value = data.startsWith('data:image') ? data : `data:image/png;base64,${data}`
+    if (data.length > 100 && data.length<=2_000_000) {
+      if(/^data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+={0,2}$/.test(data))qrCodeData.value=data
+      else if(/^[A-Za-z0-9+/]+={0,2}$/.test(data))qrCodeData.value=`data:image/png;base64,${data}`
     }
   }
-  eventSource.onerror = () => {
-    if (!['success', 'failed'].includes(loginStage.value)) loginStage.value = 'failed'
-    closeEventSource()
+  source.onerror = () => {
+    fail(loginFailureReason.value || '与本机登录服务的连接已结束，登录结果尚未确认。原浏览器可能仍在运行，请先核对原窗口，再重试。',loginFailureCode.value)
   }
 }
 
 const retryLogin = () => {
-  loginStage.value = 'idle'
-  qrCodeData.value = ''
+  if(loginStage.value==='failed')startLogin()
 }
 
 const closeEventSource = () => {
-  if (eventSource) eventSource.close()
+  loginEpoch++
+  const source=eventSource
   eventSource = null
+  if (source) {source.onmessage=null;source.onerror=null;source.close()}
 }
 
 const resetLoginDialog = () => {
   closeEventSource()
   loginStage.value = 'idle'
   qrCodeData.value = ''
+  loginFailureReason.value='';loginFailureCode.value=''
   loginForm.platformType = null
   loginForm.accountName = ''
   loginForm.existingAccountId = null
 }
+const closeLoginDialog=()=>{loginDialogVisible.value=false;resetLoginDialog()}
+const requestLoginDialogClose=done=>{closeLoginDialog();if(typeof done==='function')done()}
 
 onMounted(fetchOverview)
-onBeforeUnmount(closeEventSource)
+onBeforeUnmount(()=>{destroyed=true;overviewRequest++;closeEventSource()})
 </script>
 
 <style lang="scss" scoped>

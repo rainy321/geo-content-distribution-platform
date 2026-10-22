@@ -1,6 +1,7 @@
 from playwright.async_api import async_playwright
 
-from conf import BASE_DIR, LOCAL_CHROME_HEADLESS
+from conf import BASE_DIR, LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
+from services.browser_executable import browser_executable_options
 from utils.base_social_media import set_init_script
 from utils.log import kuaishou_logger, douyin_logger
 from pathlib import Path
@@ -8,7 +9,7 @@ from pathlib import Path
 
 async def cookie_auth_douyin(account_file):
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=LOCAL_CHROME_HEADLESS)
+        browser = await playwright.chromium.launch(headless=LOCAL_CHROME_HEADLESS, **browser_executable_options(LOCAL_CHROME_PATH))
         context = await browser.new_context(storage_state=account_file)
         context = await set_init_script(context)
         # 创建一个新的页面
@@ -42,7 +43,7 @@ async def cookie_auth_tencent(account_file):
 
 async def cookie_auth_ks(account_file):
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=LOCAL_CHROME_HEADLESS)
+        browser = await playwright.chromium.launch(headless=LOCAL_CHROME_HEADLESS, **browser_executable_options(LOCAL_CHROME_PATH))
         context = await browser.new_context(storage_state=account_file)
         context = await set_init_script(context)
         # 创建一个新的页面
@@ -61,7 +62,7 @@ async def cookie_auth_ks(account_file):
 
 async def cookie_auth_xhs(account_file):
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=LOCAL_CHROME_HEADLESS)
+        browser = await playwright.chromium.launch(headless=LOCAL_CHROME_HEADLESS, **browser_executable_options(LOCAL_CHROME_PATH))
         context = await browser.new_context(storage_state=account_file)
         context = await set_init_script(context)
         # 创建一个新的页面
@@ -86,7 +87,7 @@ async def cookie_auth_xhs(account_file):
 
 async def cookie_auth_baijiahao(account_file):
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=LOCAL_CHROME_HEADLESS)
+        browser = await playwright.chromium.launch(headless=LOCAL_CHROME_HEADLESS, **browser_executable_options(LOCAL_CHROME_PATH))
         context = await browser.new_context(storage_state=account_file)
         context = await set_init_script(context)
         page = await context.new_page()

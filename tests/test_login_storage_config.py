@@ -27,7 +27,8 @@ class LoginStorageConfigTests(unittest.IsolatedAsyncioTestCase):
         self.temp_dir.cleanup()
 
     async def test_xiaohongshu_login_persists_to_injected_storage(self):
-        async def fake_login(account_file, *, headless):
+        async def fake_login(account_file, *, headless, qrcode_callback):
+            qrcode_callback({})
             Path(account_file).write_text("{}", encoding="utf-8")
             return {"success": True, "message": "ok"}
 
@@ -73,7 +74,8 @@ class LoginStorageConfigTests(unittest.IsolatedAsyncioTestCase):
             conn.execute("INSERT INTO publish_jobs(article_id,platform,account_id,demo,status) VALUES (99,'xiaohongshu',?,0,'queued')", (account_id,))
         old_file = self.cookies_directory / 'old.json'
         old_file.write_text('previous login preserved', encoding='utf-8')
-        async def fake_login(account_file, *, headless):
+        async def fake_login(account_file, *, headless, qrcode_callback):
+            qrcode_callback({})
             Path(account_file).write_text('{}', encoding='utf-8')
             return {'success': True}
         with patch.dict('sys.modules', {'uploader.xiaohongshu_uploader.main': SimpleNamespace(xiaohongshu_cookie_gen=AsyncMock(side_effect=fake_login))}):
@@ -164,7 +166,9 @@ class LoginThreadStorageConfigTests(unittest.TestCase):
         status_queue = Queue()
         with patch('myUtils.login.xiaohongshu_cookie_gen', new=AsyncMock(side_effect=ModuleNotFoundError('missing optional module', name='patchright'))):
             run_async_function('1', 'account', status_queue)
+        self.assertEqual(status_queue.get_nowait(), 'LOGIN_OPENING')
         self.assertEqual(status_queue.get_nowait(), 'COMPONENT_MISSING:patchright')
+        self.assertEqual(status_queue.get_nowait(), 'LOGIN_ERROR:component_missing')
         self.assertEqual(status_queue.get_nowait(), '500')
 
 

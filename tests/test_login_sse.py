@@ -91,12 +91,13 @@ class LoginSseTests(unittest.TestCase):
     def test_login_route_cleans_registered_session_after_terminal_event(self):
         class ImmediateTerminalThread:
             def __init__(self, *, target, args, daemon):
-                self.status_queue = args[2]
+                self.target, self.args = target, args
 
             def start(self):
-                self.status_queue.put("200")
+                self.target(*self.args)
 
-        with patch("sau_backend.threading.Thread", ImmediateTerminalThread):
+        with patch("sau_backend.threading.Thread", ImmediateTerminalThread), \
+                patch('sau_backend.run_async_function', side_effect=lambda *args: args[2].put('200')):
             response = self.client.get(
                 "/login",
                 query_string={"type": 1, "id": "finished-account"},
@@ -123,10 +124,11 @@ class LoginSseTests(unittest.TestCase):
         class ImmediateTerminalThread:
             def __init__(self, *, target, args, daemon):
                 captured.append(args)
-                self.status_queue = args[2]
+                self.target, self.args = target, args
             def start(self):
-                self.status_queue.put('200')
-        with patch('sau_backend.threading.Thread', ImmediateTerminalThread):
+                self.target(*self.args)
+        with patch('sau_backend.threading.Thread', ImmediateTerminalThread), \
+                patch('sau_backend.run_async_function', side_effect=lambda *args: args[2].put('200')):
             response = self.client.get('/login', query_string={'type': 7, 'account_id': 7})
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_data(as_text=True), 'data: 200\n\n')
@@ -140,6 +142,55 @@ class LoginSseTests(unittest.TestCase):
             response = self.client.get('/login', query_string={'type': 7, 'account_id': 7, 'id': 'changed remark'})
         self.assertEqual(response.status_code, 409)
         thread.assert_not_called()
+
+    def test_disconnect_marks_cancel_but_retains_guard_until_worker_really_exits(self):
+        workers = []
+        class DeferredWorker:
+            def __init__(self, *, target, args, daemon):
+                self.target, self.args = target, args
+                workers.append(self)
+            def start(self):
+                self.args[2].put('LOGIN_OPENING')
+        with patch('sau_backend.threading.Thread', DeferredWorker):
+            response = self.client.get('/login', query_string={'type': 9, 'id': 'synthetic'}, buffered=False)
+            self.assertEqual(next(iter(response.response)).decode(), 'data: LOGIN_OPENING\n\n')
+            response.close()
+            queue = workers[0].args[2]
+            self.assertTrue(queue.cancel_event.is_set())
+            blocked = self.client.get('/login', query_string={'type': 9, 'id': 'synthetic'})
+            self.assertEqual(blocked.status_code, 409)
+            self.assertEqual(len(workers), 1)
+            with patch('sau_backend.run_async_function'):
+                workers[0].target(*workers[0].args)
+            with active_queues_lock:
+                self.assertEqual(active_queues, {})
+
+    def test_terminal_sse_does_not_release_guard_before_browser_cleanup_finishes(self):
+        workers = []
+        class FinishingWorker:
+            def __init__(self, *, target, args, daemon):
+                self.target, self.args = target, args
+                workers.append(self)
+            def start(self):
+                self.args[2].put('200')
+        with patch('sau_backend.threading.Thread', FinishingWorker):
+            response = self.client.get('/login', query_string={'type': 9, 'id': 'synthetic'})
+            self.assertEqual(response.get_data(as_text=True), 'data: 200\n\n')
+            self.assertFalse(workers[0].args[2].cancel_event.is_set())
+            self.assertEqual(self.client.get('/login', query_string={'type': 9, 'id': 'synthetic'}).status_code, 409)
+            with patch('sau_backend.run_async_function'):
+                workers[0].target(*workers[0].args)
+            with active_queues_lock:
+                self.assertEqual(active_queues, {})
+
+    def test_thread_start_failure_releases_guard_without_raw_exception(self):
+        with patch('sau_backend.threading.Thread') as thread:
+            thread.return_value.start.side_effect = RuntimeError('PRIVATE details')
+            response = self.client.get('/login', query_string={'type': 9, 'id': 'synthetic'})
+        self.assertEqual(response.status_code, 500)
+        self.assertNotIn('PRIVATE', response.get_data(as_text=True))
+        with active_queues_lock:
+            self.assertEqual(active_queues, {})
 
 
 if __name__ == "__main__":
