@@ -3,8 +3,8 @@ import { http } from '@/utils/request'
 // 账号管理相关API
 export const accountApi = {
   // GEO 媒体账号总览（只读，不自动访问平台）
-  getMediaAccounts() {
-    return http.get('/api/media-accounts')
+  getMediaAccounts(params = {}) {
+    return http.get('/api/media-accounts', params)
   },
 
   // 用户显式触发的单账号登录状态检测

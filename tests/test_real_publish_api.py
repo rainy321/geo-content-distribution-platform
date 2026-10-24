@@ -31,7 +31,7 @@ class RealPublishApiTests(unittest.TestCase):
 
         self.original_config = {
             key: app.config.get(key)
-            for key in ("DATABASE_PATH", "DEMO_MODE", "ALLOW_REAL_PUBLISHING")
+            for key in ("DATABASE_PATH", "DEMO_MODE", "ALLOW_REAL_PUBLISHING", "TESTING")
         }
         app.config.update(
             DATABASE_PATH=self.db_path,
@@ -53,19 +53,26 @@ class RealPublishApiTests(unittest.TestCase):
             demo=demo,
         )
 
+    def _execute_payload(self, job):
+        current = self.client.get(f"/api/publish/jobs/{job['id']}").json['data']
+        return {'confirm': True, 'expected_confirmation_snapshot': current['confirmation_snapshot']}
+
+    def _review_fingerprint(self):
+        return self.client.get(f'/api/articles/{self.article_id}').json['data']['review_fingerprint']
+
     def test_requires_all_feature_and_request_confirmation_gates(self):
         job = self._create_job()
 
         app.config["ALLOW_REAL_PUBLISHING"] = False
         disabled = self.client.post(
             f"/api/publish/jobs/{job['id']}/execute-real",
-            json={"confirm": True},
+            json=self._execute_payload(job),
         )
         app.config["ALLOW_REAL_PUBLISHING"] = True
         app.config["DEMO_MODE"] = True
         demo_mode = self.client.post(
             f"/api/publish/jobs/{job['id']}/execute-real",
-            json={"confirm": True},
+            json=self._execute_payload(job),
         )
         app.config["DEMO_MODE"] = False
         unconfirmed = self.client.post(
@@ -81,7 +88,8 @@ class RealPublishApiTests(unittest.TestCase):
     def test_real_api_rejects_unreviewed_draft_and_stops_changed_queued_task(self):
         with closing(sqlite3.connect(self.db_path)) as conn, conn:
             conn.execute("UPDATE articles SET status='draft' WHERE id=?", (self.article_id,))
-        response = self.client.post('/api/publish', json={'article_id': self.article_id, 'platform': 'zhihu'})
+        response = self.client.post('/api/publish', json={'article_id': self.article_id, 'platform': 'zhihu',
+            'expected_review_fingerprint': self._review_fingerprint()})
         self.assertEqual(response.status_code, 400)
         self.assertIn('审稿', response.json['msg'])
         with closing(sqlite3.connect(self.db_path)) as conn, conn:
@@ -91,7 +99,7 @@ class RealPublishApiTests(unittest.TestCase):
             conn.execute("UPDATE articles SET content='尚未重新确认的正文' WHERE id=?", (self.article_id,))
         publisher_factory = Mock()
         with patch('sau_backend.create_real_publisher_factory', return_value=publisher_factory):
-            result = self.client.post(f"/api/publish/jobs/{job['id']}/execute-real", json={'confirm': True})
+            result = self.client.post(f"/api/publish/jobs/{job['id']}/execute-real", json=self._execute_payload(job))
         self.assertEqual(result.status_code, 200)
         self.assertEqual(result.json['data']['status'], 'need_action')
         self.assertIn('重新审稿', result.json['data']['message'])
@@ -103,7 +111,7 @@ class RealPublishApiTests(unittest.TestCase):
         with patch("sau_backend.execute_publish_job") as execute:
             demo_response = self.client.post(
                 f"/api/publish/jobs/{demo_job['id']}/execute-real",
-                json={"confirm": True},
+                json=self._execute_payload(demo_job),
             )
 
         self.assertEqual(demo_response.status_code, 409)
@@ -130,7 +138,7 @@ class RealPublishApiTests(unittest.TestCase):
         ) as execute:
             response = self.client.post(
                 f"/api/publish/jobs/{job['id']}/execute-real",
-                json={"confirm": True},
+                json=self._execute_payload(job),
             )
 
         self.assertEqual(response.status_code, 200)
@@ -141,6 +149,7 @@ class RealPublishApiTests(unittest.TestCase):
             job["id"],
             publisher_factory=factory,
             media_root=app.config["MEDIA_ROOT"],
+            expected_confirmation_snapshot=job['confirmation_snapshot'],
         )
 
     def test_executes_confirmed_toutiao_job_with_explicit_factory(self):
@@ -162,7 +171,7 @@ class RealPublishApiTests(unittest.TestCase):
         ) as execute:
             response = self.client.post(
                 f"/api/publish/jobs/{job['id']}/execute-real",
-                json={"confirm": True},
+                json=self._execute_payload(job),
             )
 
         self.assertEqual(response.status_code, 200)
@@ -172,6 +181,7 @@ class RealPublishApiTests(unittest.TestCase):
             job["id"],
             publisher_factory=factory,
             media_root=app.config["MEDIA_ROOT"],
+            expected_confirmation_snapshot=job['confirmation_snapshot'],
         )
 
     def test_desktop_toutiao_reports_manual_progress_through_existing_job(self):
@@ -185,7 +195,7 @@ class RealPublishApiTests(unittest.TestCase):
         with patch.dict(app.config, {'DESKTOP_MODE': True}), \
                 patch('sau_backend.create_real_publisher_factory', return_value=Mock()) as create_factory, \
                 patch('sau_backend.execute_publish_job', side_effect=execute):
-            response = self.client.post(f"/api/publish/jobs/{job['id']}/execute-real", json={'confirm': True})
+            response = self.client.post(f"/api/publish/jobs/{job['id']}/execute-real", json=self._execute_payload(job))
         self.assertEqual(response.status_code, 200)
         self.assertTrue(create_factory.call_args.kwargs['toutiao_interactive'])
         self.assertEqual(response.json['data']['status'], 'processing')
@@ -226,6 +236,7 @@ class RealPublishApiTests(unittest.TestCase):
             "platform": "zhihu",
             "publish_at": "2026-09-03T09:30:00+08:00",
             "auto_execute": True,
+            "expected_review_fingerprint": self._review_fingerprint(),
         }
         app.config["ALLOW_REAL_PUBLISHING"] = False
         blocked = self.client.post("/api/publish", json=payload)
@@ -237,6 +248,7 @@ class RealPublishApiTests(unittest.TestCase):
                 "article_id": self.article_id,
                 "platform": "zhihu",
                 "auto_execute": True,
+                "expected_review_fingerprint": self._review_fingerprint(),
             },
         )
         malformed = self.client.post(
@@ -246,6 +258,7 @@ class RealPublishApiTests(unittest.TestCase):
                 "platform": "zhihu",
                 "publish_at": "2026-09-03T09:30:00+08:00",
                 "auto_execute": "yes",
+                "expected_review_fingerprint": self._review_fingerprint(),
             },
         )
 

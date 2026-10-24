@@ -7,9 +7,9 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-from patchright.async_api import Page
-from patchright.async_api import Playwright
-from patchright.async_api import async_playwright
+from playwright.async_api import Page
+from playwright.async_api import Playwright
+from playwright.async_api import async_playwright
 
 from conf import DEBUG_MODE, LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
 from services.browser_executable import browser_executable_options
@@ -30,6 +30,10 @@ XHS_LOGIN_BOX_SELECTOR = "div[class*='login-box']"
 XHS_LOGIN_SWITCH_SELECTOR = "img.css-wemwzq"
 XIAOHONGSHU_PUBLISH_STRATEGY_IMMEDIATE = "immediate"
 XIAOHONGSHU_PUBLISH_STRATEGY_SCHEDULED = "scheduled"
+
+
+def _build_launch_kwargs(headless: bool) -> dict:
+    return {"headless": headless, **browser_executable_options(LOCAL_CHROME_PATH)}
 
 
 def _msg(emoji: str, text: str) -> str:
@@ -204,8 +208,7 @@ async def cookie_auth(account_file):
         return False
 
     async with async_playwright() as playwright:
-        options = browser_executable_options(LOCAL_CHROME_PATH) or {"channel": "chrome"}
-        browser = await playwright.chromium.launch(headless=True, **options)
+        browser = await playwright.chromium.launch(**_build_launch_kwargs(True))
         try:
             context = await browser.new_context(storage_state=account_file)
             context = await set_init_script(context)
@@ -272,14 +275,14 @@ async def xiaohongshu_cookie_gen(
     account_path.parent.mkdir(parents=True, exist_ok=True)
 
     async with async_playwright() as playwright:
-        options = browser_executable_options(LOCAL_CHROME_PATH) or {"channel": "chrome"}
-        browser = await playwright.chromium.launch(headless=headless, **options)
-        context = await browser.new_context()
-        context = await set_init_script(context)
+        browser = await playwright.chromium.launch(**_build_launch_kwargs(headless))
+        context = None
         qrcode_path = None
         qrcode_info = None
         result = _build_login_result(False, "failed", "小红书登录失败", account_file)
         try:
+            context = await browser.new_context()
+            context = await set_init_script(context)
             page = await context.new_page()
             await page.goto(XHS_LOGIN_URL)
             qrcode_info = await _save_xhs_qrcode(page, account_file, qrcode_callback=qrcode_callback)
@@ -321,8 +324,11 @@ async def xiaohongshu_cookie_gen(
                 xiaohongshu_logger.info(_msg("🧹", f"临时二维码文件已清理: {qrcode_path}"))
             if not result["success"]:
                 xiaohongshu_logger.error(_msg("😢", f"登录失败: {result['message']}"))
-            await context.close()
-            await browser.close()
+            try:
+                if context is not None:
+                    await context.close()
+            finally:
+                await browser.close()
         return result
 
 
@@ -1061,21 +1067,24 @@ class XiaoHongShuNote(XiaoHongShuBaseUploader):
         xiaohongshu_logger.info(_msg("🧍", "小人先检查 cookie、图片和发布时间"))
         await self.validate_upload_args()
         xiaohongshu_logger.info(_msg("🥳", "图文上传前检查通过"))
-        browser = await playwright.chromium.launch(headless=self.headless, channel="chrome")
-        context = await browser.new_context(
-            permissions=["geolocation"],
-            storage_state=self.account_file,
-        )
-        context = await set_init_script(context)
-
+        browser = await playwright.chromium.launch(**_build_launch_kwargs(self.headless))
+        context = None
         try:
+            context = await browser.new_context(
+                permissions=["geolocation"],
+                storage_state=self.account_file,
+            )
+            context = await set_init_script(context)
             page = await context.new_page()
             await self.upload_note_content(page)
             await context.storage_state(path=self.account_file)
             xiaohongshu_logger.success(_msg("🥳", "cookie 更新完毕"))
         finally:
-            await context.close()
-            await browser.close()
+            try:
+                if context is not None:
+                    await context.close()
+            finally:
+                await browser.close()
 
     async def xiaohongshu_upload_note(self):
         async with async_playwright() as playwright:

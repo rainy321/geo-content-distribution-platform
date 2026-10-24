@@ -119,21 +119,14 @@
                   :value="account.id"
                 />
               </el-select>
-              <div class="quota-copy" :class="quotaTone(selectedAccountFor(platform.key))">
-                <template v-if="selectedAccountFor(platform.key)?.publish_policy">
-                  <strong>
-                    24h {{ selectedAccountFor(platform.key).publish_policy.reserved_24h }} /
-                    {{ selectedAccountFor(platform.key).publish_policy.safe_daily_new }}
-                  </strong>
-                  <small>当前剩余 {{ selectedAccountFor(platform.key).publish_policy.remaining_new }}</small>
-                </template>
-                <template v-else>
-                  <strong>未绑定账号</strong>
-                  <small>Demo 可继续；真实任务会被服务端阻断</small>
-                </template>
+              <div class="quota-copy" :class="quotaView(platform.key).allowed ? 'safe' : 'blocked'" role="status">
+                <strong>{{ quotaView(platform.key).title }}</strong>
+                <small>{{ quotaView(platform.key).detail }}</small>
+                <small v-if="quotaView(platform.key).nextAt">最早可用：{{ formatDate(quotaView(platform.key).nextAt, false) }}</small>
               </div>
             </article>
             <p>额度只统计本系统滚动 24 小时内的真实任务；平台后台手工发布量无法读取，请发布前自行核对。</p>
+            <p>{{ scheduleEnabled ? '额度按当前计划时间核对。' : '额度按当前时间核对。' }}<el-button text :loading="accountsStatus==='loading'" @click="fetchAccounts">刷新账号额度</el-button></p>
           </div>
         </fieldset>
 
@@ -278,9 +271,10 @@
 
         <div class="dispatch-actions">
           <p>
-            执行模式由服务端控制。Demo 任务会走完整状态链，但不会访问真实平台。
+            {{ accountsStatus==='ready' && accountsLoadedKey===quotaScopeKey && accountOverview.execution_mode==='demo' ? '当前为演示模式，不访问真实平台；可不绑定账号建立演示任务。' : '真实任务需绑定账号并再次确认；执行模式以本次服务端检查为准。' }}
             <span v-if="hasExhaustedQuota" class="quota-retry-hint" role="status">24h额度按本系统已有任务预留；重试请使用下方原任务，真实发布仍需再次确认。</span>
           </p>
+          <p v-if="reviewTokenMissing || dispatchError" class="job-action-error" role="alert">{{ dispatchError || '当前稿件的确认信息不完整，请重新读取稿件并核对后再创建真实任务。' }}<el-button text :loading="articlesLoading" @click="fetchArticles">重新读取稿件</el-button></p>
           <el-button
             type="primary"
             size="large"
@@ -378,11 +372,12 @@
         </div>
       </div>
 
+      <p v-if="jobsLoadError && jobs.length" class="jobs-stale" role="status">任务状态刷新失败，下面保留上次记录。请先刷新核对原任务，勿重复创建或提交。<el-button text @click="fetchJobs()">重新读取</el-button></p>
       <div v-if="jobsLoading" class="jobs-loading" aria-live="polite">
         <div v-for="index in 4" :key="index" class="job-skeleton"><el-skeleton :rows="2" animated /></div>
       </div>
 
-      <div v-else-if="jobsLoadError" class="board-state is-error" role="alert">
+      <div v-else-if="jobsLoadError && !jobs.length" class="board-state is-error" role="alert">
         <div class="state-symbol">!</div>
         <div>
           <h3>任务轨迹没有载入</h3>
@@ -432,10 +427,12 @@
             <div class="progress-track" :class="job.status">
               <span :style="{ width: `${statusProgress(job.status)}%` }" />
             </div>
+            <details v-if="job.message" class="job-message-details"><summary>展开任务说明</summary><p>{{ job.message }}</p></details>
+            <p v-if="jobActionErrors[job.job_id]" class="job-action-error" role="alert">{{ jobActionErrors[job.job_id] }}</p>
           </div>
 
           <div class="job-time">
-            <span>{{ job.finished_at ? '完成时间' : job.started_at ? '开始时间' : '创建时间' }}</span>
+            <span>{{ job.status==='queued' && job.started_at ? '上次尝试' : job.finished_at ? '完成时间' : job.started_at ? '开始时间' : '创建时间' }}</span>
             <time>{{ formatDate(job.finished_at || job.started_at || job.created_at) }}</time>
           </div>
 
@@ -445,6 +442,7 @@
               type="primary"
               plain
               :loading="busyJobIds.has(job.job_id)"
+              :disabled="jobsLoadError"
               @click="retryJob(job)"
             >
               {{ job.demo ? (job.status === 'need_action' ? '确认后继续' : '重新发布') : '重新检查 / 排队' }}
@@ -462,6 +460,7 @@
               type="danger"
               plain
               :loading="busyJobIds.has(job.job_id)"
+              :disabled="jobsLoadError"
               @click="executeRealJob(job)"
             >
               确认真实发布
@@ -506,6 +505,7 @@ import { articleApi } from '@/api/article'
 import { accountApi } from '@/api/account'
 import { materialApi } from '@/api/material'
 import { publishApi } from '@/api/publish'
+import { distributionActionError, distributionArticleSnapshot, distributionJobSnapshot, distributionOverviewMatches, distributionQuota, distributionReference, validDistributionToken } from '@/utils/geoDistributionState'
 
 const route = useRoute()
 const router = useRouter()
@@ -518,6 +518,7 @@ const modeNames = { article: '文章', image_article: '图文', image_note: '图
 const platforms = ref([])
 const accountOverview = ref({ platforms: [], accounts: [] })
 const accountSelections = reactive({})
+const accountsStatus=ref('idle'),accountsLoadedKey=ref('')
 
 const statusOptions = [
   { value: 'queued', label: '排队中' },
@@ -543,6 +544,7 @@ const publishAt = ref('')
 const autoExecuteAtDue = ref(false)
 const riskAcknowledged = ref(false)
 const dispatching = ref(false)
+const dispatchError=ref('')
 const imageInput = ref(null)
 const selectedImage = ref(null)
 const autoImage = ref(true)
@@ -561,14 +563,25 @@ const jobsRefreshing = ref(false)
 const jobsLoadError = ref(false)
 const lastSyncedAt = ref(null)
 const busyJobIds = ref(new Set())
+const jobActionErrors=ref({})
+const jobEpochs=ref(new Map()),dispatchEpoch=ref(0)
+let observedJobKeys=new Map()
 const jobFilters = reactive({ platform: '', status: '' })
 const jobPagination = reactive({ page: 1, page_size: 20, total: 0, total_pages: 0 })
 let pollTimer = null
 let pollingStopped = false
+let contextEpoch=0,accountsRequest=0,jobsRequest=0,articlesRequest=0,platformsRequest=0,imageRequest=0,mounted=false
+const routeContextKey=computed(()=>JSON.stringify([route.query.journey_project||'',route.query.article_id||'',route.query.platform||'']))
+const viewScope=()=>({epoch:contextEpoch,key:routeContextKey.value})
+const sameView=scope=>!pollingStopped&&scope.epoch===contextEpoch&&scope.key===routeContextKey.value
+const quotaReference=computed(()=>distributionReference(scheduleEnabled.value,publishAt.value))
+const quotaScopeKey=computed(()=>JSON.stringify([routeContextKey.value,selectedArticleId.value,quotaReference.value.key]))
+const jobsScopeKey=computed(()=>JSON.stringify([routeContextKey.value,jobFilters.platform,jobFilters.status,jobPagination.page,jobPagination.page_size]))
 
 const selectedArticle = computed(() => (
   articles.value.find(article => article.id === selectedArticleId.value) || null
 ))
+const reviewTokenMissing=computed(()=>accountOverview.value.execution_mode==='real'&&selectedArticle.value?.status==='ready'&&!validDistributionToken(selectedArticle.value.review_fingerprint))
 const visiblePlatforms = computed(() => journeyProjectId.value ? platforms.value.filter(item=>item.key===journeyPlatform.value) : platforms.value)
 const journeyContextMatches = computed(() => !journeyProjectId.value || Boolean(
   journeyArticleId.value && selectedArticle.value?.id===journeyArticleId.value
@@ -596,8 +609,25 @@ const autoExecuteAvailable = computed(() => Boolean(
 ))
 const hasExhaustedQuota = computed(() => manifestPlatforms.value.some(platform => {
   const account = selectedAccountFor(platform.key)
-  return account?.publish_policy && account.publish_policy.remaining_new <= 0
+  return distributionQuota(account?.publish_policy).state==='limit'
 }))
+const quotaView=key=>{
+  if(!quotaReference.value.valid)return {allowed:false,title:'先选择计划时间',detail:'选定时间后会重新核对额度。'}
+  if(accountsStatus.value==='loading')return {allowed:false,title:'正在核对账号额度',detail:'读取完成后才能创建新任务。'}
+  if(accountsStatus.value==='error')return {allowed:false,title:'账号额度读取失败',detail:'请刷新后重试，原任务仍保留。'}
+  if(accountsStatus.value!=='ready'||accountsLoadedKey.value!==quotaScopeKey.value)return {allowed:false,title:'额度需要重新核对',detail:'请刷新当前时间的账号额度。'}
+  if(accountOverview.value.execution_mode==='demo')return {allowed:true,title:'演示模式，不访问真实平台',detail:'无需媒体账号；演示结果不代表真实发布。'}
+  if(accountOverview.value.execution_mode!=='real')return {allowed:false,title:'执行模式尚未确认',detail:'请重新读取服务端发布模式。'}
+  const account=selectedAccountFor(key)
+  return account?distributionQuota(account.publish_policy,accountOverview.value.reference_at):{allowed:false,title:'先绑定已连接账号',detail:'连接账号后再核对当前时间的发布额度。'}
+}
+const quotaBlock=computed(()=>manifestPlatforms.value.map(platform=>quotaView(platform.key)).find(value=>!value.allowed)||null)
+const dispatchKey=computed(()=>JSON.stringify([routeContextKey.value,selectedArticleId.value,distributionArticleSnapshot(selectedArticle.value),selectedPlatforms.value,
+  selectedPlatforms.value.map(key=>accountSelections[key]),scheduleEnabled.value,publishAt.value,autoExecuteAtDue.value,
+  selectedImage.value?.filename,selectedVideo.value?.filename,autoImage.value,riskAcknowledged.value]))
+const jobActionKey=job=>distributionJobSnapshot(job)
+const currentJob=job=>!jobsLoadError.value&&!jobsLoading.value&&!jobsRefreshing.value&&jobs.value.some(value=>jobActionKey(value)===jobActionKey(job))
+const setJobActionError=(id,message)=>{jobActionErrors.value={...jobActionErrors.value,[id]:message}}
 
 const assetSummary = computed(() => {
   const parts = []
@@ -609,6 +639,10 @@ const assetSummary = computed(() => {
 
 const canDispatch = computed(() => Boolean(
   selectedArticleId.value
+  && !articlesLoading.value
+  && !articlesLoadError.value
+  && !reviewTokenMissing.value
+  && !dispatchError.value
   && selectedArticle.value?.status==='ready'
   && journeyContextMatches.value
   && selectedPlatforms.value.length
@@ -616,8 +650,9 @@ const canDispatch = computed(() => Boolean(
   && (!videoRequired.value || selectedVideo.value)
   && (!scheduleEnabled.value || publishAt.value)
   && riskAcknowledged.value
-  && !hasExhaustedQuota.value
+  && !quotaBlock.value
   && !imageUploading.value
+  && !videoUploading.value
   && !dispatching.value
 ))
 
@@ -625,8 +660,9 @@ const dispatchButtonLabel = computed(() => {
   if (!journeyContextMatches.value) return '请返回优化流程核对稿件与渠道'
   if (!selectedArticleId.value) return '先选择就绪稿件'
   if (selectedArticle.value?.status!=='ready') return '请查看下方已有任务，勿重复创建'
+  if(reviewTokenMissing.value||dispatchError.value)return '请重新读取并核对稿件'
   if (!selectedPlatforms.value.length) return '至少选择一个渠道'
-  if (hasExhaustedQuota.value) return '所选账号已达到 24h 建议上限'
+  if (quotaBlock.value) return quotaBlock.value.title
   if (!riskAcknowledged.value) return '先确认发布风险边界'
   if (imageUploading.value) return '图片上传中'
   if (videoUploading.value) return '视频上传中'
@@ -660,33 +696,43 @@ const jobsRangeLabel = computed(() => {
 })
 
 const fetchArticles = async () => {
+  if(pollingStopped)return
+  const scope=viewScope(),request=++articlesRequest
+  const current=()=>sameView(scope)&&request===articlesRequest
   articlesLoading.value = true
   articlesLoadError.value = false
   try {
     if(journeyProjectId.value){
       if(!journeyArticleId.value)throw new Error('优化流程缺少稿件编号')
       const response=await articleApi.getArticle(journeyArticleId.value)
+      if(!current())return
       if(response.data?.project_id!==journeyProjectId.value)throw new Error('稿件与当前品牌不一致')
-      articles.value=[response.data];selectedArticleId.value=journeyArticleId.value
+      articles.value=[response.data];selectedArticleId.value=journeyArticleId.value;dispatchError.value=''
       return
     }
     const response = await articleApi.getArticles({ status: 'ready', page: 1, page_size: 100 })
+    if(!current())return
     articles.value = response.data?.items || []
+    dispatchError.value=''
     const queryId = Number(route.query.article_id)
     if (!selectedArticleId.value && Number.isInteger(queryId) && articles.value.some(item => item.id === queryId)) {
       selectedArticleId.value = queryId
     }
   } catch (error) {
+    if(!current())return
     articlesLoadError.value = true
     console.error('加载就绪稿件失败:', error)
   } finally {
-    articlesLoading.value = false
+    if(current())articlesLoading.value = false
   }
 }
 
 const fetchPlatforms = async () => {
+  if(pollingStopped)return
+  const scope=viewScope(),request=++platformsRequest
   try {
     const response = await publishApi.getPlatforms()
+    if(!sameView(scope)||request!==platformsRequest)return
     platforms.value = (response.data || []).map(item => ({
       ...item,
       code: platformCodes[item.key] || item.key.slice(0, 2).toUpperCase(),
@@ -699,22 +745,35 @@ const fetchPlatforms = async () => {
 }
 
 const fetchAccounts = async () => {
+  if(pollingStopped)return
+  const reference=quotaReference.value,scope=viewScope(),key=quotaScopeKey.value,request=++accountsRequest
+  if(!reference.valid){accountsStatus.value='idle';return}
+  accountsStatus.value='loading'
+  const current=()=>sameView(scope)&&request===accountsRequest&&key===quotaScopeKey.value
   try {
-    const response = await accountApi.getMediaAccounts()
+    const response = await accountApi.getMediaAccounts(reference.params)
+    if(!current())return
+    if(!distributionOverviewMatches(response.data,reference))throw new Error('账号额度未对应当前计划时间')
     accountOverview.value = response.data || { platforms: [], accounts: [] }
+    accountsLoadedKey.value=key;accountsStatus.value='ready'
     syncDefaultAccountSelections()
   } catch (error) {
+    if(!current())return
+    accountsStatus.value='error'
     console.error('加载账号额度失败:', error)
   }
 }
 
 const fetchJobs = async (pageOrSilent = false) => {
+  if(pollingStopped)return
   const silent = pageOrSilent === true
   if (typeof pageOrSilent === 'number') jobPagination.page = pageOrSilent
+  const scope=viewScope(),key=jobsScopeKey.value,request=++jobsRequest
+  const current=()=>sameView(scope)&&request===jobsRequest&&key===jobsScopeKey.value
   if (silent) jobsRefreshing.value = false
   else if (jobs.value.length) jobsRefreshing.value = true
   else jobsLoading.value = true
-  jobsLoadError.value = false
+  if(!silent)jobsLoadError.value = false
 
   const params = {
     page: jobPagination.page,
@@ -726,15 +785,17 @@ const fetchJobs = async (pageOrSilent = false) => {
 
   try {
     const response = await publishApi.getJobs(params)
+    if(!current())return
     jobs.value = response.data?.items || []
     Object.assign(jobPagination, response.data?.pagination || {})
     lastSyncedAt.value = new Date()
+    jobsLoadError.value=false
   } catch (error) {
-    if (!silent) jobsLoadError.value = true
+    if(!current())return
+    jobsLoadError.value = true
     console.error('加载发布任务失败:', error)
   } finally {
-    jobsLoading.value = false
-    jobsRefreshing.value = false
+    if(current()){jobsLoading.value = false;jobsRefreshing.value = false}
   }
 }
 
@@ -776,11 +837,6 @@ const syncDefaultAccountSelections = () => {
       accountSelections[platform.key] = accounts[0]?.id || null
     }
   }
-}
-
-const quotaTone = account => {
-  if (!account?.publish_policy) return 'unbound'
-  return account.publish_policy.remaining_new > 0 ? 'safe' : 'blocked'
 }
 
 const handleScheduleToggle = (enabled) => {
@@ -852,10 +908,13 @@ const materialRecordToImage = record => ({
 })
 
 const recommendImage = async ({ silent = false } = {}) => {
-  if (!selectedArticleId.value || imageRecommending.value) return
+  if (pollingStopped||!selectedArticleId.value || imageRecommending.value) return
+  const scope=viewScope(),articleId=selectedArticleId.value,request=++imageRequest
+  const current=()=>sameView(scope)&&articleId===selectedArticleId.value&&request===imageRequest
   imageRecommending.value = true
   try {
-    const response = await articleApi.recommendImages(selectedArticleId.value)
+    const response = await articleApi.recommendImages(articleId)
+    if(!current())return
     const first = response.data?.items?.[0]
     if (first) {
       selectedImage.value = materialRecordToImage(first)
@@ -866,21 +925,23 @@ const recommendImage = async ({ silent = false } = {}) => {
   } catch (error) {
     console.error('推荐文章图片失败:', error)
   } finally {
-    imageRecommending.value = false
+    if(request===imageRequest)imageRecommending.value = false
   }
 }
 
 const generateCover = async () => {
-  if (!selectedArticleId.value || coverGenerating.value) return
+  if (pollingStopped||!selectedArticleId.value || coverGenerating.value) return
+  const scope=viewScope(),articleId=selectedArticleId.value,request=++imageRequest
   coverGenerating.value = true
   try {
-    const response = await articleApi.generateCover(selectedArticleId.value)
+    const response = await articleApi.generateCover(articleId)
+    if(!sameView(scope)||articleId!==selectedArticleId.value||request!==imageRequest)return
     selectedImage.value = materialRecordToImage(response.data)
     ElMessage.success('中性 GEO 封面已生成并进入素材库')
   } catch (error) {
     console.error('生成文章封面失败:', error)
   } finally {
-    coverGenerating.value = false
+    if(request===imageRequest)coverGenerating.value = false
   }
 }
 
@@ -930,6 +991,17 @@ const clearSelectedVideo = () => {
 
 const dispatchArticle = async () => {
   if (!canDispatch.value) return
+  const demo=accountOverview.value.execution_mode==='demo',reviewFingerprint=selectedArticle.value?.review_fingerprint
+  if(!demo&&!validDistributionToken(reviewFingerprint)){dispatchError.value='当前稿件的确认信息不完整，请重新读取并核对稿件。';return}
+  const scope=viewScope(),key=dispatchKey.value,intent=dispatchEpoch.value,reference=quotaReference.value
+  const current=()=>sameView(scope)&&key===dispatchKey.value&&intent===dispatchEpoch.value
+  const requests=selectedPlatforms.value.map(platform=>({article_id:selectedArticleId.value,platform,
+    images:selectedImage.value?[selectedImage.value.filename]:[],
+    video:platforms.value.find(item=>item.key===platform)?.requires_video?(selectedVideo.value?.filename||''):'',
+    auto_image:autoImage.value,publish_at:reference.at,account_id:selectedAccountFor(platform)?.id||null,
+    ...(!demo?{expected_review_fingerprint:reviewFingerprint}:{})}))
+  dispatching.value=true
+  try {
   let confirmedAutoExecute = false
   if (scheduleEnabled.value && autoExecuteAtDue.value) {
     try {
@@ -948,25 +1020,16 @@ const dispatchArticle = async () => {
       if (action !== 'cancel') return
     }
   }
-  dispatching.value = true
+  if(!current()||quotaBlock.value)return
   let createdCount = 0
   let failedCount = 0
   let demoCount = 0
 
-  for (const platform of selectedPlatforms.value) {
+  for (const payload of requests) {
+    if(!current())return
     try {
-      const capability = platforms.value.find(item => item.key === platform)
-      const account = selectedAccountFor(platform)
-      const response = await publishApi.createJob({
-        article_id: selectedArticleId.value,
-        platform,
-        images: selectedImage.value ? [selectedImage.value.filename] : [],
-        video: capability?.requires_video ? (selectedVideo.value?.filename || '') : '',
-        auto_image: autoImage.value,
-        publish_at: scheduleEnabled.value ? publishAt.value : null,
-        auto_execute: confirmedAutoExecute,
-        account_id: account?.id || null
-      })
+      const response = await publishApi.createJob({...payload,auto_execute:confirmedAutoExecute})
+      if(!current())return
       let job = response.data
       createdCount += 1
       if (job.demo) demoCount += 1
@@ -975,13 +1038,15 @@ const dispatchArticle = async () => {
         job = executed.data
       }
     } catch (error) {
+      if(!current())return
       failedCount += 1
-      console.error(`创建 ${platform} 发布任务失败:`, error)
+      if(error?.response?.status===409){dispatchError.value='稿件或发布条件已更新，请重新读取稿件并核对当前版本后再创建；不会自动重试。';break}
+      console.error(`创建 ${payload.platform} 发布任务失败:`, error)
     }
   }
 
   await Promise.allSettled([fetchJobs(true), fetchAccounts()])
-  dispatching.value = false
+  if(!current())return
   if (createdCount && !failedCount) {
     ElMessage.success(
       demoCount
@@ -990,16 +1055,24 @@ const dispatchArticle = async () => {
     )
   } else if (createdCount) {
     ElMessage.warning(`已创建 ${createdCount} 个任务，${failedCount} 个渠道创建失败`)
+  } else if(failedCount){
+    ElMessage.error('尚未确认创建结果，请先刷新原任务记录核对，勿重复创建。')
   }
+  } finally {dispatching.value=false}
 }
 
 const executeDemoJob = async (job) => {
+  if(pollingStopped||busyJobIds.value.has(job.job_id)||!currentJob(job))return
+  const scope=viewScope()
   markJobBusy(job.job_id, true)
+  setJobActionError(job.job_id,'')
   try {
     await publishApi.executeDemoJob(job.job_id)
+    if(!sameView(scope))return
     ElMessage.success('演示任务已完成，未访问真实平台')
     await fetchJobs(true)
   } catch (error) {
+    if(sameView(scope))setJobActionError(job.job_id,distributionActionError('execute',error))
     console.error('执行演示任务失败:', error)
   } finally {
     markJobBusy(job.job_id, false)
@@ -1007,8 +1080,13 @@ const executeDemoJob = async (job) => {
 }
 
 const executeRealJob = async (job) => {
-  if(pollingStopped || busyJobIds.value.has(job.job_id))return
+  if(pollingStopped || busyJobIds.value.has(job.job_id)||!currentJob(job))return
+  const scope=viewScope()
+  const token=job.confirmation_snapshot
+  if(!validDistributionToken(token)){setJobActionError(job.job_id,'原任务的确认信息不完整，请刷新任务列表并重新核对后再确认。');return}
+  const authorization={id:job.job_id,key:jobActionKey(job),epoch:jobEpochs.value.get(job.job_id)||0,token}
   markJobBusy(job.job_id, true)
+  setJobActionError(job.job_id,'')
   const policy = platforms.value.find(platform => platform.key === job.platform)
   try {
     try {await ElMessageBox.confirm(
@@ -1021,9 +1099,10 @@ const executeRealJob = async (job) => {
         distinguishCancelAndClose: true
       }
     )}catch{return}
-    if(pollingStopped)return
-    const response = await publishApi.executeRealJob(job.job_id)
-    if(pollingStopped)return
+    if(!sameView(scope)||!currentJob(job)||authorization.key!==jobActionKey(jobs.value.find(item=>item.job_id===authorization.id))
+      ||authorization.epoch!==(jobEpochs.value.get(authorization.id)||0))return
+    const response = await publishApi.executeRealJob(authorization.id,authorization.token)
+    if(!sameView(scope))return
     const result = response.data
     if (result.status === 'success') ElMessage.success(`${platformName(job.platform)}真实发布成功`)
     else if (result.status === 'need_action') ElMessage.warning(result.message || '需要人工确认后继续')
@@ -1031,6 +1110,7 @@ const executeRealJob = async (job) => {
     else ElMessage.error(result.message || '真实发布未完成')
     await fetchJobs(true)
   } catch (error) {
+    if(sameView(scope))setJobActionError(job.job_id,distributionActionError('execute',error))
     console.error('执行真实发布任务失败:', error)
   } finally {
     markJobBusy(job.job_id, false)
@@ -1038,20 +1118,24 @@ const executeRealJob = async (job) => {
 }
 
 const retryJob = async (job) => {
-  if(pollingStopped || busyJobIds.value.has(job.job_id))return
+  if(pollingStopped || busyJobIds.value.has(job.job_id)||!currentJob(job))return
+  const scope=viewScope()
   markJobBusy(job.job_id, true)
+  setJobActionError(job.job_id,'')
   try {
     const response = await publishApi.retryJob(job.job_id)
-    if(pollingStopped)return
+    if(!sameView(scope))return
     const retried = response.data
     if (retried.demo) {
       await publishApi.executeDemoJob(retried.job_id)
+      if(!sameView(scope))return
       ElMessage.success('演示任务已重新执行')
     } else {
       ElMessage.success('任务已重新排队；真实发布仍需再次确认')
     }
     await fetchJobs(true)
   } catch (error) {
+    if(sameView(scope))setJobActionError(job.job_id,distributionActionError('retry',error))
     console.error('重试发布任务失败:', error)
   } finally {
     markJobBusy(job.job_id, false)
@@ -1060,14 +1144,17 @@ const retryJob = async (job) => {
 
 const canCheckResult = job => !job.demo && job.platform === 'toutiao' && job.status === 'processing'
 const checkPlatformResult = async (job) => {
-  if (!canCheckResult(job) || job.result_checking || busyJobIds.value.has(job.job_id)) return
+  if (pollingStopped||!canCheckResult(job) || job.result_checking || busyJobIds.value.has(job.job_id)) return
+  const scope=viewScope()
   markJobBusy(job.job_id, true)
+  setJobActionError(job.job_id,'')
   try {
     const response = await publishApi.checkResult(job.job_id)
+    if(!sameView(scope))return
     ElMessage.info(`${response.data?.message || '已开始只读核对平台结果'} 请在可见窗口正常完成登录或验证；不会再次填写或提交。`)
     await fetchJobs(true)
   } catch (error) {
-    ElMessage.error(error?.response?.data?.msg || error?.message || '平台结果核对未启动，原发布任务已保留')
+    if(sameView(scope))setJobActionError(job.job_id,distributionActionError('check',error))
   } finally {
     markJobBusy(job.job_id, false)
   }
@@ -1128,7 +1215,7 @@ const disablePastDate = (date) => date.getTime() < Date.now() - 24 * 60 * 60 * 1
 const formatDate = (value, assumeUtc = true) => {
   if (!value) return '—'
   const text = String(value)
-  const normalized = assumeUtc && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(text)
+  const normalized = assumeUtc && /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{1,9})?$/.test(text)
     ? `${text.replace(' ', 'T')}Z`
     : text.includes(' ')
       ? text.replace(' ', 'T')
@@ -1153,17 +1240,45 @@ const scheduleJobPoll = () => {
   pollTimer = window.setTimeout(async () => {
     pollTimer = null
     await fetchJobs(true)
+    if(!pollingStopped&&!dispatching.value&&quotaReference.value.valid)await fetchAccounts()
     scheduleJobPoll()
   }, 5000)
 }
 
 onMounted(async () => {
   pollingStopped = false
+  mounted=true
   await Promise.allSettled([fetchPlatforms(), fetchAccounts(), fetchArticles(), fetchJobs()])
+  if(pollingStopped)return
   const requested = typeof route.query.platform === 'string' ? route.query.platform : ''
   if (requested && platforms.value.some(item=>item.key===requested && item.delivery_state!=='paused')) selectedPlatforms.value=[requested]
   scheduleJobPoll()
 })
+
+watch(routeContextKey,()=>{
+  contextEpoch++;articlesRequest++;platformsRequest++
+  articles.value=[];selectedArticleId.value=null;jobActionErrors.value={}
+  dispatchError.value=''
+  const requested=journeyPlatform.value
+  selectedPlatforms.value=requested&&platforms.value.some(item=>item.key===requested&&item.delivery_state!=='paused')?[requested]:[]
+  if(mounted&&!pollingStopped){void fetchArticles();void fetchPlatforms()}
+},{flush:'sync'})
+watch(jobs,items=>{
+  const next=new Map(items.map(item=>[item.job_id,jobActionKey(item)])),epochs=new Map(jobEpochs.value)
+  for(const id of new Set([...observedJobKeys.keys(),...next.keys()])){
+    if(observedJobKeys.get(id)!==next.get(id))epochs.set(id,(epochs.get(id)||0)+1)
+  }
+  observedJobKeys=next;jobEpochs.value=epochs
+},{deep:true,flush:'sync'})
+watch(dispatchKey,()=>{dispatchEpoch.value++},{flush:'sync'})
+watch(quotaScopeKey,()=>{
+  accountsRequest++;accountsLoadedKey.value='';accountsStatus.value='idle'
+  if(mounted&&!pollingStopped)void fetchAccounts()
+},{flush:'sync'})
+watch(jobsScopeKey,()=>{
+  jobsRequest++;jobs.value=[];jobsLoadError.value=false
+  if(mounted&&!pollingStopped)void fetchJobs()
+},{flush:'sync'})
 
 watch(selectedPlatforms, () => {
   riskAcknowledged.value = false
@@ -1171,13 +1286,15 @@ watch(selectedPlatforms, () => {
 })
 
 watch(selectedArticleId, async value => {
+  imageRequest++;imageRecommending.value=false;coverGenerating.value=false
   selectedImage.value = null
   selectedVideo.value = null
   if (value) await recommendImage({ silent: true })
-})
+},{flush:'sync'})
 
 onBeforeUnmount(() => {
   pollingStopped = true
+  mounted=false;contextEpoch++;accountsRequest++;jobsRequest++;articlesRequest++;platformsRequest++
   if (pollTimer) window.clearTimeout(pollTimer)
   pollTimer = null
 })
@@ -1186,6 +1303,7 @@ onBeforeUnmount(() => {
 <style lang="scss" scoped>
 .journey-return{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 20px;margin-bottom:24px;border:1px solid var(--geo-border,#dce6e5);border-radius:14px;background:#fff}.journey-return strong{font-size:15px}.journey-return p{margin:5px 0 0;color:var(--geo-muted,#52676d);font-size:13px;line-height:1.6}@media(max-width:600px){.journey-return{align-items:flex-start;flex-direction:column}}
 .quota-retry-hint{display:block;margin-top:6px;line-height:1.6}
+.job-message-details{margin-top:8px;font-size:12px;line-height:1.7;color:var(--muted)}.job-message-details summary{cursor:pointer;width:fit-content}.job-message-details summary:focus-visible{outline:2px solid var(--signal);outline-offset:3px}.job-message-details p{white-space:pre-wrap;overflow-wrap:anywhere;margin:8px 0}.job-action-error,.jobs-stale{color:var(--danger);font-size:12px;line-height:1.7;overflow-wrap:anywhere}.job-action-error{margin:8px 0 0}.jobs-stale{padding:12px 26px;margin:0;border-bottom:1px solid var(--rule)}
 .distribution-center {
   --harbor: #102b31;
   --harbor-deep: #0a2227;

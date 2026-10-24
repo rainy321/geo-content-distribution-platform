@@ -171,7 +171,8 @@ class PublishJobsApiTests(unittest.TestCase):
 
         response = self.client.post(
             "/api/publish",
-            json={"article_id": self.article_id, "platform": "xiaohongshu"},
+            json={"article_id": self.article_id, "platform": "xiaohongshu",
+                  "expected_review_fingerprint": self._review_fingerprint()},
         )
 
         self.assertEqual(response.status_code, 400)
@@ -195,7 +196,7 @@ class PublishJobsApiTests(unittest.TestCase):
     def test_retries_failed_job(self):
         job = self._create_job()
         transition_publish_job(self.db_path, job["job_id"], "processing")
-        transition_publish_job(
+        failed = transition_publish_job(
             self.db_path,
             job["job_id"],
             "failed",
@@ -208,7 +209,7 @@ class PublishJobsApiTests(unittest.TestCase):
         retried = response.get_json()["data"]
         self.assertEqual(retried["status"], "queued")
         self.assertEqual(retried["message"], "")
-        self.assertIsNone(retried["started_at"])
+        self.assertEqual(retried["started_at"], failed["started_at"])
 
     def test_real_job_cannot_be_executed_by_safe_demo_endpoint(self):
         app.config["DEMO_MODE"] = False
@@ -228,6 +229,7 @@ class PublishJobsApiTests(unittest.TestCase):
             "article_id": self.article_id,
             "platform": "zhihu",
             "account_id": self.zhihu_account_id,
+            "expected_review_fingerprint": self._review_fingerprint(),
         }
 
         first = self.client.post("/api/publish", json=payload)
@@ -312,12 +314,18 @@ class PublishJobsApiTests(unittest.TestCase):
         self.assertEqual(queued_retry.status_code, 409)
 
     def _create_job(self, *, platform="zhihu"):
+        payload = {"article_id": self.article_id, "platform": platform}
+        if not app.config['DEMO_MODE']:
+            payload['expected_review_fingerprint'] = self._review_fingerprint()
         response = self.client.post(
             "/api/publish",
-            json={"article_id": self.article_id, "platform": platform},
+            json=payload,
         )
         self.assertEqual(response.status_code, 201)
         return response.get_json()["data"]
+
+    def _review_fingerprint(self):
+        return self.client.get(f'/api/articles/{self.article_id}').json['data']['review_fingerprint']
 
 
 if __name__ == "__main__":

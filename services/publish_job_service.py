@@ -5,7 +5,7 @@ import hmac
 import json
 import sqlite3
 from contextlib import closing
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +16,7 @@ from services.platform_capability_service import (
 )
 from services.publish_policy_service import assert_can_reserve_publish
 from services.publish_retry_evidence import record_publish_submission_state
+from services.publish_confirmation import article_review_fingerprint, publish_confirmation_snapshot
 
 
 PUBLISH_JOB_STATUSES = frozenset(
@@ -52,6 +53,15 @@ class PublishReviewRequiredError(InvalidPublishJobTransitionError):
     """A real task cannot be claimed without its unchanged reviewed payload."""
 
 
+class PublishConfirmationMismatchError(InvalidPublishJobTransitionError):
+    """The user's confirmed view no longer identifies the current payload."""
+
+
+def _confirmation_matches(expected, actual):
+    return (isinstance(expected, str) and expected.isascii() and len(expected) == 64
+            and hmac.compare_digest(expected, actual))
+
+
 def create_publish_job(
     database_path: str | Path,
     *,
@@ -65,6 +75,7 @@ def create_publish_job(
     account_id: int | None = None,
     require_account: bool = False,
     enforce_publish_policy: bool = False,
+    expected_review_fingerprint: str | None = None,
 ) -> dict[str, Any]:
     if not isinstance(auto_execute, bool):
         raise ValueError("auto_execute 必须是布尔值")
@@ -83,6 +94,9 @@ def create_publish_job(
             article_row = _fetch_authorization_article(conn, article_id, platform=normalized_platform)
             if article_row is None:
                 raise ArticleNotFoundError("文章不存在")
+            if (expected_review_fingerprint is not None and not _confirmation_matches(
+                    expected_review_fingerprint, article_review_fingerprint(article_row))):
+                raise PublishConfirmationMismatchError("稿件内容或审稿状态已变化，请重新查看并确认；未创建发布任务")
             if not demo and article_row['status'] != 'ready':
                 raise ValueError('真实发布前请先审稿，并把文章标记为就绪；已发布文章需重新确认后另建任务')
             resolved_account_id = _resolve_publish_account_id(
@@ -213,11 +227,30 @@ def get_publish_job(
     return _serialize_job(row)
 
 
+def _new_attempt_time(previous: str | None) -> str:
+    """Give a real processing transition a distinct, UTC attempt binding."""
+    current = datetime.now(timezone.utc)
+    if previous:
+        try:
+            prior = datetime.fromisoformat(str(previous).strip().replace("Z", "+00:00"))
+            if prior.tzinfo is None:
+                prior = prior.replace(tzinfo=timezone.utc)
+            prior = prior.astimezone(timezone.utc)
+        except (ValueError, TypeError) as exc:
+            raise InvalidPublishJobTransitionError("上次发布尝试时间无法核对，未开始新的发布") from exc
+        if prior > current:
+            raise InvalidPublishJobTransitionError("系统时间早于上次发布尝试，请校准时间后重试；未开始新的发布")
+        if prior == current:
+            current += timedelta(microseconds=1)
+    return current.isoformat(timespec="microseconds")
+
+
 def claim_publish_job(
     database_path: str | Path,
     job_id: int,
     *,
     message: str = "正在准备发布",
+    expected_confirmation_snapshot: str | None = None,
 ) -> dict[str, Any]:
     """Atomically move one queued job to processing for a single worker."""
 
@@ -227,6 +260,9 @@ def claim_publish_job(
             current_row = _fetch_job(conn, job_id)
             if current_row is None:
                 raise PublishJobNotFoundError("发布任务不存在")
+            if (expected_confirmation_snapshot is not None and not _confirmation_matches(
+                    expected_confirmation_snapshot, _serialize_job(current_row)["confirmation_snapshot"])):
+                raise PublishConfirmationMismatchError("发布任务已变化，请重新查看并确认；未开始新的发布")
             if current_row["status"] != "queued":
                 raise InvalidPublishJobTransitionError(
                     f"状态为 {current_row['status']} 的发布任务不能开始执行"
@@ -266,11 +302,11 @@ def claim_publish_job(
                 """
                 UPDATE publish_jobs
                 SET status = 'processing', message = ?, result_url = '',
-                    started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+                    started_at = ?,
                     finished_at = NULL
                 WHERE id = ? AND status = 'queued'
                 """,
-                (_normalize_text(message), job_id),
+                (_normalize_text(message), _new_attempt_time(current_row["started_at"]), job_id),
             )
             if cursor.rowcount != 1:
                 raise InvalidPublishJobTransitionError("发布任务已被其他执行器领取")
@@ -399,11 +435,11 @@ def transition_publish_job(
                     """
                     UPDATE publish_jobs
                     SET status = ?, message = ?, result_url = '',
-                        started_at = COALESCE(started_at, CURRENT_TIMESTAMP),
+                        started_at = ?,
                         finished_at = NULL
                     WHERE id = ?
                     """,
-                    (new_status, _normalize_text(message), job_id),
+                    (new_status, _normalize_text(message), _new_attempt_time(current_row["started_at"]), job_id),
                 )
             elif new_status in {"success", "failed"}:
                 conn.execute(
@@ -478,11 +514,13 @@ def retry_publish_job(
                 UPDATE publish_jobs
                 SET status = 'queued', message = '', result_url = '',
                     authorization_fingerprint = ?, auto_execute = 0,
-                    started_at = NULL, finished_at = NULL
+                    finished_at = NULL
                 WHERE id = ?
                 """,
                 (authorization, job_id),
             )
+            # Requeueing is not an execution. Keep the last actual attempt's
+            # timestamp for quotas and evidence until a worker claims again.
             _sync_article_status(conn, current_row["article_id"])
             updated_row = _fetch_job(conn, job_id)
     return _serialize_job(updated_row)
@@ -762,6 +800,7 @@ def _serialize_job(row: sqlite3.Row) -> dict[str, Any]:
         job["images"] = normalize_publish_images(raw_images)
     except (TypeError, json.JSONDecodeError, ValueError):
         job["images"] = []
+    job["confirmation_snapshot"] = publish_confirmation_snapshot(job)
     return job
 
 

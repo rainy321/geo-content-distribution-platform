@@ -69,6 +69,7 @@ class P2ContentWorkflowApiTests(unittest.TestCase):
             "MEDIA_ROOT": app.config["MEDIA_ROOT"],
             "DEMO_MODE": app.config["DEMO_MODE"],
             "AI_RATE_LIMIT_PER_MINUTE": app.config["AI_RATE_LIMIT_PER_MINUTE"],
+            "TESTING": app.config["TESTING"],
         }
         app.config.update(
             DATABASE_PATH=self.db_path,
@@ -82,6 +83,9 @@ class P2ContentWorkflowApiTests(unittest.TestCase):
     def tearDown(self):
         app.config.update(self.original)
         self.temp_dir.cleanup()
+
+    def _review_fingerprint(self):
+        return self.client.get(f'/api/articles/{self.article_id}').json['data']['review_fingerprint']
 
     def test_template_crud_and_generation_instruction(self):
         listed = self.client.get("/api/content-templates")
@@ -213,7 +217,8 @@ class P2ContentWorkflowApiTests(unittest.TestCase):
         app.config["DEMO_MODE"] = False
         missing = self.client.post(
             "/api/publish",
-            json={"article_id": self.article_id, "platform": "bilibili"},
+            json={"article_id": self.article_id, "platform": "bilibili",
+                  "expected_review_fingerprint": self._review_fingerprint()},
         )
         self.assertEqual(missing.status_code, 400)
         self.assertIn("视频素材", missing.get_json()["msg"])
@@ -225,6 +230,7 @@ class P2ContentWorkflowApiTests(unittest.TestCase):
                 "article_id": self.article_id,
                 "platform": "bilibili",
                 "video": "demo.mp4",
+                "expected_review_fingerprint": self._review_fingerprint(),
             },
         )
         self.assertEqual(created.status_code, 201)
@@ -239,6 +245,7 @@ class P2ContentWorkflowApiTests(unittest.TestCase):
                 "platform": "xiaohongshu",
                 "auto_image": True,
                 "account_id": self.xiaohongshu_account_id,
+                "expected_review_fingerprint": self._review_fingerprint(),
             },
         )
         self.assertEqual(response.status_code, 201)
@@ -248,14 +255,19 @@ class P2ContentWorkflowApiTests(unittest.TestCase):
 
     def test_paused_douyin_delivery_does_not_generate_or_publish(self):
         app.config["DEMO_MODE"] = False
-        response = self.client.post(
-            "/api/publish",
-            json={
-                "article_id": self.article_id,
-                "platform": "douyin",
-                "auto_image": True,
-            },
-        )
+        with patch('sau_backend.ensure_article_cover') as cover, \
+                patch('sau_backend.create_publish_job') as create_job:
+            response = self.client.post(
+                "/api/publish",
+                json={
+                    "article_id": self.article_id,
+                    "platform": "douyin",
+                    "auto_image": True,
+                    "expected_review_fingerprint": self._review_fingerprint(),
+                },
+            )
+        cover.assert_not_called()
+        create_job.assert_not_called()
 
         self.assertEqual(response.status_code, 409)
         self.assertEqual(

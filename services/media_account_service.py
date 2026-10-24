@@ -11,6 +11,7 @@ from services.platform_capability_service import (
     PLATFORM_CAPABILITIES,
     list_planned_platforms,
 )
+from services.publish_policy_service import evaluate_publish_reservation, normalize_publish_reference
 
 
 PLATFORM_DEFINITIONS = tuple(
@@ -35,8 +36,11 @@ def get_media_accounts_overview(
     database_path: str | Path,
     *,
     cookies_directory: str | Path,
+    publish_at: str | datetime | None = None,
+    now: datetime | None = None,
 ) -> dict[str, Any]:
     cookie_dir = Path(cookies_directory)
+    reference = normalize_publish_reference(publish_at, now=now)
     with closing(_connect(database_path)) as conn:
         rows = conn.execute(
             """
@@ -45,25 +49,13 @@ def get_media_accounts_overview(
             ORDER BY type, id
             """
         ).fetchall()
-        usage_rows = conn.execute(
-            """
-            SELECT account_id, platform,
-                   COUNT(*) AS reserved_24h,
-                   SUM(CASE WHEN started_at IS NOT NULL THEN 1 ELSE 0 END)
-                       AS attempted_24h,
-                   MAX(started_at) AS last_attempt_at
-            FROM publish_jobs
-            WHERE demo = 0
-              AND account_id IS NOT NULL
-              AND created_at >= datetime('now', '-24 hours')
-            GROUP BY account_id, platform
-            """
-        ).fetchall()
-
-    usage_by_account = {
-        (int(row["account_id"]), str(row["platform"])): dict(row)
-        for row in usage_rows
-    }
+        decisions = {
+            int(row["id"]): evaluate_publish_reservation(
+                conn, account_id=int(row["id"]), platform=_PLATFORM_BY_TYPE[row["type"]]["key"],
+                publish_at=reference,
+            )
+            for row in rows if row["type"] in _PLATFORM_BY_TYPE
+        }
     accounts = [_serialize_account(row, cookie_dir) for row in rows]
     platforms = []
     for definition in PLATFORM_DEFINITIONS:
@@ -71,23 +63,24 @@ def get_media_accounts_overview(
             account for account in accounts if account["type"] == definition["type"]
         ]
         for account in platform_accounts:
-            usage = usage_by_account.get(
-                (account["id"], definition["key"]),
-                {},
-            )
-            reserved_24h = int(usage.get("reserved_24h") or 0)
+            decision = decisions[account["id"]]
+            reserved_24h = decision["used_24h"]
             safe_daily_new = int(definition["safe_daily_new"])
             safe_daily_stable = int(definition["safe_daily_stable"])
             account["publish_policy"] = {
                 "reserved_24h": reserved_24h,
-                "attempted_24h": int(usage.get("attempted_24h") or 0),
-                "remaining_new": max(safe_daily_new - reserved_24h, 0),
+                "attempted_24h": decision["attempted_24h"],
+                "remaining_new": decision["remaining"],
                 "remaining_stable": max(safe_daily_stable - reserved_24h, 0),
                 "safe_daily_new": safe_daily_new,
                 "safe_daily_stable": safe_daily_stable,
                 "min_interval_hours": int(definition["min_interval_hours"]),
-                "last_attempt_at": usage.get("last_attempt_at"),
+                "last_attempt_at": decision["last_attempt_at"],
                 "delivery_state": definition["delivery_state"],
+                **{key: decision[key] for key in (
+                    "allowed", "reason_code", "reference_at", "next_allowed_at",
+                    "policy_version", "manual_activity_unknown",
+                )},
             }
         platforms.append(
             {
@@ -101,6 +94,8 @@ def get_media_accounts_overview(
         )
 
     return {
+        "reference_at": reference.isoformat(),
+        "reference_mode": "scheduled" if publish_at not in (None, "") else "now",
         "summary": {
             "total": len(accounts),
             "connected": sum(account["status"] == "connected" for account in accounts),

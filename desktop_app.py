@@ -449,6 +449,28 @@ def run_smoke_check(window, data: Path, url: str) -> None:
         status['zhihu_preflight_browser_ready'] = asyncio.run(check_zhihu_preflight_browser())
         if not status['zhihu_preflight_browser_ready']:
             raise RuntimeError('知乎发文前检查浏览器未就绪')
+        async def check_article_browser_options():
+            from uploader.baijiahao_uploader.main import _build_launch_kwargs as baijiahao_options
+            from uploader.xiaohongshu_uploader.main import _build_launch_kwargs as xiaohongshu_options
+            observations = {}
+            async with async_playwright() as playwright:
+                for platform, options in (('baijiahao', baijiahao_options), ('xiaohongshu', xiaohongshu_options)):
+                    browser = await playwright.chromium.launch(**options(headless=True))
+                    try:
+                        context = await browser.new_context()
+                        try:
+                            page = await context.new_page()
+                            await page.goto(url)
+                            await page.locator('[data-testid="geo-journey"] .journey-steps > button').last.wait_for()
+                            observations[platform] = await page.locator('[data-testid="geo-journey"] .journey-steps > button').count() == 5
+                        finally:
+                            await context.close()
+                    finally:
+                        await browser.close()
+            return observations
+        status['article_browser_options_ready'] = asyncio.run(check_article_browser_options())
+        if not all(status['article_browser_options_ready'].values()):
+            raise RuntimeError('文章浏览器启动配置未就绪')
         # Exercise the same worker/login path that failed for the user. The
         # browser is real; only the URL and wait budget use a local QA page.
         import services.desktop_geo_jobs as native_jobs

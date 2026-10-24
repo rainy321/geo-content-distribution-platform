@@ -4,10 +4,6 @@ import base64
 from pathlib import Path
 import sys
 
-import cv2
-import segno
-
-
 def build_login_qrcode_path(account_file: str, suffix: str = "login_qrcode") -> Path:
     account_path = Path(account_file)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -35,6 +31,12 @@ def remove_qrcode_file(qrcode_path: Path | None) -> bool:
 
 
 def decode_qrcode_from_path(qrcode_path: Path) -> str | None:
+    try:
+        import cv2
+    except ModuleNotFoundError as exc:
+        if exc.name != "cv2":
+            raise
+        return None
     image = cv2.imread(str(qrcode_path))
     if image is None:
         return None
@@ -64,6 +66,13 @@ def print_terminal_qrcode(
     compact: bool = True,
     border: int = 0,
 ) -> None:
+    try:
+        import segno
+    except ModuleNotFoundError as exc:
+        if exc.name != "segno":
+            raise
+        print(f"请使用{app_name}扫描浏览器中的二维码，或打开图片 {qrcode_path} 扫码")
+        return
     print()
     print(f"请使用{app_name}扫描下方二维码登录：")
     qrcode = segno.make(qrcode_content, error="L", boost_error=False)

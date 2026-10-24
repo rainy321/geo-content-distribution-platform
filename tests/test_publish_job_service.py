@@ -2,8 +2,9 @@ import sqlite3
 import tempfile
 import unittest
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import patch
 
 from db.createTable import initialize_database
 from services.article_service import ArticleNotFoundError
@@ -22,7 +23,9 @@ from services.publish_job_service import (
     retry_publish_job,
     transition_publish_job,
     update_publish_job_progress,
+    record_publish_submission_state,
 )
+from services.publish_policy_service import evaluate_publish_reservation
 
 
 class PublishJobServiceTests(unittest.TestCase):
@@ -331,7 +334,7 @@ class PublishJobServiceTests(unittest.TestCase):
             article_id=self.article_id,
             platform="zhihu",
         )
-        transition_publish_job(self.db_path, failed_job["id"], "processing")
+        attempted = transition_publish_job(self.db_path, failed_job["id"], "processing")
         transition_publish_job(
             self.db_path,
             failed_job["id"],
@@ -343,7 +346,7 @@ class PublishJobServiceTests(unittest.TestCase):
 
         self.assertEqual(retried["status"], "queued")
         self.assertEqual(retried["message"], "")
-        self.assertIsNone(retried["started_at"])
+        self.assertEqual(retried["started_at"], attempted["started_at"])
         self.assertIsNone(retried["finished_at"])
 
         action_job = create_publish_job(
@@ -361,6 +364,130 @@ class PublishJobServiceTests(unittest.TestCase):
             retry_publish_job(self.db_path, action_job["id"])["status"],
             "queued",
         )
+
+    def _fixed_clock(self, current):
+        class FixedDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return current.astimezone(tz) if tz is not None else current.replace(tzinfo=None)
+        return patch('services.publish_job_service.datetime', FixedDatetime)
+
+    def _account(self):
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            return conn.execute("INSERT INTO user_info(type,filePath,userName,status) VALUES(7,'synthetic.json','synthetic account',1)").lastrowid
+
+    def test_requeue_of_old_schedule_keeps_today_attempt_in_quota_without_new_attempt(self):
+        account = self._account()
+        job = create_publish_job(self.db_path, article_id=self.article_id, platform='toutiao',
+                                 account_id=account, publish_at='2026-09-01T00:00:00Z')
+        transition_publish_job(self.db_path, job['id'], 'queued')
+        current = datetime(2026,10,25,12,tzinfo=timezone.utc)
+        with self._fixed_clock(current):
+            attempted = claim_publish_job(self.db_path, job['id'])
+        transition_publish_job(self.db_path, job['id'], 'failed', message='synthetic failed attempt')
+        queued = retry_publish_job(self.db_path, job['id'])
+        self.assertEqual(queued['status'], 'queued')
+        self.assertEqual(queued['started_at'], attempted['started_at'])
+        self.assertFalse(queued['auto_execute'])
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            decision = evaluate_publish_reservation(conn, account_id=account, platform='toutiao',
+                                                    now=current + timedelta(hours=1))
+            self.assertEqual(conn.execute('SELECT COUNT(*) FROM publish_jobs').fetchone()[0], 1)
+        self.assertEqual(decision['used_24h'], 1)
+        self.assertEqual(decision['attempted_24h'], 1)
+        self.assertFalse(decision['allowed'])
+        self.assertEqual(decision['reason_code'], 'minimum_interval')
+
+    def test_requeue_before_any_execution_preserves_future_slot_without_faking_attempt(self):
+        account = self._account()
+        job = create_publish_job(self.db_path, article_id=self.article_id, platform='toutiao',
+                                 account_id=account, publish_at='2026-10-30T12:00:00Z')
+        transition_publish_job(self.db_path, job['id'], 'queued')
+        transition_publish_job(self.db_path, job['id'], 'need_action', message='confirmation not supplied')
+        queued = retry_publish_job(self.db_path, job['id'])
+        self.assertIsNone(queued['started_at'])
+        self.assertEqual(queued['publish_at'], job['publish_at'])
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            current = evaluate_publish_reservation(conn, account_id=account, platform='toutiao',
+                                                   publish_at='2026-10-25T12:00:00Z')
+            future = evaluate_publish_reservation(conn, account_id=account, platform='toutiao',
+                                                  publish_at='2026-10-30T12:00:00Z')
+        self.assertEqual(current['used_24h'], 0)
+        self.assertEqual(future['used_24h'], 1)
+        self.assertEqual(future['attempted_24h'], 0)
+
+    def test_real_claim_updates_last_attempt_and_same_instant_gets_distinct_binding(self):
+        job = create_publish_job(self.db_path, article_id=self.article_id, platform='toutiao')
+        current = datetime(2026,10,25,12,0,0,123456,tzinfo=timezone.utc)
+        with self._fixed_clock(current):
+            first = claim_publish_job(self.db_path, job['id'])
+            transition_publish_job(self.db_path, job['id'], 'failed')
+            queued = retry_publish_job(self.db_path, job['id'])
+            second = claim_publish_job(self.db_path, job['id'])
+        self.assertEqual(queued['started_at'], first['started_at'])
+        self.assertEqual(first['started_at'], '2026-10-25T12:00:00.123456+00:00')
+        self.assertEqual(second['started_at'], '2026-10-25T12:00:00.123457+00:00')
+        expected = {key:first[key] for key in ('article_id','account_id','started_at','authorization_fingerprint')}
+        with self.assertRaises(InvalidPublishJobTransitionError):
+            reconcile_publish_job_success(self.db_path, job['id'], result_url='https://www.toutiao.com/article/123/',
+                                          expected_binding=expected)
+        self.assertEqual(get_publish_job(self.db_path, job['id'])['status'], 'processing')
+
+    def test_transition_to_processing_replaces_prior_legacy_timestamp_but_repeat_is_idempotent(self):
+        job = create_publish_job(self.db_path, article_id=self.article_id, platform='toutiao')
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute('UPDATE publish_jobs SET started_at=? WHERE id=?', ('2026-10-24 12:00:00',job['id']))
+        with self._fixed_clock(datetime(2026,10,25,12,tzinfo=timezone.utc)):
+            first = transition_publish_job(self.db_path, job['id'], 'processing')
+        with self._fixed_clock(datetime(2026,10,26,12,tzinfo=timezone.utc)):
+            repeated = transition_publish_job(self.db_path, job['id'], 'processing')
+        self.assertEqual(first['started_at'], '2026-10-25T12:00:00.000000+00:00')
+        self.assertEqual(repeated['started_at'], first['started_at'])
+
+    def test_clock_rollback_or_invalid_prior_attempt_refuses_without_claiming(self):
+        job = create_publish_job(self.db_path, article_id=self.article_id, platform='toutiao')
+        for previous in ('2026-10-26T12:00:00.000000+00:00', 'not a timestamp'):
+            with self.subTest(previous=previous):
+                with closing(sqlite3.connect(self.db_path)) as conn, conn:
+                    conn.execute('UPDATE publish_jobs SET started_at=? WHERE id=?', (previous,job['id']))
+                with self._fixed_clock(datetime(2026,10,25,12,tzinfo=timezone.utc)), self.assertRaises(InvalidPublishJobTransitionError):
+                    claim_publish_job(self.db_path, job['id'])
+                unchanged = get_publish_job(self.db_path, job['id'])
+                self.assertEqual(unchanged['status'], 'queued')
+                self.assertEqual(unchanged['started_at'], previous)
+
+    def test_failed_review_before_claim_does_not_change_previous_attempt(self):
+        job = create_publish_job(self.db_path, article_id=self.article_id, platform='toutiao')
+        previous = '2026-10-24 12:00:00'
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute('UPDATE publish_jobs SET started_at=? WHERE id=?', (previous,job['id']))
+            conn.execute("UPDATE articles SET status='draft' WHERE id=?", (self.article_id,))
+        with self.assertRaises(InvalidPublishJobTransitionError):
+            claim_publish_job(self.db_path, job['id'])
+        self.assertEqual(get_publish_job(self.db_path, job['id'])['started_at'], previous)
+
+    def test_new_attempt_cannot_use_old_submission_journal_for_readonly_reconciliation(self):
+        from services.toutiao_result_check import _load_binding, ResultCheckUnavailable
+        account = self._account()
+        cookies = self.db_path.parent / 'cookies'
+        cookies.mkdir()
+        (cookies / 'synthetic.json').write_text('{"cookies":[],"origins":[]}', encoding='utf-8')
+        job = create_publish_job(self.db_path, article_id=self.article_id, platform='toutiao', account_id=account)
+        current = datetime(2026,10,25,12,0,0,123456,tzinfo=timezone.utc)
+        with self._fixed_clock(current):
+            first = claim_publish_job(self.db_path, job['id'])
+            record_publish_submission_state(self.db_path, job['id'], 'toutiao', {'submission_attempted':True})
+            journal = self.db_path.parent / 'publish-evidence' / f'job-{job["id"]}.json'
+            original = journal.read_bytes()
+            transition_publish_job(self.db_path, job['id'], 'failed')
+            retry_publish_job(self.db_path, job['id'])
+            second = claim_publish_job(self.db_path, job['id'])
+        self.assertNotEqual(first['started_at'], second['started_at'])
+        with self.assertRaises(ResultCheckUnavailable):
+            _load_binding(self.db_path, cookies, job['id'])
+        self.assertEqual(journal.read_bytes(), original)
 
     def test_manual_retry_revokes_prior_scheduled_auto_execute_authorization(self):
         job = create_publish_job(

@@ -7,7 +7,7 @@ from typing import Any
 from services.platform_capability_service import get_platform_capability
 
 
-POLICY_VERSION = "2026-09-08"
+POLICY_VERSION = "2026-10-24"
 COUNTED_JOB_STATUSES = frozenset(
     {"scheduled", "queued", "processing", "success", "failed", "need_action"}
 )
@@ -40,22 +40,12 @@ def evaluate_publish_reservation(
     if capability is None:
         raise ValueError("暂不支持该发布平台")
 
-    reference = _normalize_reference_time(publish_at, now=now)
-    rows = conn.execute(
-        """
-        SELECT id, status, created_at, publish_at, started_at
-        FROM publish_jobs
-        WHERE account_id = ? AND platform = ? AND demo = 0
-        """,
-        (int(account_id), capability["key"]),
-    ).fetchall()
-    reserved_times = [
-        timestamp
-        for row in rows
-        if row['id'] != exclude_job_id
-        if str(row["status"]) in COUNTED_JOB_STATUSES
-        if (timestamp := _job_effective_time(row)) is not None
-    ]
+    reference = normalize_publish_reference(publish_at, now=now)
+    observation = observe_publish_quota(
+        conn, account_id=account_id, platform=capability["key"],
+        reference=reference, exclude_job_id=exclude_job_id,
+    )
+    reserved_times = observation["reserved_times"]
 
     recommended_limit = int(capability["safe_daily_new"])
     stable_limit = int(capability["safe_daily_stable"])
@@ -67,13 +57,6 @@ def evaluate_publish_reservation(
     used_24h = _max_existing_in_rolling_window(reserved_times, reference)
     interval_hours = int(capability["min_interval_hours"])
     interval = timedelta(hours=interval_hours)
-    nearest_conflict = min(
-        (
-            (abs((timestamp - reference).total_seconds()), timestamp)
-            for timestamp in reserved_times
-        ),
-        default=None,
-    )
 
     decision = {
         "allowed": True,
@@ -92,6 +75,8 @@ def evaluate_publish_reservation(
         "next_allowed_at": None,
         "manual_activity_unknown": True,
         "delivery_state": capability["delivery_state"],
+        "attempted_24h": observation["attempted_24h"],
+        "last_attempt_at": observation["last_attempt_at"],
     }
 
     if capability["delivery_state"] == "paused":
@@ -102,27 +87,81 @@ def evaluate_publish_reservation(
             "remaining": 0,
         }
 
-    if nearest_conflict and nearest_conflict[0] < interval.total_seconds():
-        next_allowed = max(timestamp for timestamp in reserved_times) + interval
+    reason = _quota_conflict(reserved_times, reference, interval, effective_limit)
+    if reason:
         return {
             **decision,
             "allowed": False,
-            "reason_code": "minimum_interval",
+            "reason_code": reason,
             "remaining": 0,
-            "next_allowed_at": next_allowed.isoformat(),
+            "next_allowed_at": _next_available_reference(
+                reserved_times, reference, interval, effective_limit,
+            ).isoformat(),
         }
-
-    if used_24h >= effective_limit:
-        next_allowed = min(reserved_times) + timedelta(hours=24)
-        return {
-            **decision,
-            "allowed": False,
-            "reason_code": "rolling_limit_reached",
-            "remaining": 0,
-            "next_allowed_at": next_allowed.isoformat(),
-        }
-
     return decision
+
+
+def observe_publish_quota(
+    conn: sqlite3.Connection,
+    *,
+    account_id: int,
+    platform: str,
+    reference: datetime,
+    exclude_job_id: int | None = None,
+) -> dict[str, Any]:
+    """Read each real job once using the reservation policy's effective time.
+
+    Failed, pending-action and unrecognized legacy states retain their slot;
+    there is no implicit quota-release state. Excluding the candidate's own
+    job lets retry validation evaluate a replacement rather than an extra slot.
+    """
+    rows = conn.execute(
+        """
+        SELECT id, status, created_at, publish_at, started_at
+        FROM publish_jobs
+        WHERE account_id = ? AND platform = ? AND demo = 0
+        """,
+        (int(account_id), platform),
+    ).fetchall()
+    reserved_times, attempts = [], []
+    for row in rows:
+        if row["id"] == exclude_job_id:
+            continue
+        timestamp = _job_effective_time(row)
+        if timestamp is None:
+            raise ValueError("历史发布任务缺少可靠的预留时间，请先核对任务记录")
+        reserved_times.append(timestamp)
+        if row["started_at"]:
+            attempts.append(_parse_time(row["started_at"], naive_timezone=timezone.utc))
+    previous_attempts = [timestamp for timestamp in attempts if timestamp <= reference]
+    return {
+        "reserved_times": reserved_times,
+        "attempted_24h": sum(reference - timedelta(hours=24) < timestamp <= reference
+                              for timestamp in previous_attempts),
+        "last_attempt_at": max(previous_attempts).isoformat() if previous_attempts else None,
+    }
+
+
+def _quota_conflict(reserved_times, reference, interval, effective_limit):
+    if any(abs(timestamp - reference) < interval for timestamp in reserved_times):
+        return "minimum_interval"
+    if _max_existing_in_rolling_window(reserved_times, reference) >= effective_limit:
+        return "rolling_limit_reached"
+    return None
+
+
+def _next_available_reference(reserved_times, reference, interval, effective_limit):
+    # Moving forward can resolve a conflict only when a prior reservation's
+    # interval or rolling window expires. Test each boundary against *both*
+    # rules, so unrelated old/future reservations cannot give a false date.
+    candidates = sorted({timestamp + delay for timestamp in reserved_times
+                         for delay in (interval, timedelta(hours=24))
+                         if timestamp + delay > reference})
+    for candidate in candidates:
+        if not _quota_conflict(reserved_times, candidate, interval, effective_limit):
+            return candidate
+    # The final reservation's 24h expiry is always present for positive limits.
+    raise ValueError("无法确定可用的发布时间，请先核对发布策略")
 
 
 def assert_can_reserve_publish(
@@ -160,10 +199,10 @@ def assert_can_reserve_publish(
     raise PublishPolicyViolation(message, decision=decision)
 
 
-def _normalize_reference_time(
-    publish_at: str | datetime | None,
+def normalize_publish_reference(
+    publish_at: str | datetime | None = None,
     *,
-    now: datetime | None,
+    now: datetime | None = None,
 ) -> datetime:
     if publish_at not in {None, ""}:
         return _parse_time(publish_at, naive_timezone=_local_timezone())
@@ -171,6 +210,10 @@ def _normalize_reference_time(
     if current.tzinfo is None:
         current = current.replace(tzinfo=_local_timezone())
     return current.astimezone(timezone.utc)
+
+
+# Existing target-frequency guards share this normalization helper.
+_normalize_reference_time = normalize_publish_reference
 
 
 def _job_effective_time(row: sqlite3.Row) -> datetime | None:
@@ -205,12 +248,20 @@ def _max_existing_in_rolling_window(
 ) -> int:
     if not reserved_times:
         return 0
-    points = sorted([*reserved_times, reference])
     window = timedelta(hours=24)
+    # Only points strictly within one day of the proposed slot can share a
+    # half-open window with it. Keep duplicates: each existing job is one slot.
+    points = sorted([reference, *(point for point in reserved_times
+                                 if reference - window < point < reference + window)])
     maximum = 1
-    for start in points:
-        end = start + window
-        if not (start <= reference < end):
+    right = 0
+    for left, start in enumerate(points):
+        if start > reference:
+            break
+        if left and points[left - 1] == start:
             continue
-        maximum = max(maximum, sum(start <= point < end for point in points))
+        end = start + window
+        while right < len(points) and points[right] < end:
+            right += 1
+        maximum = max(maximum, right - left)
     return max(maximum - 1, 0)

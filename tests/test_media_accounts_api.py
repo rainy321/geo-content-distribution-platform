@@ -59,6 +59,35 @@ class MediaAccountsApiTests(unittest.TestCase):
         self.assertEqual(response.get_json()["data"], account)
         self.assertEqual(mocked.await_count, 1)
 
+    def test_readonly_overview_forwards_normalized_schedule_reference(self):
+        with patch('sau_backend.get_media_accounts_overview', return_value={'accounts':[]}) as mocked:
+            response = self.client.get('/api/media-accounts', query_string={'publish_at':'2026-10-25T09:30:00+08:00'})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(mocked.call_args.kwargs['publish_at'], '2026-10-25T09:30:00+08:00')
+
+    def test_invalid_reference_is_rejected_before_any_account_or_browser_work(self):
+        for value in ('', '2026-10-25', 'not-a-time', '2026-13-45T10:00:00', 'x'*81):
+            with patch('sau_backend.get_media_accounts_overview') as mocked:
+                response = self.client.get('/api/media-accounts', query_string={'publish_at':value})
+                self.assertEqual(response.status_code,400)
+                mocked.assert_not_called()
+        with patch('sau_backend.get_media_accounts_overview') as mocked:
+            response=self.client.get('/api/media-accounts?publish_at=2026-10-25T10:00:00&publish_at=2026-10-26T10:00:00')
+            self.assertEqual(response.status_code,400)
+            mocked.assert_not_called()
+
+    def test_overview_execution_mode_is_server_owned(self):
+        with patch.dict(app.config, {'DEMO_MODE':True,'ALLOW_REAL_PUBLISHING':False}):
+            with patch('sau_backend.get_media_accounts_overview', return_value={'accounts':[]}):
+                data=self.client.get('/api/media-accounts?execution_mode=real').get_json()['data']
+        self.assertEqual(data['execution_mode'],'demo')
+        self.assertFalse(data['real_publishing_enabled'])
+        with patch.dict(app.config, {'DEMO_MODE':False,'ALLOW_REAL_PUBLISHING':True}):
+            with patch('sau_backend.get_media_accounts_overview', return_value={'accounts':[]}):
+                data=self.client.get('/api/media-accounts?execution_mode=demo').get_json()['data']
+        self.assertEqual(data['execution_mode'],'real')
+        self.assertTrue(data['real_publishing_enabled'])
+
     def test_check_maps_not_found_and_platform_failure(self):
         with patch(
             "sau_backend.check_media_account",

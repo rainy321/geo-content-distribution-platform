@@ -78,6 +78,30 @@ class ArticlesListApiTests(unittest.TestCase):
         self.assertEqual(second_page["pagination"]["total"], 3)
         self.assertEqual(second_page["pagination"]["total_pages"], 2)
 
+    def test_list_review_fingerprint_matches_full_detail_without_returning_body(self):
+        listing = self.client.get('/api/articles').json['data']['items']
+        for item in listing:
+            with self.subTest(article=item['id']):
+                detail = self.client.get(f'/api/articles/{item["id"]}').json['data']
+                self.assertRegex(item['review_fingerprint'], '^[0-9a-f]{64}$')
+                self.assertEqual(item['review_fingerprint'], detail['review_fingerprint'])
+                self.assertNotIn('content', item)
+                self.assertNotIn('geo_analysis', item)
+                self.assertTrue(detail['content'])
+
+    def test_same_title_and_status_body_edit_changes_both_list_and_detail_fingerprint(self):
+        article = self.article_ids[1]
+        previous = self.client.get(f'/api/articles/{article}').json['data']
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute('UPDATE articles SET content=? WHERE id=?', ('server changed only body',article))
+        current = self.client.get(f'/api/articles/{article}').json['data']
+        item = next(value for value in self.client.get('/api/articles').json['data']['items'] if value['id']==article)
+        self.assertEqual(current['title'], previous['title'])
+        self.assertEqual(current['status'], previous['status'])
+        self.assertNotEqual(current['review_fingerprint'], previous['review_fingerprint'])
+        self.assertEqual(item['review_fingerprint'], current['review_fingerprint'])
+        self.assertNotIn('content', item)
+
     def test_filters_by_project_and_status_together(self):
         response = self.client.get(
             f"/api/articles?project_id={self.project_a}&status=ready"

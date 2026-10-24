@@ -13,6 +13,7 @@ from services.media_account_service import (
     check_media_account,
     get_media_accounts_overview,
 )
+from services.publish_policy_service import evaluate_publish_reservation
 
 
 class MediaAccountServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -47,6 +48,23 @@ class MediaAccountServiceTests(unittest.IsolatedAsyncioTestCase):
                     (platform_type, file_path, name, status, last_checked_at),
                 )
         return cursor.lastrowid
+
+    def _insert_reservation(self, account_id, *, created_at, publish_at=None,
+                            started_at=None, status='scheduled', demo=0):
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            project_id = conn.execute("INSERT INTO projects(name) VALUES ('synthetic quota project')").lastrowid
+            article_id = conn.execute("INSERT INTO articles(project_id,title,content,status) VALUES (?,'synthetic quota','body','ready')", (project_id,)).lastrowid
+            if status == 'unknown':
+                # A legacy job can have a state the current schema cannot create.
+                conn.execute('PRAGMA ignore_check_constraints = ON')
+            return conn.execute('''INSERT INTO publish_jobs(article_id,account_id,platform,status,demo,
+                created_at,publish_at,started_at) VALUES(?,?,'toutiao',?,?,?,?,?)''',
+                (article_id, account_id, status, demo, created_at, publish_at, started_at)).lastrowid
+
+    def _overview_policy(self, account_id, reference):
+        overview = get_media_accounts_overview(self.db_path, cookies_directory=self.cookies_dir,
+                                               publish_at=reference)
+        return next(account['publish_policy'] for account in overview['accounts'] if account['id'] == account_id)
 
     async def test_overview_groups_accounts_and_does_not_trust_missing_cookie(self):
         (self.cookies_dir / "zhihu.json").write_text("{}", encoding="utf-8")
@@ -160,6 +178,78 @@ class MediaAccountServiceTests(unittest.IsolatedAsyncioTestCase):
                 cookies_directory=self.cookies_dir,
                 checker=AsyncMock(),
             )
+
+    async def test_quota_overview_uses_actual_start_of_old_schedule_and_matches_authority(self):
+        account = self._insert_account(platform_type=7)
+        self._insert_reservation(account, created_at='2026-09-01 00:00:00',
+                                 publish_at='2026-09-02T00:00:00Z',
+                                 started_at='2026-10-25 11:00:00', status='need_action')
+        reference = '2026-10-25T12:00:00Z'
+        policy = self._overview_policy(account, reference)
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            conn.row_factory = sqlite3.Row
+            decision = evaluate_publish_reservation(conn, account_id=account, platform='toutiao', publish_at=reference)
+        self.assertEqual(policy['reserved_24h'], decision['used_24h'])
+        self.assertEqual(policy['remaining_new'], decision['remaining'])
+        self.assertEqual(policy['allowed'], decision['allowed'])
+        self.assertEqual(policy['reason_code'], 'minimum_interval')
+        self.assertEqual(policy['attempted_24h'], 1)
+        self.assertEqual(policy['last_attempt_at'], '2026-10-25T11:00:00+00:00')
+        self.assertEqual(policy['next_allowed_at'], decision['next_allowed_at'])
+
+    async def test_future_reservation_does_not_block_now_but_applies_to_selected_schedule(self):
+        account = self._insert_account(platform_type=7)
+        self._insert_reservation(account, created_at='2026-10-25 08:00:00',
+                                 publish_at='2026-10-30T12:00:00Z')
+        current = self._overview_policy(account, '2026-10-25T12:00:00Z')
+        future = self._overview_policy(account, '2026-10-30T12:00:00Z')
+        self.assertTrue(current['allowed'])
+        self.assertEqual((current['reserved_24h'], current['remaining_new']), (0, 2))
+        self.assertFalse(future['allowed'])
+        self.assertEqual((future['reserved_24h'], future['remaining_new']), (1, 0))
+        self.assertEqual(future['attempted_24h'], 0)
+
+    async def test_failed_unknown_and_retry_same_row_still_reserve_once(self):
+        account = self._insert_account(platform_type=7)
+        job = self._insert_reservation(account, created_at='2026-10-25 08:00:00', status='failed')
+        self._insert_reservation(account, created_at='2026-10-25 12:00:00', status='unknown')
+        failed = self._overview_policy(account, '2026-10-25T16:00:00Z')
+        with closing(sqlite3.connect(self.db_path)) as conn, conn:
+            conn.execute("UPDATE publish_jobs SET status='queued' WHERE id=?", (job,))
+        queued = self._overview_policy(account, '2026-10-25T16:00:00Z')
+        self.assertEqual(failed['reserved_24h'], 2)
+        self.assertEqual(queued['reserved_24h'], 2)
+        self.assertEqual(queued['remaining_new'], 0)
+        self.assertFalse(queued['allowed'])
+
+    async def test_empty_overview_validates_and_echoes_one_reference(self):
+        overview = get_media_accounts_overview(self.db_path, cookies_directory=self.cookies_dir,
+                                               publish_at='2026-10-25T12:00:00+08:00')
+        self.assertEqual(overview['reference_at'], '2026-10-25T04:00:00+00:00')
+        self.assertEqual(overview['reference_mode'], 'scheduled')
+        self.assertEqual(overview['accounts'], [])
+        current = get_media_accounts_overview(self.db_path, cookies_directory=self.cookies_dir,
+                                              now=datetime(2026,10,25,12,tzinfo=timezone.utc))
+        self.assertEqual(current['reference_at'], '2026-10-25T12:00:00+00:00')
+        self.assertEqual(current['reference_mode'], 'now')
+        with self.assertRaises(ValueError):
+            get_media_accounts_overview(self.db_path, cookies_directory=self.cookies_dir, publish_at='invalid')
+
+    async def test_all_account_views_have_the_same_reference_without_mutating_jobs(self):
+        first = self._insert_account(platform_type=7)
+        second = self._insert_account(platform_type=9)
+        self._insert_reservation(first, created_at='2026-10-25 08:00:00', status='failed')
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            before = conn.execute('SELECT * FROM publish_jobs').fetchall()
+        overview = get_media_accounts_overview(self.db_path, cookies_directory=self.cookies_dir,
+                                               publish_at='2026-10-25T16:00:00Z')
+        for account in overview['accounts']:
+            self.assertEqual(account['publish_policy']['reference_at'], overview['reference_at'])
+        for platform in overview['platforms']:
+            for account in platform['accounts']:
+                self.assertEqual(account['publish_policy']['reference_at'], overview['reference_at'])
+        with closing(sqlite3.connect(self.db_path)) as conn:
+            self.assertEqual(conn.execute('SELECT * FROM publish_jobs').fetchall(), before)
 
 
 class MediaAccountSchemaMigrationTests(unittest.TestCase):

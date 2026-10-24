@@ -135,7 +135,7 @@ def list_articles(
         rows = conn.execute(
             f"""
             SELECT a.id, a.project_id, p.name AS project_name,
-                   a.title, a.summary, a.tags, a.geo_score, a.status,
+                   a.title, a.summary, a.content, a.tags, a.geo_score, a.status,
                    a.created_at, a.updated_at
             FROM articles AS a
             JOIN projects AS p ON p.id = a.project_id
@@ -233,15 +233,20 @@ def _score_article(project: sqlite3.Row, title: str, content: str) -> dict[str, 
 
 
 def _serialize_article(row: sqlite3.Row) -> dict[str, Any]:
+    from services.publish_confirmation import article_review_fingerprint
     article = dict(row)
     article["tags"] = _decode_string_list(article.get("tags"))
     article["geo_analysis"] = _decode_json_object(article.get("geo_analysis"))
+    article['review_fingerprint'] = article_review_fingerprint(article)
     return article
 
 
 def _serialize_article_list_item(row: sqlite3.Row) -> dict[str, Any]:
+    from services.publish_confirmation import article_review_fingerprint
     article = dict(row)
     article["tags"] = _decode_string_list(article.get("tags"))
+    article['review_fingerprint'] = article_review_fingerprint(article)
+    article.pop('content', None)
     return article
 
 

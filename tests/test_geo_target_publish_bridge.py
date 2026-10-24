@@ -15,6 +15,7 @@ from services.publish_job_service import (create_publish_job, retry_publish_job,
     claim_publish_job, transition_publish_job, record_publish_submission_state)
 from services.publish_retry_evidence import LEGACY_BEFORE_FILL_MESSAGE
 from services.publish_job_executor import execute_publish_job
+from services.publish_confirmation import article_review_fingerprint
 from services.publisher_adapter import PublishResult
 from tests.test_geo_content_loop import ResearchFixture, draft, facts
 from tests.test_geo_destinations import config
@@ -193,7 +194,8 @@ class TargetPublishBridgeTests(ResearchFixture, unittest.TestCase):
                         ALLOW_REAL_PUBLISHING=True, TESTING=True, DESKTOP_MODE=False):
             client = app.test_client()
             response = client.post('/api/publish', json={'article_id': self.article_id,
-                'platform': 'toutiao', 'account_id': self.account_id})
+                'platform': 'toutiao', 'account_id': self.account_id,
+                'expected_review_fingerprint': article_review_fingerprint(get_article(self.database,self.article_id))})
             self.assertEqual(response.status_code, 201, response.json)
             job = response.json['data']
             self.assertEqual(job['article_id'], self.article_id)
@@ -202,7 +204,9 @@ class TargetPublishBridgeTests(ResearchFixture, unittest.TestCase):
                 unconfirmed = client.post(f'/api/publish/jobs/{job["job_id"]}/execute-real', json={})
                 self.assertEqual(unconfirmed.status_code, 400)
                 factory.assert_not_called()
-                confirmed = client.post(f'/api/publish/jobs/{job["job_id"]}/execute-real', json={'confirm': True})
+                current_job = client.get(f'/api/publish/jobs/{job["job_id"]}').json['data']
+                confirmed = client.post(f'/api/publish/jobs/{job["job_id"]}/execute-real', json={
+                    'confirm': True, 'expected_confirmation_snapshot': current_job['confirmation_snapshot']})
             self.assertEqual(confirmed.status_code, 200, confirmed.json)
             self.assertEqual(confirmed.json['data']['status'], 'processing')
             self.assertEqual(len(publisher.calls), 1)

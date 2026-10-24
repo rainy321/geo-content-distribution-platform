@@ -37,6 +37,7 @@ def execute_publish_job(
     publisher_factory: PublisherFactory | None = None,
     media_root: str | Path = DEFAULT_MEDIA_ROOT,
     require_authorization_match: bool = False,
+    expected_confirmation_snapshot: str | None = None,
 ) -> dict[str, Any]:
     """Claim and execute exactly one queued job.
 
@@ -46,7 +47,11 @@ def execute_publish_job(
     """
 
     try:
-        job = claim_publish_job(database_path, job_id)
+        if expected_confirmation_snapshot is None:
+            job = claim_publish_job(database_path, job_id)
+        else:
+            job = claim_publish_job(database_path, job_id,
+                                    expected_confirmation_snapshot=expected_confirmation_snapshot)
     except PublishReviewRequiredError as error:
         return transition_publish_job(database_path, job_id, 'need_action', message=str(error))
     try:

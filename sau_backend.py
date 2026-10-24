@@ -8,7 +8,7 @@ import threading
 import time
 import uuid
 from contextlib import closing
-from datetime import timedelta
+from datetime import datetime, timedelta
 from pathlib import Path
 from queue import Queue
 from flask_cors import CORS
@@ -1039,10 +1039,26 @@ def geo_content_destination_review(identifier, target_id):
 
 @app.route('/api/media-accounts', methods=['GET'])
 def get_media_accounts():
-    overview = get_media_accounts_overview(
-        app.config["DATABASE_PATH"],
-        cookies_directory=app.config["COOKIES_DIRECTORY"],
-    )
+    publish_at = None
+    if 'publish_at' in request.args:
+        values = request.args.getlist('publish_at')
+        value = values[0].strip() if len(values) == 1 else ''
+        try:
+            if not value or len(value) > 80 or ('T' not in value and ' ' not in value):
+                raise ValueError()
+            publish_at = datetime.fromisoformat(value.replace('Z', '+00:00')).isoformat()
+        except ValueError:
+            return jsonify({'code':400,'msg':'计划时间必须是完整的 ISO 8601 日期和时间','data':None}),400
+    try:
+        overview = get_media_accounts_overview(
+            app.config["DATABASE_PATH"],
+            cookies_directory=app.config["COOKIES_DIRECTORY"],
+            publish_at=publish_at,
+        )
+    except ValueError:
+        return jsonify({'code':400,'msg':'无法按指定时间核对发布额度，请重新选择时间','data':None}),400
+    overview['execution_mode'] = 'demo' if app.config.get('DEMO_MODE', False) else 'real'
+    overview['real_publishing_enabled'] = bool(app.config.get('ALLOW_REAL_PUBLISHING', False))
     return jsonify({"code": 200, "msg": "success", "data": overview}), 200
 
 
@@ -1464,6 +1480,11 @@ def create_publish_task():
     capability = get_platform_capability(platform)
     if capability is None:
         return jsonify({"code": 400, "msg": "暂不支持该发布平台", "data": None}), 400
+    expected_review = data.get('expected_review_fingerprint')
+    if not app.config.get('DEMO_MODE', False) and (
+        not isinstance(expected_review, str) or not re.fullmatch(r'[a-f0-9]{64}', expected_review)
+    ):
+        return jsonify({'code':400,'msg':'请先刷新并核对当前稿件，再创建发布任务','data':None}),400
     if (
         capability.get("delivery_state") == "paused"
         and not app.config.get("DEMO_MODE", False)
@@ -1482,6 +1503,15 @@ def create_publish_task():
                 },
             }
         ), 409
+
+    if not app.config.get('DEMO_MODE', False):
+        from services.publish_confirmation import article_review_fingerprint
+        try:
+            reviewed_article = get_article(app.config['DATABASE_PATH'], article_id)
+        except ArticleNotFoundError as exc:
+            return jsonify({'code':404,'msg':str(exc),'data':None}),404
+        if article_review_fingerprint(reviewed_article) != expected_review:
+            return jsonify({'code':409,'msg':'稿件已经更新，请重新读取并核对后再创建发布任务','data':None}),409
 
     auto_image = data.get("auto_image", False)
     if not isinstance(auto_image, bool):
@@ -1579,6 +1609,7 @@ def create_publish_task():
         ), 403
 
     try:
+        from services.publish_job_service import PublishConfirmationMismatchError
         job = create_publish_job(
             app.config["DATABASE_PATH"],
             article_id=article_id,
@@ -1591,9 +1622,12 @@ def create_publish_task():
             account_id=data.get("account_id"),
             require_account=not bool(app.config.get("DEMO_MODE", False)),
             enforce_publish_policy=not bool(app.config.get("DEMO_MODE", False)),
+            expected_review_fingerprint=expected_review if not app.config.get('DEMO_MODE', False) else None,
         )
     except ArticleNotFoundError as exc:
         return jsonify({"code": 404, "msg": str(exc), "data": None}), 404
+    except PublishConfirmationMismatchError as exc:
+        return jsonify({'code':409,'msg':str(exc),'data':None}),409
     except PublishPolicyViolation as exc:
         return jsonify(
             {
@@ -1740,8 +1774,8 @@ def execute_real_publish_task(job_id):
                 "data": None,
             }
         ), 403
-    data = request.get_json(silent=True) or {}
-    if data.get("confirm") is not True:
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict) or data.get("confirm") is not True:
         return jsonify(
             {"code": 400, "msg": "真实发布需要明确确认", "data": None}
         ), 400
@@ -1770,6 +1804,10 @@ def execute_real_publish_task(job_id):
             }
         ), 409
 
+    expected_confirmation = data.get('expected_confirmation_snapshot')
+    if not isinstance(expected_confirmation, str) or not re.fullmatch(r'[a-f0-9]{64}', expected_confirmation):
+        return jsonify({'code':400,'msg':'请刷新原任务并核对当前稿件后，再确认真实发布','data':None}),400
+
     factory_options = {}
     if app.config.get('DESKTOP_MODE', False) and current['platform'] == 'toutiao':
         from services.publish_job_service import update_publish_job_progress
@@ -1791,6 +1829,7 @@ def execute_real_publish_task(job_id):
             job_id,
             publisher_factory=publisher_factory,
             media_root=app.config["MEDIA_ROOT"],
+            expected_confirmation_snapshot=expected_confirmation,
         )
     except InvalidPublishJobTransitionError as exc:
         return jsonify({"code": 409, "msg": str(exc), "data": None}), 409
@@ -1809,8 +1848,10 @@ def execute_real_publish_task(job_id):
 def _publish_job_payload(job):
     from services.toutiao_result_check import result_check_running
     from services.publish_messages import public_publish_message
+    from services.publish_confirmation import publish_confirmation_snapshot
     payload = {
         "job_id": job["id"],
+        "confirmation_snapshot": publish_confirmation_snapshot(job),
         "article_id": job["article_id"],
         "account_id": job.get("account_id"),
         "platform": job["platform"],

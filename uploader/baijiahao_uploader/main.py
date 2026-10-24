@@ -9,6 +9,7 @@ import time
 import asyncio
 
 from conf import LOCAL_CHROME_PATH, LOCAL_CHROME_HEADLESS
+from services.browser_executable import browser_executable_options
 from utils.base_social_media import set_init_script
 from utils.log import baijiahao_logger
 from utils.network import async_retry
@@ -24,20 +25,12 @@ def _build_launch_kwargs(headless: bool) -> dict:
             "--start-maximized",
         ],
     }
-    if LOCAL_CHROME_PATH:
-        options["executable_path"] = LOCAL_CHROME_PATH
+    options.update(browser_executable_options(LOCAL_CHROME_PATH))
     return options
 
 
 async def _launch_browser(playwright: Playwright, headless: bool):
-    launch_kwargs = _build_launch_kwargs(headless)
-    try:
-        return await playwright.chromium.launch(**launch_kwargs)
-    except Exception:
-        if "channel" not in launch_kwargs:
-            launch_kwargs["channel"] = "chrome"
-            return await playwright.chromium.launch(**launch_kwargs)
-        raise
+    return await playwright.chromium.launch(**_build_launch_kwargs(headless))
 
 
 async def _install_preview_guard(page: Page) -> None:
@@ -103,6 +96,7 @@ async def baijiahao_cookie_gen(account_file):
                 '--lang en-GB'
             ],
             'headless': LOCAL_CHROME_HEADLESS,  # Set headless option here
+            **browser_executable_options(LOCAL_CHROME_PATH),
         }
         # Make sure to run headed.
         browser = await playwright.chromium.launch(**options)
@@ -120,21 +114,26 @@ async def baijiahao_cookie_gen(account_file):
 
 async def cookie_auth(account_file):
     async with async_playwright() as playwright:
-        browser = await playwright.chromium.launch(headless=LOCAL_CHROME_HEADLESS)
-        context = await browser.new_context(storage_state=account_file)
-        context = await set_init_script(context)
-        # 创建一个新的页面
-        page = await context.new_page()
-        # 访问指定的 URL
-        await page.goto("https://baijiahao.baidu.com/builder/rc/home")
-        await page.wait_for_timeout(timeout=5000)
+        browser = await _launch_browser(playwright, LOCAL_CHROME_HEADLESS)
+        context = None
+        try:
+            context = await browser.new_context(storage_state=account_file)
+            context = await set_init_script(context)
+            page = await context.new_page()
+            await page.goto("https://baijiahao.baidu.com/builder/rc/home")
+            await page.wait_for_timeout(timeout=5000)
 
-        if await page.get_by_text('注册/登录百家号').count():
-            baijiahao_logger.error("等待5秒 cookie 失效")
-            return False
-        else:
+            if await page.get_by_text('注册/登录百家号').count():
+                baijiahao_logger.error("等待5秒 cookie 失效")
+                return False
             baijiahao_logger.success("[+] cookie 有效")
             return True
+        finally:
+            try:
+                if context is not None:
+                    await context.close()
+            finally:
+                await browser.close()
 
 
 async def baijiahao_setup(account_file, handle=False):

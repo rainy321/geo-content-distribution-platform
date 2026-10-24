@@ -29,7 +29,7 @@ export const publishApi = {
     return http.post(`/api/publish/jobs/${id}/execute`)
   },
 
-  executeRealJob(id) {
-    return http.post(`/api/publish/jobs/${id}/execute-real`, { confirm: true })
+  executeRealJob(id, confirmationSnapshot) {
+    return http.post(`/api/publish/jobs/${id}/execute-real`, { confirm: true, expected_confirmation_snapshot: confirmationSnapshot })
   }
 }
