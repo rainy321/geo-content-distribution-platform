@@ -23,9 +23,7 @@ def _launch_options() -> dict[str, Any]:
     return {
         "headless": True,
         "args": [
-            "--disable-blink-features=AutomationControlled",
             "--lang=zh-CN",
-            "--disable-infobars",
         ],
         **browser_executable_options(LOCAL_CHROME_PATH),
     }

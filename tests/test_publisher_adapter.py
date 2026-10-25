@@ -3,6 +3,8 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
+from services.zhihu_publish_flow import ZhihuAIStatementNotConfirmedError
+
 from services.publisher_adapter import (
     BaijiahaoPublisherAdapter,
     DemoPublisher,
@@ -209,6 +211,26 @@ class ZhihuPublisherAdapterTests(unittest.TestCase):
         self.assertEqual(result.status, "need_action")
         self.assertIn("请检查知乎登录或安全验证", result.message)
 
+    def test_ai_statement_failure_is_known_before_publish_and_does_not_probe_afterward(self):
+        checks = []
+
+        def checker(_title, _account_file, attempts):
+            checks.append(attempts)
+            return None
+
+        def blocked(_content, _account_file):
+            raise ZhihuAIStatementNotConfirmedError('PRIVATE_EDITOR_DATA')
+
+        result = self._adapter(publication_checker=checker, publish_runner=blocked).publish(self.content)
+
+        self.assertEqual(checks, [1], 'Only the ordinary duplicate precheck should run')
+        self.assertFalse(result.success)
+        self.assertEqual(result.status, 'need_action')
+        self.assertIn('AI 创作声明', result.message)
+        self.assertIn('未点击发布', result.message)
+        for misleading in ('登录', '安全验证', '状态未知', 'PRIVATE_EDITOR_DATA'):
+            self.assertNotIn(misleading, result.message)
+
     def test_ordinary_errors_are_failed(self):
         def raise_network_error(*_args):
             raise RuntimeError("连接被重置")
@@ -346,6 +368,7 @@ class ZhihuPublisherAdapterTests(unittest.TestCase):
             "包含 AI 辅助创作 作者对内容负责",
         )
         article.main.assert_awaited_once_with()
+        self.assertIs(article.headless, False)
         self.assertTrue(callable(article.click_publish))
         self.assertEqual(result, observed)
 

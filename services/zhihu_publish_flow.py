@@ -9,6 +9,10 @@ _SUBMISSION_METHODS = frozenset({"POST", "PUT", "PATCH"})
 _SUBMISSION_URL_MARKERS = ("article", "publish")
 
 
+class ZhihuAIStatementNotConfirmedError(RuntimeError):
+    """The declaration check stopped before the uploader's publish action."""
+
+
 async def click_exact_publish_and_observe(page: Any) -> dict[str, Any]:
     """Click Zhihu's exact publish action and report only observable outcomes.
 

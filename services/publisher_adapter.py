@@ -11,6 +11,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from services.zhihu_publish_flow import ZhihuAIStatementNotConfirmedError
+
 
 PUBLISH_RESULT_STATUSES = frozenset(
     {"queued", "processing", "success", "failed", "need_action", "scheduled"}
@@ -251,6 +253,11 @@ class ZhihuPublisherAdapter(PublisherAdapter):
                 self.account_file,
                 timeout_seconds=self.timeout_seconds,
             )
+        except ZhihuAIStatementNotConfirmedError as exc:
+            # This typed boundary can only originate from the pre-publish
+            # declaration check. Do not run a post-submission probe or turn
+            # it into a misleading login/unknown-submission message.
+            return self._exception_result(exc, prefix="知乎发布失败")
         except (TimeoutError, asyncio.TimeoutError):
             result = self._failed(
                 "知乎发布操作超时；平台最终状态未知，请先人工核对再重试"
@@ -384,6 +391,12 @@ class ZhihuPublisherAdapter(PublisherAdapter):
         )
 
     def _exception_result(self, exc: Exception, *, prefix: str) -> PublishResult:
+        if isinstance(exc, ZhihuAIStatementNotConfirmedError):
+            logging.warning("Zhihu publisher paused stage=before_publish code=ai_creation_statement_not_confirmed")
+            return PublishResult(
+                success=False, platform=self.platform, status="need_action",
+                message="知乎 AI 创作声明尚未确认，请先核对创作声明；本次未点击发布，原稿和任务记录已保留",
+            )
         detail = str(exc).strip() or exc.__class__.__name__
         status = classify_publisher_error(detail)
         from services.login_runtime import login_error_code
@@ -1019,6 +1032,9 @@ async def _default_zhihu_publish_runner(
         cover_path=content.images[0] if content.images else None,
         creation_statement="包含 AI 辅助创作 作者对内容负责",
     )
+    # Keep the actual article window visible for ordinary account/security
+    # prompts. Read-only login and duplicate probes retain their own options.
+    publisher.headless = False
     observed_result: dict[str, Any] = {}
 
     async def click_publish(page: Any) -> None:
@@ -1356,6 +1372,8 @@ def _normalize_guarded_public_result(
 def classify_publisher_error(error: Exception | str) -> str:
     """Map platform safety/login failures to the shared task status."""
 
+    if isinstance(error, ZhihuAIStatementNotConfirmedError):
+        return "need_action"
     normalized = str(error).lower()
     return (
         "need_action"

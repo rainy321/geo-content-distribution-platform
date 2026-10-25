@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from datetime import datetime
 from pathlib import Path
 
-from playwright.async_api import Page, async_playwright
+from playwright.async_api import Page, async_playwright, expect
 
 from conf import LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
-from utils.base_social_media import set_init_script
 from utils.log import zhihu_logger
 from services.browser_executable import browser_executable_options
 from services.login_runtime import LoginCancelled
+from services.zhihu_publish_flow import ZhihuAIStatementNotConfirmedError
 
 ZHIHU_LOGIN_URL = "https://www.zhihu.com/signin"
 ZHIHU_WRITE_URL = "https://zhuanlan.zhihu.com/write"
@@ -32,15 +33,14 @@ ZHIHU_CREATION_STATEMENT_OPTIONS = (
     "无声明",
 )
 ZHIHU_CREATION_STATEMENT_DEFAULT = "无声明"
+ZHIHU_AI_CREATION_STATEMENT = "包含 AI 辅助创作 作者对内容负责"
 
 
 def _build_launch_kwargs(headless: bool) -> dict:
     options = {
         "headless": headless,
         "args": [
-            "--disable-blink-features=AutomationControlled",
             "--lang=zh-CN",
-            "--disable-infobars",
             "--start-maximized",
         ],
     }
@@ -92,7 +92,6 @@ async def cookie_auth(account_file) -> bool:
         browser = await playwright.chromium.launch(**_build_launch_kwargs(headless=LOCAL_CHROME_HEADLESS))
         try:
             context = await browser.new_context(storage_state=account_file)
-            context = await set_init_script(context)
             page = await context.new_page()
             await page.goto(ZHIHU_WRITE_URL, timeout=60000)
             await page.wait_for_timeout(3000)
@@ -130,7 +129,6 @@ async def zhihu_cookie_gen(account_file):
     async with async_playwright() as playwright:
         browser = await playwright.chromium.launch(**_build_launch_kwargs(headless=False))
         context = await browser.new_context()
-        context = await set_init_script(context)
         page = await context.new_page()
         await page.goto(ZHIHU_LOGIN_URL, timeout=60000)
         zhihu_logger.info("请在浏览器中完成知乎登录；检测到登录凭证 z_c0 后会自动保存…")
@@ -240,7 +238,6 @@ class ZhiHuArticle(object):
     async def upload(self, playwright) -> None:
         browser = await playwright.chromium.launch(**_build_launch_kwargs(headless=self.headless))
         context = await browser.new_context(storage_state=str(self.account_file))
-        context = await set_init_script(context)
         page = await context.new_page()
         try:
             await page.goto(ZHIHU_WRITE_URL, timeout=90000, wait_until="domcontentloaded")
@@ -277,6 +274,15 @@ class ZhiHuArticle(object):
     async def apply_creation_statement(self, page: Page) -> None:
         """选择写文章页「创作声明」下拉项。"""
         label = self.creation_statement or ZHIHU_CREATION_STATEMENT_DEFAULT
+        if label == ZHIHU_AI_CREATION_STATEMENT:
+            # The real GEO adapter uses this label for AI-assisted articles.
+            # A warning-only legacy selector must not allow the following
+            # publish action to run with an absent or different declaration.
+            try:
+                await self._apply_required_ai_creation_statement(page, label)
+            except Exception as exc:
+                raise ZhihuAIStatementNotConfirmedError("知乎 AI 创作声明尚未确认，需要人工核对后再发布") from exc
+            return
         try:
             # 创作声明在编辑区下方，先滚入视口
             for _ in range(10):
@@ -332,6 +338,44 @@ class ZhiHuArticle(object):
                 zhihu_logger.warning(f"创作声明点击后显示为「{after}」，期望「{label}」")
         except Exception as exc:
             zhihu_logger.warning(f"设置创作声明失败（可忽略）: {exc}")
+
+    async def _apply_required_ai_creation_statement(self, page: Page, label: str) -> None:
+        def normalized(value):
+            return "".join((value or "").split())
+
+        async def visible(locator):
+            return [locator.nth(index) for index in range(await locator.count())
+                    if await locator.nth(index).is_visible()]
+
+        rows = page.locator('div:has(> label:has-text("创作声明"))')
+        matches = await visible(rows)
+        if len(matches) != 1:
+            raise RuntimeError("创作声明区域无法唯一确认")
+        controls = await visible(matches[0].locator('button[role="combobox"], button.Select-button'))
+        if len(controls) != 1 or not await controls[0].is_enabled():
+            raise RuntimeError("创作声明选择框尚未就绪")
+        combo = controls[0]
+        await combo.scroll_into_view_if_needed()
+        if normalized(await combo.inner_text()) == normalized(label):
+            return
+
+        await combo.click(timeout=5000)
+        candidates = page.get_by_role("option", name=label, exact=True)
+        await candidates.first.wait_for(state="visible", timeout=5000)
+        options = await visible(candidates)
+        if len(options) != 1 or not await options[0].is_enabled():
+            raise RuntimeError("AI 创作声明选项无法唯一确认")
+        await options[0].click(timeout=5000)
+        # Re-read the visible control. Do not treat an option click as
+        # confirmation, choose another label, force a click, or submit anyway.
+        expected_text = re.compile(r"^\s*" + r"\s*".join(re.escape(c) for c in normalized(label)) + r"\s*$")
+        await expect(combo).to_have_text(expected_text, timeout=5000)
+        matches = await visible(rows)
+        controls = (await visible(matches[0].locator('button[role="combobox"], button.Select-button'))
+                    if len(matches) == 1 else [])
+        if (len(controls) != 1 or not await controls[0].is_enabled()
+                or normalized(await controls[0].inner_text()) != normalized(label)):
+            raise RuntimeError("AI 创作声明选择结果未确认")
 
     async def fill_title(self, page: Page) -> None:
         candidates = [
