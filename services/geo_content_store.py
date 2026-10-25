@@ -18,6 +18,7 @@ from services.geo_score_service import score_geo_content
 from services import geo_destination_service as destinations
 from services.geo_entity_identity import same_entity_target, entity_measurement_signature
 from services.geo_test_reports import project_report_evaluation
+from services.geo_feedback_summary import collection_summary
 
 
 class ResearchNotFoundError(LookupError):
@@ -295,7 +296,7 @@ def get_cycle(database, identifier):
             comparison = compare_reports(result['baseline'], report, publication_urls)
             comparison.update(publication_feedback(comparison, report, publication_records))
             result['retests'].append({'run_id': report['run_id'], 'updated_at': report.get('updated_at'),
-                                      'comparison': comparison})
+                                      'comparison': comparison, 'collection': collection_summary(report)})
     return result
 
 

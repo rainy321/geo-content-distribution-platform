@@ -668,7 +668,7 @@ class BrowserExtractionTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(result['submission_receipt']['invalid_reason'])
             self.assertEqual(result['submission_receipt']['submission_attempts'], 1)
 
-    async def test_internal_fenced_prompt_has_editor_and_dom_proof_with_one_enter(self):
+    async def test_internal_fenced_prompt_waits_for_delayed_handler_before_one_button_click(self):
         question = '任务：只输出 JSON。\n资料：{"quoted":"\\\"literal\\\"","path":"C:\\\\data"}\n```json\n{}\n```'
         html = self.fixture_html.replace('<div data-message-role="assistant">','<div data-message-role="assistant" hidden>')
         # Tiptap preserves authored newlines; the minimal unstyled fixture's
@@ -676,10 +676,13 @@ class BrowserExtractionTests(unittest.IsolatedAsyncioTestCase):
         html = html.replace('contenteditable="true"', 'contenteditable="true" style="white-space:pre-wrap"')
         html = html.replace('class="tiptap"', 'class="tiptap ProseMirror"')
         html += '<button data-testid="chat_input_action_model" onclick="window.modelClicks++">豆包2.1 Lite<br>高</button>'
+        html += '<button data-testid="chat_input_send_button" id="flow-end-msg-send" data-disabled="false" aria-disabled="false" data-loading="false">↑</button>'
         html += '''<script>
             const user=document.querySelector('[data-message-role=user]'); user.hidden=true; user.textContent='';
-            window.submissions=0; window.modelClicks=0;
+            window.submissions=0; window.modelClicks=0; window.enterPresses=0;
+            window.inputReady=false; window.earlySubmissions=0;
             document.querySelector('[contenteditable]').addEventListener('input',e=>{
+                window.inputReady=false; setTimeout(()=>window.inputReady=true,500);
                 if(e.target.childNodes.length && [...e.target.childNodes].every(n=>n.nodeName==='P')) return;
                 const lines=e.target.innerText.split('\\n');
                 e.target.replaceChildren(...lines.map(line=>{
@@ -687,16 +690,19 @@ class BrowserExtractionTests(unittest.IsolatedAsyncioTestCase):
                 }));
             });
             document.querySelector('[contenteditable]').addEventListener('keydown',e=>{
-                if(e.key==='Enter'){
-                    e.preventDefault(); window.submissions++;
-                    const sent=[...e.target.children].map(p=>p.textContent).join('\\n'), lines=sent.split('\\n');
+                if(e.key==='Enter') window.enterPresses++;
+            });
+            document.querySelector('[data-testid="chat_input_send_button"]').addEventListener('click',e=>{
+                    if(!window.inputReady) {window.earlySubmissions++; return;}
+                    window.submissions++;
+                    const editor=document.querySelector('[contenteditable]');
+                    const sent=[...editor.children].map(p=>p.textContent).join('\\n'), lines=sent.split('\\n');
                     const body=document.createElement('div'); body.dataset.testid='message_text_content';
                     const intro=document.createElement('p'); intro.textContent=lines[0];
                     const pre=document.createElement('pre'),code=document.createElement('code');
                     code.textContent=lines.slice(2,-1).join('\\n')+'\\n'; pre.append(code); body.append(intro,pre);
                     user.replaceChildren(body); user.hidden=false;
                     document.querySelector('[data-message-role=assistant]').hidden=false;
-                }
             });
         </script>'''
         contexts, sent = [], asyncio.Event()
@@ -719,9 +725,14 @@ class BrowserExtractionTests(unittest.IsolatedAsyncioTestCase):
                 raise
             count=await contexts[0].pages[0].evaluate('window.submissions')
             model_clicks=await contexts[0].pages[0].evaluate('window.modelClicks')
+            enters=await contexts[0].pages[0].evaluate('window.enterPresses')
+            early=await contexts[0].pages[0].evaluate('window.earlySubmissions')
             result,path=await task
             self.assertEqual(count,1)
             self.assertEqual(model_clicks,0)
+            self.assertEqual(enters,0)
+            self.assertEqual(early,0)
+            self.assertEqual(result['submission_transport']['method'],'visible_send_button')
             self.assertEqual(result['environment']['requested_model_label'],'豆包2.1 Lite')
             self.assertEqual(result['environment']['model_label'],'豆包2.1 Lite\n高')
             self.assertTrue(result['answer_completed'],result)
@@ -737,6 +748,8 @@ class BrowserExtractionTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(editor['editor_readback_method'],'prosemirror_direct_plain_paragraphs')
             self.assertNotEqual(editor['editor_inner_text'],editor['editor_readback'])
             self.assertTrue(editor['verified'])
+            self.assertTrue(editor['editor_settle']['unchanged_between_observations'])
+            self.assertGreaterEqual(editor['editor_settle']['waited_seconds'],1.0)
 
     async def test_full_local_pipeline_writes_answer_sources_and_evidence(self):
         html = self.fixture_html.replace('<div data-message-role="assistant">', '<div data-message-role="assistant" hidden>')

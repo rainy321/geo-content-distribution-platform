@@ -165,7 +165,12 @@ class VisibleResultTests(BindingFixture,unittest.IsolatedAsyncioTestCase):
             if value.request.url.startswith('https://mp.toutiao.com/'):
                 await value.fulfill(content_type='text/html',body=management)
             elif value.request.url.startswith('https://www.toutiao.com/item/'):
-                await value.fulfill(status=302,headers={'location':'https://www.toutiao.com/article/123456/'})
+                # Playwright routes only the first URL of an HTTP redirect;
+                # a fulfilled 302 can let the next request escape this local
+                # fixture. Exercise a same-article browser navigation instead,
+                # so every GET, including the final public page, stays routed.
+                await value.fulfill(content_type='text/html',body=
+                    '<script>location.replace("https://www.toutiao.com/article/123456/")</script>')
             elif value.request.url.startswith('https://www.toutiao.com/article/'):
                 await value.fulfill(content_type='text/html',body=public)
             else:
@@ -184,6 +189,7 @@ class VisibleResultTests(BindingFixture,unittest.IsolatedAsyncioTestCase):
             self.assertTrue((output/'management.json').is_file())
             self.assertTrue((output/'public.png').is_file())
             self.assertTrue(all(method=='GET' for method,_ in requests))
+            self.assertIn(('GET','https://www.toutiao.com/article/123456/'),requests)
             self.assertEqual(get_publish_job(self.database,self.job['id'])['status'],'processing','Probe alone must not reconcile')
         finally:await context.close()
 

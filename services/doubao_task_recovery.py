@@ -129,10 +129,22 @@ def recovery_view(record, root, *, live_window=False):
 
 def action_required(reason, collection_status=None):
     return (collection_status == 'need_action' or reason in AUTH_REASONS
-            or reason in ('browser_error:TargetClosedError', 'user_cancelled_submission_unknown', 'background_task_timeout'))
+            or reason in ('browser_error:TargetClosedError', 'user_cancelled_submission_unknown', 'background_task_timeout',
+                          'website_temporarily_unavailable'))
 
 
-def recovery_message(reason):
+def recovery_message(reason, *, attempted=None, submitted=None, failure_stage=None):
+    if attempted is False and submitted is False:
+        if reason in ('submission_send_button_not_unique_not_submitted', 'submission_send_button_not_ready_not_submitted'):
+            return '豆包发送按钮暂不可用或无法唯一确认，本次问题尚未发送。请核对当前窗口后再手动开始；证据已保留，不会自动重试。'
+        if reason == 'website_temporarily_unavailable':
+            return '豆包网站显示“该页面暂时不可用”，本次问题尚未发送。请核对页面恢复后再手动开始；证据已保留，不会自动重发。'
+        if failure_stage == 'navigation' and isinstance(reason, str) and reason.startswith(('browser_error:', 'network_error:')):
+            return '豆包页面未能正常打开，本次问题尚未发送。请核对浏览器页面后再手动开始；证据已保留，不会自动重发。'
+    if reason == 'website_temporarily_unavailable':
+        state = ('问题已确认发送，请先核对当前会话' if submitted is True else
+                 '已尝试发送问题，请先核对当前会话与提交结果' if attempted is True else '问题提交状态尚未确认，请先核对当前会话')
+        return f'豆包网站显示“该页面暂时不可用”，本次未取得完整回答。{state}；证据已保留，不会自动重发。'
     if reason in ('login_required', 'session_redirected_to_logout'):
         return '豆包登录已失效，请先正常登录对应的豆包界面，再按提交状态决定是否另开尝试；原始证据已保留，不会自动重发。'
     if reason == 'human_verification_required':

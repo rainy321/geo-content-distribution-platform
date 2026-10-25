@@ -95,12 +95,18 @@
         <DoubaoPreparation v-if="nativeAvailable"/>
         <el-button v-if="nativeAvailable" text :disabled="busy" @click="login">登录复测所用的豆包会话</el-button>
         <BaselineContext/>
-        <div class="metric-grid feedback-metrics"><article><span>发布器成功回报</span><strong>{{ cycle.publications?.length || 0 }}</strong><small>排除演示任务与无链接任务</small></article><article><span>运营方自报提交</span><strong>{{ cycle.reported_publications?.length || 0 }}</strong><small>尚未独立核验发布成功</small></article><article><span>同题复测</span><strong>{{ cycle.retests?.length || 0 }}</strong><small>按计划、界面、模型和时间检查</small></article></div>
+        <div class="metric-grid feedback-metrics"><article><span>发布器成功回报</span><strong>{{ cycle.publications?.length || 0 }}</strong><small>排除演示任务与无链接任务</small></article><article><span>运营方自报提交</span><strong>{{ cycle.reported_publications?.length || 0 }}</strong><small>尚未独立核验发布成功</small></article><article><span>取得回答的复测</span><strong>{{ feedbackTotals.withAnswers }}</strong><small>共 {{ feedbackTotals.attempts }} 轮尝试，仍需检查比较条件</small></article></div>
         <GeoPublicationReview :cycle="cycle" :busy="busy" @updated="applyReviewCycle"/>
         <p v-if="!hasPublication" class="hint">{{ unfinishedPublications.length ? '尚无公开成功记录，请先查看以下原发布任务。待确认不等于失败，现在复测只记录新的采集观察。' : '当前没有可用于发布后分析的提交记录。现在复测只会记录新的采集观察。' }}</p>
         <div v-if="unfinishedPublications.length" class="publication-tasks" aria-label="原发布任务"><article v-for="job in unfinishedPublications" :key="job.id" class="feedback-card"><el-tag :type="job.status==='failed' ? 'danger' : job.status==='need_action' ? 'warning' : 'info'">{{ publicationStatus[job.status] }}</el-tag><h3>{{ job.title }} · {{ cycle.channels[job.platform] || job.platform }}</h3><p>{{ job.message || publicationMessages[job.status] }}</p><p v-if="job.status==='processing'" class="hint">最终提交结果仍在确认，请核对原任务与平台后台，不要另建重复发布。</p><el-button :disabled="busy" @click="continuePublication(job)">继续查看原发布任务</el-button></article></div>
         <div v-for="url in cycle.publications || []" :key="url" class="publication-link"><el-tag size="small" type="success">发布器回报</el-tag><a v-if="safeLink(url)" :href="safeLink(url)" target="_blank" rel="noopener noreferrer">{{ url }}</a></div><div v-for="item in cycle.reported_publications || []" :key="item.id" class="publication-link"><el-tag size="small" type="info">运营方自报</el-tag><a v-if="safeLink(item.url)" :href="safeLink(item.url)" target="_blank" rel="noopener noreferrer">{{ item.url }}</a></div>
-        <article v-for="item in cycle.retests || []" :key="item.run_id" class="feedback-card"><h3>{{ feedbackLabels[item.comparison.feedback_stage] || '采集观察' }} · {{ journeyDate(item.updated_at) }}</h3><p>{{ item.comparison.publication_context }}</p><p v-if="!item.comparison.conditions_match" class="hint">条件差异：{{ item.comparison.reasons?.join('；') }}</p><div v-for="cohort in item.comparison.cohorts || []" :key="cohort.category" class="comparison-row"><span>{{ categoryNames[cohort.category] }}</span><strong>{{ rate(cohort.before_brand_rate) }} → {{ rate(cohort.after_brand_rate) }}</strong><small>共同有效 {{ cohort.paired_answers }} 题</small></div><p class="hint">{{ item.comparison.note }}</p><p v-for="link in item.comparison.publication_citations || []" :key="link.url" class="hint">{{ link.observed_in_citations===true ? '本轮正文引用中观察到' : '暂未观察到引用，索引状态未知' }}：{{ link.url }}</p></article>
+        <article v-for="item in cycle.retests || []" :key="item.run_id" class="feedback-card">
+          <h3>{{ retestCollection(item).title || feedbackLabels[item.comparison.feedback_stage] || '采集观察' }} · {{ journeyDate(item.updated_at) }}</h3>
+          <p v-if="retestCollection(item).known">{{ retestCollection(item).status }} · {{ retestCollection(item).countsText }}</p>
+          <template v-if="retestCollection(item).empty"><p>{{ retestCollection(item).explanation }}</p><p class="hint">{{ retestCollection(item).nextStep }}</p></template>
+          <details v-if="retestCollection(item).issues.length" class="feedback-issues"><summary>查看未完成题目与原因</summary><p v-for="issue in retestCollection(item).issues" :key="issue.caseId">{{ issue.caseId }} · {{ issue.status }}<span v-if="issue.stage"> · {{ issue.stage }}</span><span v-if="issue.message">：{{ issue.message }}</span><small v-if="issue.code">（{{ issue.code }}）</small></p></details>
+          <template v-if="!retestCollection(item).empty"><p>{{ item.comparison.publication_context }}</p><p v-if="!item.comparison.conditions_match" class="hint">条件差异：{{ item.comparison.reasons?.join('；') }}</p><div v-for="cohort in item.comparison.cohorts || []" :key="cohort.category" class="comparison-row"><span>{{ categoryNames[cohort.category] }}</span><strong>{{ rate(cohort.before_brand_rate) }} → {{ rate(cohort.after_brand_rate) }}</strong><small>共同有效 {{ cohort.paired_answers }} 题</small></div><p class="hint">{{ item.comparison.note }}</p><p v-for="link in item.comparison.publication_citations || []" :key="link.url" class="hint">{{ link.observed_in_citations===true ? '本轮正文引用中观察到' : '暂未观察到引用，索引状态未知' }}：{{ link.url }}</p></template>
+        </article>
         <p class="hint">复测沿用原问题、界面与模型选项；未知不算零。单轮小样本与索引时滞都影响结果，不能直接判断有效、无效或因果。</p><div class="utility-row"><el-button text :disabled="busy" @click="refreshCycle">刷新发布与反馈</el-button><el-button text :disabled="busy" @click="openDetails">查看完整采集与复测明细</el-button></div>
       </section>
     </Transition>
@@ -124,6 +130,7 @@ import DestinationUseReview from '@/components/DestinationUseReview.vue'
 import JourneySavedCycles from '@/components/JourneySavedCycles.vue'
 import { savedCycleContinuation, savedCycleFactEdits } from '@/utils/geoSavedCycles'
 import { baselineWritingOptions } from '@/utils/geoWritingOptions'
+import { feedbackCollectionTotals, retestCollection } from '@/utils/geoFeedback'
 import GeoPublicationReview from '@/components/GeoPublicationReview.vue'
 import DoubaoPreparation from '@/components/DoubaoPreparation.vue'
 import DoubaoSessionControls from '@/components/DoubaoSessionControls.vue'
@@ -203,6 +210,7 @@ const evidenceReport=computed(()=>cycle.value?.baseline||report.value)
 const evidenceSummary=computed(()=>baselineEvidenceSummary(evidenceReport.value))
 const unfinishedPublications=computed(()=>(cycle.value?.drafts||[]).flatMap(draft=>(draft.jobs||[]).filter(job=>!job.demo&&publicationStatus[job.status]).map(job=>({...job,article_id:draft.article_id,title:draft.title}))))
 const hasPublication=computed(()=>Boolean(cycle.value?.publications?.length||cycle.value?.reported_publications?.length))
+const feedbackTotals=computed(()=>feedbackCollectionTotals(cycle.value?.retests))
 const usableReport=computed(()=>Boolean(report.value?.cases?.some(item=>item.assessment?.answer_evaluable===true)))
 const sourceCounts=computed(()=>({verified:(cycle.value?.opportunities||[]).filter(item=>item.surface==='community_candidate').length,unknown:(cycle.value?.opportunities||[]).filter(item=>item.surface==='url_unknown').length}))
 const confirmedFacts=()=>factRows.value.filter(item=>item.confirmed&&item.text.trim()).map(item=>({text:item.text.trim(),source_url:item.source_url.trim(),confirmed:true}))
@@ -219,7 +227,7 @@ const platformBasis=computed(()=>{
   return '手动选择通用渠道稿；这不表示豆包已引用或推荐该平台。'
 })
 const canVisit=index=>index===0||Boolean(project.value&&!profileDirty.value&&(index===1||cycle.value&&(index===2||reviewedDraft.value&&index===3||index===4)))
-const stepComplete=index=>index===0?Boolean(project.value):index===1?usableReport.value:index===2?reviewedDraft.value||publishedDraft.value:index===3?hasPublication.value:Boolean(cycle.value?.retests?.length)
+const stepComplete=index=>index===0?Boolean(project.value):index===1?usableReport.value:index===2?reviewedDraft.value||publishedDraft.value:index===3?hasPublication.value:feedbackTotals.value.withAnswers>0
 const primaryLabel=computed(()=>[2,3].includes(step.value)&&needsReplacement.value?'按当前目标另存新稿':step.value===0?'保存品牌并继续':step.value===1?(report.value?'分析这份报告':plan.value?'开始真实搜索测试':'生成 3 个测试问题'):step.value===2?(needsAnalysis.value?'分析来源并制定选题':!activeDraft.value?(!factsSaved.value?'保存已核对的事实':'生成平台草稿'):publishedDraft.value?'查看发布反馈':!reviewedDraft.value?'保存审稿并标记就绪':'继续发布'):step.value===3?(publisherPaused.value?'发布器当前暂停':targetPublisher.value?`使用${publisherName.value}发布器`:selectedTarget.value?(destinationSupportsFill(selectedTarget.value)?'打开目标平台并填写':'配置平台编辑入口'):ownedDraft.value?'导出官网稿件':'打开发布中心'):'开始同题复测')
 const primaryDisabled=computed(()=>{
   if(busy.value)return true
@@ -453,6 +461,7 @@ onUnmounted(()=>{persist();destroyed=true;clearInterval(timer);clearInterval(bri
 </script>
 
 <style scoped>
+.feedback-issues{margin-top:14px;padding:12px 16px;border:1px solid var(--geo-border);border-radius:8px;font-size:12px;line-height:1.8;color:var(--geo-muted);overflow-wrap:anywhere}.feedback-issues summary{cursor:pointer;color:var(--geo-text)}.feedback-issues p{margin-top:8px}.feedback-issues small{font-size:11px}
 .login-observation{display:grid;gap:8px;padding:16px 20px;border:1px solid var(--geo-border);border-radius:12px;background:#f6f9f8;font-size:13px;line-height:1.8}.login-observation>strong{color:var(--geo-text);font-size:13px}.login-observation.mismatch{border-color:#e7d4b3;background:#fffaf1}.login-observation.mismatch>strong{color:#7b5b26}.login-state{display:flex;flex-wrap:wrap;gap:4px 18px;color:var(--geo-muted)}.login-observation details{font-size:12px;color:var(--geo-muted)}.login-observation summary{cursor:pointer;width:fit-content}.login-observation details p{margin-top:8px}
 .journey-steps>button{min-width:0;white-space:nowrap}.journey-header>div{min-width:0}.geo-page-heading{overflow-wrap:anywhere}@media(max-width:1100px){.journey-steps>button{gap:6px;padding:12px 4px;font-size:12px}.journey-steps .el-icon{display:none}}
 .entity-hint{flex-basis:100%;margin-bottom:0}

@@ -63,11 +63,17 @@
         <el-button v-if="nativeAvailable" :disabled="busy" @click="retest">按原计划开始新一轮复测</el-button>
         <div class="row"><el-select v-model="retestReportId" aria-label="关联复测报告" placeholder="或选择本品牌的其他报告"><el-option v-for="report in matchingRetests" :key="report.id" :value="report.id" :label="`${report.name} · ${date(report.updated_at)}`"/></el-select><el-button :disabled="!retestReportId || busy" @click="attachRetest">关联并比较</el-button></div>
         <article v-for="report in cycle.retests" :key="report.run_id" class="draft">
-          <h3>复测 {{ date(report.updated_at) }}</h3><p>{{ report.comparison.conditions_match ? '计划、界面及模型标签匹配，按共同有效题观察' : `条件不匹配：${report.comparison.reasons.join('；')}` }}</p>
+          <h3>{{ retestCollection(report).title || '复测' }} {{ date(report.updated_at) }}</h3>
+          <p v-if="retestCollection(report).known">{{ retestCollection(report).status }} · {{ retestCollection(report).countsText }}</p>
+          <template v-if="retestCollection(report).empty"><p>{{ retestCollection(report).explanation }}</p><p class="hint">{{ retestCollection(report).nextStep }}</p></template>
+          <details v-if="retestCollection(report).issues.length"><summary>查看未完成题目与原因</summary><p v-for="issue in retestCollection(report).issues" :key="issue.caseId">{{ issue.caseId }} · {{ issue.status }}<span v-if="issue.stage"> · {{ issue.stage }}</span><span v-if="issue.message">：{{ issue.message }}</span><small v-if="issue.code">（{{ issue.code }}）</small></p></details>
+          <template v-if="!retestCollection(report).empty">
+          <p>{{ report.comparison.conditions_match ? '计划、界面及模型标签匹配，按共同有效题观察' : `条件不匹配：${report.comparison.reasons.join('；')}` }}</p>
           <el-tag>{{ feedbackStages[report.comparison.feedback_stage] || '采集观察' }}</el-tag><p class="hint">{{ report.comparison.publication_context }} 本次样本只能描述变化，不能独立证明有效、无效或因果关系。</p>
           <el-table :data="report.comparison.cohorts"><el-table-column label="类别"><template #default="{row}">{{ category[row.category] }}</template></el-table-column><el-table-column prop="paired_answers" label="共同有效题"/><el-table-column label="之前提及"><template #default="{row}">{{ rate(row.before_brand_rate) }}</template></el-table-column><el-table-column label="复测提及"><template #default="{row}">{{ rate(row.after_brand_rate) }}</template></el-table-column></el-table>
           <p class="hint">官网正文引用：<span v-for="row in report.comparison.cohorts" :key="row.category">{{ category[row.category] }} {{ rate(row.official_citation_before) }} → {{ rate(row.official_citation_after) }}（共同可判断 {{ row.official_citation_paired }} 题）；</span></p>
           <p class="hint">{{ report.comparison.note }}</p><p v-for="link in report.comparison.publication_citations" :key="link.url" class="hint">{{ link.url }} · {{ link.observed_in_citations === true ? '在本次正文引用中观察到' : '暂未观察到引用，是否被索引未知' }}</p>
+          </template>
         </article>
       </el-card>
     </template>
@@ -92,6 +98,7 @@ import { doubaoTaskRecovery, scopedRecoveryCheckpoint } from '@/utils/geoTaskRec
 import GeoPublicationReview from '@/components/GeoPublicationReview.vue'
 import { destinationContinuationText, destinationPreparationText, destinationSupportsFill, isDestinationTask } from '@/utils/geoDestinationSession'
 import { createWritingPreferences } from '@/utils/geoWritingOptions'
+import { retestCollection } from '@/utils/geoFeedback'
 import { destinationEnabled, destinationCanPrepare, destinationPublicationGate, writingChannelEnabled, writingChannelLabel, inactiveDestinationMessage } from '@/utils/geoDestinationAvailability'
 
 const route = useRoute(), router = useRouter()

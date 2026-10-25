@@ -474,6 +474,12 @@ def build_report(plan: dict, state: dict) -> dict:
                   'private_account_context': 'private_account_context'}.get(assessment["answer_error"], entry["status"])
         rows.append({**case, "status": status, "result_path": entry.get("result_path"),
                      "collection_status": result.get("collection_status"), "failure_reason": result.get("failure_reason"),
+                      "failure_stage": (result.get("failure_stage") if isinstance(result.get("failure_stage"), str)
+                                        and re.fullmatch(r'[a-z_]{1,80}', result['failure_stage']) else None),
+                      "question_submission_attempted": (result.get("question_submission_attempted")
+                                                        if type(result.get("question_submission_attempted")) is bool else None),
+                      "question_submitted": (result.get("question_submitted")
+                                             if type(result.get("question_submitted")) is bool else None),
                      "response": result.get("response"), "citations": result.get("citations"),
                      "displayed_sources": result.get("displayed_sources"),
                      "visible_source_count": result.get("visible_source_count"),

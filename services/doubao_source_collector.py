@@ -52,6 +52,8 @@ class DoubaoSelectors:
     login_dialog: str = '[data-testid="login_modal"], [role="dialog"]:has(input[type="tel"])'
     challenge: str = '[id*="captcha"], [class*="captcha-verify"], iframe[src*="captcha"]'
     model_label: str = '[data-testid="chat_input_action_model"]'
+    # Observed on the live work composer 2026-10-25; icon/aria text is absent.
+    send_button: str = 'button[data-testid="chat_input_send_button"]'
 
 
 @dataclass(frozen=True)
@@ -380,6 +382,14 @@ SNAPSHOT_JS = r"""({s, question, allowExternalPanels, submissionFormat, literalP
         && /^\/chat(?:\/|$)/.test(location.pathname)
         && !!modelControl && !!text(modelControl)
         && all(document, s.editor).some(e => e.isContentEditable || (e.tagName === 'TEXTAREA' && !e.disabled && !e.readOnly));
+    // This is the site's whole-page technical-error screen, not a quoted
+    // phrase in a user question or an assistant answer. Keep it separate from
+    // the work client's capacity notice so recovery can explain what failed.
+    const websiteUnavailable = !chatInterfaceReady
+        && all(document, 'h1,h2,h3,p,div,span,[role="alert"]').some(e =>
+            !e.closest(s.assistant_message) && !e.closest(s.user_message)
+            && /^该页面暂时不可用[。！!]?\s*$/.test(text(e)))
+        && /这可能是一个技术错误|请尝试刷新此页面/.test(document.body.innerText);
     return {
         page_url: location.href, page_title: document.title,
         assistant_count: assistants.length, answer, question_verified: questionVerified, user_message_count: users.length,
@@ -394,6 +404,7 @@ SNAPSHOT_JS = r"""({s, question, allowExternalPanels, submissionFormat, literalP
         chat_interface_ready: chatInterfaceReady,
         rate_limited: /请求过于频繁|操作频繁，请|访问过于频繁/.test(document.body.innerText),
         service_unavailable: /^算力紧张，办公能力得晚点才能用了/.test(answer.trim()),
+        website_temporarily_unavailable: websiteUnavailable,
         login_state: all(document, '[data-testid="to_login_button"]').length ? 'guest' : 'unknown',
         client_mode: /工作/.test(text(all(document, '[data-testid="workspace-switch-chip"]')[0])) || /^豆包工作/.test(document.title) ? 'work' : 'consumer',
         model_label: text(all(document, s.model_label)[0]) || null,
@@ -425,6 +436,64 @@ async def _first_visible(locator: Any) -> Any:
         if await item.is_visible():
             return item
     return None
+
+
+async def _fenced_editor_settle(editor: Any, sent_text: str, run_dir: Path) -> dict[str, Any]:
+    """Allow the observed work editor to settle without editing or submitting again.
+
+    A correct DOM readback can precede the composer's own input processing.
+    Two exact observations a second apart are a bounded precaution, not proof
+    of app readiness or delivery; the normal user-message receipt is still required.
+    """
+    started = time.monotonic()
+    before = await editor.evaluate(EDITOR_READBACK_JS, sent_text)
+    first = before.get('readback')
+    proof = {'minimum_wait_seconds': 1.0, 'observations': 1,
+             'expected_submission_sha256': hashlib.sha256(sent_text.encode('utf-8')).hexdigest(),
+             'before_sha256': hashlib.sha256(first.encode('utf-8')).hexdigest() if isinstance(first, str) else None,
+             'matched_before': first == sent_text, 'matched_after': None,
+             'unchanged_between_observations': None, 'waited_seconds': 0.0}
+    if first == sent_text:
+        await asyncio.sleep(1.0)
+        after = await editor.evaluate(EDITOR_READBACK_JS, sent_text)
+        second = after.get('readback')
+        proof.update(observations=2,
+            after_sha256=hashlib.sha256(second.encode('utf-8')).hexdigest() if isinstance(second, str) else None,
+            matched_after=second == sent_text, unchanged_between_observations=second == first,
+            waited_seconds=time.monotonic() - started)
+    (run_dir / 'editor-settle.json').write_text(json.dumps(proof, ensure_ascii=False, indent=2), encoding='utf-8')
+    return proof
+
+
+async def _fenced_send_control(page: Any, config: CollectorConfig, run_dir: Path) -> Any:
+    """Bind one visible, ready send button before recording any send attempt."""
+    locator = page.locator(config.selectors.send_button)
+    matched = await locator.count()
+    handles = []
+    observations = []
+    for index in range(matched):
+        handle = await locator.nth(index).element_handle()
+        if handle is None or not await handle.is_visible():
+            continue
+        evidence = await handle.evaluate('''e => ({tag_name:e.tagName, test_id:e.getAttribute('data-testid'),
+            id:e.id || null, disabled:e.disabled === true, aria_disabled:e.getAttribute('aria-disabled'),
+            data_disabled:e.getAttribute('data-disabled'), data_loading:e.getAttribute('data-loading')})''')
+        evidence['enabled'] = await handle.is_enabled()
+        handles.append(handle)
+        observations.append(evidence)
+    proof = {'selector': config.selectors.send_button, 'matched_count': matched,
+             'visible_count': len(handles), 'controls': observations}
+    (run_dir / 'submission-control.json').write_text(json.dumps(proof, ensure_ascii=False, indent=2), encoding='utf-8')
+    if len(handles) != 1:
+        raise ValueError('submission_send_button_not_unique_not_submitted')
+    control = observations[0]
+    if (control.get('disabled') is True or control.get('enabled') is not True
+            or any(str(control.get(name) or '').strip().casefold() == 'true'
+                   for name in ('aria_disabled', 'data_disabled', 'data_loading'))):
+        raise ValueError('submission_send_button_not_ready_not_submitted')
+    # ElementHandle keeps this exact node bound. Replacement or detachment
+    # after checkpoint must fail conservatively, never retarget another button.
+    return handles[0]
 
 
 async def _navigate_to_doubao(page: Any, timeout_seconds: float) -> None:
@@ -955,6 +1024,7 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                 initial = await _wait_for_manual_verification(page, config, run_dir, result, initial, progress=progress)
                 if _blocked_reason(initial):
                     result.update(collection_status='need_action', failure_reason=_blocked_reason(initial),
+                                  failure_stage=stage,
                                   finished_at=datetime.now(HK_TIME).isoformat())
                     await _save_checkpoint(page, config, run_dir, result, 'before')
                     return result, write_evidence_result(run_dir, result)
@@ -979,7 +1049,7 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                                               "browser_user_agent": await page.evaluate("navigator.userAgent")})
                 await _save_checkpoint(page, config, run_dir, result, "before")
                 if _blocked_reason(baseline):
-                    result.update(collection_status="need_action", failure_reason=_blocked_reason(baseline))
+                    result.update(collection_status="need_action", failure_reason=_blocked_reason(baseline), failure_stage=stage)
                     result["finished_at"] = datetime.now(HK_TIME).isoformat()
                     return result, write_evidence_result(run_dir, result)
                 if baseline["client_mode"] != config.client_mode:
@@ -1017,6 +1087,9 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                 stage = "question_evidence"
                 await _save_checkpoint(page, config, run_dir, result, "question")
                 stage = 'editor_readback'
+                editor_settle = None
+                if config.submission_format == 'verbatim_fenced':
+                    editor_settle = await _fenced_editor_settle(editor, sent_text, run_dir)
                 editor_proof = await editor.evaluate(EDITOR_READBACK_JS, sent_text)
                 readback = editor_proof.get('readback')
                 (run_dir / 'editor-readback.json').write_text(json.dumps({
@@ -1025,13 +1098,20 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                     'editor_readback': readback,
                     'editor_readback_sha256': hashlib.sha256(readback.encode('utf-8')).hexdigest() if isinstance(readback, str) else None,
                     'editor_readback_method': editor_proof['method'],
+                    'editor_settle': editor_settle,
                     'editor_dom': editor_proof['editor_dom'],
                     'editor_inner_text': editor_proof['inner_text'], 'editor_text_content': editor_proof['text_content'],
                     'verified': readback == sent_text}, ensure_ascii=False, indent=2), encoding='utf-8')
-                if readback != sent_text:
+                if (readback != sent_text or editor_settle is not None
+                        and (editor_settle['matched_before'] is not True or editor_settle['matched_after'] is not True)):
                     raise ValueError('editor_readback_mismatch_not_submitted')
                 if config.submission_format == 'verbatim_fenced' and baseline.get('user_message_count') != 0:
                     raise ValueError('submission_fresh_user_context_not_confirmed')
+                send_control = None
+                if config.submission_format == 'verbatim_fenced':
+                    stage = 'submission_control'
+                    send_control = await _fenced_send_control(page, config, run_dir)
+                result['submission_transport']['method'] = 'visible_send_button' if send_control is not None else 'editor_enter'
                 result["question_submission_attempted"] = True
                 submission = SubmissionReceipt(page, config.question, baseline['assistant_count'],
                     submitted_text=sent_text, editor_readback=readback, submission_format=config.submission_format,
@@ -1039,7 +1119,7 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                 submission.attempted()
                 # Persist conservative attempt state before the first operation
                 # that can submit. If either evidence or the native task store
-                # cannot persist it, the Enter press must never occur.
+                # cannot persist it, neither a click nor an Enter may occur.
                 stage = 'submission_checkpoint'
                 result['submission_receipt'] = submission.evidence()
                 checkpoint_path = write_evidence_result(run_dir, result)
@@ -1048,7 +1128,10 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                               'question_submission_attempted': True, 'question_submitted': False,
                               'evidence_path': str(checkpoint_path)})
                 stage = "submit_question"
-                await editor.press("Enter")  # exactly one submission, never an automatic retry
+                if send_control is not None:
+                    await send_control.click(timeout=5000)  # one operation; no Enter fallback or retry
+                else:
+                    await editor.press("Enter")  # plain GEO questions retain their observed transport
                 if progress:
                     progress({'event': 'question_sent', 'state': 'waiting_for_answer',
                               'question_submission_attempted': True, 'question_submitted': False})
@@ -1072,7 +1155,8 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                     if last["assistant_count"] > baseline["assistant_count"]:
                         result["response"] = last["answer"]
                     if reason:
-                        result.update(collection_status="failed" if reason == "service_capacity_unavailable" else "need_action", failure_reason=reason)
+                        result.update(collection_status="failed" if reason == "service_capacity_unavailable" else "need_action",
+                                      failure_reason=reason, failure_stage=stage)
                         break
                     if verified and is_deferred_answer(last.get('answer')):
                         submission.observed_deferred(last, verified=verified)
@@ -1161,6 +1245,8 @@ def _blocked_reason(snapshot: dict[str, Any]) -> str | None:
         return "human_verification_required"
     if snapshot.get("login_required"):
         return "login_required"
+    if snapshot.get("website_temporarily_unavailable"):
+        return "website_temporarily_unavailable"
     try:
         logout_path = urlsplit(snapshot.get('page_url') or '').path.rstrip('/') in ('/logout', '/chat/logout')
     except (ValueError, TypeError):

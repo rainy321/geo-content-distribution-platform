@@ -12,6 +12,7 @@ from services import geo_content_research as research, geo_content_store as stor
 from services import geo_destination_service as destinations
 from services.article_service import update_article
 from services.geo_test_service import plan_fingerprint
+from services.geo_feedback_summary import collection_summary
 from services.project_service import create_project
 from tests.test_geo_content_loop import ResearchFixture, draft, facts
 from tests.test_geo_destinations import config
@@ -37,6 +38,76 @@ class TestPublicationFeedback(ResearchFixture, unittest.TestCase):
         for case in value['cases']:
             case['collected_at'] = collected_at
         return value
+
+    def test_stopped_empty_retest_exposes_collection_failure_without_changing_report(self):
+        after = self.retest()
+        after.update(status='stopped', stop_reason='browser_error:TimeoutError')
+        for index, case in enumerate(after['cases']):
+            case.update(status='failed' if index == 0 else 'pending', response=None,
+                        collected_at=None, model_label=None, client_mode=None,
+                        failure_reason='browser_error:TimeoutError' if index == 0 else None,
+                        result_path='C:/private/account/evidence/result.json')
+            case['assessment'].update(answer_evaluable=False)
+            for key in ('failure_stage', 'question_submission_attempted', 'question_submitted'):
+                case.pop(key, None)
+        original = copy.deepcopy(after)
+        loaded = store.attach_retest(self.database, self.cycle['id'], after)['retests'][0]
+        summary = loaded['collection']
+        self.assertEqual(summary['status'], 'stopped')
+        self.assertFalse(summary['has_evaluable_answers'])
+        self.assertEqual(summary['stop_reason'], 'browser_error:TimeoutError')
+        self.assertEqual(summary['counts'], {'planned': len(after['cases']), 'evaluable': 0,
+                         'failed': 1, 'pending': len(after['cases']) - 1, 'excluded_private': 0, 'incomplete': 0})
+        self.assertIsNone(summary['issues'][0]['failure_stage'])
+        self.assertIsNone(summary['issues'][0]['question_submitted'])
+        self.assertNotIn('private/account', json.dumps(summary))
+        self.assertFalse(loaded['comparison']['conditions_match'])
+        self.assertTrue(all(row['change'] is None for row in loaded['comparison']['cohorts']))
+        self.assertEqual(after, original)
+        with closing(sqlite3.connect(self.database)) as connection:
+            stored_before = connection.execute('SELECT report FROM geo_content_retests WHERE cycle_id=?', (self.cycle['id'],)).fetchone()[0]
+        store.get_cycle(self.database, self.cycle['id'])
+        with closing(sqlite3.connect(self.database)) as connection:
+            stored_after = connection.execute('SELECT report FROM geo_content_retests WHERE cycle_id=?', (self.cycle['id'],)).fetchone()[0]
+        self.assertEqual(stored_before, stored_after)
+        self.assertEqual(json.loads(stored_after), original)
+
+    def test_feedback_collection_summary_uses_current_private_isolation_and_keeps_other_answers(self):
+        after = self.retest()
+        after['execution']['client_mode'] = 'work'
+        for case in after['cases']:
+            case['client_mode'] = 'work'
+        after['cases'][0]['response'] = '内部资料已显示合成客户的项目情况。'
+        before = copy.deepcopy(after)
+        summary = collection_summary(after)
+        self.assertEqual(summary['counts']['evaluable'], len(after['cases']) - 1)
+        self.assertEqual(summary['counts']['excluded_private'], 1)
+        self.assertEqual(summary['counts']['failed'], 0)
+        self.assertTrue(summary['has_evaluable_answers'])
+        self.assertEqual(summary['issues'][0]['failure_reason'], 'private_account_context')
+        self.assertNotIn('合成客户的项目情况', json.dumps(summary, ensure_ascii=False))
+        self.assertEqual(after, before)
+
+    def test_feedback_summary_only_exposes_typed_phase_and_submission_evidence(self):
+        after = self.retest()
+        after['status'] = 'stopped'
+        after['stop_reason'] = 'C:/private/profile/TimeoutError'
+        for case in after['cases']:
+            case.update(status='failed', failure_reason='C:/private/profile/TimeoutError',
+                        failure_stage='navigation', question_submission_attempted=False, question_submitted=False)
+        summary = collection_summary(after)
+        self.assertIsNone(summary['stop_reason'])
+        self.assertEqual(summary['issues'][0]['failure_stage'], 'navigation')
+        self.assertFalse(summary['issues'][0]['question_submission_attempted'])
+        self.assertFalse(summary['issues'][0]['question_submitted'])
+        self.assertIsNone(summary['issues'][0]['failure_reason'])
+        after['cases'][0]['failure_stage'] = 'submission_control'
+        self.assertEqual(collection_summary(after)['issues'][0]['failure_stage'], 'submission_control')
+        after['cases'][0].update(failure_stage='C:/private/profile', question_submission_attempted=0, question_submitted='false')
+        issue = collection_summary(after)['issues'][0]
+        self.assertIsNone(issue['failure_stage'])
+        self.assertIsNone(issue['question_submission_attempted'])
+        self.assertIsNone(issue['question_submitted'])
 
     def test_same_project_facts_are_candidates_and_require_new_confirmation(self):
         self.prepare_facts()

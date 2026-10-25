@@ -53,6 +53,7 @@ async def _plan_with_doubao(profile, args, config, *, progress=None):
     _print({"event": "planner_collected", "status": result["collection_status"], "result_path": str(path)})
     if progress:
         progress({'event': 'collector_finished', 'failure_reason': result.get('failure_reason'),
+                  'failure_stage': result.get('failure_stage'),
                   'collection_status': result.get('collection_status'), 'evidence_path': str(path),
                   'question_submission_attempted': result.get('question_submission_attempted'),
                   'question_submitted': result.get('question_submitted')})

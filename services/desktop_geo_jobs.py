@@ -148,6 +148,9 @@ class DesktopGeoJobs:
                 failure = safe_reason(event.get('failure_reason'))
                 if failure:
                     self.job['failure_reason'] = failure
+                stage = event.get('failure_stage')
+                if isinstance(stage, str) and 0 < len(stage) <= 80 and all(c.islower() or c == '_' for c in stage):
+                    self.job['failure_stage'] = stage
                 path = event.get('evidence_path')
                 if isinstance(path, str):
                     try:
@@ -180,7 +183,7 @@ class DesktopGeoJobs:
             'manual_action_required': '等待你在当前豆包窗口完成正常验证或登录；保持窗口打开，本轮会原地继续，请勿重新发送。',
             'manual_action_cleared': '正常验证或登录已解除，继续当前请求；不会重新发送问题。',
             'manual_action_ended': '当前验证等待已结束，请核对窗口与提交状态；不会自动重发。',
-            'question_sent': '问题已发送，正在等待豆包当前回答；无需重复发送。',
+            'question_sent': '已执行本次发送操作，正在核对豆包当前请求的回执；请勿重复发送。',
             'question_submission_started': '已保留本次发送尝试，正在提交当前问题；请勿重复开始。',
             'background_task_waiting': '豆包已委托后台调研，尚未返回最终回答；保留当前请求等待，不作为曝光结果，无需重新发送。',
             'background_task_cleared': '豆包后台调研已返回当前请求的最终回答，继续保存证据。',
@@ -198,6 +201,10 @@ class DesktopGeoJobs:
         with self.lock:
             if self.job.get('status') != 'running':
                 return
+            if name == 'case_started':
+                for field in ('submission_state', 'collector_finished', 'collector_need_action',
+                              'failure_reason', 'failure_stage', 'evidence_path'):
+                    self.job.pop(field, None)
             for field in ('question_submission_attempted', 'question_submitted'):
                 if field in safe:
                     self.job.setdefault('submission_state', {})[field] = safe[field]
@@ -247,7 +254,10 @@ class DesktopGeoJobs:
                 with self.lock:
                     self.job.update(status="completed", result=result, waiting_for_user=False)
                     self.job.pop('wait_reason', None)
-                    if isinstance(result, dict) and result.get('message'):
+                    report = result.get('report') if kind == 'run' and isinstance(result, dict) else None
+                    if isinstance(report, dict) and report.get('status') in ('stopped', 'needs_review'):
+                        self._apply_incomplete_run(report)
+                    elif isinstance(result, dict) and result.get('message'):
                         self.job['message'] = result['message']
                     elif self.job.get('progress'):
                         self.job['message'] = '本轮任务已结束，结果和未完成原因已保存，请查看对应记录。'
@@ -274,7 +284,10 @@ class DesktopGeoJobs:
                         message = f"软件采集组件加载失败（{getattr(error, 'name', None) or '运行库'}），本次未发送问题。请重新打开更新后的软件。"
                     needs_action = self.job.get('collector_need_action') is True
                     if needs_action:
-                        message = recovery_message(self.job.get('failure_reason'))
+                        state = self.job.get('submission_state') or {}
+                        message = recovery_message(self.job.get('failure_reason'),
+                            attempted=state.get('question_submission_attempted'), submitted=state.get('question_submitted'),
+                            failure_stage=self.job.get('failure_stage'))
                     self.job.update(status="need_action" if needs_action else "failed", waiting_for_user=False, message=message)
                     self.job.pop('wait_reason', None)
                     self._persist()
@@ -293,6 +306,38 @@ class DesktopGeoJobs:
         self.worker = threading.Thread(target=run, daemon=True, name="GEO native collector")
         self.worker.start()
         return {"id": self.job["id"], "status": "running"}
+
+    def _apply_incomplete_run(self, report):
+        """A completed worker is not a successfully completed collection run."""
+        rows = report.get('cases') if isinstance(report.get('cases'), list) else []
+        reason = safe_reason(report.get('stop_reason'))
+        # A resumed report can contain an earlier failed question. Bind the
+        # task's submission state to the failure which stopped this attempt,
+        # never to an unrelated earlier row.
+        row = next((item for item in reversed(rows) if isinstance(item, dict)
+                    and reason and item.get('failure_reason') == reason
+                    and item.get('collection_status') not in (None, 'success', 'partial')), {})
+        state = {field: row[field] for field in ('question_submission_attempted', 'question_submitted')
+                 if type(row.get(field)) is bool}
+        if state:
+            self.job.update(submission_state=state, collector_finished=True)
+        if reason:
+            self.job['failure_reason'] = reason
+        stage = row.get('failure_stage')
+        if isinstance(stage, str):
+            self.job['failure_stage'] = stage
+        evidence = row.get('result_path')
+        if isinstance(evidence, str):
+            try:
+                Path(evidence).resolve().relative_to(self.data.resolve())
+                self.job['evidence_path'] = evidence
+            except (OSError, ValueError):
+                pass
+        needs_action = action_required(reason, row.get('collection_status'))
+        self.job['status'] = ('needs_review' if report.get('status') == 'needs_review'
+                              else 'need_action' if needs_action else 'failed')
+        self.job['message'] = recovery_message(reason, attempted=state.get('question_submission_attempted'),
+            submitted=state.get('question_submitted'), failure_stage=stage)
 
     def open_login(self, options):
         try:
@@ -392,6 +437,7 @@ class DesktopGeoJobs:
                 result, path = await collect_doubao_sources(replace(config, question=prompt, submission_format='verbatim_fenced',
                     output_root=self.data / 'geo-content/evidence' / uuid.uuid4().hex), progress=self._collector_progress)
             self._collector_progress({'event': 'collector_finished', 'failure_reason': result.get('failure_reason'),
+                'failure_stage': result.get('failure_stage'),
                 'collection_status': result.get('collection_status'), 'evidence_path': str(path),
                 'question_submission_attempted': result.get('question_submission_attempted'),
                 'question_submitted': result.get('question_submitted')})
