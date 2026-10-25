@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from services.zhihu_publish_flow import ZhihuAIStatementNotConfirmedError
+from services.zhihu_publish_flow import ZhihuAIStatementNotConfirmedError, ZhihuEditorNotReadyError
 
 
 PUBLISH_RESULT_STATUSES = frozenset(
@@ -253,7 +253,7 @@ class ZhihuPublisherAdapter(PublisherAdapter):
                 self.account_file,
                 timeout_seconds=self.timeout_seconds,
             )
-        except ZhihuAIStatementNotConfirmedError as exc:
+        except (ZhihuAIStatementNotConfirmedError, ZhihuEditorNotReadyError) as exc:
             # This typed boundary can only originate from the pre-publish
             # declaration check. Do not run a post-submission probe or turn
             # it into a misleading login/unknown-submission message.
@@ -391,6 +391,12 @@ class ZhihuPublisherAdapter(PublisherAdapter):
         )
 
     def _exception_result(self, exc: Exception, *, prefix: str) -> PublishResult:
+        if isinstance(exc, ZhihuEditorNotReadyError):
+            logging.warning("Zhihu publisher paused stage=before_publish code=editor_not_ready")
+            return PublishResult(
+                success=False, platform=self.platform, status="need_action",
+                message="知乎编辑器尚未就绪，请先检查编辑器是否完整加载；本次未点击发布，原稿和任务记录已保留",
+            )
         if isinstance(exc, ZhihuAIStatementNotConfirmedError):
             logging.warning("Zhihu publisher paused stage=before_publish code=ai_creation_statement_not_confirmed")
             return PublishResult(
@@ -1372,7 +1378,7 @@ def _normalize_guarded_public_result(
 def classify_publisher_error(error: Exception | str) -> str:
     """Map platform safety/login failures to the shared task status."""
 
-    if isinstance(error, ZhihuAIStatementNotConfirmedError):
+    if isinstance(error, (ZhihuAIStatementNotConfirmedError, ZhihuEditorNotReadyError)):
         return "need_action"
     normalized = str(error).lower()
     return (

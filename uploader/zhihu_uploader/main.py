@@ -8,13 +8,13 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from playwright.async_api import Page, async_playwright, expect
+from playwright.async_api import Error as PlaywrightError, Page, async_playwright, expect
 
 from conf import LOCAL_CHROME_HEADLESS, LOCAL_CHROME_PATH
 from utils.log import zhihu_logger
 from services.browser_executable import browser_executable_options
 from services.login_runtime import LoginCancelled
-from services.zhihu_publish_flow import ZhihuAIStatementNotConfirmedError
+from services.zhihu_publish_flow import ZhihuAIStatementNotConfirmedError, ZhihuEditorNotReadyError
 
 ZHIHU_LOGIN_URL = "https://www.zhihu.com/signin"
 ZHIHU_WRITE_URL = "https://zhuanlan.zhihu.com/write"
@@ -241,11 +241,14 @@ class ZhiHuArticle(object):
         page = await context.new_page()
         try:
             await page.goto(ZHIHU_WRITE_URL, timeout=90000, wait_until="domcontentloaded")
-            await page.wait_for_timeout(2000)
             if _is_login_url(page.url):
                 raise RuntimeError("知乎 cookie 已失效，请重新登录")
-            await self.fill_title(page)
-            await self.fill_body(page)
+            try:
+                await self._wait_for_editor_ready(page)
+                await self.fill_title(page)
+                await self.fill_body(page)
+            except Exception as exc:
+                raise ZhihuEditorNotReadyError("知乎编辑器尚未就绪，需要人工核对；本次未点击发布") from exc
             if self.cover_path:
                 await self.upload_cover(page)
             await self.apply_creation_statement(page)
@@ -270,6 +273,34 @@ class ZhiHuArticle(object):
         finally:
             await context.close()
             await browser.close()
+
+    async def _wait_for_editor_ready(self, page: Page, *, timeout_seconds=20.0) -> None:
+        """Wait for recognizable editable fields; never click, type or submit."""
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+
+        async def ready(selectors):
+            for selector in selectors:
+                field = page.locator(selector).first
+                if await field.count() and await field.is_visible():
+                    try:
+                        if await field.is_enabled(timeout=500) and await field.is_editable(timeout=500):
+                            return True
+                    except PlaywrightError:
+                        # A visible wrapper or a control still being replaced
+                        # is not an editable writer field. Keep waiting within
+                        # the shared budget instead of treating it as ready.
+                        continue
+            return False
+
+        title_selectors = ('textarea[placeholder*="标题"]', 'input[placeholder*="标题"]')
+        body_selectors = ('.public-DraftEditor-content', '[contenteditable="true"]',
+                          '.ProseMirror', 'div[role="textbox"]', '.ql-editor')
+        while True:
+            if await ready(title_selectors) and await ready(body_selectors):
+                return
+            if asyncio.get_running_loop().time() >= deadline:
+                raise ZhihuEditorNotReadyError("知乎编辑器尚未就绪，需要人工核对；本次未点击发布")
+            await asyncio.sleep(min(0.2, max(0, deadline-asyncio.get_running_loop().time())))
 
     async def apply_creation_statement(self, page: Page) -> None:
         """选择写文章页「创作声明」下拉项。"""

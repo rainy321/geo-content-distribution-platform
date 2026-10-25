@@ -3,7 +3,7 @@ import unittest
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
 
-from services.zhihu_publish_flow import ZhihuAIStatementNotConfirmedError
+from services.zhihu_publish_flow import ZhihuAIStatementNotConfirmedError, ZhihuEditorNotReadyError
 
 from services.publisher_adapter import (
     BaijiahaoPublisherAdapter,
@@ -229,6 +229,26 @@ class ZhihuPublisherAdapterTests(unittest.TestCase):
         self.assertIn('AI 创作声明', result.message)
         self.assertIn('未点击发布', result.message)
         for misleading in ('登录', '安全验证', '状态未知', 'PRIVATE_EDITOR_DATA'):
+            self.assertNotIn(misleading, result.message)
+
+    def test_editor_readiness_failure_is_known_before_publish_and_does_not_probe_afterward(self):
+        checks = []
+
+        def checker(_title, _account_file, attempts):
+            checks.append(attempts)
+            return None
+
+        def blocked(_content, _account_file):
+            raise ZhihuEditorNotReadyError('PRIVATE_EDITOR_DOM')
+
+        result = self._adapter(publication_checker=checker, publish_runner=blocked).publish(self.content)
+
+        self.assertEqual(checks, [1])
+        self.assertFalse(result.success)
+        self.assertEqual(result.status, 'need_action')
+        self.assertIn('编辑器尚未就绪', result.message)
+        self.assertIn('未点击发布', result.message)
+        for misleading in ('登录', '状态未知', 'PRIVATE_EDITOR_DOM'):
             self.assertNotIn(misleading, result.message)
 
     def test_ordinary_errors_are_failed(self):

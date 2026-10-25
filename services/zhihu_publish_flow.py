@@ -13,6 +13,10 @@ class ZhihuAIStatementNotConfirmedError(RuntimeError):
     """The declaration check stopped before the uploader's publish action."""
 
 
+class ZhihuEditorNotReadyError(RuntimeError):
+    """The editor preparation failed before any uploader publish action."""
+
+
 async def click_exact_publish_and_observe(page: Any) -> dict[str, Any]:
     """Click Zhihu's exact publish action and report only observable outcomes.
 

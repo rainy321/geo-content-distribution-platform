@@ -32,7 +32,9 @@ class ZhihuAIStatementTests(unittest.IsolatedAsyncioTestCase):
                                     creation_statement=AI)
 
     async def prepare(self, html):
-        await self.page.set_content('<meta charset="utf-8"><script>window.combos=0;</script>' + html)
+        await self.page.set_content('<meta charset="utf-8"><script>window.combos=0;</script>'
+            '<textarea placeholder="请输入标题"></textarea>'
+            '<div class="public-DraftEditor-content" contenteditable="true" style="height:50px"></div>' + html)
         await self.page.evaluate('(label)=>window.ai=label', AI)
 
     async def upload_with_local_dom(self):
