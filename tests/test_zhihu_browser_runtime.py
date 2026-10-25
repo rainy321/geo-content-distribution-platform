@@ -56,6 +56,8 @@ class ZhihuBrowserRuntimeTests(unittest.IsolatedAsyncioTestCase):
                         article.fill_title = AsyncMock()
                         article.fill_body = AsyncMock()
                         article._wait_for_editor_ready = AsyncMock()
+                        article._assert_empty_editor = AsyncMock()
+                        article._verify_content = AsyncMock()
                         article.apply_creation_statement = AsyncMock()
                         article.click_publish = AsyncMock()
                         await article.upload(runtime)

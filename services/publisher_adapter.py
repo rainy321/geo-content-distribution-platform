@@ -392,10 +392,17 @@ class ZhihuPublisherAdapter(PublisherAdapter):
 
     def _exception_result(self, exc: Exception, *, prefix: str) -> PublishResult:
         if isinstance(exc, ZhihuEditorNotReadyError):
-            logging.warning("Zhihu publisher paused stage=before_publish code=editor_not_ready")
+            code = exc.reason_code
+            logging.warning("Zhihu publisher paused stage=before_publish code=%s", code)
+            hint = {
+                'editor_existing_content': '知乎编辑器已有草稿内容，已停止以免覆盖，请先核对原草稿',
+                'title_readback_mismatch': '知乎文章标题未通过回读核对，请先检查原草稿',
+                'body_readback_mismatch': '知乎正文未完整写入或未通过回读核对，请先检查原草稿',
+                'body_input_empty': '知乎正文仍为空，未能确认输入成功，请先检查原草稿',
+            }.get(code, '知乎编辑器尚未就绪，请先检查编辑器是否完整加载')
             return PublishResult(
                 success=False, platform=self.platform, status="need_action",
-                message="知乎编辑器尚未就绪，请先检查编辑器是否完整加载；本次未点击发布，原稿和任务记录已保留",
+                message=f"{hint}；本次未点击发布，原稿和任务记录已保留",
             )
         if isinstance(exc, ZhihuAIStatementNotConfirmedError):
             logging.warning("Zhihu publisher paused stage=before_publish code=ai_creation_statement_not_confirmed")

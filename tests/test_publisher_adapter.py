@@ -251,6 +251,26 @@ class ZhihuPublisherAdapterTests(unittest.TestCase):
         for misleading in ('登录', '状态未知', 'PRIVATE_EDITOR_DOM'):
             self.assertNotIn(misleading, result.message)
 
+    def test_known_content_readback_reasons_have_precise_pre_publish_messages(self):
+        for code, expected in (('editor_existing_content', '已停止以免覆盖'),
+                               ('title_readback_mismatch', '标题未通过回读'),
+                               ('body_readback_mismatch', '正文未完整写入或未通过回读'),
+                               ('body_input_empty', '正文仍为空')):
+            with self.subTest(code=code):
+                checks = []
+                def checker(_title, _account_file, attempts):
+                    checks.append(attempts)
+                    return None
+                def blocked(_content, _account_file):
+                    raise ZhihuEditorNotReadyError('PRIVATE_CONTENT', reason_code=code)
+                result = self._adapter(publication_checker=checker, publish_runner=blocked).publish(self.content)
+                self.assertEqual(checks, [1])
+                self.assertEqual(result.status, 'need_action')
+                self.assertIn(expected, result.message)
+                self.assertIn('未点击发布', result.message)
+                for wrong in ('登录', '状态未知', 'PRIVATE_CONTENT'):
+                    self.assertNotIn(wrong, result.message)
+
     def test_ordinary_errors_are_failed(self):
         def raise_network_error(*_args):
             raise RuntimeError("连接被重置")

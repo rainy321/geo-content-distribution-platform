@@ -16,6 +16,12 @@ class ZhihuAIStatementNotConfirmedError(RuntimeError):
 class ZhihuEditorNotReadyError(RuntimeError):
     """The editor preparation failed before any uploader publish action."""
 
+    def __init__(self, message="", *, reason_code="editor_not_ready"):
+        super().__init__(message)
+        allowed = {'editor_not_ready', 'editor_preparation_failed', 'editor_existing_content',
+                   'title_readback_mismatch', 'body_readback_mismatch', 'body_input_empty'}
+        self.reason_code = reason_code if reason_code in allowed else 'editor_not_ready'
+
 
 async def click_exact_publish_and_observe(page: Any) -> dict[str, Any]:
     """Click Zhihu's exact publish action and report only observable outcomes.

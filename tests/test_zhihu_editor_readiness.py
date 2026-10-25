@@ -69,6 +69,8 @@ class ZhihuEditorReadinessTests(unittest.IsolatedAsyncioTestCase):
 
                 article.fill_title = AsyncMock(side_effect=title)
                 article.fill_body = AsyncMock()
+                article._assert_empty_editor = AsyncMock()
+                article._verify_content = AsyncMock()
                 article.apply_creation_statement = AsyncMock()
                 article.click_publish = AsyncMock()
                 if ready:

@@ -245,13 +245,20 @@ class ZhiHuArticle(object):
                 raise RuntimeError("知乎 cookie 已失效，请重新登录")
             try:
                 await self._wait_for_editor_ready(page)
+                await self._assert_empty_editor(page)
                 await self.fill_title(page)
                 await self.fill_body(page)
+                await self._verify_content(page)
+            except ZhihuEditorNotReadyError:
+                raise
             except Exception as exc:
-                raise ZhihuEditorNotReadyError("知乎编辑器尚未就绪，需要人工核对；本次未点击发布") from exc
+                zhihu_logger.warning("知乎编辑准备未完成 code=editor_preparation_failed")
+                raise ZhihuEditorNotReadyError("知乎编辑器尚未就绪，需要人工核对；本次未点击发布",
+                                               reason_code='editor_preparation_failed') from exc
             if self.cover_path:
                 await self.upload_cover(page)
             await self.apply_creation_statement(page)
+            await self._verify_content(page)
             if self.dry_run:
                 zhihu_logger.warning("🛑 【仅预览不发布】已跳过点击发布按钮")
                 zhihu_logger.info("👀 请在浏览器窗口核对：标题、正文、封面、创作声明")
@@ -312,6 +319,7 @@ class ZhiHuArticle(object):
             try:
                 await self._apply_required_ai_creation_statement(page, label)
             except Exception as exc:
+                zhihu_logger.warning(f"知乎 AI 声明核对未完成 code=ai_statement_unconfirmed exception_type={type(exc).__name__}")
                 raise ZhihuAIStatementNotConfirmedError("知乎 AI 创作声明尚未确认，需要人工核对后再发布") from exc
             return
         try:
@@ -370,7 +378,7 @@ class ZhiHuArticle(object):
         except Exception as exc:
             zhihu_logger.warning(f"设置创作声明失败（可忽略）: {exc}")
 
-    async def _apply_required_ai_creation_statement(self, page: Page, label: str) -> None:
+    async def _apply_required_ai_creation_statement(self, page: Page, label: str, *, ready_timeout_seconds=5.0) -> None:
         def normalized(value):
             return "".join((value or "").split())
 
@@ -379,58 +387,78 @@ class ZhiHuArticle(object):
                     if await locator.nth(index).is_visible()]
 
         rows = page.locator('div:has(> label:has-text("创作声明"))')
-        matches = await visible(rows)
-        if len(matches) != 1:
-            raise RuntimeError("创作声明区域无法唯一确认")
-        controls = await visible(matches[0].locator('button[role="combobox"], button.Select-button'))
-        if len(controls) != 1 or not await controls[0].is_enabled():
-            raise RuntimeError("创作声明选择框尚未就绪")
-        combo = controls[0]
-        await combo.scroll_into_view_if_needed()
+        deadline = asyncio.get_running_loop().time() + ready_timeout_seconds
+        scrolls = 0
+        while True:
+            matches = await visible(rows)
+            if len(matches) > 1:
+                zhihu_logger.warning("知乎 AI 声明核对停止 code=ai_statement_region_ambiguous")
+                raise RuntimeError("创作声明区域无法唯一确认")
+            controls = (await visible(matches[0].locator('button[role="combobox"], button.Select-button'))
+                        if len(matches) == 1 else [])
+            if len(controls) > 1:
+                zhihu_logger.warning("知乎 AI 声明核对停止 code=ai_statement_control_ambiguous")
+                raise RuntimeError("创作声明选择框无法唯一确认")
+            if len(controls) == 1 and await controls[0].is_enabled():
+                combo = controls[0]
+                await combo.scroll_into_view_if_needed(timeout=3000)
+                break
+            if asyncio.get_running_loop().time() >= deadline:
+                code = 'ai_statement_region_not_ready' if len(matches) != 1 else 'ai_statement_control_not_ready'
+                zhihu_logger.warning(f"知乎 AI 声明核对停止 code={code}")
+                raise RuntimeError("创作声明区域或选择框尚未就绪")
+            if not matches and scrolls < 3:
+                await page.mouse.wheel(0, 600)
+                scrolls += 1
+            await asyncio.sleep(.2)
         if normalized(await combo.inner_text()) == normalized(label):
+            zhihu_logger.info("知乎 AI 声明已核对 code=ai_statement_already_confirmed")
             return
 
         await combo.click(timeout=5000)
         candidates = page.get_by_role("option", name=label, exact=True)
+        zhihu_logger.info("知乎 AI 声明核对阶段 code=ai_statement_option_wait")
         await candidates.first.wait_for(state="visible", timeout=5000)
         options = await visible(candidates)
         if len(options) != 1 or not await options[0].is_enabled():
+            zhihu_logger.warning("知乎 AI 声明核对停止 code=ai_statement_option_not_unique_or_enabled")
             raise RuntimeError("AI 创作声明选项无法唯一确认")
         await options[0].click(timeout=5000)
         # Re-read the visible control. Do not treat an option click as
         # confirmation, choose another label, force a click, or submit anyway.
         expected_text = re.compile(r"^\s*" + r"\s*".join(re.escape(c) for c in normalized(label)) + r"\s*$")
+        zhihu_logger.info("知乎 AI 声明核对阶段 code=ai_statement_readback_wait")
         await expect(combo).to_have_text(expected_text, timeout=5000)
         matches = await visible(rows)
         controls = (await visible(matches[0].locator('button[role="combobox"], button.Select-button'))
                     if len(matches) == 1 else [])
         if (len(controls) != 1 or not await controls[0].is_enabled()
                 or normalized(await controls[0].inner_text()) != normalized(label)):
+            zhihu_logger.warning("知乎 AI 声明核对停止 code=ai_statement_readback_mismatch")
             raise RuntimeError("AI 创作声明选择结果未确认")
 
-    async def fill_title(self, page: Page) -> None:
+    @staticmethod
+    def _normalized_editor_text(value: str) -> str:
+        return (value or '').replace('\r\n', '\n').replace('\r', '\n').replace('\u00a0', ' ')
+
+    @staticmethod
+    def _content_error(code: str, message: str):
+        zhihu_logger.warning(f"知乎编辑内容核对停止 code={code}")
+        return ZhihuEditorNotReadyError(message, reason_code=code)
+
+    async def _title_field(self, page: Page):
         candidates = [
             page.locator('textarea[placeholder*="标题"]').first,
             page.locator('input[placeholder*="标题"]').first,
             page.get_by_placeholder("请输入标题").first,
             page.locator('[class*="WriteIndex"] textarea').first,
         ]
-        title_field = None
         for loc in candidates:
-            try:
-                if await loc.count() and await loc.is_visible():
-                    title_field = loc
-                    break
-            except Exception:
-                continue
-        if not title_field:
-            raise RuntimeError("未找到知乎文章标题输入框")
-        await title_field.click(force=True)
-        await title_field.fill("")
-        await title_field.fill(self.title)
-        zhihu_logger.info(f"已填写文章标题: {self.title}")
+            if await loc.count() and await loc.is_visible() and await loc.is_enabled():
+                return loc
+        raise self._content_error('editor_not_ready', '未找到可用的知乎标题输入框；本次未点击发布')
 
-    async def fill_body(self, page: Page) -> None:
+    async def _body_editor(self, page: Page):
         selectors = [
             ".public-DraftEditor-content",
             '[contenteditable="true"]',
@@ -438,36 +466,77 @@ class ZhiHuArticle(object):
             'div[role="textbox"]',
             ".ql-editor",
         ]
-        editor = None
         for sel in selectors:
             loc = page.locator(sel).first
-            try:
-                if await loc.count() and await loc.is_visible():
-                    editor = loc
-                    break
-            except Exception:
-                continue
-        if not editor:
-            raise RuntimeError("未找到知乎文章正文编辑器")
-        await editor.click(force=True)
-        await page.wait_for_timeout(200)
-        try:
-            await page.context.grant_permissions(["clipboard-read", "clipboard-write"])
-        except Exception:
-            pass
-        await page.keyboard.press("Control+A")
-        await page.keyboard.press("Backspace")
-        try:
-            await page.evaluate(
-                """async (t) => { await navigator.clipboard.writeText(t); }""",
-                self.body,
-            )
-            await page.keyboard.press("Control+V")
-        except Exception:
-            for para in self.body.split("\n"):
-                await page.keyboard.type(para, delay=10)
-                await page.keyboard.press("Enter")
-        zhihu_logger.info(f"已填写正文，长度={len(self.body)}")
+            if await loc.count() and await loc.is_visible() and await loc.is_enabled():
+                return loc
+        raise self._content_error('editor_not_ready', '未找到可用的知乎正文编辑器；本次未点击发布')
+
+    async def _read_body_text(self, editor) -> str:
+        value = await editor.evaluate('''e => {
+            if (e.tagName === 'TEXTAREA' || e.tagName === 'INPUT') return e.value;
+            const blocks = [...e.querySelectorAll('[data-block="true"]')].filter(block => {
+                const parent = block.parentElement?.closest('[data-block="true"]');
+                return !parent || !e.contains(parent);
+            });
+            if (blocks.length) return blocks.map(block => {
+                const value = block.innerText ?? block.textContent ?? '';
+                return value === '\\n' ? '' : value;
+            }).join('\\n');
+            return e.innerText ?? e.textContent ?? '';
+        }''')
+        value = self._normalized_editor_text(value)
+        return '' if value == '\n' else value
+
+    async def _assert_empty_editor(self, page: Page) -> None:
+        title = await self._title_field(page)
+        body = await self._body_editor(page)
+        if (self._normalized_editor_text(await title.input_value()).strip()
+                or (await self._read_body_text(body)).strip()):
+            raise self._content_error('editor_existing_content', '知乎编辑器已有草稿内容，已停止以免覆盖；本次未点击发布')
+
+    async def fill_title(self, page: Page) -> None:
+        title = await self._title_field(page)
+        if self._normalized_editor_text(await title.input_value()).strip():
+            raise self._content_error('editor_existing_content', '知乎标题已有内容，已停止以免覆盖；本次未点击发布')
+        await title.fill(self.title)
+        if self._normalized_editor_text(await title.input_value()) != self._normalized_editor_text(self.title):
+            raise self._content_error('title_readback_mismatch', '知乎标题未通过回读核对；本次未点击发布')
+        zhihu_logger.info("知乎文章标题已通过回读核对")
+
+    async def fill_body(self, page: Page) -> None:
+        editor = await self._body_editor(page)
+        if (await self._read_body_text(editor)).strip():
+            raise self._content_error('editor_existing_content', '知乎正文已有内容，已停止以免覆盖；本次未点击发布')
+        await editor.click(timeout=5000)
+        # Normal browser input updates the observed Draft.js editor. Never
+        # infer success from a clipboard shortcut, clear existing text, or
+        # replay a partial insertion. The readback decides whether to proceed.
+        await page.keyboard.insert_text(self.body)
+        expected = self._normalized_editor_text(self.body)
+        deadline = asyncio.get_running_loop().time() + 2.0
+        observed = await self._read_body_text(editor)
+        while observed != expected and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(.1)
+            observed = await self._read_body_text(editor)
+        if observed != expected:
+            code = 'body_input_empty' if not observed.strip() else 'body_readback_mismatch'
+            raise self._content_error(code, '知乎正文未完整写入或未通过回读核对；本次未点击发布')
+        await asyncio.sleep(.3)
+        if await self._read_body_text(editor) != expected:
+            raise self._content_error('body_readback_mismatch', '知乎正文在输入后发生变化，未通过回读核对；本次未点击发布')
+        zhihu_logger.info(f"知乎正文已通过回读核对，字符数={len(observed)}")
+
+    async def _verify_content(self, page: Page) -> None:
+        title = await self._title_field(page)
+        editor = await self._body_editor(page)
+        for observation in range(2):
+            if self._normalized_editor_text(await title.input_value()) != self._normalized_editor_text(self.title):
+                raise self._content_error('title_readback_mismatch', '知乎标题未通过最终回读核对；本次未点击发布')
+            if await self._read_body_text(editor) != self._normalized_editor_text(self.body):
+                raise self._content_error('body_readback_mismatch', '知乎正文未通过最终回读核对；本次未点击发布')
+            if observation == 0:
+                await asyncio.sleep(.3)
 
     async def upload_cover(self, page: Page) -> None:
         # 多候选：封面入口文案/上传 input；实现时以真实页面为准微调

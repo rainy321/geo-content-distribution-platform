@@ -30,6 +30,9 @@ class ZhihuAIStatementTests(unittest.IsolatedAsyncioTestCase):
         self.page = await self.browser.new_page()
         self.article = ZhiHuArticle('选型说明', '有依据的正文', [], 0, 'unused-account.json',
                                     creation_statement=AI)
+        required = self.article._apply_required_ai_creation_statement
+        self.article._apply_required_ai_creation_statement = lambda page, label: required(
+            page, label, ready_timeout_seconds=.3)
 
     async def prepare(self, html):
         await self.page.set_content('<meta charset="utf-8"><script>window.combos=0;</script>'
@@ -42,13 +45,12 @@ class ZhihuAIStatementTests(unittest.IsolatedAsyncioTestCase):
         # the statement and replacing all account/network/browser operations.
         page = SimpleNamespace(url='https://zhuanlan.zhihu.com/write',
             goto=AsyncMock(), wait_for_timeout=AsyncMock(), locator=self.page.locator,
-            get_by_role=self.page.get_by_role)
+            get_by_role=self.page.get_by_role, get_by_placeholder=self.page.get_by_placeholder,
+            keyboard=self.page.keyboard, mouse=self.page.mouse)
         context = SimpleNamespace(new_page=AsyncMock(return_value=page), close=AsyncMock(),
                                   add_init_script=AsyncMock())
         browser = SimpleNamespace(new_context=AsyncMock(return_value=context), close=AsyncMock())
         runtime = SimpleNamespace(chromium=SimpleNamespace(launch=AsyncMock(return_value=browser)))
-        self.article.fill_title = AsyncMock()
-        self.article.fill_body = AsyncMock()
         self.article.click_publish = AsyncMock()
         await self.article.upload(runtime)
         context.add_init_script.assert_not_awaited()
@@ -106,6 +108,26 @@ class ZhihuAIStatementTests(unittest.IsolatedAsyncioTestCase):
         await self.prepare(row())
         await article.apply_creation_statement(self.page)
         self.assertEqual(await self.page.get_by_role('combobox').inner_text(), '无声明')
+
+    async def test_delayed_statement_region_and_control_are_waited_for_before_selection(self):
+        for initial, script in (
+            ('<div id="later"></div>', '(html)=>setTimeout(()=>document.querySelector("#later").innerHTML=html,150)'),
+            ('<div class="statement"><label>创作声明</label><div id="later"></div></div>',
+             '(html)=>setTimeout(()=>document.querySelector(".statement").outerHTML=html,150)'),
+        ):
+            with self.subTest(initial=initial):
+                await self.prepare(initial)
+                await self.page.evaluate(script, row()+option())
+                await self.article.apply_creation_statement(self.page)
+                self.assertEqual(await self.page.get_by_role('combobox').inner_text(), AI)
+
+    async def test_delayed_ambiguous_statement_regions_still_block_selection(self):
+        await self.prepare('<div id="later"></div>')
+        await self.page.evaluate('(html)=>setTimeout(()=>document.querySelector("#later").innerHTML=html,150)',
+                                 row()+row()+option())
+        with self.assertRaisesRegex(RuntimeError, 'AI 创作声明尚未确认'):
+            await self.article.apply_creation_statement(self.page)
+        self.assertEqual(await self.page.evaluate('window.combos'), 0)
 
 
 if __name__ == '__main__':
