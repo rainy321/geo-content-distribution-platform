@@ -10,9 +10,10 @@ from uploader.zhihu_uploader import main as zhihu
 
 
 class ZhihuBrowserOptionsTests(unittest.TestCase):
-    def test_existing_explicit_edge_chrome_choices_are_preserved_without_evasion_flags(self):
+    def test_explicit_then_chrome_then_edge_choices_use_ordinary_options(self):
         cases = [('configured.exe', 'edge.exe', 'chrome.exe', 'configured.exe'),
-                 ('', 'edge.exe', 'chrome.exe', 'edge.exe'),
+                 ('', 'edge.exe', 'chrome.exe', 'chrome.exe'),
+                 ('', 'edge.exe', None, 'edge.exe'),
                  ('', None, 'chrome.exe', 'chrome.exe'), ('', None, None, None)]
         for configured, edge, chrome, expected in cases:
             for module in (zhihu, verifier):

@@ -3,7 +3,7 @@
     <el-card class="about-card">
       <div class="about-header">
         <h1>GEO AI 搜索工作台</h1>
-        <p class="version">2026.10.26.2</p>
+        <p class="version">2026.10.26.3</p>
       </div>
 
       <el-divider />
@@ -34,6 +34,7 @@
           <li>根据来源发现平台，按目标要求生成待审文章</li>
           <li>已接入平台逐篇确认发布；其他平台可配置辅助填写</li>
           <li>沿用有效登录会话，按平台实际要求处理验证</li>
+          <li>未指定浏览器时优先 Chrome，未找到再使用 Edge</li>
           <li>发布前核对正文与 AI 声明，未就绪时提示具体步骤</li>
           <li>分别查看发布状态、公开链接与 AI 引用观察</li>
         </ul>

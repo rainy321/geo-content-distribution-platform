@@ -24,7 +24,7 @@ def messages(queue):
 
 
 class InstalledBrowserTests(unittest.TestCase):
-    def test_installed_edge_then_chrome_matches_existing_geo_discovery(self):
+    def test_default_prefers_installed_chrome_then_edge(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             edge = root / 'Microsoft/Edge/Application/msedge.exe'
@@ -33,14 +33,15 @@ class InstalledBrowserTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b'synthetic executable placeholder')
             with patch.dict('os.environ', {'ProgramFiles': directory}, clear=True):
-                self.assertEqual(browser_executable.browser_executable_options(), {'executable_path': str(edge)})
-                edge.unlink()
                 self.assertEqual(browser_executable.browser_executable_options(), {'executable_path': str(chrome)})
                 chrome.unlink()
+                self.assertEqual(browser_executable.browser_executable_options(), {'executable_path': str(edge)})
+                edge.unlink()
                 self.assertEqual(browser_executable.browser_executable_options(), {})
 
     def test_explicit_browser_is_not_silently_replaced(self):
-        with patch.object(browser_executable, 'edge_executable', side_effect=AssertionError('must respect configuration')):
+        with patch.object(browser_executable, 'edge_executable', side_effect=AssertionError('must respect configuration')), \
+                patch.object(browser_executable, 'chrome_executable', side_effect=AssertionError('must respect configuration')):
             self.assertEqual(browser_executable.browser_executable_options('C:/configured/missing.exe'),
                              {'executable_path': 'C:/configured/missing.exe'})
 

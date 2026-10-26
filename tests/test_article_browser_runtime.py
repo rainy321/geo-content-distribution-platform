@@ -17,6 +17,8 @@ CASES = (
     ('explicit', 'synthetic-configured.exe', 'synthetic-edge.exe', 'synthetic-chrome.exe',
      {'executable_path': 'synthetic-configured.exe'}),
     ('no_system_browser', '', None, None, {}),
+    ('both_installed_prefer_chrome', '', 'synthetic-edge.exe', 'synthetic-chrome.exe',
+     {'executable_path': 'synthetic-chrome.exe'}),
 )
 
 
@@ -75,7 +77,7 @@ class ArticleBrowserSelectionTests(unittest.TestCase):
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(b'synthetic browser placeholder; never executed')
             with patch.dict('os.environ', {'ProgramFiles': directory}, clear=True):
-                for expected in (edge, chrome, None):
+                for expected in (chrome, edge, None):
                     for module in (baijiahao, xhs):
                         with self.subTest(platform=module.__name__, expected=expected), \
                                 patch.object(module, 'LOCAL_CHROME_PATH', ''):

@@ -29,6 +29,6 @@ def chrome_executable():
 
 
 def browser_executable_options(configured_path=""):
-    """Respect explicit configuration, otherwise use the same local paths as GEO."""
-    executable = str(configured_path or "").strip() or edge_executable() or chrome_executable()
+    """Respect explicit configuration, otherwise prefer installed Chrome, then Edge."""
+    executable = str(configured_path or "").strip() or chrome_executable() or edge_executable()
     return {"executable_path": executable} if executable else {}
