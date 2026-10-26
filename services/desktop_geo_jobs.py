@@ -426,6 +426,89 @@ class DesktopGeoJobs:
         except (ValueError, geo_content_store.ResearchNotFoundError) as error:
             return {'error': str(error)}
 
+    def start_research_probe(self, cycle_id, case_id):
+        """Collect one unchanged cycle question once; never create a full report."""
+        from services.geo_research_probe_service import context, attach_probe
+        database = self.data / 'database.db'
+        try:
+            if not isinstance(cycle_id, str) or not cycle_id:
+                raise ValueError('请选择本轮实验')
+            cycle = geo_content_store.get_cycle(database, cycle_id)
+            details = context(cycle, case_id)
+            execution = details['execution']
+            config = replace(self._config({'client_mode': execution['client_mode'],
+                'model_label': execution['requested_model_label']}),
+                question=details['case']['question'], timeout_seconds=execution['timeout_seconds'])
+        except (ValueError, TypeError, KeyError, sqlite3.Error, geo_content_store.ResearchNotFoundError) as error:
+            return {'error': str(error)}
+        probe_id = uuid.uuid4().hex
+        directory = self.data / 'geo-content/probes' / probe_id
+        config = replace(config, output_root=directory / 'evidence')
+
+        async def probe():
+            import hashlib
+            current = geo_content_store.get_cycle(database, cycle_id)
+            fresh = context(current, case_id)
+            if (current['test_plan']['plan_sha256'] != cycle['test_plan']['plan_sha256']
+                    or current['profile'] != cycle['profile'] or fresh != details):
+                raise ValueError('原实验问题或资料已变化，未发送，请重新核对')
+            with self.lock:
+                task_id = self.job['id']
+                self.job.update(probe_id=probe_id, case_id=case_id, run_dir=str(directory),
+                    message='独立复测这道原问题；只发送一次，其他问题不会重发。')
+                self._persist()
+            result = None
+            evidence = None
+            cancelled = False
+            with exclusive_lock(config.profile_dir / '.geo-test.lock'):
+                write_json(directory / 'single_probe_intent.json', {'probe_id': probe_id,
+                    'cycle_id': cycle_id, 'case_id': case_id, 'question': config.question,
+                    'plan_sha256': cycle['test_plan']['plan_sha256'], 'created_at': now(),
+                    'collector_invocation_limit': 1, 'automatic_retry': False})
+                try:
+                    # Do not retry any call, including exceptions after sending.
+                    result, path = await collect_doubao_sources(config, progress=self._collector_progress)
+                    path = Path(path).resolve()
+                    path.relative_to(directory.resolve())
+                    if path.is_symlink() or path.stat().st_size > 5 * 1024 * 1024:
+                        raise ValueError('单题采集结果文件无法核对')
+                    raw = path.read_bytes()
+                    if json.loads(raw.decode('utf-8')) != result or result.get('question') != config.question:
+                        raise ValueError('单题采集问题或持久结果不一致')
+                    evidence = {'result_path': str(path), 'result_sha256': hashlib.sha256(raw).hexdigest()}
+                except asyncio.CancelledError:
+                    cancelled = True
+                    result = None
+                except Exception:
+                    logging.exception('Single-question collector failed; no second call will be made')
+                    result = None
+                if result is None:
+                    result = {'question': config.question, 'response': '', 'collection_status': 'failed',
+                        'failure_reason': 'collector_exception_submission_unknown',
+                        'timestamp': now(), 'environment': {'client_mode': execution['client_mode']}}
+                self._collector_progress({'event': 'collector_finished',
+                    'failure_reason': result.get('failure_reason'), 'failure_stage': result.get('failure_stage'),
+                    'collection_status': result.get('collection_status'),
+                    'evidence_path': (evidence or {}).get('result_path'),
+                    'question_submission_attempted': result.get('question_submission_attempted'),
+                    'question_submitted': result.get('question_submitted')})
+                record = attach_probe(database, cycle_id,
+                    {'case_id': case_id, 'run_id': probe_id, 'collector_result': result, 'created_at': now()},
+                    source='native_collector', native_task_id=task_id, evidence=evidence)
+                write_json(directory / 'single_case_probe.json', record)
+            outcome = {'probe': record, 'cycle_id': cycle_id,
+                'message': ('单题回答及对照已保存；官网地址出现不代表引用、业务正确或优化因果。'
+                            if record['after']['answer_evaluable'] else
+                            '本次没有可评估的完整回答，地址出现情况未知；证据已保存，未自动重发。')}
+            if cancelled:
+                with self.lock:
+                    self.job['result'] = outcome
+                    self._persist()
+                raise asyncio.CancelledError()
+            return outcome
+        return self._start('probe', probe, client_name=cycle['profile']['name'], cycle_id=cycle_id,
+                           collector_config=config)
+
     def _resume_research_source(self, source_task_id, cycle_id):
         if not isinstance(source_task_id, str) or not isinstance(cycle_id, str) or not source_task_id or not cycle_id:
             raise ValueError('请选择本轮原采集任务')

@@ -3,7 +3,7 @@
     <el-card class="about-card">
       <div class="about-header">
         <h1>GEO AI 搜索工作台</h1>
-        <p class="version">2026.10.26.5</p>
+        <p class="version">2026.10.26.6</p>
       </div>
 
       <el-divider />
@@ -37,6 +37,7 @@
           <li>未指定浏览器时优先 Chrome，未找到再使用 Edge</li>
           <li>知乎常见 Markdown 结构原生导入，逐项核对后继续</li>
           <li>符合恢复条件的旧超时任务，可继续未发送问题</li>
+          <li>按原题做单题复测，保留前后回答与来源对照</li>
           <li>发布前核对正文与 AI 声明，未就绪时提示具体步骤</li>
           <li>分别查看发布状态、公开链接与 AI 引用观察</li>
         </ul>

@@ -42,10 +42,10 @@
         </template>
         <template v-else>
           <div class="report-heading"><el-tag :type="reportOrigin==='fresh' ? 'success' : 'info'">{{ reportOrigin==='fresh' ? '本次采集' : '历史采集' }}</el-tag><span>{{ journeyDate(report.updated_at) }}</span><el-button v-if="nativeAvailable" text :disabled="busy" @click="login">登录豆包</el-button><el-button v-if="reusablePlan" text :disabled="busy" @click="repeatBaseline">沿用问题新测一轮</el-button><el-button text :disabled="busy" @click="newBaseline">重新出题</el-button></div>
-          <div class="metric-grid"><article v-for="key in categoryKeys" :key="key"><span>{{ categoryNames[key] }}</span><strong>{{ rate(report.cohorts?.[key]?.brand_mention_rate) }}</strong><small>{{ reportEntityContext(report).mentionLabel }} · 有效 {{ report.cohorts?.[key]?.answers_evaluable || 0 }} 题</small></article></div>
+          <div class="metric-grid"><article v-for="key in categoryKeys" :key="key"><span>{{ categoryNames[key] }} · 名称提及率</span><strong>{{ rate(report.cohorts?.[key]?.brand_mention_rate) }}</strong><small>{{ reportEntityContext(report).mentionLabel }} · 有效 {{ report.cohorts?.[key]?.answers_evaluable || 0 }} 题</small></article></div>
           <BaselineContext/>
           <details v-if="report.evaluation_projection" class="hint"><summary>评估说明 · {{ report.evaluation_projection.stored_evaluation_version }} → {{ report.evaluation_projection.applied_evaluation_version }}</summary><p>{{ report.evaluation_projection.note }}</p></details>
-          <p class="hint">提及不等于推荐。网址未知会保留未知，不按“没有引用”计算。</p><p v-if="!usableReport" class="hint">这份报告没有可分析的有效回答，请新建一轮基线；失败记录仍会保留。</p><p v-if="report.stop_reason" class="hint">采集中断：{{ report.stop_reason }}。有有效回答时可继续分析，或新建一轮。</p>
+          <p class="hint">名称提及只表示回答出现名称，不代表业务描述正确、推荐或优化有效。网址未知会保留未知，不按“没有引用”计算。</p><p v-if="!usableReport" class="hint">这份报告没有可分析的有效回答，请新建一轮基线；失败记录仍会保留。</p><p v-if="report.stop_reason" class="hint">采集中断：{{ report.stop_reason }}。有有效回答时可继续分析，或新建一轮。</p>
         </template>
         <el-collapse class="advanced"><el-collapse-item title="继续同一对象的历史采集" name="history"><p class="hint">只显示名称、测试对象类型和完整主网址匹配的报告；同域不同产品路径分别保留，不会当作新采集。未标对象类型的旧报告按产品档案兼容，旧统计口径另行提示。</p><el-select v-model="historyReportId" placeholder="选择带时间的历史报告" :disabled="busy" @change="useHistory"><el-option v-for="item in reports" :key="item.id" :value="item.id" :label="`${journeyDate(item.updated_at)} · ${item.case_count} 题 · ${item.status}`"/></el-select><p v-if="!reports.length" class="hint">这个对象尚无匹配的历史报告。</p></el-collapse-item><el-collapse-item title="采集模型与界面" name="model"><ModelOptions/></el-collapse-item></el-collapse>
       </section>
@@ -97,6 +97,7 @@
         <el-button v-if="nativeAvailable" text :disabled="busy" @click="login">登录复测所用的豆包会话</el-button>
         <BaselineContext/>
         <div class="metric-grid feedback-metrics"><article><span>发布器成功回报</span><strong>{{ cycle.publications?.length || 0 }}</strong><small>排除演示任务与无链接任务</small></article><article><span>运营方自报提交</span><strong>{{ cycle.reported_publications?.length || 0 }}</strong><small>尚未独立核验发布成功</small></article><article><span>取得回答的复测</span><strong>{{ feedbackTotals.withAnswers }}</strong><small>共 {{ feedbackTotals.attempts }} 轮尝试，仍需检查比较条件</small></article></div>
+        <GeoSingleCaseProbe :cycle="cycle" :busy="busy" :can-start="singleProbeAvailable" @probe="startSingleCaseProbe"/>
         <GeoPublicationReview v-if="hasPublicationReviewDrafts" :cycle="cycle" :busy="busy" @updated="applyReviewCycle"/>
         <p v-if="!hasPublication" class="hint">{{ unfinishedPublications.length ? '尚无公开成功记录，请先查看以下原发布任务。待确认不等于失败，现在复测只记录新的采集观察。' : '当前没有可用于发布后分析的提交记录。现在复测只会记录新的采集观察。' }}</p>
         <div v-if="unfinishedPublications.length" class="publication-tasks" aria-label="原发布任务"><article v-for="job in unfinishedPublications" :key="job.id" class="feedback-card"><el-tag :type="job.status==='failed' ? 'danger' : job.status==='need_action' ? 'warning' : 'info'">{{ publicationStatus[job.status] }}</el-tag><h3>{{ job.title }} · {{ cycle.channels[job.platform] || job.platform }}</h3><p>{{ job.message || publicationMessages[job.status] }}</p><p v-if="job.status==='processing'" class="hint">最终提交结果仍在确认，请核对原任务与平台后台，不要另建重复发布。</p><el-button :disabled="busy" @click="continuePublication(job)">继续查看原发布任务</el-button></article></div>
@@ -106,7 +107,7 @@
           <p v-if="retestCollection(item).known">{{ retestCollection(item).status }} · {{ retestCollection(item).countsText }}</p>
           <template v-if="retestCollection(item).empty"><p>{{ retestCollection(item).explanation }}</p><p class="hint">{{ retestCollection(item).nextStep }}</p></template>
           <details v-if="retestCollection(item).issues.length" class="feedback-issues"><summary>查看未完成题目与原因</summary><p v-for="issue in retestCollection(item).issues" :key="issue.caseId">{{ issue.caseId }} · {{ issue.status }}<span v-if="issue.stage"> · {{ issue.stage }}</span><span v-if="issue.message">：{{ issue.message }}</span><small v-if="issue.code">（{{ issue.code }}）</small></p></details>
-          <template v-if="!retestCollection(item).empty"><p>{{ item.comparison.publication_context }}</p><p v-if="!item.comparison.conditions_match" class="hint">条件差异：{{ item.comparison.reasons?.join('；') }}</p><div v-for="cohort in item.comparison.cohorts || []" :key="cohort.category" class="comparison-row"><span>{{ categoryNames[cohort.category] }}</span><strong>{{ rate(cohort.before_brand_rate) }} → {{ rate(cohort.after_brand_rate) }}</strong><small>共同有效 {{ cohort.paired_answers }} 题</small></div><p class="hint">{{ item.comparison.note }}</p><p v-for="link in item.comparison.publication_citations || []" :key="link.url" class="hint">{{ link.observed_in_citations===true ? '本轮正文引用中观察到' : '暂未观察到引用，索引状态未知' }}：{{ link.url }}</p></template>
+          <template v-if="!retestCollection(item).empty"><p>{{ item.comparison.publication_context }}</p><p v-if="!item.comparison.conditions_match" class="hint">条件差异：{{ item.comparison.reasons?.join('；') }}</p><div v-for="cohort in item.comparison.cohorts || []" :key="cohort.category" class="comparison-row"><span>{{ categoryNames[cohort.category] }} · 名称提及率</span><strong>{{ rate(cohort.before_brand_rate) }} → {{ rate(cohort.after_brand_rate) }}</strong><small>共同有效 {{ cohort.paired_answers }} 题</small></div><p class="hint">{{ item.comparison.note }}</p><p v-for="link in item.comparison.publication_citations || []" :key="link.url" class="hint">{{ link.observed_in_citations===true ? '本轮正文引用中观察到' : '暂未观察到引用，索引状态未知' }}：{{ link.url }}</p></template>
         </article>
         <p class="hint">复测沿用原问题、界面与模型选项；未知不算零。单轮小样本与索引时滞都影响结果，不能直接判断有效、无效或因果。</p><div class="utility-row"><el-button text :disabled="busy" @click="refreshCycle">刷新发布与反馈</el-button><el-button text :disabled="busy" @click="openDetails">查看完整采集与复测明细</el-button></div>
       </section>
@@ -133,6 +134,7 @@ import { savedCycleContinuation, savedCycleFactEdits } from '@/utils/geoSavedCyc
 import { baselineWritingOptions } from '@/utils/geoWritingOptions'
 import { feedbackCollectionTotals, retestCollection } from '@/utils/geoFeedback'
 import GeoPublicationReview from '@/components/GeoPublicationReview.vue'
+import GeoSingleCaseProbe from '@/components/GeoSingleCaseProbe.vue'
 import { publicationReviewArticles } from '@/utils/geoPublicationReview'
 import DoubaoPreparation from '@/components/DoubaoPreparation.vue'
 import DoubaoSessionControls from '@/components/DoubaoSessionControls.vue'
@@ -246,6 +248,7 @@ const unfinishedPublications=computed(()=>(cycle.value?.drafts||[]).flatMap(draf
 const hasPublication=computed(()=>Boolean(cycle.value?.publications?.length||cycle.value?.reported_publications?.length))
 const hasPublicationReviewDrafts=computed(()=>publicationReviewArticles(cycle.value).length>0)
 const feedbackTotals=computed(()=>feedbackCollectionTotals(cycle.value?.retests))
+const singleProbeAvailable=computed(()=>nativeAvailable.value&&Array.isArray(cycle.value?.probes)&&typeof window.pywebview?.api?.start_research_probe==='function')
 const usableReport=computed(()=>Boolean(report.value?.cases?.some(item=>item.assessment?.answer_evaluable===true)))
 const sourceCounts=computed(()=>({verified:(cycle.value?.opportunities||[]).filter(item=>item.surface==='community_candidate').length,unknown:(cycle.value?.opportunities||[]).filter(item=>item.surface==='url_unknown').length}))
 const confirmedFacts=()=>factRows.value.filter(item=>item.confirmed&&item.text.trim()).map(item=>({text:item.text.trim(),source_url:item.source_url.trim(),confirmed:true}))
@@ -412,6 +415,28 @@ const resumeUnsentRetest=()=>run(async()=>{
   recoveryTask.value=null
   persist()
 })
+const startSingleCaseProbe=selection=>run(async()=>{
+  const id=cycleId.value, epoch=contextEpoch, selectedTaskId=taskId.value
+  const matches=(cycle.value?.baseline?.cases||[]).filter(item=>item.id===selection?.caseId&&typeof item.question==='string'&&item.question.trim())
+  if(step.value!==4||!singleProbeAvailable.value||selection?.cycleId!==id||!id||matches.length!==1)
+    throw new Error('原问题或单题复测能力尚未确认，请刷新当前反馈页。')
+  const selected=matches[0], question=selected.question
+  const assertCurrent=()=>{if(destroyed||epoch!==contextEpoch||id!==cycleId.value||selectedTaskId!==taskId.value||step.value!==4
+    ||!(cycle.value?.baseline?.cases||[]).some(item=>item.id===selected.id&&item.question===question)){
+    const cancelled=new Error('原操作页面已变更');cancelled.name='AbortError';throw cancelled}}
+  try{await ElMessageBox.confirm(`只发送以下这一题，作为一次独立新请求；其他问题不发送，原回答和整轮记录保留。\n\n${question}`,'只复测这一题',{confirmButtonText:'发送这一题',cancelButtonText:'先保留原记录'})}
+  catch{const cancelled=new Error('已保留原记录');cancelled.name='AbortError';throw cancelled}
+  assertCurrent()
+  if(nativeBusy.value||!singleProbeAvailable.value)throw new Error('当前有任务进行中或单题复测暂不可用，请先查看原任务。')
+  const result=await window.pywebview.api.start_research_probe(id,selected.id)
+  assertCurrent()
+  if(result?.error)throw new Error(result.error)
+  if(!result||typeof result.id!=='string'||!(/^[\w-]{1,100}$/).test(result.id)||result.id===selectedTaskId||result.status!=='running'
+    ||result.kind!==undefined&&result.kind!=='probe'||result.cycle_id!==undefined&&result.cycle_id!==id)
+    throw new Error('单题任务启动结果尚未确认，请查看任务记录，不要重复发送。')
+  task.value={...result,kind:'probe',cycle_id:id,case_id:selected.id};taskId.value=result.id;liveTaskId=result.id;taskKind.value='probe';handledTask=''
+  persist()
+})
 const retestSessionOptions=()=>{const baseline=cycle.value?.baseline||{},execution=baseline.execution||{};return {client_mode:execution.client_mode||baseline.cases?.find(item=>item.client_mode)?.client_mode||'consumer',model_label:execution.requested_model_label||''}}
 const login=()=>run(()=>startNative('login',()=>window.pywebview.api.open_login(step.value===4?retestSessionOptions():options())))
 const makePlan=()=>run(async()=>{if(profileDirty.value)throw new Error('测试对象资料已变更，请先保存，再为该对象生成新问题');planConfirmed.value=false;const profile={...project.value,...formProfile()};if(provider.value==='doubao'){if(!nativeAvailable.value)throw new Error('桌面豆包采集服务尚未就绪');await startNative('plan',()=>window.pywebview.api.plan_with_doubao(profile,3,options()))}else plan.value=(await geoTestApi.generatePlan({project_id:projectId.value,case_count:3,...entityProfileFields(profile)})).data})
@@ -487,7 +512,7 @@ const poll=async()=>{
     else if(['failed','stopped','needs_review','need_action'].includes(current.status))error.value=current.message||'任务未完成，记录已保留，请检查后重试'
     if(current.result?.plan&&sameBrand(current.result.plan.profile,project.value)){plan.value=current.result.plan;planConfirmed.value=false}
     if(current.result?.report&&taskKind.value==='run'&&sameBrand(current.result.report.profile,project.value)){await loadReports();if(!currentScope())return;const item=reports.value.find(item=>item.run_id===current.result.report.run_id);if(item){report.value=item.report;reportId.value=item.id;reportOrigin.value=liveTaskId===current.id?'fresh':'history';historyReportId.value=item.id}else throw new Error('本轮报告尚未进入报告列表，请稍后重试，未使用其他报告替代')}
-    if(cycleId.value&&['analysis','draft','retest','destination'].includes(taskKind.value)){const updated=(await geoContentApi.get(cycleId.value)).data;if(!currentScope())return;applyCycle(updated,{keepEditor:taskKind.value!=='draft'||current.status!=='completed'})}
+    if(cycleId.value&&['analysis','draft','retest','probe','destination'].includes(taskKind.value)){const updated=(await geoContentApi.get(cycleId.value)).data;if(!currentScope())return;applyCycle(updated,{keepEditor:taskKind.value!=='draft'||current.status!=='completed'})}
     if(taskKind.value==='draft'&&replacementSourceId.value){
       if(current.status==='completed'){
         const target=selectedTarget.value, draft=matchingDrafts.value.find(item=>item.article_id!==replacementSourceId.value&&item.provenance?.destination?.id===target?.id&&item.provenance?.destination?.revision===target?.revision&&item.provenance?.destination_config_sha256===target?.config_sha256)

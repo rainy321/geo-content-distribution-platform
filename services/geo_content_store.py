@@ -297,6 +297,8 @@ def get_cycle(database, identifier):
             comparison.update(publication_feedback(comparison, report, publication_records))
             result['retests'].append({'run_id': report['run_id'], 'updated_at': report.get('updated_at'),
                                       'comparison': comparison, 'collection': collection_summary(report)})
+        from services.geo_research_probe_service import list_probes
+        result['probes'] = list_probes(connection, identifier)
     return result
 
 
