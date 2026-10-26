@@ -3,6 +3,7 @@ import fs from 'node:fs'
 import test from 'node:test'
 import { computed, ref } from 'vue'
 import { parse, compileScript, compileTemplate, compileStyle } from '@vue/compiler-sfc'
+import { doubaoTaskRecovery, scopedRecoveryCheckpoint } from '../src/utils/geoTaskRecovery.js'
 
 const filename=new URL('../src/views/GeoJourney.vue',import.meta.url)
 const {descriptor,errors}=parse(fs.readFileSync(filename,'utf8'),{filename:filename.pathname})
@@ -40,6 +41,37 @@ const harness=(source=sourceTask())=>{
   `)(...Object.values(values))
   return {...values,...actions,calls,checkpoint}
 }
+
+test('a real-shaped timeout reaches same-cycle feedback recovery and enables only its unsent continuation',async()=>{
+  const actualSource=sourceTask({failure_reason:'browser_error:TimeoutError',
+    progress:{question_submission_attempted:true,question_submitted:false}})
+  for(const variant of ['same-cycle','foreign-cycle','foreign-task','baseline-run','unknown-reason']){
+    const source=variant==='unknown-reason'?{...actualSource,failure_reason:'browser_error:OtherTimeoutError'}:actualSource
+    const page=harness(source),original=JSON.stringify(source)
+    if(variant==='foreign-cycle')page.cycleId.value='cycle-b'
+    if(variant==='foreign-task')page.taskId.value='another-task'
+    if(variant==='baseline-run')page.taskKind.value='run'
+    const bindings={computed,task:page.task,taskId:page.taskId,taskKind:page.taskKind,cycleId:page.cycleId,
+      step:page.step,doubaoTaskRecovery,scopedRecoveryCheckpoint,recoveryTask:ref(null)}
+    const visible=new Function(...Object.keys(bindings),`
+      const currentRecovery=${expression('currentRecovery')};
+      const recoveryInfo=${expression('recoveryInfo')};
+      const recoveryStepKinds=${expression('recoveryStepKinds')};
+      return (${expression('visibleRecoveryInfo')});
+    `)(...Object.values(bindings))
+    page.visibleRecoveryInfo.value=visible.value
+    await page.refreshRetestResume()
+    assert.equal(page.canResumeRetest.value,variant==='same-cycle',variant)
+    if(variant==='same-cycle'){
+      assert.equal(visible.value.reason,'browser_error:TimeoutError')
+      assert.equal(visible.value.kind,'retest');assert.equal(visible.value.requiresConfirmation,true)
+      await page.resumeUnsentRetest()
+      assert.deepEqual(page.calls.resumes,[['source-retest','cycle-a']])
+      assert.deepEqual(page.calls.wholeRounds,[])
+    }else assert.deepEqual(page.calls.resumes,[])
+    assert.equal(JSON.stringify(source),original)
+  }
+})
 
 test('only explicit fresh same-cycle terminal run capability enables the resume action',async()=>{
   const invalid=[

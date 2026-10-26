@@ -11,6 +11,7 @@ const reasons = {
   rate_limited: ['豆包暂时限制了请求', '请稍后再试，先保留当前资料与原任务记录。', false],
   service_capacity_unavailable: ['豆包当前服务繁忙', '这次没有取得完整结果。请稍后再试，当前资料仍保留。', false],
   'browser_error:TargetClosedError': ['豆包窗口已结束', '窗口结束前未取得完整结果。请先核对豆包里的原会话；重新登录只处理账号，不会重发问题。', true],
+  'browser_error:TimeoutError': ['豆包页面等待超时', '尚未确认本题的完整采集结果，原始记录已保留。请先核对原任务，已发送题不会自动重发。', false],
   user_cancelled_submission_unknown: ['任务已停止，原记录保留', '请先核对豆包里的原会话，再决定是否重新开始。', false],
   application_closed_submission_unknown: ['上次任务被中断', '软件关闭前任务尚未完成。原记录仍保留，请核对原会话后再继续操作。', false],
   interrupted_submission_unknown: ['上次采集被中断', '原报告和已完成题仍保留。新测一轮会再次提问，请先核对原会话。', false],

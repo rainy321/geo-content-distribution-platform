@@ -18,6 +18,22 @@ test('an old logout error becomes an actionable explanation without inventing su
   assert.doesNotMatch(recovery.title+recovery.description,/session_redirected_to_logout|已确认登录/)
 })
 
+test('the known browser timeout has safe recovery text without admitting unknown error variants',()=>{
+  const source=failed({kind:'run',status:'failed',recovery:undefined,failure_reason:'browser_error:TimeoutError',
+    progress:{question_submission_attempted:true,question_submitted:false}})
+  const original=JSON.stringify(source),checkpoint=scopedRecoveryCheckpoint(source,'cycle-a')
+  assert.ok(checkpoint)
+  const recovery=doubaoTaskRecovery(checkpoint)
+  assert.equal(recovery.title,'豆包页面等待超时');assert.equal(recovery.canLogin,false)
+  assert.equal(recovery.submission,'unknown');assert.equal(recovery.requiresConfirmation,true)
+  assert.doesNotMatch(recovery.title+recovery.description,/TimeoutError|登录已失效|已确认未发送/)
+  assert.equal(scopedRecoveryCheckpoint(source,'cycle-b'),null)
+  assert.equal(JSON.stringify(source),original)
+  for(const reason of ['browser_error:OtherTimeoutError','browser_error:TimeoutError:unconfirmed','unrecognized_timeout']){
+    assert.equal(doubaoTaskRecovery({...source,failure_reason:reason}),null)
+  }
+})
+
 test('only two explicit false flags prove no submission; attempted and sent remain distinct',()=>{
   assert.equal(doubaoTaskRecovery(failed()).submission,'not_submitted')
   assert.equal(doubaoTaskRecovery(failed()).requiresConfirmation,false)
