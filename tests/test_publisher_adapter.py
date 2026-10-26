@@ -255,7 +255,11 @@ class ZhihuPublisherAdapterTests(unittest.TestCase):
         for code, expected in (('editor_existing_content', '已停止以免覆盖'),
                                ('title_readback_mismatch', '标题未通过回读'),
                                ('body_readback_mismatch', '正文未完整写入或未通过回读'),
-                               ('body_input_empty', '正文仍为空')):
+                               ('body_input_empty', '正文仍为空'),
+                               ('markdown_unsupported', '尚未支持自动核对的 Markdown'),
+                               ('markdown_import_controls_unconfirmed', '导入入口或文件选择器尚未确认'),
+                               ('markdown_import_unconfirmed', '导入结果尚未确认'),
+                               ('markdown_semantic_mismatch', '段落、链接或表格未通过原稿核对')):
             with self.subTest(code=code):
                 checks = []
                 def checker(_title, _account_file, attempts):
@@ -409,6 +413,7 @@ class ZhihuPublisherAdapterTests(unittest.TestCase):
         )
         article.main.assert_awaited_once_with()
         self.assertIs(article.headless, False)
+        self.assertEqual(article_class.call_args.kwargs["content_format"], "markdown")
         self.assertTrue(callable(article.click_publish))
         self.assertEqual(result, observed)
 

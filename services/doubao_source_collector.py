@@ -1181,6 +1181,7 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                                           'question_submitted': result['question_submitted']})
                         break
                     await asyncio.sleep(0.5)
+                stage = 'answer_checkpoint'
                 await _save_checkpoint(page, config, run_dir, result, "answer")
                 result["conversation_url"] = last.get("page_url")
                 result["source_ui_summaries"] = last.get("source_ui_summaries", [])
@@ -1262,10 +1263,35 @@ def _blocked_reason(snapshot: dict[str, Any]) -> str | None:
 
 async def _save_checkpoint(page: Any, config: CollectorConfig, run_dir: Path, result: dict[str, Any], name: str) -> None:
     filename = f"{name}.png"
-    await page.screenshot(path=str(run_dir / filename), full_page=True)
-    result["screenshots"].append(filename)
-    snapshot = await read_snapshot(page, config)
-    (run_dir / f"{name}.json").write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+    optional_screenshot = (result.get('question_submission_attempted') is True
+        and (name in {'answer', 'failure', 'deferred-notice'} or name.startswith('manual-action-')))
+    if optional_screenshot:
+        # Preserve readable DOM before a diagnostic screenshot can time out.
+        # DOM/storage errors still propagate; they cannot prove completion.
+        try:
+            snapshot = await read_snapshot(page, config)
+            (run_dir / f"{name}.json").write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            if name == 'answer':
+                result['answer_completed'] = False
+            raise
+    try:
+        options = {'path': str(run_dir / filename), 'full_page': True}
+        if optional_screenshot:
+            options['timeout'] = 5000
+        await page.screenshot(**options)
+        result["screenshots"].append(filename)
+    except Exception as exc:
+        if not optional_screenshot or type(exc).__name__ != 'TimeoutError' or page.is_closed():
+            raise
+        diagnostic = {'checkpoint': name, 'operation': 'screenshot', 'error_type': type(exc).__name__,
+                      'recorded_at': datetime.now(HK_TIME).isoformat()}
+        result.setdefault('diagnostic_errors', []).append(diagnostic)
+        (run_dir / f'{name}-diagnostic.json').write_text(
+            json.dumps(diagnostic, ensure_ascii=False, indent=2), encoding='utf-8')
+    if not optional_screenshot:
+        snapshot = await read_snapshot(page, config)
+        (run_dir / f"{name}.json").write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 async def _wait_for_manual_verification(page: Any, config: CollectorConfig, run_dir: Path,

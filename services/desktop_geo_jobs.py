@@ -6,6 +6,7 @@ import copy
 import json
 import logging
 import os
+import sqlite3
 import threading
 import uuid
 from pathlib import Path
@@ -20,6 +21,7 @@ from services.desktop_task_store import DesktopTaskStore, now
 from services import geo_content_store, geo_content_research, geo_destination_service
 from services.doubao_source_collector import collect_doubao_sources, MANUAL_AUTH_REASONS
 from services.doubao_task_recovery import recovery_view, safe_reason, action_required, recovery_message
+from services.geo_retest_resume import resume_source, source_manifest, copy_resume_source, file_digest
 
 
 def edge_executable() -> str | None:
@@ -84,6 +86,14 @@ class DesktopGeoJobs:
             recovery = recovery_view(value, self.data, live_window=live_window)
             if recovery:
                 value['recovery'] = recovery
+            if value.get('kind') == 'run' and value.get('cycle_id') and value.get('status') != 'running':
+                try:
+                    details = self._resume_research_source(value['id'], value['cycle_id'])
+                    value['resume_research_retest'] = {'can_resume': True, 'pending_case_ids': details['case_ids'],
+                        'message': '继续未发送题，已发送题不会重发'}
+                except (ValueError, OSError, KeyError, TypeError, geo_content_store.ResearchNotFoundError):
+                    value['resume_research_retest'] = {'can_resume': False, 'pending_case_ids': [],
+                        'message': '当前任务不满足安全续采条件，请查看原记录'}
         return value
 
     @staticmethod
@@ -415,6 +425,65 @@ class DesktopGeoJobs:
             return self.start_run(cycle['test_plan'], options, cycle_id=cycle_id)
         except (ValueError, geo_content_store.ResearchNotFoundError) as error:
             return {'error': str(error)}
+
+    def _resume_research_source(self, source_task_id, cycle_id):
+        if not isinstance(source_task_id, str) or not isinstance(cycle_id, str) or not source_task_id or not cycle_id:
+            raise ValueError('请选择本轮原采集任务')
+        with self.lock:
+            if self.job.get('status') == 'running':
+                raise ValueError('已有任务正在执行，请先等待或停止')
+            source = self.store.read(source_task_id)
+            if any(item.get('resumed_from_task_id') == source_task_id for item in self.store.records()):
+                raise ValueError('该原任务已有续采记录，请从最近的续采任务继续')
+        database = self.data / 'database.db'
+        if not database.is_file():
+            raise ValueError('本机实验记录尚未就绪，请先打开对应实验')
+        try:
+            cycle = geo_content_store.get_cycle(database, cycle_id)
+        except sqlite3.Error as error:
+            raise ValueError('本机实验记录无法读取，请先核对原记录') from error
+        details = resume_source(self.data, source, cycle)
+        details['task'] = source
+        return details
+
+    def resume_research_retest(self, source_task_id, cycle_id):
+        try:
+            details = self._resume_research_source(source_task_id, cycle_id)
+            execution = details['execution']
+            config = self._config({'client_mode': execution['client_mode'],
+                                   'model_label': execution.get('requested_model_label')})
+            config = replace(config, timeout_seconds=execution.get('timeout_seconds', config.timeout_seconds))
+            cooldown = execution.get('cooldown_seconds', 15)
+            source = details['run_dir']
+            manifest = source_manifest(source)
+            task_path = self.data / 'desktop-jobs' / (source_task_id + '.json')
+            task_hash = file_digest(task_path)
+            destination = self.data / 'geo-tests/desktop-runs' / uuid.uuid4().hex
+            RunConfig(destination, config, cooldown)
+        except (ValueError, OSError, KeyError, TypeError, geo_content_store.ResearchNotFoundError) as error:
+            return {'error': str(error)}
+
+        async def resume():
+            with self.lock:
+                self.job.update(run_dir=str(destination), resumed_from_task_id=source_task_id,
+                    resumed_from_run_dir=str(source), resumed_from_manifest_sha256=manifest['sha256'],
+                    resumed_from_task_sha256=task_hash, resumed_case_ids=details['case_ids'],
+                    logical_run_id=details['state']['run_id'], message='继续未发送题，已发送题不会重发；这是原实验的续采。')
+                self._persist()
+            if file_digest(task_path) != task_hash:
+                raise ValueError('原任务记录已变化，已停止；不会发送问题')
+            copy_resume_source(source, destination, manifest)
+            write_json(destination / 'resume-source-manifest.json', {'source_task_id': source_task_id,
+                'source_run_dir': str(source), 'source_task_sha256': task_hash, **manifest})
+            # The original plan and logical run stay fixed. build_report in
+            # the existing runner recomputes every assessment and cohort from
+            # saved case results; stale cached cohort rates are never reused.
+            report = await run_test_plan(details['plan'], RunConfig(destination, config, cooldown),
+                                         resume=True, progress=self._collector_progress)
+            geo_content_store.attach_retest(self.data / 'database.db', cycle_id, report)
+            return {'report': report, 'message': '未发送问题已继续采集；已发送问题保留原结果，没有重发。'}
+        return self._start('run', resume, client_name=details['plan']['profile']['name'],
+                           cycle_id=cycle_id, collector_config=config)
 
     def generate_research(self, cycle_id, kind, brief_id, platform, options):
         database = self.data / 'database.db'

@@ -8,7 +8,8 @@
       <button v-for="(label,index) in steps" :key="label" type="button" :disabled="busy || !canVisit(index)" :aria-current="step === index ? 'step' : undefined" :class="{active:step===index,done:step!==index&&stepComplete(index)}" @click="step=index"><span>{{ index+1 }}</span>{{ label }}<el-icon v-if="step!==index&&stepComplete(index)"><Check /></el-icon></button>
     </nav>
     <el-alert v-if="error && !recoveredTaskError" type="error" :title="error" :closable="false" show-icon class="journey-alert"/>
-    <DoubaoTaskRecovery v-if="recoveryInfo" :recovery="recoveryInfo" :busy="busy" :native-available="nativeAvailable" @login="login"/>
+    <DoubaoTaskRecovery v-if="visibleRecoveryInfo" :recovery="visibleRecoveryInfo" :busy="busy" :native-available="nativeAvailable" @login="login"/>
+    <div v-if="canResumeRetest" class="retest-resume" role="group" aria-label="继续当前复测未发送问题"><div><strong>继续当前复测</strong><p>继续未发送题，已发送题不会重发。</p></div><el-button :disabled="busy" :loading="working" data-testid="journey-resume-retest" @click="resumeUnsentRetest">继续未发送问题</el-button></div>
     <el-alert v-if="saveError" type="warning" :title="saveError" :closable="false" show-icon/>
     <div v-if="recoveryDraft || recoveryFacts" class="recovery-note"><p>其他页面更新过资料，已保留服务端版本。冲突的本机编辑可先导出核对。</p><el-button v-if="recoveryDraft" text @click="exportRecovery('draft')">导出本机未保存稿</el-button><el-button v-if="recoveryFacts" text @click="exportRecovery('facts')">导出本机未保存资料</el-button></div>
     <div v-if="nativeBusy" class="task-progress" role="status" aria-live="polite"><el-icon class="is-loading"><Loading /></el-icon><div><strong>{{ isDestinationTask(task) ? '平台接入任务进行中' : task.message || '任务执行中' }}</strong><p>{{ isDestinationTask(task) ? '请在平台专用窗口正常完成登录、验证或绑定，再在对应平台卡检查并继续。请保持窗口打开。' : '请在豆包专用窗口正常完成登录或安全验证。采集或写作时保持窗口打开，软件继续同一条请求，请勿重复点开始。单独登录任务按提示结束窗口。' }}</p></div><el-button @click="stopTask">停止</el-button></div>
@@ -87,7 +88,7 @@
         <template v-else><p v-if="targetPublisher" class="hint publisher-bridge">使用{{ publisherName }}发布器，保留这篇目标稿和来源记录。进入发布中心后核对账号与素材，再逐篇确认真实发布。</p><div class="subheading"><h3>平台账号</h3><el-button text :disabled="busy" @click="refreshAccounts">刷新账号</el-button></div><article v-for="account in matchingAccounts" :key="account.id" class="account-row"><div><strong>{{ account.account_name || `账号 #${account.id}` }}</strong><p>{{ account.status==='connected' ? '已连接（仍需发布前检查）' : '登录状态待处理' }} · {{ account.check_message || '尚无最新检测说明' }}</p></div><el-button :disabled="busy" @click="checkAccount(account.id)">检测登录</el-button></article><p v-if="!matchingAccounts.length" class="hint">尚未连接{{ publisherName }}账号。发布中心会保留这篇稿件，先连接账号再继续。</p><p v-if="platformCapability?.requires_images" class="hint">该平台需要图片。请在发布中心选择并核对配图，再执行真实发布。</p><el-button text @click="router.push('/account-management')">管理账号与登录</el-button></template>
         <el-alert type="info" :closable="false" :title="ownedDraft ? '请由网站编辑发布后，接入官网目标并登记公开文章链接；未登记前只显示采集观察。' : '在平台完成单篇真实发布后，返回“开始优化”的反馈步骤刷新记录。'"/>
         <el-button text :disabled="busy" @click="goFeedback">已经提交，查看反馈与复测</el-button>
-        <GeoPublicationReview :cycle="cycle" :busy="busy" @updated="applyReviewCycle"/>
+        <GeoPublicationReview v-if="hasPublicationReviewDrafts" :cycle="cycle" :busy="busy" @updated="applyReviewCycle"/>
         <el-collapse v-if="selectedTarget" class="advanced"><el-collapse-item title="登记已在该平台提交的文章链接" name="publication"><p class="hint">记录为运营方自报，软件尚未独立核验。请填写公开文章网址和实际提交时间。</p><el-form label-position="top"><el-form-item label="公开文章链接"><el-input v-model="publication.url" placeholder="https://平台/具体文章"/></el-form-item><el-form-item label="实际提交时间"><el-date-picker v-model="publication.publishedAt" type="datetime" placeholder="选择时间"/></el-form-item></el-form><el-checkbox v-model="publication.confirmed">我确认这是这篇文章在对应平台提交后的链接</el-checkbox><el-button :disabled="busy || !publication.confirmed || !publication.url || !publication.publishedAt" @click="recordPublication">保存提交记录</el-button></el-collapse-item></el-collapse>
       </section>
       <section v-else-if="step===4 && cycle" key="feedback" class="geo-surface step-panel">
@@ -96,7 +97,7 @@
         <el-button v-if="nativeAvailable" text :disabled="busy" @click="login">登录复测所用的豆包会话</el-button>
         <BaselineContext/>
         <div class="metric-grid feedback-metrics"><article><span>发布器成功回报</span><strong>{{ cycle.publications?.length || 0 }}</strong><small>排除演示任务与无链接任务</small></article><article><span>运营方自报提交</span><strong>{{ cycle.reported_publications?.length || 0 }}</strong><small>尚未独立核验发布成功</small></article><article><span>取得回答的复测</span><strong>{{ feedbackTotals.withAnswers }}</strong><small>共 {{ feedbackTotals.attempts }} 轮尝试，仍需检查比较条件</small></article></div>
-        <GeoPublicationReview :cycle="cycle" :busy="busy" @updated="applyReviewCycle"/>
+        <GeoPublicationReview v-if="hasPublicationReviewDrafts" :cycle="cycle" :busy="busy" @updated="applyReviewCycle"/>
         <p v-if="!hasPublication" class="hint">{{ unfinishedPublications.length ? '尚无公开成功记录，请先查看以下原发布任务。待确认不等于失败，现在复测只记录新的采集观察。' : '当前没有可用于发布后分析的提交记录。现在复测只会记录新的采集观察。' }}</p>
         <div v-if="unfinishedPublications.length" class="publication-tasks" aria-label="原发布任务"><article v-for="job in unfinishedPublications" :key="job.id" class="feedback-card"><el-tag :type="job.status==='failed' ? 'danger' : job.status==='need_action' ? 'warning' : 'info'">{{ publicationStatus[job.status] }}</el-tag><h3>{{ job.title }} · {{ cycle.channels[job.platform] || job.platform }}</h3><p>{{ job.message || publicationMessages[job.status] }}</p><p v-if="job.status==='processing'" class="hint">最终提交结果仍在确认，请核对原任务与平台后台，不要另建重复发布。</p><el-button :disabled="busy" @click="continuePublication(job)">继续查看原发布任务</el-button></article></div>
         <div v-for="url in cycle.publications || []" :key="url" class="publication-link"><el-tag size="small" type="success">发布器回报</el-tag><a v-if="safeLink(url)" :href="safeLink(url)" target="_blank" rel="noopener noreferrer">{{ url }}</a></div><div v-for="item in cycle.reported_publications || []" :key="item.id" class="publication-link"><el-tag size="small" type="info">运营方自报</el-tag><a v-if="safeLink(item.url)" :href="safeLink(item.url)" target="_blank" rel="noopener noreferrer">{{ item.url }}</a></div>
@@ -132,6 +133,7 @@ import { savedCycleContinuation, savedCycleFactEdits } from '@/utils/geoSavedCyc
 import { baselineWritingOptions } from '@/utils/geoWritingOptions'
 import { feedbackCollectionTotals, retestCollection } from '@/utils/geoFeedback'
 import GeoPublicationReview from '@/components/GeoPublicationReview.vue'
+import { publicationReviewArticles } from '@/utils/geoPublicationReview'
 import DoubaoPreparation from '@/components/DoubaoPreparation.vue'
 import DoubaoSessionControls from '@/components/DoubaoSessionControls.vue'
 import DoubaoTaskRecovery from '@/components/DoubaoTaskRecovery.vue'
@@ -155,8 +157,9 @@ const replacementSourceId=ref(null)
 const editor=reactive({title:'',content:'',summary:'',tags:[]}), publication=reactive({url:'',publishedAt:null,confirmed:false})
 const recoveryDraft=ref(null), recoveryFacts=ref(null)
 const recoveryTask=ref(null)
+const retestResume=ref(null)
 const accounts=ref([]), capabilities=ref([]), capabilitiesLoaded=ref(false), task=ref({status:'idle'}), taskId=ref(''), taskKind=ref(''), working=ref(false), finishingTask=ref(false), error=ref(''), saveError=ref('')
-let timer, bridgeTimer, pollPending=false, handledTask='', restoring=false, destroyed=false, liveTaskId='', initialized=false, contextEpoch=0
+let timer, bridgeTimer, pollPending=false, handledTask='', restoring=false, destroyed=false, liveTaskId='', initialized=false, contextEpoch=0, retestResumeRead=0
 const nativeMethodsReady=()=>['get_task','plan_with_doubao','start_run','open_login','generate_research','start_research_retest','open_destination','stop_task'].every(name=>typeof window.pywebview?.api?.[name]==='function')
 const activateNative=()=>{if(destroyed||!nativeMethodsReady())return false;nativeAvailable.value=true;if(initialized&&!timer){void poll();timer=setInterval(poll,1000)}clearInterval(bridgeTimer);return true}
 const project=computed(()=>projects.value.find(item=>item.id===projectId.value)), nativeBusy=computed(()=>task.value.status==='running'), busy=computed(()=>working.value||nativeBusy.value||finishingTask.value)
@@ -171,8 +174,38 @@ const completedLoginObservation=(current,currentId,currentKind,isWorking=false)=
     explanation:result.close_reason==='page_crashed'?'页面异常退出，登录与会话保存状态未知。':result.close_reason==='browser_disconnected'?'浏览器连接已结束，登录与会话保存状态仍需核验。':'关闭窗口只结束本次登录操作，登录与会话保存状态仍需核验。'}
 }
 const loginObservation=computed(()=>completedLoginObservation(task.value,taskId.value,taskKind.value,working.value))
-const currentRecovery=computed(()=>task.value.id===taskId.value?doubaoTaskRecovery(scopedRecoveryCheckpoint(task.value,cycleId.value)):null)
+const currentRecovery=computed(()=>{
+  if(task.value.id!==taskId.value)return null
+  const checkpoint=scopedRecoveryCheckpoint(task.value,cycleId.value)
+  if(checkpoint?.kind==='run'&&taskKind.value==='retest'&&cycleId.value)checkpoint.kind='retest'
+  return doubaoTaskRecovery(checkpoint)
+})
 const recoveryInfo=computed(()=>currentRecovery.value||doubaoTaskRecovery(scopedRecoveryCheckpoint(recoveryTask.value,cycleId.value)))
+const recoveryStepKinds={1:['plan','run'],2:['research','analysis','draft'],4:['retest']}
+const visibleRecoveryInfo=computed(()=>recoveryStepKinds[step.value]?.includes(recoveryInfo.value?.kind)?recoveryInfo.value:null)
+const resumableRetest=current=>{
+  const capability=current?.resume_research_retest, pending=capability?.pending_case_ids
+  return Boolean(step.value===4&&nativeAvailable.value&&!nativeBusy.value&&cycleId.value
+    &&typeof window.pywebview?.api?.resume_research_retest==='function'
+    &&visibleRecoveryInfo.value?.kind==='retest'&&current?.id===visibleRecoveryInfo.value.taskId
+    &&current?.kind==='run'&&current.cycle_id===cycleId.value
+    &&['completed','failed','stopped','need_action','needs_review'].includes(current.status)
+    &&capability?.can_resume===true&&Array.isArray(pending)&&pending.length>0
+    &&pending.every(id=>typeof id==='string'&&/^[\w-]{1,100}$/.test(id))&&new Set(pending).size===pending.length)
+}
+const canResumeRetest=computed(()=>resumableRetest(retestResume.value))
+const refreshRetestResume=async()=>{
+  const id=visibleRecoveryInfo.value?.taskId, cycle=cycleId.value, epoch=contextEpoch, read=++retestResumeRead
+  retestResume.value=null
+  if(step.value!==4||!nativeAvailable.value||nativeBusy.value||!cycle||visibleRecoveryInfo.value?.kind!=='retest'
+    ||typeof id!=='string'||!(/^[\w-]{1,100}$/).test(id)||typeof window.pywebview?.api?.resume_research_retest!=='function')return
+  try{
+    const current=await window.pywebview.api.get_task(id)
+    if(destroyed||read!==retestResumeRead||epoch!==contextEpoch||cycle!==cycleId.value||id!==visibleRecoveryInfo.value?.taskId||!resumableRetest(current))return
+    retestResume.value={id:current.id,kind:current.kind,status:current.status,cycle_id:current.cycle_id,
+      resume_research_retest:{can_resume:true,pending_case_ids:[...current.resume_research_retest.pending_case_ids]}}
+  }catch{ /* An unconfirmed local capability never enables continuation. */ }
+}
 const recoveredTaskError=computed(()=>Boolean(currentRecovery.value&&error.value===task.value.message))
 const selectSessionMode=value=>{if(busy.value||!['consumer','work'].includes(value))return;if(clientMode.value!==value)model.value='';clientMode.value=value}
 const restoreTaskRecovery=async()=>{
@@ -182,6 +215,7 @@ const restoreTaskRecovery=async()=>{
     const saved=await window.pywebview.api.get_task(id)
     if(destroyed||epoch!==contextEpoch||id!==taskId.value||saved?.id!==id)return
     const recovery=scopedRecoveryCheckpoint(saved,cycleId.value)
+    if(recovery?.kind==='run'&&taskKind.value==='retest'&&cycleId.value)recovery.kind='retest'
     if(recovery)recoveryTask.value=recovery
   }catch{ /* Missing historical task does not replace the current successful task. */ }
 }
@@ -210,6 +244,7 @@ const evidenceReport=computed(()=>cycle.value?.baseline||report.value)
 const evidenceSummary=computed(()=>baselineEvidenceSummary(evidenceReport.value))
 const unfinishedPublications=computed(()=>(cycle.value?.drafts||[]).flatMap(draft=>(draft.jobs||[]).filter(job=>!job.demo&&publicationStatus[job.status]).map(job=>({...job,article_id:draft.article_id,title:draft.title}))))
 const hasPublication=computed(()=>Boolean(cycle.value?.publications?.length||cycle.value?.reported_publications?.length))
+const hasPublicationReviewDrafts=computed(()=>publicationReviewArticles(cycle.value).length>0)
 const feedbackTotals=computed(()=>feedbackCollectionTotals(cycle.value?.retests))
 const usableReport=computed(()=>Boolean(report.value?.cases?.some(item=>item.assessment?.answer_evaluable===true)))
 const sourceCounts=computed(()=>({verified:(cycle.value?.opportunities||[]).filter(item=>item.surface==='community_candidate').length,unknown:(cycle.value?.opportunities||[]).filter(item=>item.surface==='url_unknown').length}))
@@ -276,7 +311,7 @@ const applyCycle=(value,{keepEditor=false}={})=>{
   const facts=value.facts.length?value.facts:value.fact_candidates?.facts||[{text:project.value.description,source_url:'',confirmed:false}]
   if(!keepFactRows)factRows.value=facts.map(item=>({text:item.text,source_url:item.source_url||'',confirmed:value.facts.length>0&&item.confirmed===true}))
 }
-const refreshCycle=()=>run(async()=>{if(cycleId.value)applyCycle((await geoContentApi.get(cycleId.value)).data,{keepEditor:true});await loadAccounts()})
+const refreshCycle=()=>run(async()=>{if(cycleId.value)applyCycle((await geoContentApi.get(cycleId.value)).data,{keepEditor:true});await loadAccounts();await refreshRetestResume()})
 const applyReviewCycle=value=>{if(value.id===cycleId.value)applyCycle(value,{keepEditor:true})}
 const continueSavedCycle=value=>run(async()=>{
   if(profileDirty.value)throw new Error('品牌资料已修改，请先保存或重新选择对象，再继续已有内容。')
@@ -344,7 +379,8 @@ const startNative=async(kind,action)=>{
   const epoch=contextEpoch,selectedTaskId=taskId.value
   const assertCurrent=()=>{if(destroyed||epoch!==contextEpoch||selectedTaskId!==taskId.value){const cancelled=new Error('原操作页面已变更');cancelled.name='AbortError';throw cancelled}}
   assertCurrent()
-  if(!['login','destination'].includes(kind)&&recoveryInfo.value?.requiresConfirmation){
+  const independentRetest=kind==='retest'&&['analysis','research','draft'].includes(recoveryInfo.value?.kind)
+  if(!['login','destination'].includes(kind)&&recoveryInfo.value?.requiresConfirmation&&!independentRetest){
     try{await ElMessageBox.confirm(`${recoveryInfo.value.submissionText} 这是一次新的尝试，不会自动接续或撤销豆包里的原问题。`,'重新开始前核对原会话',{confirmButtonText:kind==='run'||kind==='retest'?'新测一轮，会再次提问':'已核对，重新开始',cancelButtonText:'先保留原任务'})}
     catch{const cancelled=new Error('已保留原任务');cancelled.name='AbortError';throw cancelled}
   }
@@ -355,6 +391,27 @@ const startNative=async(kind,action)=>{
   if(!['login','destination'].includes(kind))recoveryTask.value=null
   persist()
 }
+const resumeUnsentRetest=()=>run(async()=>{
+  const source=retestResume.value, cycle=cycleId.value, epoch=contextEpoch, selectedTaskId=taskId.value
+  if(!resumableRetest(source))throw new Error('尚未确认可继续的未发送问题，请先刷新任务状态；原任务仍保留。')
+  const assertCurrent=()=>{if(destroyed||epoch!==contextEpoch||cycle!==cycleId.value||selectedTaskId!==taskId.value
+    ||step.value!==4||source.id!==visibleRecoveryInfo.value?.taskId){const cancelled=new Error('原操作页面已变更');cancelled.name='AbortError';throw cancelled}}
+  retestResumeRead++
+  retestResume.value=null
+  const current=await window.pywebview.api.get_task(source.id)
+  assertCurrent()
+  if(!resumableRetest(current))throw new Error('原任务当前不能继续未发送问题，请刷新查看；已发送题不会重发。')
+  const result=await window.pywebview.api.resume_research_retest(source.id,cycle)
+  assertCurrent()
+  if(result?.error)throw new Error(result.error)
+  if(!result||typeof result.id!=='string'||!(/^[\w-]{1,100}$/).test(result.id)||result.id===source.id||result.status!=='running'
+    ||result.kind!==undefined&&result.kind!=='run'||result.cycle_id!==undefined&&result.cycle_id!==cycle
+    ||result.resumed_from_task_id!==undefined&&result.resumed_from_task_id!==source.id)
+    throw new Error('续采启动结果尚未确认，请查看原任务与任务记录，不要重复点击继续。')
+  task.value={...result,kind:'run',cycle_id:cycle};taskId.value=result.id;liveTaskId=result.id;taskKind.value='retest';handledTask=''
+  recoveryTask.value=null
+  persist()
+})
 const retestSessionOptions=()=>{const baseline=cycle.value?.baseline||{},execution=baseline.execution||{};return {client_mode:execution.client_mode||baseline.cases?.find(item=>item.client_mode)?.client_mode||'consumer',model_label:execution.requested_model_label||''}}
 const login=()=>run(()=>startNative('login',()=>window.pywebview.api.open_login(step.value===4?retestSessionOptions():options())))
 const makePlan=()=>run(async()=>{if(profileDirty.value)throw new Error('测试对象资料已变更，请先保存，再为该对象生成新问题');planConfirmed.value=false;const profile={...project.value,...formProfile()};if(provider.value==='doubao'){if(!nativeAvailable.value)throw new Error('桌面豆包采集服务尚未就绪');await startNative('plan',()=>window.pywebview.api.plan_with_doubao(profile,3,options()))}else plan.value=(await geoTestApi.generatePlan({project_id:projectId.value,case_count:3,...entityProfileFields(profile)})).data})
@@ -425,6 +482,7 @@ const poll=async()=>{
     finishingTask.value=Boolean(current.id&&current.id===taskId.value&&current.status!=='running'&&handledTask!==current.id);task.value=current
     if(!current.id||current.status==='running'||current.id!==taskId.value||handledTask===current.id)return
     const recovery=scopedRecoveryCheckpoint(current,cycleId.value)
+    if(recovery?.kind==='run'&&taskKind.value==='retest'&&cycleId.value)recovery.kind='retest'
     if(recovery){recoveryTask.value=recovery;if(error.value===current.message)error.value=''}
     else if(['failed','stopped','needs_review','need_action'].includes(current.status))error.value=current.message||'任务未完成，记录已保留，请检查后重试'
     if(current.result?.plan&&sameBrand(current.result.plan.profile,project.value)){plan.value=current.result.plan;planConfirmed.value=false}
@@ -442,6 +500,7 @@ const poll=async()=>{
   }catch(cause){if(currentScope())error.value=cause.message||'任务状态读取失败，可保留当前窗口稍后重试'}finally{pollPending=false;finishingTask.value=false}
 }
 watch([projectId,cycleId],()=>{contextEpoch++},{flush:'sync'})
+watch([step,cycleId,()=>visibleRecoveryInfo.value?.taskId,nativeAvailable,nativeBusy],()=>{void refreshRetestResume()},{flush:'sync'})
 watch([step,form,clientMode,model,provider,plan,reportId,cycleId,briefId,platform,articleId,editor,factRows,replacementSourceId,recoveryTask],persist,{deep:true})
 watch(step,value=>{if(value===3&&!capabilitiesLoaded.value&&!busy.value)void refreshAccounts()})
 watch(()=>[form.name,form.website,form.entity_type,form.company,form.audience,form.description,form.aliasesText,form.officialUrlsText],()=>{if(!restoring){plan.value=null;planConfirmed.value=false}},{flush:'sync'})
@@ -461,6 +520,7 @@ onUnmounted(()=>{persist();destroyed=true;clearInterval(timer);clearInterval(bri
 </script>
 
 <style scoped>
+.retest-resume{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 20px;border:1px solid var(--geo-border);border-radius:10px;background:#f6faf8;font-size:13px}.retest-resume p{margin-top:5px;color:var(--geo-muted);font-size:12px;line-height:1.7}@media(max-width:600px){.retest-resume{align-items:flex-start;flex-direction:column}}
 .feedback-issues{margin-top:14px;padding:12px 16px;border:1px solid var(--geo-border);border-radius:8px;font-size:12px;line-height:1.8;color:var(--geo-muted);overflow-wrap:anywhere}.feedback-issues summary{cursor:pointer;color:var(--geo-text)}.feedback-issues p{margin-top:8px}.feedback-issues small{font-size:11px}
 .login-observation{display:grid;gap:8px;padding:16px 20px;border:1px solid var(--geo-border);border-radius:12px;background:#f6f9f8;font-size:13px;line-height:1.8}.login-observation>strong{color:var(--geo-text);font-size:13px}.login-observation.mismatch{border-color:#e7d4b3;background:#fffaf1}.login-observation.mismatch>strong{color:#7b5b26}.login-state{display:flex;flex-wrap:wrap;gap:4px 18px;color:var(--geo-muted)}.login-observation details{font-size:12px;color:var(--geo-muted)}.login-observation summary{cursor:pointer;width:fit-content}.login-observation details p{margin-top:8px}
 .journey-steps>button{min-width:0;white-space:nowrap}.journey-header>div{min-width:0}.geo-page-heading{overflow-wrap:anywhere}@media(max-width:1100px){.journey-steps>button{gap:6px;padding:12px 4px;font-size:12px}.journey-steps .el-icon{display:none}}

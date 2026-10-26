@@ -399,6 +399,10 @@ class ZhihuPublisherAdapter(PublisherAdapter):
                 'title_readback_mismatch': '知乎文章标题未通过回读核对，请先检查原草稿',
                 'body_readback_mismatch': '知乎正文未完整写入或未通过回读核对，请先检查原草稿',
                 'body_input_empty': '知乎正文仍为空，未能确认输入成功，请先检查原草稿',
+                'markdown_unsupported': '知乎原稿包含尚未支持自动核对的 Markdown 格式，请先调整或人工检查',
+                'markdown_import_controls_unconfirmed': '知乎文档导入入口或文件选择器尚未确认，请先检查页面',
+                'markdown_import_unconfirmed': '知乎文档导入结果尚未确认，请先检查平台草稿，避免重复导入',
+                'markdown_semantic_mismatch': '知乎导入后的段落、链接或表格未通过原稿核对，请先检查平台草稿',
             }.get(code, '知乎编辑器尚未就绪，请先检查编辑器是否完整加载')
             return PublishResult(
                 success=False, platform=self.platform, status="need_action",
@@ -1044,6 +1048,7 @@ async def _default_zhihu_publish_runner(
         dry_run=False,
         cover_path=content.images[0] if content.images else None,
         creation_statement="包含 AI 辅助创作 作者对内容负责",
+        content_format="markdown",
     )
     # Keep the actual article window visible for ordinary account/security
     # prompts. Read-only login and duplicate probes retain their own options.

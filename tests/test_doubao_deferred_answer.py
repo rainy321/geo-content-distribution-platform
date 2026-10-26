@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 from services.doubao_answer_state import is_deferred_answer
 from services.doubao_source_collector import CollectorConfig, CompletionTracker, SubmissionReceipt, collect_doubao_sources
-from services.geo_test_service import assess_answer, build_report
+from services.geo_test_service import assess_answer, build_report, report_cohorts
 from services.geo_content_research import compare_reports, research_observations
 from tests.test_doubao_manual_wait import CANONICAL, FakePage, snapshot
 from tests.test_geo_tests import answer, plan, profile
@@ -19,8 +19,71 @@ NOTICE = ('我来先评估这个任务：这是一次需要多渠道核验的调
           '已把这个调研任务委托给专门的调研代理执行了。查不到的价格、稳定性、合规性会如实标注未知。\n'
           '调研在后台进行，你可以继续问我其他问题；完成后我会把带来源标注的候选清单整理给你。')
 
+STARTED_NOTICE = ('已为您启动调研任务，将核对示例协作平台的公开能力与适用范围。\n'
+                  '调研完成后会以飞书文档形式交付给您，包含来源说明与尚不能确认的内容。\n'
+                  '您无需等待，可以继续处理其他事情。')
+SYNTHETIC_PROFILE = {'name': '示例协作平台', 'company': '示例组织', 'industry': '协作工具',
+                     'description': '提供协作界面', 'website': 'https://example.org/', 'aliases': []}
+
 
 class DeferredAssessmentTests(unittest.TestCase):
+    def test_started_research_and_future_document_delivery_are_pending_together(self):
+        for text in (
+            STARTED_NOTICE,
+            '我已为你启动本次调研任务。调研完成后将以飞书文档形式提供给你，无需等待。',
+            '我已经启动了这个研究任务。研究结束后将整理成飞书文档发送给你。',
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(is_deferred_answer(text))
+
+    def test_copy_marker_and_long_quiet_period_do_not_complete_started_research(self):
+        tracker = CompletionTracker(0, .1)
+        pending = snapshot(challenge=False, answer=STARTED_NOTICE,
+                           completion_marker=True, assistant_count=1)
+        for now in (1, 2, 10, 100):
+            self.assertFalse(tracker.observe(pending, now))
+        final = snapshot(challenge=False, assistant_count=2, completion_marker=True,
+                         answer='调研已完成，以下是最终结果：示例协作平台提供公开的协作界面，其他能力仍需核对。')
+        self.assertFalse(tracker.observe(final, 101))
+        self.assertTrue(tracker.observe(final, 102))
+
+    def test_started_notice_brand_mention_is_unknown_and_excluded_from_denominator(self):
+        question = '协作工具选型时可以从哪些公开维度比较？'
+        result = answer(question, response=STARTED_NOTICE)
+        original = copy.deepcopy(result)
+        assessment = assess_answer(SYNTHETIC_PROFILE, result, question)
+        self.assertEqual(result, original)
+        self.assertEqual(assessment['answer_error'], 'background_task_not_final')
+        self.assertFalse(assessment['answer_evaluable'])
+        for field in ('brand_mentioned', 'official_source_present', 'official_citation_present'):
+            self.assertIsNone(assessment[field])
+        pending_row = {'category': 'discovery', 'assessment': assessment}
+        pending_only = report_cohorts([pending_row])['discovery']
+        self.assertEqual(pending_only['planned'], 1)
+        self.assertEqual(pending_only['answers_evaluable'], 0)
+        self.assertIsNone(pending_only['brand_mention_rate'])
+        actual = assess_answer(SYNTHETIC_PROFILE, answer(question,
+            response='可比较公开功能、权限范围与交付说明；本次没有发现指定品牌的公开依据。'), question)
+        mixed = report_cohorts([pending_row, {'category': 'discovery', 'assessment': actual}])['discovery']
+        self.assertEqual(mixed['planned'], 2)
+        self.assertEqual(mixed['answers_evaluable'], 1)
+        self.assertEqual(mixed['brand_mentions'], 0)
+        self.assertEqual(mixed['brand_mention_rate'], 0)
+
+    def test_completed_results_generic_document_discussion_and_quoted_examples_are_not_pending(self):
+        for text in (
+            '已为您启动调研任务。调研已完成，以下是最终结果：示例协作平台提供协作界面，来源可公开核对。',
+            '以下是核验结果：示例协作平台提供协作界面。飞书文档可作为普通协作工具使用。',
+            '飞书文档支持多人协作；调研完成后可以将公开材料整理成文档。',
+            '已为您启动调研任务是一种通知文案的示例写法，本文解释该句，并未执行新的调查。',
+            '调研完成后会以飞书文档形式交付给您，这是一条通用流程说明。',
+            '用户引用示例：“已为您启动调研任务，调研完成后会以飞书文档形式交付给您，无需等待。”这是一条占位提示。',
+        ):
+            with self.subTest(text=text):
+                self.assertFalse(is_deferred_answer(text))
+                self.assertTrue(assess_answer(SYNTHETIC_PROFILE,
+                    answer('通用测试问题', response=text), '通用测试问题')['answer_evaluable'])
+
     def test_notice_copy_and_brand_in_notice_never_imply_final_answer_or_zero(self):
         self.assertTrue(is_deferred_answer(NOTICE))
         self.assertTrue(is_deferred_answer('已委托专门调研代理，后台进行，完成后整理给你。'))
@@ -98,7 +161,7 @@ class DeferredAssessmentTests(unittest.TestCase):
 
 
 class DeferredCollectorTests(unittest.IsolatedAsyncioTestCase):
-    async def collect_synthetic(self, *, final):
+    async def collect_synthetic(self, *, final, notice=NOTICE):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             page = FakePage()
@@ -118,8 +181,8 @@ class DeferredCollectorTests(unittest.IsolatedAsyncioTestCase):
                 calls[0] += 1
                 if calls[0] <= 2:
                     return snapshot(challenge=False, question_verified=False, user_message_count=0)
-                text = '公开核验的最终回答：可比较接口兼容性、价格依据与可查来源。' if final and calls[0] >= 5 else NOTICE
-                return snapshot(challenge=False, assistant_count=2 if text != NOTICE else 1,
+                text = '公开核验的最终回答：可比较接口兼容性、价格依据与可查来源。' if final and calls[0] >= 5 else notice
+                return snapshot(challenge=False, assistant_count=2 if text != notice else 1,
                                 answer=text, completion_marker=True)
             async def sleep(_):
                 clock[0] += .5
@@ -159,6 +222,24 @@ class DeferredCollectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result['visible_source_count'])
         self.assertEqual(extractions, 0)
         self.assertIsNone(assess_answer(profile(), result, 'exact question')['brand_mentioned'])
+
+    async def test_started_document_notice_waits_without_resubmission_or_source_zero(self):
+        result, events, extractions = await self.collect_synthetic(final=False, notice=STARTED_NOTICE)
+        self.assertEqual(result['response'], STARTED_NOTICE)
+        self.assertFalse(result['answer_completed'])
+        self.assertEqual(result['collection_status'], 'need_action')
+        self.assertEqual(result['failure_reason'], 'background_task_timeout')
+        self.assertIsNone(result['visible_source_count'])
+        self.assertEqual(extractions, 0)
+        self.assertNotIn('answer_completed', [event['event'] for event in events])
+
+    async def test_started_document_notice_accepts_later_actual_answer_on_same_request(self):
+        result, events, extractions = await self.collect_synthetic(final=True, notice=STARTED_NOTICE)
+        self.assertTrue(result['answer_completed'])
+        self.assertEqual(result['collection_status'], 'success')
+        self.assertEqual(extractions, 1)
+        self.assertIn('background_task_cleared', [event['event'] for event in events])
+        self.assertNotIn('飞书文档', result['response'])
 
 
 if __name__ == '__main__':

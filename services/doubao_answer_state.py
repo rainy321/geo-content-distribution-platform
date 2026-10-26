@@ -22,8 +22,18 @@ def is_deferred_answer(response: str) -> bool:
         r"(?:^|[。！？；])(?:我(?:已经|已|先)?|已经|已).{0,60}(?:委托|委派|交给|交由).{0,70}(?:代理|组织者|后台任务)",
         text,
     )
+    # Observed work-client notice: the task was started and its Feishu
+    # document will be delivered later. Mentioning Feishu alone is insufficient.
+    started_research = re.search(
+        r'(?:^|[。！？；])(?:我(?:已经|已)?|已经|已)(?:为(?:你|您))?启动(?:了)?(?:这个|本次)?(?:调研|研究)任务',
+        text,
+    )
+    future_document = re.search(
+        r'(?:调研|研究)(?:任务)?(?:完成|结束)后.{0,35}(?:飞书文档).{0,20}(?:交付|给您|给你|发送|提供)',
+        text,
+    )
     pending = re.search(
         r"(?:调研|研究|任务).{0,12}(?:正在|在)后台(?:进行|执行|运行)|(?:完成|结束)后.{0,35}(?:我会|给你|整理|汇总)|稍后.{0,25}(?:给你|整理|汇总)",
         text,
     )
-    return bool(delegated and pending)
+    return bool(delegated and pending or started_research and future_document)

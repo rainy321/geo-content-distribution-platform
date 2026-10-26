@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import re
 from typing import Any
+from urllib.parse import urlsplit
 
 
-_ARTICLE_URL_PATTERN = re.compile(r"https://zhuanlan\.zhihu\.com/p/\d+")
+_ARTICLE_URL_PATTERN = re.compile(r"https://zhuanlan\.zhihu\.com/p/[0-9]+")
 _SUBMISSION_METHODS = frozenset({"POST", "PUT", "PATCH"})
 _SUBMISSION_URL_MARKERS = ("article", "publish")
+_RESPONSE_HOSTS = frozenset({'www.zhihu.com', 'zhuanlan.zhihu.com', 'api.zhihu.com'})
 
 
 class ZhihuAIStatementNotConfirmedError(RuntimeError):
@@ -19,7 +21,9 @@ class ZhihuEditorNotReadyError(RuntimeError):
     def __init__(self, message="", *, reason_code="editor_not_ready"):
         super().__init__(message)
         allowed = {'editor_not_ready', 'editor_preparation_failed', 'editor_existing_content',
-                   'title_readback_mismatch', 'body_readback_mismatch', 'body_input_empty'}
+                   'title_readback_mismatch', 'body_readback_mismatch', 'body_input_empty',
+                   'markdown_unsupported', 'markdown_import_controls_unconfirmed',
+                   'markdown_import_unconfirmed', 'markdown_semantic_mismatch'}
         self.reason_code = reason_code if reason_code in allowed else 'editor_not_ready'
 
 
@@ -36,12 +40,13 @@ async def click_exact_publish_and_observe(page: Any) -> dict[str, Any]:
 
     def record_response(response: Any) -> None:
         method = str(response.request.method or "").upper()
-        url = str(response.url or "").lower()
-        if method in _SUBMISSION_METHODS and any(
-            marker in url for marker in _SUBMISSION_URL_MARKERS
-        ):
+        url = urlsplit(str(response.url or ""))
+        if (method in _SUBMISSION_METHODS and url.scheme == 'https'
+                and url.netloc in _RESPONSE_HOSTS
+                and any(marker in url.path.lower() for marker in _SUBMISSION_URL_MARKERS)):
             submission_responses.append(response)
 
+    confirmation_pending = False
     page.on("response", record_response)
     try:
         candidates = page.get_by_role("button", name="发布", exact=True)
@@ -58,7 +63,7 @@ async def click_exact_publish_and_observe(page: Any) -> dict[str, Any]:
         await publish_buttons[0].click(timeout=5_000)
         try:
             await page.wait_for_timeout(1_500)
-            await _confirm_publish_dialog_if_present(page)
+            confirmation_pending = not await _confirm_publish_dialog_if_present(page)
             await page.wait_for_timeout(6_000)
         except Exception as exc:
             if not _is_navigation_context_error(exc):
@@ -76,6 +81,11 @@ async def click_exact_publish_and_observe(page: Any) -> dict[str, Any]:
         except Exception:
             pass
 
+    if confirmation_pending:
+        return {
+            'status': 'processing', 'success': False,
+            'message': '知乎仍有待确认的弹窗，请先在平台核对；不会重复点击发布',
+        }
     current_url = str(page.url or "")
     direct_url = _extract_article_url(current_url)
     if direct_url:
@@ -106,13 +116,16 @@ async def click_exact_publish_and_observe(page: Any) -> dict[str, Any]:
             "success": False,
             "message": "已观察到知乎文章写入请求，但没有明确发布成功信号",
         }
-    raise RuntimeError("点击知乎发布后未观察到文章提交请求")
+    return {
+        'status': 'processing', 'success': False,
+        'message': '已点击知乎发布，但尚未观察到明确提交结果，请先核对平台状态；不会自动重试',
+    }
 
 
-async def _confirm_publish_dialog_if_present(page: Any) -> None:
+async def _confirm_publish_dialog_if_present(page: Any) -> bool:
     dialogs = page.locator('[role="dialog"]:visible')
     if not await dialogs.count():
-        return
+        return True
     dialog = dialogs.last
     for label in ("确认发布", "发布", "确定"):
         candidates = dialog.get_by_role("button", name=label, exact=True)
@@ -121,8 +134,8 @@ async def _confirm_publish_dialog_if_present(page: Any) -> None:
             if await candidate.is_visible() and await candidate.is_enabled():
                 await candidate.click(timeout=5_000)
                 await page.wait_for_timeout(1_000)
-                return
-    raise RuntimeError("知乎发布确认弹窗已出现，但未找到可用的确认按钮")
+                return True
+    return False
 
 
 async def _summarize_submission_responses(responses: list[Any]) -> dict[str, Any]:
@@ -134,24 +147,36 @@ async def _summarize_submission_responses(responses: list[Any]) -> dict[str, Any
         if not 200 <= status < 300:
             continue
         successful_count += 1
-        response_url = str(response.url or "")
-        if "publish" in response_url.lower():
-            explicit_publish_success = True
         try:
             payload = await response.json()
         except Exception:
             payload = None
-        payload_text = str(payload or "")
-        article_url = article_url or _extract_article_url(payload_text)
-        if isinstance(payload, dict):
-            state = str(
-                payload.get("status")
-                or payload.get("state")
-                or payload.get("publish_status")
-                or ""
-            ).lower()
-            if state in {"published", "success", "submitted"}:
-                explicit_publish_success = True
+        nodes = _result_nodes(payload)
+        states = {str(node.get(key) or '').lower()
+                  for node in nodes for key in ('status', 'state', 'publish_status')}
+        negative = {'draft', 'saved', 'autosaved', 'unpublished', 'unsubmitted',
+                    'pending', 'pending_review', 'under_review', 'reviewing', 'processing', 'failed', 'error'}
+        if (states & negative or any(
+                node.get('is_draft') is True or node.get('published') is False
+                or node.get('is_published') is False or node.get('success') is False
+                or bool(node.get('error')) or bool(node.get('errors')) for node in nodes)):
+            continue
+        parsed = urlsplit(str(response.url or ''))
+        publish_request = (parsed.scheme == 'https' and parsed.netloc in _RESPONSE_HOSTS
+                           and parsed.path.rstrip('/').rsplit('/', 1)[-1].lower() == 'publish')
+        published = 'published' in states
+        submitted = 'submitted' in states
+        if publish_request or published or submitted:
+            explicit_publish_success = True
+            # A submitted/review-pending article may not be public yet.
+            # A draft/save URL from another response is never reused here.
+            if submitted and not published:
+                continue
+            for node in nodes:
+                for key in ('article_url', 'url', 'share_url'):
+                    value = node.get(key)
+                    candidate = _extract_article_url(value) if isinstance(value, str) else ''
+                    article_url = article_url or candidate
     return {
         "request_count": len(responses),
         "successful_request_count": successful_count,
@@ -161,8 +186,19 @@ async def _summarize_submission_responses(responses: list[Any]) -> dict[str, Any
 
 
 def _extract_article_url(value: str) -> str:
-    match = _ARTICLE_URL_PATTERN.search(value)
-    return match.group(0) if match else ""
+    # The editor auto-saves to /p/<id>/edit. Prefix extraction would turn that
+    # private draft route (or an arbitrary longer string) into false success.
+    return value if _ARTICLE_URL_PATTERN.fullmatch(value) else ''
+
+
+def _result_nodes(payload: Any, depth: int = 0) -> list[dict]:
+    """Inspect result fields, never article text, references or history URLs."""
+    if not isinstance(payload, dict) or depth > 3:
+        return []
+    result = [payload]
+    for key in ('data', 'result', 'article', 'publish_result'):
+        result.extend(_result_nodes(payload.get(key), depth + 1))
+    return result
 
 
 def _is_navigation_context_error(exc: Exception) -> bool:

@@ -166,6 +166,7 @@ class ZhiHuArticle(object):
         dry_run=False,
         cover_path=None,
         creation_statement=None,
+        content_format="text",
     ):
         self.title = (title or "").strip()[:TITLE_MAX_LEN]
         if not self.title:
@@ -180,6 +181,14 @@ class ZhiHuArticle(object):
         self.headless = LOCAL_CHROME_HEADLESS if not self.dry_run else False
         self.cover_path = self._normalize_cover(cover_path)
         self.creation_statement = self._normalize_creation_statement(creation_statement)
+        if content_format not in {'text', 'markdown'}:
+            raise ValueError('知乎正文格式必须为 text 或 markdown')
+        self.content_format = content_format
+        self._markdown_import_attempted = False
+        self._markdown_manifest = None
+        if content_format == 'markdown':
+            from services.zhihu_markdown_editor import build_markdown_manifest
+            self._markdown_manifest = build_markdown_manifest(self.body)
 
     @staticmethod
     def _normalize_cover(cover_path) -> str | None:
@@ -508,6 +517,15 @@ class ZhiHuArticle(object):
         editor = await self._body_editor(page)
         if (await self._read_body_text(editor)).strip():
             raise self._content_error('editor_existing_content', '知乎正文已有内容，已停止以免覆盖；本次未点击发布')
+        if self.content_format == 'markdown':
+            from services.zhihu_markdown_editor import import_markdown_body
+            if self._markdown_import_attempted:
+                raise self._content_error('markdown_import_unconfirmed', '知乎正文已尝试导入，已暂停以免重复导入；本次未点击发布')
+            self._markdown_import_attempted = True
+            await import_markdown_body(page, editor, markdown=self.body, expected_title=self.title,
+                                       manifest=self._markdown_manifest)
+            zhihu_logger.info('知乎 Markdown 正文已通过段落、链接与表格核对')
+            return
         await editor.click(timeout=5000)
         # Normal browser input updates the observed Draft.js editor. Never
         # infer success from a clipboard shortcut, clear existing text, or
@@ -533,7 +551,10 @@ class ZhiHuArticle(object):
         for observation in range(2):
             if self._normalized_editor_text(await title.input_value()) != self._normalized_editor_text(self.title):
                 raise self._content_error('title_readback_mismatch', '知乎标题未通过最终回读核对；本次未点击发布')
-            if await self._read_body_text(editor) != self._normalized_editor_text(self.body):
+            if self.content_format == 'markdown':
+                from services.zhihu_markdown_editor import verify_markdown_document
+                await verify_markdown_document(editor, self._markdown_manifest)
+            elif await self._read_body_text(editor) != self._normalized_editor_text(self.body):
                 raise self._content_error('body_readback_mismatch', '知乎正文未通过最终回读核对；本次未点击发布')
             if observation == 0:
                 await asyncio.sleep(.3)

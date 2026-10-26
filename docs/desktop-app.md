@@ -2,7 +2,9 @@
 
 桌面程序名为“GEO AI 搜索工作台”，启动文件为 `GEO_AI_Workbench.exe`。使用独立 WebView2 窗口，包含 Python 后端和已构建的界面。需要 Windows x64、Microsoft WebView2 和可用的 Chrome 或 Edge。
 
-本文对应 **2026.10.26.3 本机浏览器自动选择版**。未显式指定浏览器时，先选择本机已安装的 Chrome；未找到 Chrome 时再选择 Edge。明确指定的浏览器配置继续优先，不需要客户为默认选择手动配置环境变量，不会迁移或合并不同浏览器的用户目录。
+本文对应 **2026.10.26.4 知乎正文原生导入候选版**。当前知乎路径支持以空行分隔的普通段落、`#` / `##` 标题、HTTP(S) 链接和简单表格，通过平台正常的 Markdown 文档导入处理正文，再按段落顺序、标题层级、链接文字及网址、表格单元格做语义回读，并单独核对文章标题。图片、代码、列表等尚未支持核对的结构，以及读回不一致的内容，均暂停并提示审核，不静默删减或当作已就绪。现有正文不会被自动覆盖，导入状态未确认时不重复导入。候选源码的导入检查不等于新稿已公开，也不能证明 GEO 提升；实际交付结果以最终构建和对应清单为准。
+
+未显式指定浏览器时，先选择本机已安装的 Chrome；未找到 Chrome 时再选择 Edge。明确指定的浏览器配置继续优先，不需要客户为默认选择手动配置环境变量，不会迁移或合并不同浏览器的用户目录。
 
 本次本机排查中，默认 Edge 在启动阶段退出，未完成原生检查；显式使用本机 Chrome 的完整原生检查通过。这是本机运行观察，不表示其他 Edge 安装均有相同问题；本版最终程序与浏览器验收结果以对应发行清单为准。
 
@@ -76,7 +78,7 @@ CSDN 专用辅助填写无需配置 CSS 选择器；仅确认空白或完整匹�
 
 ## 本机安装与数据
 
-本次目标版本为 **2026.10.26.3**。从 [GitHub Releases](https://github.com/rainy321/geo-content-distribution-platform/releases) 中实际公开的版本下载 Windows x64 ZIP，并核对对应清单；完整解压后打开 `GEO_AI_Workbench/GEO_AI_Workbench.exe`，保留同级 `_internal` 目录。[2026.10.25.2 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.25.2)、[2026.10.25.1 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.25.1)、[2026.10.22.3 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.22.3)、[2026.10.22.2 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.22.2)、[2026.10.22.1 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.22.1)、[2026.10.21.5 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.5)、[2026.10.21.4 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.4)及[2026.10.21.3 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.3)继续保留。[2026.10.20 五步流程版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.20)保留此前真实发布走查。更早版本在[旧版归档 Release](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-legacy-backup-2026.10.15)，仅用于备份恢复。
+本次目标版本为 **2026.10.26.4**。从 [GitHub Releases](https://github.com/rainy321/geo-content-distribution-platform/releases) 中实际公开的版本下载 Windows x64 ZIP，并核对对应清单；完整解压后打开 `GEO_AI_Workbench/GEO_AI_Workbench.exe`，保留同级 `_internal` 目录。[2026.10.25.2 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.25.2)、[2026.10.25.1 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.25.1)、[2026.10.22.3 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.22.3)、[2026.10.22.2 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.22.2)、[2026.10.22.1 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.22.1)、[2026.10.21.5 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.5)、[2026.10.21.4 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.4)及[2026.10.21.3 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.3)继续保留。[2026.10.20 五步流程版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.20)保留此前真实发布走查。更早版本在[旧版归档 Release](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-legacy-backup-2026.10.15)，仅用于备份恢复。
 
 本机安装文件：`%LOCALAPPDATA%\Programs\GEO_AI_Workbench\GEO_AI_Workbench.exe`。桌面和开始菜单有“GEO AI搜索工作台”快捷方式。
 
@@ -87,6 +89,8 @@ CSDN 专用辅助填写无需配置 CSS 选择器；仅确认空白或完整匹�
 五步流程还会按品牌保存当前步骤、选题、未保存编辑和事实核对进度。恢复时核对服务器版本；出现冲突会保留两份并提供本机稿导出，不静默覆盖。旧事实重新作为待核对资料出现，不自动视为今天仍有效。“沿用问题新测一轮”明确开启独立新轮次，先检查模型和问题；发布后的效果观察则从原内容任务单执行同题复测。
 
 独立程序只监听本机回环地址。关闭窗口会停止内部服务。再次打开会使用已有数据；同一数据目录只允许一个窗口实例。
+
+开发与测试副本清理保留当前可用版本及必要恢复包；确认远端备份可恢复且摘要一致后，可以清理旧 ZIP 和重复解压副本。客户账号、浏览器会话、报告、任务及项目数据不属于版本清理范围。固定信任脚本、备份清单与核对证据继续保留，避免为腾空间影响后续恢复或验证。
 
 平台可在接入配置中显式停用，历史来源、稿件与审核记录保留；停用后不再从该目标启动登录、写稿或填稿。发现某网站出现在 AI 来源中，只代表研究线索，不能据此认定适合投递推广内容。
 
