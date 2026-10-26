@@ -55,6 +55,7 @@ class DesktopGeoJobs:
         self._destination_check = self._destination_check_loop = None
         self._destination_check_task_id = None
         self._destination_check_pending = False
+        self._source_check = self._source_check_loop = self._source_check_task_id = None
         for record in records:
             if record.get("status") == "running":
                 record.update(status="needs_review", updated_at=now(),
@@ -66,6 +67,15 @@ class DesktopGeoJobs:
                     report = self._save_interrupted_run(record, reason="application_closed_submission_unknown")
                     if report:
                         record["result"] = {"report": report}
+                if record.get('kind') == 'source_maintenance' and record.get('source_task_id'):
+                    from services import source_maintenance_service as maintenance
+                    try:
+                        source = maintenance.get_task(data / 'database.db', record.get('cycle_id'), record['source_task_id'])
+                        maintenance.record_state(data / 'database.db', record['cycle_id'], source['id'],
+                            stage='submission_unknown' if source['read_only'] else 'window_closed',
+                            message='软件上次关闭时来源维护未结束，原申请保留；只能检查，不会自动提交。', window_open=False)
+                    except (ValueError, sqlite3.Error, geo_content_store.ResearchNotFoundError):
+                        logging.warning('Interrupted source maintenance requires manual record review')
                 if record.get('target_id') and record.get('kind') == 'destination_fill':
                     geo_destination_service.record_event(data / 'database.db', record['target_id'], 'interrupted', 'need_action',
                         '上次填写时软件关闭，编辑器是否自动保存或提交未知；请检查页面，不会自动重试')
@@ -699,6 +709,71 @@ class DesktopGeoJobs:
                 self._destination_check_pending = False
                 return {'error': '当前平台窗口已结束，请查看任务记录；不会自动重开。'}
             return {'id': task_id, 'status': 'running', 'check_requested': True}
+
+    def open_source_maintenance(self, cycle_id, source_task_id):
+        from services import source_maintenance_service as maintenance
+        database = self.data / 'database.db'
+        try:
+            record = maintenance.get_task(database, cycle_id, source_task_id)
+            if not record['read_only'] and maintenance.get_overview(database, cycle_id)['context_sha256'] != record['context_sha256']:
+                raise ValueError('确认资料已变化，请刷新公开说明，未打开辅助申请')
+        except (ValueError, TypeError, sqlite3.Error, geo_content_store.ResearchNotFoundError) as error:
+            return {'error': str(error)}
+
+        async def operate():
+            from services.qcc_source_maintenance_browser import open_session
+            signal = asyncio.Event()
+            with self.lock:
+                native_id = self.job['id']
+                self.job['source_task_id'] = source_task_id
+                self._source_check, self._source_check_loop, self._source_check_task_id = signal, asyncio.get_running_loop(), native_id
+                self._persist()
+            latest = record
+
+            def progress(value):
+                nonlocal latest
+                if value.get('write_attempted') and not latest.get('write_attempted'):
+                    if maintenance.get_overview(database, cycle_id)['context_sha256'] != record['context_sha256']:
+                        raise ValueError('确认资料已变化，公开说明尚未写入')
+                latest = maintenance.record_state(database, cycle_id, source_task_id,
+                    stage=value['stage'], message=value['message'], native_task_id=native_id,
+                    write_attempted=value.get('write_attempted', False),
+                    confirmation_seen=value.get('confirmation_seen', False), window_open=value.get('window_open', False),
+                    submission_success_observed=value.get('submission_success_observed', False),
+                    inspection_only=value.get('inspection_only', False))
+                with self.lock:
+                    self.job.update(message=latest['message'], waiting_for_user=latest['window_open'],
+                        progress={'source_maintenance': {'id': source_task_id, 'stage': latest['stage'],
+                            'window_open': latest['window_open'], 'read_only': latest['read_only']}})
+                    self._persist()
+            try:
+                progress({'stage': 'opening', 'message': '正在打开固定企查查官方入口；最终提交始终由本人操作。', 'window_open': False})
+                # Stable per-user/platform profile reuses normal authorized QCC
+                # sessions, including the existing browser-selection marker.
+                await open_session(record, self.data / 'source-research/qcc-browser-profile', edge_executable(),
+                    fallback_executable_path=chrome_executable(), progress=progress, check_requested=signal)
+                return {'source_maintenance': latest, 'message': latest['message']}
+            finally:
+                if latest.get('window_open') or latest['stage'] == 'opening':
+                    progress({'stage': 'submission_unknown' if latest.get('read_only') else 'window_closed',
+                        'message': '来源维护窗口已结束，原申请保留；不会自动重新填写或提交。',
+                        'write_attempted': latest.get('write_attempted'), 'window_open': False})
+                with self.lock:
+                    self._source_check = self._source_check_loop = self._source_check_task_id = None
+        return self._start('source_maintenance', operate, client_name=record['company_name'], cycle_id=cycle_id)
+
+    def check_source_maintenance_session(self, native_task_id):
+        with self.lock:
+            if (not isinstance(native_task_id, str) or self.job.get('id') != native_task_id
+                    or self.job.get('kind') != 'source_maintenance' or self.job.get('status') != 'running'
+                    or self._source_check_task_id != native_task_id or self._source_check is None
+                    or self._source_check_loop is None or self._source_check_loop.is_closed()):
+                return {'error': '只能检查当前来源维护窗口；请先打开原任务。'}
+            try:
+                self._source_check_loop.call_soon_threadsafe(self._source_check.set)
+            except RuntimeError:
+                return {'error': '来源维护窗口已结束，请查看原任务；不会自动重新打开或提交。'}
+            return {'id': native_task_id, 'status': 'running', 'check_requested': True}
 
     def stop_task(self):
         self.cancel_requested = True

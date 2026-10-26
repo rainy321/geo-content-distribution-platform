@@ -911,6 +911,27 @@ def geo_content_cycle(identifier):
     return jsonify(code=200, data=cycle)
 
 
+@app.route('/api/geo-content/cycles/<identifier>/source-maintenance', methods=['GET', 'POST'])
+def geo_source_maintenance(identifier):
+    from services import source_maintenance_service as maintenance
+    try:
+        if request.method == 'GET':
+            result = maintenance.get_overview(app.config['DATABASE_PATH'], identifier)
+        else:
+            data = request.get_json(silent=True)
+            names = {'module', 'proposal', 'expected_context_sha256', 'reference_fact_ids', 'task_id'}
+            if not isinstance(data, dict) or set(data) - names:
+                raise ValueError('请仅提交公司模块、公开说明和已确认资料引用')
+            result = maintenance.save_task(app.config['DATABASE_PATH'], identifier,
+                data.get('module'), data.get('proposal'), data.get('expected_context_sha256'),
+                data.get('reference_fact_ids'), data.get('task_id'))
+    except geo_content_store.ResearchNotFoundError as error:
+        return jsonify(code=404, msg=str(error), data=None), 404
+    except (ValueError, TypeError, KeyError) as error:
+        return jsonify(code=400, msg=str(error), data=None), 400
+    return jsonify(code=200, data=result)
+
+
 @app.route('/api/geo-content/cycles/<identifier>/generate', methods=['POST'])
 def geo_content_generate(identifier):
     data = request.get_json(silent=True)

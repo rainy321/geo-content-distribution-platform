@@ -295,6 +295,13 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                 )
             ''')
             cursor.execute('''
+                CREATE TABLE IF NOT EXISTS geo_source_maintenance (
+                    id TEXT PRIMARY KEY, cycle_id TEXT NOT NULL, company_key TEXT NOT NULL, module TEXT NOT NULL,
+                    record TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    FOREIGN KEY(cycle_id) REFERENCES geo_content_cycles(id) ON DELETE CASCADE
+                )
+            ''')
+            cursor.execute('''
                 CREATE TABLE IF NOT EXISTS geo_distribution_targets (
                     id TEXT PRIMARY KEY, project_id INTEGER NOT NULL,
                     config TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,

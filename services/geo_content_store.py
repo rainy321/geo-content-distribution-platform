@@ -299,6 +299,8 @@ def get_cycle(database, identifier):
                                       'comparison': comparison, 'collection': collection_summary(report)})
         from services.geo_research_probe_service import list_probes
         result['probes'] = list_probes(connection, identifier)
+        from services.source_maintenance_service import overview
+        result['source_maintenance'] = overview(connection, result)
     return result
 
 

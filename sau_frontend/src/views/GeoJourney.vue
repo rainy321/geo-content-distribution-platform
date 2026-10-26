@@ -12,7 +12,7 @@
     <div v-if="canResumeRetest" class="retest-resume" role="group" aria-label="继续当前复测未发送问题"><div><strong>继续当前复测</strong><p>继续未发送题，已发送题不会重发。</p></div><el-button :disabled="busy" :loading="working" data-testid="journey-resume-retest" @click="resumeUnsentRetest">继续未发送问题</el-button></div>
     <el-alert v-if="saveError" type="warning" :title="saveError" :closable="false" show-icon/>
     <div v-if="recoveryDraft || recoveryFacts" class="recovery-note"><p>其他页面更新过资料，已保留服务端版本。冲突的本机编辑可先导出核对。</p><el-button v-if="recoveryDraft" text @click="exportRecovery('draft')">导出本机未保存稿</el-button><el-button v-if="recoveryFacts" text @click="exportRecovery('facts')">导出本机未保存资料</el-button></div>
-    <div v-if="nativeBusy" class="task-progress" role="status" aria-live="polite"><el-icon class="is-loading"><Loading /></el-icon><div><strong>{{ isDestinationTask(task) ? '平台接入任务进行中' : task.message || '任务执行中' }}</strong><p>{{ isDestinationTask(task) ? '请在平台专用窗口正常完成登录、验证或绑定，再在对应平台卡检查并继续。请保持窗口打开。' : '请在豆包专用窗口正常完成登录或安全验证。采集或写作时保持窗口打开，软件继续同一条请求，请勿重复点开始。单独登录任务按提示结束窗口。' }}</p></div><el-button @click="stopTask">停止</el-button></div>
+    <div v-if="nativeBusy" class="task-progress" role="status" aria-live="polite"><el-icon class="is-loading"><Loading /></el-icon><div><strong>{{ task.kind==='source_maintenance' ? '企查查资料补正进行中' : isDestinationTask(task) ? '平台接入任务进行中' : task.message || '任务执行中' }}</strong><p>{{ task.kind==='source_maintenance' ? '请在企查查官方窗口完成当前登录、验证或待填写项，再检查当前窗口。最终提交由你本人完成；正常关闭窗口后可继续其他桌面任务，原记录保留。' : isDestinationTask(task) ? '请在平台专用窗口正常完成登录、验证或绑定，再在对应平台卡检查并继续。请保持窗口打开。' : '请在豆包专用窗口正常完成登录或安全验证。采集或写作时保持窗口打开，软件继续同一条请求，请勿重复点开始。单独登录任务按提示结束窗口。' }}</p></div><el-button @click="stopTask">停止</el-button></div>
     <aside v-if="loginObservation" class="login-observation" :class="{mismatch:loginObservation.mismatch}" role="status" aria-live="polite" aria-label="本次登录观察">
       <strong>{{ loginObservation.mismatch ? '所选 / 实际界面不一致' : '登录窗口已结束，状态待核验' }}</strong>
       <p class="login-state"><span>本次所选：{{ loginObservation.selected }}</span><span>最后实际：{{ loginObservation.actual }}</span><span>{{ loginObservation.login }}</span><span>{{ loginObservation.challenge }}</span></p>
@@ -55,6 +55,7 @@
         <BaselineContext/>
         <div class="diagnosis"><p>{{ diagnosisPreview }}</p><details v-if="cycle.analysis?.diagnosis?.length>180" class="hint"><summary>查看完整分析</summary><p>{{ cycle.analysis.diagnosis }}</p></details><span v-if="needsAnalysis" class="hint">当前是规则整理的观察记录，下一步用 AI 制定选题。</span></div>
         <el-collapse class="source-summary"><el-collapse-item :title="`来源线索：${sourceCounts.verified} 个网址平台候选 · ${sourceCounts.unknown} 组网址未知`" name="opportunities"><article v-for="item in cycle.opportunities || []" :key="item.id" class="source-row"><strong>{{ item.candidate?.name || item.domain || '网址未知' }}</strong><el-tag size="small" effect="plain">{{ surfaceLabels[item.surface] || '待核对' }}</el-tag><p>{{ item.note }}</p><p v-for="lead in item.title_leads || []" :key="lead.candidate.name" class="hint">标题线索：{{ lead.candidate.name }}，尚未核实网址。</p></article><el-button text @click="openDetails">接入或配置目标平台</el-button></el-collapse-item></el-collapse>
+        <GeoSourceMaintenance :cycle="cycle" :busy="working || finishingTask || nativeBusy && (task.kind!=='source_maintenance' || task.cycle_id!==cycleId)" :native-task-active="nativeBusy && task.kind==='source_maintenance' && task.cycle_id===cycleId" :native-available="nativeAvailable" @busy="sourceMaintenanceBusy=$event" @task="adoptSourceMaintenanceTask"/>
         <template v-if="!needsAnalysis">
           <div class="form-pair"><el-form-item label="这次写什么"><el-select :model-value="briefId" :disabled="busy" aria-label="内容选题" @change="selectContent('brief', $event)"><el-option v-for="brief in cycle.analysis.briefs" :key="brief.id" :value="brief.id" :label="brief.topic"/></el-select></el-form-item><el-form-item label="写给哪个平台"><el-select :model-value="platform" :disabled="busy" placeholder="选择渠道或已接入平台" aria-label="目标平台" @change="selectContent('platform', $event)"><el-option v-for="(label,key) in cycle.channels" :key="key" :value="key" :label="channelOptionLabel(key,label)" :disabled="!writingChannelEnabled(cycle,key)"/></el-select></el-form-item></div>
           <p class="hint platform-basis">{{ platformBasis }}</p>
@@ -97,6 +98,7 @@
         <el-button v-if="nativeAvailable" text :disabled="busy" @click="login">登录复测所用的豆包会话</el-button>
         <BaselineContext/>
         <div class="metric-grid feedback-metrics"><article><span>发布器成功回报</span><strong>{{ cycle.publications?.length || 0 }}</strong><small>排除演示任务与无链接任务</small></article><article><span>运营方自报提交</span><strong>{{ cycle.reported_publications?.length || 0 }}</strong><small>尚未独立核验发布成功</small></article><article><span>取得回答的复测</span><strong>{{ feedbackTotals.withAnswers }}</strong><small>共 {{ feedbackTotals.attempts }} 轮尝试，仍需检查比较条件</small></article></div>
+        <GeoSourceMaintenance :cycle="cycle" :busy="working || finishingTask || nativeBusy && (task.kind!=='source_maintenance' || task.cycle_id!==cycleId)" :native-task-active="nativeBusy && task.kind==='source_maintenance' && task.cycle_id===cycleId" :native-available="nativeAvailable" @busy="sourceMaintenanceBusy=$event" @task="adoptSourceMaintenanceTask"/>
         <GeoSingleCaseProbe :cycle="cycle" :busy="busy" :can-start="singleProbeAvailable" @probe="startSingleCaseProbe"/>
         <GeoPublicationReview v-if="hasPublicationReviewDrafts" :cycle="cycle" :busy="busy" @updated="applyReviewCycle"/>
         <p v-if="!hasPublication" class="hint">{{ unfinishedPublications.length ? '尚无公开成功记录，请先查看以下原发布任务。待确认不等于失败，现在复测只记录新的采集观察。' : '当前没有可用于发布后分析的提交记录。现在复测只会记录新的采集观察。' }}</p>
@@ -135,6 +137,7 @@ import { baselineWritingOptions } from '@/utils/geoWritingOptions'
 import { feedbackCollectionTotals, retestCollection } from '@/utils/geoFeedback'
 import GeoPublicationReview from '@/components/GeoPublicationReview.vue'
 import GeoSingleCaseProbe from '@/components/GeoSingleCaseProbe.vue'
+import GeoSourceMaintenance from '@/components/GeoSourceMaintenance.vue'
 import { publicationReviewArticles } from '@/utils/geoPublicationReview'
 import DoubaoPreparation from '@/components/DoubaoPreparation.vue'
 import DoubaoSessionControls from '@/components/DoubaoSessionControls.vue'
@@ -160,11 +163,12 @@ const editor=reactive({title:'',content:'',summary:'',tags:[]}), publication=rea
 const recoveryDraft=ref(null), recoveryFacts=ref(null)
 const recoveryTask=ref(null)
 const retestResume=ref(null)
+const sourceMaintenanceBusy=ref(false)
 const accounts=ref([]), capabilities=ref([]), capabilitiesLoaded=ref(false), task=ref({status:'idle'}), taskId=ref(''), taskKind=ref(''), working=ref(false), finishingTask=ref(false), error=ref(''), saveError=ref('')
 let timer, bridgeTimer, pollPending=false, handledTask='', restoring=false, destroyed=false, liveTaskId='', initialized=false, contextEpoch=0, retestResumeRead=0
 const nativeMethodsReady=()=>['get_task','plan_with_doubao','start_run','open_login','generate_research','start_research_retest','open_destination','stop_task'].every(name=>typeof window.pywebview?.api?.[name]==='function')
 const activateNative=()=>{if(destroyed||!nativeMethodsReady())return false;nativeAvailable.value=true;if(initialized&&!timer){void poll();timer=setInterval(poll,1000)}clearInterval(bridgeTimer);return true}
-const project=computed(()=>projects.value.find(item=>item.id===projectId.value)), nativeBusy=computed(()=>task.value.status==='running'), busy=computed(()=>working.value||nativeBusy.value||finishingTask.value)
+const project=computed(()=>projects.value.find(item=>item.id===projectId.value)), nativeBusy=computed(()=>task.value.status==='running'), busy=computed(()=>working.value||nativeBusy.value||finishingTask.value||sourceMaintenanceBusy.value)
 const completedLoginObservation=(current,currentId,currentKind,isWorking=false)=>{
   if(isWorking||!currentId||current?.id!==currentId||currentKind!=='login'||current.kind!=='login'||current.status!=='completed')return null
   const result=current.result||{}, observed=result.login_observation||{}
@@ -316,6 +320,12 @@ const applyCycle=(value,{keepEditor=false}={})=>{
 }
 const refreshCycle=()=>run(async()=>{if(cycleId.value)applyCycle((await geoContentApi.get(cycleId.value)).data,{keepEditor:true});await loadAccounts();await refreshRetestResume()})
 const applyReviewCycle=value=>{if(value.id===cycleId.value)applyCycle(value,{keepEditor:true})}
+const adoptSourceMaintenanceTask=value=>{
+  if(!value||value.kind!=='source_maintenance'||value.cycle_id!==cycleId.value||value.status!=='running'
+    ||typeof value.id!=='string'||!(/^[\w-]{1,100}$/).test(value.id)||cycle.value?.baseline?.profile?.entity_type!=='company')return
+  task.value={...value,message:'请在企查查官方窗口处理当前步骤；软件不执行最终提交。'}
+  taskId.value=value.id;taskKind.value='source_maintenance';liveTaskId=value.id;handledTask='';persist()
+}
 const continueSavedCycle=value=>run(async()=>{
   if(profileDirty.value)throw new Error('品牌资料已修改，请先保存或重新选择对象，再继续已有内容。')
   const selection=savedCycleContinuation(value,project.value),sameCycle=cycleId.value===value.id
@@ -509,10 +519,10 @@ const poll=async()=>{
     const recovery=scopedRecoveryCheckpoint(current,cycleId.value)
     if(recovery?.kind==='run'&&taskKind.value==='retest'&&cycleId.value)recovery.kind='retest'
     if(recovery){recoveryTask.value=recovery;if(error.value===current.message)error.value=''}
-    else if(['failed','stopped','needs_review','need_action'].includes(current.status))error.value=current.message||'任务未完成，记录已保留，请检查后重试'
+    else if(['failed','stopped','needs_review','need_action'].includes(current.status)&&taskKind.value!=='source_maintenance')error.value=current.message||'任务未完成，记录已保留，请检查后重试'
     if(current.result?.plan&&sameBrand(current.result.plan.profile,project.value)){plan.value=current.result.plan;planConfirmed.value=false}
     if(current.result?.report&&taskKind.value==='run'&&sameBrand(current.result.report.profile,project.value)){await loadReports();if(!currentScope())return;const item=reports.value.find(item=>item.run_id===current.result.report.run_id);if(item){report.value=item.report;reportId.value=item.id;reportOrigin.value=liveTaskId===current.id?'fresh':'history';historyReportId.value=item.id}else throw new Error('本轮报告尚未进入报告列表，请稍后重试，未使用其他报告替代')}
-    if(cycleId.value&&['analysis','draft','retest','probe','destination'].includes(taskKind.value)){const updated=(await geoContentApi.get(cycleId.value)).data;if(!currentScope())return;applyCycle(updated,{keepEditor:taskKind.value!=='draft'||current.status!=='completed'})}
+    if(cycleId.value&&['analysis','draft','retest','probe','destination','source_maintenance'].includes(taskKind.value)){const updated=(await geoContentApi.get(cycleId.value)).data;if(!currentScope())return;applyCycle(updated,{keepEditor:taskKind.value!=='draft'||current.status!=='completed'})}
     if(taskKind.value==='draft'&&replacementSourceId.value){
       if(current.status==='completed'){
         const target=selectedTarget.value, draft=matchingDrafts.value.find(item=>item.article_id!==replacementSourceId.value&&item.provenance?.destination?.id===target?.id&&item.provenance?.destination?.revision===target?.revision&&item.provenance?.destination_config_sha256===target?.config_sha256)
