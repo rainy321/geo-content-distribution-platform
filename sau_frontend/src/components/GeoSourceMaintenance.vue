@@ -49,7 +49,7 @@ import { qccMaintenanceEntry, sourceMaintenanceModules, sourceMaintenanceCompany
   sourceMaintenanceReadOnly, sourceMaintenanceEditable, sourceMaintenanceTask, sourceMaintenancePayload, sourceMaintenanceCanOpen,
   sourceMaintenanceNativeId, sourceMaintenanceStage, sourceMaintenanceError } from '@/utils/geoSourceMaintenance'
 
-const props=defineProps({cycle:{type:Object,required:true},busy:Boolean,nativeAvailable:Boolean,nativeTaskActive:Boolean})
+const props=defineProps({cycle:{type:Object,required:true},busy:Boolean,nativeAvailable:Boolean,nativeTaskActive:Boolean,focusTaskId:String})
 const emit=defineEmits(['busy','task'])
 const overview=ref(props.cycle.source_maintenance||null),selectedModule=ref('website'),proposal=ref(''),edited=ref(false),editorContext=ref(null)
 const loading=ref(false),saving=ref(false),opening=ref(''),checking=ref(''),error=ref(''),saveUncertain=ref(false)
@@ -142,6 +142,12 @@ const poll=async()=>{
 watch(proposal,()=>{edited.value=true},{flush:'sync'})
 watch(()=>localBusy.value||sessionBusy.value,value=>emit('busy',value),{immediate:true,flush:'sync'})
 watch(()=>props.cycle.source_maintenance,value=>{overview.value=value||null;if(!edited.value)syncProposal()},{flush:'sync'})
+watch(()=>[props.focusTaskId,overview.value],()=>{
+  const record=view.value.tasks.find(item=>item.id===props.focusTaskId)
+  if(!record||record.module===selectedModule.value||!Object.hasOwn(sourceMaintenanceModules,record.module))return
+  if(edited.value){error.value='当前补正说明有未保存编辑，请先保存或保留内容，再查看另一模块的原请求。';return}
+  if(!locked.value){selectedModule.value=record.module;syncProposal()}
+},{immediate:true,flush:'post'})
 watch(currentScope,()=>{scopeVersion++;readVersion++;overview.value=props.cycle.source_maintenance||null;selectedModule.value='website';loading.value=false;saving.value=false;opening.value='';checking.value='';error.value='';saveUncertain.value=false;syncProposal();void refresh()},{flush:'sync'})
 onMounted(()=>{syncProposal();void refresh();pollTimer=setInterval(poll,1800)})
 onUnmounted(()=>{disposed=true;scopeVersion++;readVersion++;clearInterval(pollTimer);emit('busy',false)})

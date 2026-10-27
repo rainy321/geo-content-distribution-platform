@@ -5,7 +5,7 @@ import { computed, effectScope, reactive, ref, watch } from 'vue'
 import { parse, compileScript } from '@vue/compiler-sfc'
 import * as availability from '../src/utils/geoDestinationAvailability.js'
 import * as use from '../src/utils/geoDestinationUse.js'
-import { sameBrand, articleSnapshot } from '../src/utils/geoJourney.js'
+import { sameBrand, articleSnapshot, sameResearchBrief } from '../src/utils/geoJourney.js'
 const deferred=()=>{let resolve;const promise=new Promise(done=>resolve=done);return {promise,resolve}}
 const target=id=>({id,key:`target_${id}`,revision:1,state:'need_action',blocked_reason:'原尝试待核对',config:{name:id,enabled:true},publication_gate:{allowed:true,code:'allowed'}})
 const cycle=(id='a')=>({id,destinations:[target('t1'),target('t2')]})
@@ -73,7 +73,7 @@ test('a late restore mutation response does not request or emit another cycle',a
   }finally{page.stop()}
 })
 
-const draft=(id=5,brief='b01',title='原稿',content='原正文')=>({article_id:id,brief_id:brief,platform:'target_t1',title,content,summary:'',tags:[]})
+const draft=(id=5,brief='b01',title='原稿',content='原正文')=>({article_id:id,brief_id:brief,platform:'target_t1',title,content,summary:'',tags:[],provenance:{brief:{id:brief}}})
 const contentCycle=(drafts=[draft()],briefs=[{id:'b01'},{id:'b02'}])=>({id:'cycle-a',project_id:1,profile:{name:'示例软件',website:'https://software.example.org/',entity_type:'product'},analysis:{briefs},channels:{target_t1:'合成平台'},facts:[{id:'f1',text:'事实',source_url:'',confirmed:true}],drafts})
 const editorHarness=(edited=true)=>{
   const value=contentCycle(),cycle=ref(value),articleId=ref(5),briefId=ref('b01'),platform=ref('target_t1')
@@ -81,7 +81,7 @@ const editorHarness=(edited=true)=>{
   const activeDraft=computed(()=>matchingDrafts.value.find(item=>item.article_id===articleId.value)||null)
   const editor=reactive({title:edited?'本机未保存稿':value.drafts[0].title,content:edited?'本机修改正文':value.drafts[0].content,summary:'',tags:[]})
   const editorDirty=computed(()=>activeDraft.value && (editor.title!==activeDraft.value.title || editor.content!==activeDraft.value.content))
-  const deps={cycle,articleId,briefId,platform,matchingDrafts,activeDraft,editor,editorDirty,articleSnapshot,sameBrand,
+  const deps={cycle,articleId,briefId,platform,matchingDrafts,activeDraft,editor,editorDirty,articleSnapshot,sameBrand,sameResearchBrief,
     projectId:ref(1),project:ref(value.profile),cycleId:ref(value.id),recoveryDraft:ref(null),error:ref(''),factRows:ref([]),reviewConfirmed:ref(true)}
   const action=new Function(...Object.keys(deps),`const loadEditor=${journey.expression('loadEditor')};return (${journey.expression('applyCycle')});`)(...Object.values(deps))
   return {...deps,action}

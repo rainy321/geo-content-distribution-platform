@@ -11,7 +11,27 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from desktop_app import configure_environment, create_desktop_server, desktop_urls, migrate_workspace, shutdown_desktop_runtime, _paged_history_ready
+from desktop_app import main
 from services.desktop_geo_jobs import DesktopGeoJobs
+
+
+class TestRunningDesktopInstallSmoke(unittest.TestCase):
+    def test_running_instance_cannot_reuse_an_old_success_receipt_for_an_upgrade_smoke(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            data=Path(temporary);(data/'logs').mkdir()
+            receipt=data/'logs/smoke-test.json';receipt.write_text('{"passed":true,"process_id":123}',encoding='utf-8')
+            close=Mock();instance=SimpleNamespace(acquired=False,close=close)
+            with patch('desktop_app.SingleInstance',return_value=instance),patch('desktop_app.activate_existing_window') as activate:
+                self.assertEqual(main(['--data-dir',str(data),'--smoke-test']),2)
+                activate.assert_not_called();close.assert_called_once()
+            self.assertEqual(receipt.read_text(encoding='utf-8'),'{"passed":true,"process_id":123}')
+
+    def test_regular_second_launch_still_activates_the_existing_software(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            instance=SimpleNamespace(acquired=False,close=Mock())
+            with patch('desktop_app.SingleInstance',return_value=instance),patch('desktop_app.activate_existing_window') as activate:
+                self.assertEqual(main(['--data-dir',temporary]),0)
+                activate.assert_called_once();instance.close.assert_called_once()
 
 
 class TestPagedHistorySmoke(unittest.TestCase):

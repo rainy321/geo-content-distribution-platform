@@ -611,6 +611,8 @@ class DesktopGeoJobs:
             provenance = {'method': 'doubao_web_ai', 'model_label': (result.get('environment') or {}).get('model_label'),
                           'client_mode': (result.get('environment') or {}).get('client_mode'), 'evidence_path': str(path),
                           'role': 'content_editing_not_exposure_test', 'prompt_sha256': geo_content_research.fingerprint(prompt)}
+            if kind == 'analysis':
+                provenance['feedback_inputs_sha256'] = geo_content_research.fingerprint(geo_content_research.planning_feedback(cycle))
             if kind == 'draft':
                 provenance['input_sha256'] = geo_content_research.fingerprint(geo_content_research.draft_input(cycle, brief_id, platform))
             if kind == 'analysis':

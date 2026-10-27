@@ -1,6 +1,13 @@
 const PREFIX = 'geo-journey:v1:'
 export const normalizeName = value => String(value || '').trim().toLocaleLowerCase()
 export const articleSnapshot = draft => draft ? {title:draft.title,content:draft.content,summary:draft.summary||'',tags:draft.tags||[]} : null
+export function sameResearchBrief(draft,brief) {
+  const prior=draft?.provenance?.brief
+  if(!prior||!brief||prior.id!==brief.id)return false
+  const canonical=value=>Array.isArray(value)?value.map(canonical):value&&typeof value==='object'
+    ?Object.fromEntries(Object.keys(value).sort().map(key=>[key,canonical(value[key])])):value
+  return JSON.stringify(canonical(prior))===JSON.stringify(canonical(brief))
+}
 export function targetDraftOutdated(draft, target) {
   if (!draft || !target || draft.platform !== target.key) return false
   const prior=draft.provenance?.destination, digest=draft.provenance?.destination_config_sha256

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import ipaddress
 import json
 import re
 from datetime import datetime, timezone
@@ -228,10 +229,98 @@ def _business_review(cycle, record, review):
         'scope': 'manual_or_assistant_business_material_acknowledgment_not_automated_fact_accuracy'}
 
 
-def attach_external_observation(database, cycle_id, expected_case_id, raw_response_text, metadata):
+def _check_external_scope(cycle, expected_scope, *, allow_unassigned_project=False):
+    if expected_scope is None:
+        return
+    if (not isinstance(expected_scope, dict)
+            or set(expected_scope) != {'project_id', 'expected_plan_sha256', 'expected_revision'}
+            or not ((type(expected_scope['project_id']) is int and expected_scope['project_id'] > 0)
+                    or (allow_unassigned_project and expected_scope['project_id'] is None and cycle['project_id'] is None))
+            or type(expected_scope['expected_revision']) is not int
+            or not isinstance(expected_scope['expected_plan_sha256'], str)
+            or not re.fullmatch('[0-9a-f]{64}', expected_scope['expected_plan_sha256'])):
+        raise ValueError('请提供当前品牌项目、计划摘要与资料版本')
+    if (cycle['project_id'] != expected_scope['project_id']
+            or cycle['revision'] != expected_scope['expected_revision']
+            or cycle['test_plan']['plan_sha256'] != expected_scope['expected_plan_sha256']):
+        raise ValueError('品牌项目、原计划或资料版本已变化，请刷新后重新核对')
+
+
+def _external_source_links(value):
+    from services.geo_content_research import public_url
+    if not isinstance(value, list) or len(value) > 20:
+        raise ValueError('外部来源链接最多20项，只接受用户提供的公开网址')
+    result = []
+    for item in value:
+        if not isinstance(item, dict) or set(item) - {'title', 'url'} or 'url' not in item:
+            raise ValueError('外部来源只接受公开网址和可选标题，不接受验证或采集字段')
+        url, title = item['url'], item.get('title')
+        if (not isinstance(url, str) or not 1 <= len(url) <= 2000 or not public_url(url)
+                or re.search(r'[\s\\\x00-\x1f\x7f]', url)
+                or ('title' in item and (not isinstance(title, str) or not title.strip() or len(title) > 300))):
+            raise ValueError('外部来源应为公开HTTP/HTTPS网址，标题最多300字')
+        parsed = urlsplit(url)
+        try:
+            port = parsed.port
+        except ValueError:
+            raise ValueError('外部来源网址端口无效') from None
+        host = parsed.hostname.casefold().rstrip('.')
+        try:
+            address = ipaddress.ip_address(host)
+        except ValueError:
+            address = None
+            try:
+                host = host.encode('idna').decode('ascii')
+            except UnicodeError:
+                raise ValueError('外部来源网址域名无效') from None
+        valid_domain = (len(host) <= 253 and '.' in host and not host.rsplit('.', 1)[-1].isdigit()
+            and all(re.fullmatch(r'[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?', part) for part in host.split('.'))
+            and not host.endswith(('.localhost', '.local', '.internal')))
+        if ((address is not None and not address.is_global)
+                or (address is None and not valid_domain)
+                or (port is not None and not 1 <= port <= 65535)):
+            raise ValueError('外部来源不能使用本机或内部网络地址')
+        result.append({'url': url, 'title': title, 'basis': 'user_reported',
+                       'verified': False, 'native_verified': False})
+    return result
+
+
+def submit_external_observation(database, cycle_id, payload):
+    """Finite browser JSON contract; no native imports or business judgments."""
+    required = {'project_id', 'case_id', 'expected_plan_sha256', 'expected_revision', 'raw_response_text'}
+    if (not isinstance(payload, dict) or not required <= set(payload)
+            or set(payload) - required - {'metadata'}):
+        raise ValueError('请仅提交关联原题、当前项目版本与外部回答原文')
+    metadata = payload.get('metadata', {})
+    allowed = {'question', 'model_label', 'client_mode', 'collected_at', 'answer_complete', 'note', 'source_links'}
+    if not isinstance(metadata, dict) or set(metadata) - allowed:
+        raise ValueError('外部反馈只接受用户提供的条件和公开链接，不能提供业务判定或原生验证')
+    text = payload['raw_response_text']
+    if isinstance(text, str) and '\n' not in text and '\r' not in text and re.match(
+            r'^(?:[a-zA-Z]:[\\/]|\\\\|file:|/|\.{1,2}[\\/]|~[\\/])', text.strip(), re.I):
+        raise ValueError('请粘贴回答原文，不接受本地文件路径')
+    return attach_external_observation(database, cycle_id, payload['case_id'], text, metadata,
+        expected_scope={key: payload[key] for key in ('project_id', 'expected_plan_sha256', 'expected_revision')})
+
+
+def submit_external_observation_context(database, cycle_id, probe_id, payload):
+    required = {'project_id', 'case_id', 'expected_plan_sha256', 'expected_revision',
+                'expected_response_sha256', 'expected_context_sequence', 'attestation'}
+    if not isinstance(payload, dict) or set(payload) != required:
+        raise ValueError('请仅提交当前外部记录身份、原文摘要与明确的用户条件声明')
+    sequence = payload['expected_context_sequence']
+    if type(sequence) is not int or not 0 <= sequence < 1000:
+        raise ValueError('条件声明版本无效，请刷新后重新核对')
+    return attest_external_observation_context(database, cycle_id, probe_id, payload['expected_response_sha256'],
+        payload['attestation'], expected_case_id=payload['case_id'], expected_context_sequence=sequence,
+        expected_scope={key: payload[key] for key in ('project_id', 'expected_plan_sha256', 'expected_revision')})
+
+
+def attach_external_observation(database, cycle_id, expected_case_id, raw_response_text, metadata, *, expected_scope=None):
     """Save owner-provided external answer text; never pretend a native collection.
 
-    Domain-only: the public browser bridge accepts no imported text or file path.
+    The finite browser facade requires current project/plan/revision identity.
+    Trusted domain callers can still add attributed business material reviews.
     The expected case is an association, not proof of the external question.
     """
     from contextlib import closing
@@ -240,7 +329,7 @@ def attach_external_observation(database, cycle_id, expected_case_id, raw_respon
             or len(raw_response_text.encode('utf-8')) > 1024 * 1024 or not isinstance(metadata, dict)):
         raise ValueError('请提供外部回答原文与元数据，不接受文件路径读取')
     allowed = {'question', 'model_label', 'client_mode', 'collected_at', 'answer_complete', 'note',
-               'business_relationship_review'}
+               'business_relationship_review', 'source_links'}
     if set(metadata) - allowed:
         raise ValueError('外部反馈不能提供或伪造原生采集验证字段')
     for key, maximum in (('question', 4000), ('model_label', 100), ('collected_at', 100), ('note', 1000)):
@@ -251,9 +340,11 @@ def attach_external_observation(database, cycle_id, expected_case_id, raw_respon
     complete = metadata.get('answer_complete')
     if mode not in (None, 'work', 'consumer') or (complete is not None and type(complete) is not bool):
         raise ValueError('外部界面或完整性只能使用明确提供的信息，缺失请保持未知')
+    source_links = _external_source_links(metadata['source_links']) if 'source_links' in metadata else []
     with closing(_connect(database)) as connection, connection:
         connection.execute('BEGIN IMMEDIATE')
         cycle = _cycle(connection, cycle_id)
+        _check_external_scope(cycle, expected_scope)
         details = context(cycle, expected_case_id)
         observed_question = metadata.get('question')
         raw_sha = _sha(raw_response_text.encode('utf-8'))
@@ -292,7 +383,12 @@ def attach_external_observation(database, cycle_id, expected_case_id, raw_respon
                 'client_mode_match': mode == before['client_mode'] if mode and before['client_mode'] else None,
                 'model_label_match': metadata.get('model_label') == before['model_label'] if metadata.get('model_label') and before['model_label'] else None},
             'business_relationship_review': None, 'causal_effect': None, 'external_note': metadata.get('note'),
+            'external_source_links': source_links,
             'limitations': list(LIMITATIONS) + ['这是用户提供的外部回答原文；关联题不证明实际同题，未独立核验采集过程、完整性或条件。']}
+        if expected_scope is not None:
+            record['external_submission'] = {'channel': 'software_json_text_entry', 'basis': 'user_reported',
+                'project_id': cycle['project_id'], 'cycle_revision': cycle['revision'],
+                'plan_sha256': cycle['test_plan']['plan_sha256'], 'independent_verification': False}
         if metadata.get('business_relationship_review') is not None:
             record['business_relationship_review'] = _business_review(cycle, record, metadata['business_relationship_review'])
         connection.execute(CREATE_PROBES)
@@ -308,7 +404,8 @@ def attach_external_observation(database, cycle_id, expected_case_id, raw_respon
     return record
 
 
-def attest_external_observation_context(database, cycle_id, probe_id, expected_response_sha256, attestation):
+def attest_external_observation_context(database, cycle_id, probe_id, expected_response_sha256, attestation, *,
+                                        expected_scope=None, expected_case_id=None, expected_context_sequence=None):
     """Append an owner's context statement to the same unchanged external answer.
 
     Domain-only; no collector receipt or independent sampling is manufactured.
@@ -336,6 +433,7 @@ def attest_external_observation_context(database, cycle_id, probe_id, expected_r
     with closing(_connect(database)) as connection, connection:
         connection.execute('BEGIN IMMEDIATE')
         cycle = _cycle(connection, cycle_id)
+        _check_external_scope(cycle, expected_scope)
         if not connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='geo_research_probes'").fetchone():
             raise ValueError('外部反馈记录不存在，未新建记录')
         row = connection.execute('SELECT source,record FROM geo_research_probes WHERE id=? AND cycle_id=?',
@@ -343,6 +441,8 @@ def attest_external_observation_context(database, cycle_id, probe_id, expected_r
         if not row:
             raise ValueError('外部反馈记录不属于本轮实验，未修改')
         record = json.loads(row['record'])
+        if expected_scope is not None and record.get('case_id') != expected_case_id:
+            raise ValueError('外部反馈不属于当前关联原题，未修改')
         if (row['source'] != 'user_reported_external' or record.get('source') != 'user_reported_external'
                 or record.get('id') != probe_id or record.get('cycle_id') != cycle_id
                 or record.get('native_verified') is not False or record.get('native_task_id') is not None):
@@ -362,8 +462,16 @@ def attest_external_observation_context(database, cycle_id, probe_id, expected_r
         history = record.get('context_attestations', [])
         if not isinstance(history, list) or any(not isinstance(item, dict) for item in history):
             raise ValueError('已有条件声明历史格式异常，未覆盖')
+        if expected_context_sequence is not None:
+            if (type(expected_context_sequence) is not int
+                    or expected_context_sequence not in (len(history), len(history) - 1)
+                    or (expected_context_sequence == len(history) - 1
+                        and (not history or history[-1].get('statement_sha256') != statement_sha))):
+                raise ValueError('条件声明已更新，请刷新后核对，未覆盖后续声明')
         if history and history[-1].get('statement_sha256') == statement_sha:
             return record
+        if len(history) >= 1000:
+            raise ValueError('条件声明历史已达到上限，未覆盖已有记录')
         prior_context = {key: copy.deepcopy(record.get(key)) for key in
             ('observed_question', 'observed_question_sha256', 'website_in_question', 'website_test_without_url')}
         prior_context['same_question'] = (record.get('conditions') or {}).get('same_question')
@@ -379,6 +487,8 @@ def attest_external_observation_context(database, cycle_id, probe_id, expected_r
             'response_sha256': expected_response_sha256, 'statement_sha256': statement_sha,
             **statement, 'question_sha256': _sha(question.encode('utf-8')),
             'prior_context': prior_context}
+        if expected_scope is not None:
+            entry['submission_channel'] = 'software_json_text_entry'
         record['context_attestations'] = [*history, entry]
         record['observed_question'] = question
         record['observed_question_sha256'] = entry['question_sha256']
@@ -390,22 +500,139 @@ def attest_external_observation_context(database, cycle_id, probe_id, expected_r
     return record
 
 
-def review_probe_business(database, cycle_id, probe_id, review):
-    """Attach an explicitly attributed local review to this unchanged answer."""
+def _reviewed_probe(connection, cycle, probe_id, *, expected_case_id=None, expected_response_sha256=None):
+    if not isinstance(probe_id, str) or not re.fullmatch('[0-9a-f]{32}', probe_id):
+        raise ValueError('请选择本轮单题记录')
+    if not connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='geo_research_probes'").fetchone():
+        raise ValueError('单题记录不存在')
+    row = connection.execute('SELECT source,record FROM geo_research_probes WHERE id=? AND cycle_id=?',
+                             (probe_id, cycle['id'])).fetchone()
+    if not row:
+        raise ValueError('单题记录不属于本轮实验')
+    record = json.loads(row['record'])
+    if (record.get('id') != probe_id or record.get('cycle_id') != cycle['id']
+            or row['source'] not in (*SOURCES, 'user_reported_external') or record.get('source') != row['source']
+            or record.get('native_verified') is not (row['source'] == 'native_collector')
+            or (expected_case_id is not None and record.get('case_id') != expected_case_id)):
+        raise ValueError('单题记录的来源或关联原题不一致，未修改')
+    details = context(cycle, record.get('case_id'))
+    question = details['case']['question']
+    if (record.get('question') != question or record.get('question_sha256') != _sha(question.encode('utf-8'))
+            or record.get('plan_sha256') != cycle['test_plan']['plan_sha256']):
+        raise ValueError('单题记录的关联原题或计划已变化，未修改')
+    after = record.get('after') or {}
+    response = after.get('response')
+    if not isinstance(response, str):
+        raise ValueError('原始回答文本不存在，未修改')
+    response_sha = _sha(response.encode('utf-8'))
+    if (('response_sha256' in record and record['response_sha256'] != response_sha)
+            or ('response_sha256' in after and after['response_sha256'] != response_sha)
+            or (expected_response_sha256 is not None and expected_response_sha256 != response_sha)):
+        raise ValueError('原始回答与预期SHA256不一致，未修改')
+    return record, response_sha
+
+
+def _business_review_history(record):
+    current = record.get('business_relationship_review')
+    history = record.get('business_relationship_reviews')
+    if history is None:
+        if current is not None and not isinstance(current, dict):
+            raise ValueError('已有业务核对格式异常，未覆盖')
+        history = [current] if current is not None else []
+    elif (not isinstance(history, list) or len(history) > 1000
+            or any(not isinstance(entry, dict) for entry in history)
+            or (history[-1] if history else None) != current):
+        raise ValueError('业务核对最新项与历史不一致，未覆盖')
+    identifiers = set()
+    for sequence, entry in enumerate(history, 1):
+        if ('sequence' in entry and (type(entry['sequence']) is not int or entry['sequence'] != sequence)
+                or ('review_request_sha256' in entry and (not isinstance(entry['review_request_sha256'], str)
+                    or not re.fullmatch('[0-9a-f]{64}', entry['review_request_sha256'])))
+                or ('id' in entry and (not isinstance(entry['id'], str) or not re.fullmatch('[0-9a-f]{32}', entry['id'])
+                    or entry['id'] in identifiers))):
+            raise ValueError('业务核对历史顺序或身份异常，未覆盖')
+        if 'id' in entry:
+            identifiers.add(entry['id'])
+    if ('business_review_sequence' in record
+            and (type(record['business_review_sequence']) is not int or record['business_review_sequence'] != len(history))):
+        raise ValueError('业务核对版本与历史不一致，未覆盖')
+    return copy.deepcopy(history)
+
+
+def business_review_context(database, cycle_id, probe_id):
+    """Read exact source identity, current facts and retained attributed reviews."""
+    from contextlib import closing
+    from services.geo_content_store import _connect, _cycle
+    with closing(_connect(database)) as connection:
+        cycle = _cycle(connection, cycle_id)
+        record, response_sha = _reviewed_probe(connection, cycle, probe_id)
+        history = _business_review_history(record)
+        return {'project_id': cycle['project_id'], 'cycle_id': cycle_id, 'case_id': record['case_id'],
+            'probe_id': probe_id, 'plan_sha256': cycle['test_plan']['plan_sha256'], 'revision': cycle['revision'],
+            'response_sha256': response_sha, 'review_sequence': len(history), 'reviews': history,
+            'confirmed_facts': [{key: fact.get(key) for key in ('id', 'text', 'source_url')}
+                                for fact in cycle.get('facts', []) if fact.get('confirmed') is True],
+            'scope': 'business_material_acknowledgment_only_not_fact_or_effect_verification'}
+
+
+def submit_operator_business_review(database, cycle_id, probe_id, payload):
+    required = {'project_id', 'case_id', 'expected_plan_sha256', 'expected_revision',
+                'expected_response_sha256', 'expected_review_sequence', 'review'}
+    if not isinstance(payload, dict) or set(payload) != required:
+        raise ValueError('请仅提交当前单题身份、原文摘要与用户业务材料核对')
+    review = payload['review']
+    if (not isinstance(review, dict) or not {'status', 'quote', 'reference_fact_ids'} <= set(review)
+            or set(review) - {'status', 'quote', 'reference_fact_ids', 'note'}
+            or not isinstance(review.get('quote'), str) or not review['quote'].strip()):
+        raise ValueError('用户核对只接受状态、原文精确摘录、已确认事实编号和备注，不接受身份或效果字段')
+    if (not isinstance(payload['expected_response_sha256'], str)
+            or not re.fullmatch('[0-9a-f]{64}', payload['expected_response_sha256'])
+            or type(payload['expected_review_sequence']) is not int
+            or not 0 <= payload['expected_review_sequence'] <= 1000
+            or not isinstance(payload['case_id'], str)):
+        raise ValueError('请提供原文SHA256、关联题和当前核对版本')
+    return review_probe_business(database, cycle_id, probe_id, {**review, 'by': 'operator'},
+        expected_scope={key: payload[key] for key in ('project_id', 'expected_plan_sha256', 'expected_revision')},
+        expected_case_id=payload['case_id'], expected_response_sha256=payload['expected_response_sha256'],
+        expected_review_sequence=payload['expected_review_sequence'])
+
+
+def review_probe_business(database, cycle_id, probe_id, review, *, expected_scope=None, expected_case_id=None,
+                          expected_response_sha256=None, expected_review_sequence=None):
+    """Append an attributed review; preserve raw text and all earlier opinions."""
     from contextlib import closing
     from services.geo_content_store import _connect, _cycle
     with closing(_connect(database)) as connection, connection:
         connection.execute('BEGIN IMMEDIATE')
         cycle = _cycle(connection, cycle_id)
-        if not isinstance(probe_id, str):
-            raise ValueError('请选择本轮单题记录')
-        if not connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='geo_research_probes'").fetchone():
-            raise ValueError('单题记录不存在')
-        row = connection.execute('SELECT record FROM geo_research_probes WHERE id=? AND cycle_id=?', (probe_id, cycle_id)).fetchone()
-        if not row:
-            raise ValueError('单题记录不属于本轮实验')
-        record = json.loads(row[0])
-        record['business_relationship_review'] = _business_review(cycle, record, review)
+        _check_external_scope(cycle, expected_scope, allow_unassigned_project=True)
+        record, response_sha = _reviewed_probe(connection, cycle, probe_id,
+            expected_case_id=expected_case_id, expected_response_sha256=expected_response_sha256)
+        history = _business_review_history(record)
+        entry = _business_review(cycle, record, review)
+        identity = {key: value for key, value in entry.items() if key != 'reviewed_at'}
+        identity.update(cycle_revision=cycle['revision'], plan_sha256=cycle['test_plan']['plan_sha256'])
+        request_sha = _sha(json.dumps(identity, ensure_ascii=False, sort_keys=True).encode('utf-8'))
+        identical = bool(history and history[-1].get('review_request_sha256') == request_sha)
+        if (expected_review_sequence is not None
+                and (type(expected_review_sequence) is not int
+                     or expected_review_sequence not in (len(history), len(history) - 1)
+                     or (expected_review_sequence == len(history) - 1 and not identical))):
+            raise ValueError('业务核对已更新，请刷新后核对，未覆盖后续意见')
+        if identical:
+            return record
+        if len(history) >= 1000:
+            raise ValueError('业务核对历史已达到上限，未覆盖已有意见')
+        sequence = len(history) + 1
+        event = {'probe_id': probe_id, 'response_sha256': response_sha, 'sequence': sequence, 'request_sha256': request_sha}
+        entry.update(id=_sha(json.dumps(event, sort_keys=True).encode())[:32], sequence=sequence,
+                     review_request_sha256=request_sha, cycle_revision=cycle['revision'],
+                     plan_sha256=cycle['test_plan']['plan_sha256'], basis='operator_statement' if entry['by'] == 'operator' else 'attributed_review',
+                     submission_channel='software_json_text_entry' if expected_scope is not None else 'trusted_domain',
+                     independent_verification=False)
+        record['business_relationship_reviews'] = [*history, entry]
+        record['business_review_sequence'] = sequence
+        record['business_relationship_review'] = entry
         connection.execute('UPDATE geo_research_probes SET record=? WHERE id=? AND cycle_id=?',
             (json.dumps(record, ensure_ascii=False), probe_id, cycle_id))
     return record

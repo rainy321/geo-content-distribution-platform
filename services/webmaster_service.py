@@ -213,16 +213,17 @@ def _resolve_public(host):
 
 
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
-    def __init__(self, host, endpoint):
-        super().__init__(host, port=443, timeout=REQUEST_SECONDS, context=ssl.create_default_context())
+    def __init__(self, host, endpoint, *, timeout_seconds=REQUEST_SECONDS):
+        super().__init__(host, port=443, timeout=timeout_seconds, context=ssl.create_default_context())
         self.endpoint = endpoint
+        self._request_seconds = timeout_seconds
 
     def connect(self):
         family, address = self.endpoint
         raw = socket.socket(family, socket.SOCK_STREAM)
         self.sock = raw
         self._active_socket = raw
-        raw.settimeout(REQUEST_SECONDS)
+        raw.settimeout(self._request_seconds)
         raw.connect((address, 443))
         self.sock = self._context.wrap_socket(raw, server_hostname=self.host, do_handshake_on_connect=False)
         self._active_socket = self.sock
@@ -233,9 +234,34 @@ def _fetch_public(origin, path, maximum):
     """Pinned DNS/TLS; no proxies, redirects, cookies, or caller-controlled paths."""
     if path not in ('/BingSiteAuth.xml', '/sitemap.xml') or _origin(origin) != origin:
         raise ValueError('只能检查当前官网固定的验证文件与站点地图')
+    return _fetch_bounded(origin, path, maximum)
+
+
+def _fetch_bounded(origin, path, maximum, *, accept='application/xml,text/xml', deadline=None, include_headers=False):
+    """Shared bounded transport; URL scope/redirect policy belongs to its caller.
+
+    Both callers use the same public DNS validation, pinned socket and TLS
+    hostname. This transport never redirects, sends cookies, or uses a proxy.
+    """
+    if (_origin(origin) != origin or not isinstance(path, str) or not path.startswith('/') or path.startswith('//')
+            or len(path) > 2000 or '\\' in path or any(ord(char) <= 32 or ord(char) == 127 for char in path)
+            or type(maximum) is not int or not 1 <= maximum <= MAX_SITEMAP_BYTES
+            or accept not in ('application/xml,text/xml', 'text/html,application/xhtml+xml')):
+        raise ValueError('invalid_public_request')
     host = urlsplit(origin).hostname
     endpoint = _resolve_public(host)
-    connection = _PinnedHTTPSConnection(host, endpoint)
+    budget = REQUEST_SECONDS if deadline is None else min(REQUEST_SECONDS, deadline - time.monotonic())
+    if budget <= 0:
+        raise TimeoutError('response_timeout')
+    connection = (_PinnedHTTPSConnection(host, endpoint) if budget == REQUEST_SECONDS else
+                  _PinnedHTTPSConnection(host, endpoint, timeout_seconds=budget))
+    if deadline is not None:
+        budget = min(budget, deadline - time.monotonic())
+        if budget <= 0:
+            connection.close()
+            raise TimeoutError('response_timeout')
+        connection.timeout = budget
+        connection._request_seconds = budget
 
     def expire():
         sock = getattr(connection, '_active_socket', None) or connection.sock
@@ -246,15 +272,22 @@ def _fetch_public(origin, path, maximum):
                 pass
             sock.close()
 
-    timer = threading.Timer(REQUEST_SECONDS, expire)
+    timer = threading.Timer(budget, expire)
     timer.daemon = True
     started = time.monotonic()
     timer.start()
     try:
         connection.request('GET', path, headers={'User-Agent': 'GEO-Website-Verification/1.0',
-                           'Accept': 'application/xml,text/xml', 'Accept-Encoding': 'identity', 'Connection': 'close'})
+                           'Accept': accept, 'Accept-Encoding': 'identity', 'Connection': 'close'})
         response = connection.getresponse()
         metadata = {'http_status': response.status, 'content_type': response.getheader('Content-Type', '')}
+        if include_headers:
+            content_type = metadata['content_type'] or ''
+            location = response.getheader('Location', '') or ''
+            robots = response.getheader('X-Robots-Tag', '') or ''
+            metadata.update(content_type=content_type[:512], content_type_truncated=len(content_type) > 512,
+                location=location if len(location) <= 2000 else '', location_truncated=len(location) > 2000,
+                x_robots_tag=robots[:1000], x_robots_tag_truncated=len(robots) > 1000)
         if response.status != 200:
             return metadata, b''
         encoding = response.getheader('Content-Encoding', 'identity').lower()
@@ -265,7 +298,7 @@ def _fetch_public(origin, path, maximum):
             raise ValueError('response_too_large')
         chunks, size = [], 0
         while True:
-            if time.monotonic() - started >= REQUEST_SECONDS:
+            if time.monotonic() - started >= budget:
                 raise TimeoutError('response_timeout')
             chunk = response.read(min(16384, maximum + 1 - size))
             if not chunk:

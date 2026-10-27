@@ -386,8 +386,8 @@ class ExternalObservationTests(ProbeFixture, unittest.TestCase):
         self.assertIsNone(entry['prior_context']['same_question'])
         after_cycle = store.get_cycle(self.database, self.cycle['id'])
         self.assertEqual(len(after_cycle['probes']), 1)
-        self.assertEqual({k:v for k,v in before_cycle.items() if k != 'probes'},
-                         {k:v for k,v in after_cycle.items() if k != 'probes'})
+        self.assertEqual({k:v for k,v in before_cycle.items() if k not in ('probes', 'feedback_diagnostics')},
+                         {k:v for k,v in after_cycle.items() if k not in ('probes', 'feedback_diagnostics')})
         self.assert_original_unchanged()
 
     def test_context_attestation_preserves_other_probe_and_all_other_database_tables(self):

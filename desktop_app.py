@@ -318,7 +318,8 @@ def _paged_history_ready(observed, expected):
 
 def run_smoke_check(window, data: Path, url: str) -> None:
     """Exercise the actual embedded window; no provider requests or fixtures."""
-    status = {"passed": False, "embedded_window": True, "url": url, "mock_api": False}
+    status = {"passed": False, "embedded_window": True, "url": url, "mock_api": False,
+              "process_id": os.getpid(), "started_at_unix": time.time()}
     try:
         _entry_url, legacy_url = desktop_urls(urlsplit(url).port, data)
         status["legacy_report_url"] = legacy_url
@@ -519,6 +520,9 @@ def main(argv=None) -> int:
     data.mkdir(parents=True, exist_ok=True)
     instance = SingleInstance(data)
     if not instance.acquired:
+        if args.smoke_test:
+            instance.close()
+            return 2
         activate_existing_window()
         instance.close()
         return 0

@@ -2,7 +2,7 @@
   <main class="content-loop" data-testid="geo-content-loop">
     <div v-if="journeyProjectId" class="journey-return"><span>这里保留详细来源和平台接入配置，品牌资料与稿件会延续到同一轮流程。</span><el-button @click="returnToJourney">返回优化流程</el-button></div>
     <header><div><h1>采集驱动内容</h1><p>从来源发现内容机会，先核对平台用途，再准备稿件与反馈。</p></div><el-button :loading="loading" @click="reload">刷新</el-button></header>
-    <el-card shadow="never">
+    <el-card shadow="never" data-geo-section="baseline">
       <h2>1 · 选择采集依据</h2>
       <div class="row"><el-select v-model="reportId" placeholder="选择采集报告" aria-label="选择采集报告"><el-option v-for="report in reports" :key="report.id" :value="report.id" :label="`${report.name} · ${report.case_count} 题 · ${date(report.updated_at)}`" /></el-select><el-button type="primary" :disabled="!reportId || busy" @click="create">建立内容任务单</el-button></div>
       <p class="hint">使用报告里的原始问题与来源。不同客户各建任务单，自动关联同名品牌项目。</p>
@@ -17,16 +17,19 @@
       <p v-if="recoveryStorageError" class="hint" role="status">{{ recoveryStorageError }}</p>
     </el-card>
     <template v-if="cycle">
+      <GeoNextActions :cycle="cycle" :busy="busy" @navigate="navigateDiagnostic"/>
+      <GeoWebsiteAudit :cycle="cycle" :busy="working || nativeBusy || feedbackBusy" @busy="websiteAuditBusy=$event"/>
       <el-card shadow="never">
         <div class="row"><h2>2 · {{ cycle.profile.name }} · 内容选题</h2><el-tag>{{ cycle.analysis.method === 'rule_observations_not_ai' ? '采集待办，尚未 AI 策划' : '已完成 AI 策划' }}</el-tag></div>
         <p>{{ cycle.analysis.diagnosis }}</p>
+        <p v-if="cycle.feedback_diagnostics?.planning_feedback?.needs_update" class="hint" data-testid="research-feedback-planning-stale">后来收到的单题或外部反馈尚未用于当前选题。用下方 AI 策划按钮更新后，旧稿与原发布任务仍会保留。</p>
         <div class="row"><el-button v-if="nativeAvailable" type="primary" :disabled="busy" @click="generate('analysis', 'doubao')">豆包分析采集并制定选题</el-button><el-button :disabled="busy" @click="generate('analysis', 'api')">用已配置的 AI API 策划</el-button><el-button @click="download(cycle, 'research-task.json')">导出任务单</el-button></div>
         <div class="observations"><p v-for="item in cycle.observations.cases" :key="item.id"><strong>{{ item.id }} · {{ category[item.category] }}</strong>：{{ item.finding }}</p></div>
         <el-table :data="cycle.analysis.briefs" data-testid="research-briefs"><el-table-column label="优先级" width="90"><template #default="{row}">{{ row.priority === 'high' ? '优先' : '后续' }}</template></el-table-column><el-table-column prop="topic" label="选题" min-width="220"/><el-table-column label="采集依据 / 待补资料" min-width="300"><template #default="{row}"><p>{{ row.case_ids.join('、') }} · {{ row.why }}</p><p v-for="text in row.missing_evidence" :key="text" class="hint">待补：{{ text }}</p><p v-if="row.outline.length" class="hint">结构：{{ row.outline.join(' → ') }}</p></template></el-table-column></el-table>
-        <el-collapse><el-collapse-item title="查看观察到的来源（网址未知仍保留未知）" name="sources"><p class="hint">{{ cycle.observations.source_note }}</p><p class="hint">主体标签只按来源域名、标题或已确认的关系区分范围，不等于业务事实已核实；其他公司的条目仍可作为平台线索。</p><ul><li v-for="source in cycle.observations.sources" :key="source.id">{{ source.id }} · {{ source.case_id }} · {{ source.kind === 'citations' ? '正文引用' : '界面资料' }} · <a v-if="source.url" :href="safeUrl(source.url)" target="_blank" rel="noopener noreferrer">{{ source.title || source.domain }}</a><span v-else>{{ source.title || '标题未知' }} · 网址未确认</span><GeoSourceIdentity :identity="source.source_identity" compact/></li></ul></el-collapse-item></el-collapse>
+        <el-collapse data-geo-section="sources"><el-collapse-item title="查看观察到的来源（网址未知仍保留未知）" name="sources"><p class="hint">{{ cycle.observations.source_note }}</p><p class="hint">主体标签只按来源域名、标题或已确认的关系区分范围，不等于业务事实已核实；其他公司的条目仍可作为平台线索。</p><ul><li v-for="source in cycle.observations.sources" :key="source.id">{{ source.id }} · {{ source.case_id }} · {{ source.kind === 'citations' ? '正文引用' : '界面资料' }} · <a v-if="source.url" :href="safeUrl(source.url)" target="_blank" rel="noopener noreferrer">{{ source.title || source.domain }}</a><span v-else>{{ source.title || '标题未知' }} · 网址未确认</span><GeoSourceIdentity :identity="source.source_identity" compact/></li></ul></el-collapse-item></el-collapse>
       </el-card>
-      <GeoDestinations :cycle="cycle" :task="task" :busy="busy" :native-available="nativeAvailable" @updated="applyCycle" @select="selectDestination" @open="openDestination" @checked="poll"/>
-      <el-card shadow="never">
+      <GeoDestinations data-geo-section="destinations" :cycle="cycle" :task="task" :busy="busy" :native-available="nativeAvailable" @updated="applyCycle" @select="selectDestination" @open="openDestination" @checked="poll"/>
+      <el-card shadow="never" data-geo-section="facts">
         <h2>3 · 补充可用于写作的事实</h2>
         <div v-if="cycle.fact_candidates && !cycle.facts.length" class="fact-reuse"><p>上轮 {{ date(cycle.fact_candidates.source_created_at) }} 核对过的资料可作为本轮候选，带入后仍需重新核对。</p><el-button :disabled="busy" @click="reuseFacts">带入上轮资料</el-button></div>
         <p class="hint">每行“事实内容 | 来源网址”，没有公开网址时留空，稿件须注明据运营方说明。采集回答不会自动变成事实库。</p>
@@ -35,7 +38,7 @@
         <div class="row"><el-checkbox v-model="confirmed" :disabled="busy">我已核对这些资料，允许据此起草</el-checkbox><el-button :disabled="busy || !confirmed || !factsText.trim()" @click="saveFacts">保存事实资料</el-button></div>
         <p class="hint">资料修改后请先保存；新的事实或选题会生成独立版本。AI 稿件仍需要审稿。</p>
       </el-card>
-      <el-card shadow="never">
+      <el-card shadow="never" data-geo-section="drafts">
         <h2>4 · 生成文章或帖子，进入现有发布流程</h2>
         <div class="row"><el-select v-model="briefId" aria-label="内容选题"><el-option v-for="brief in cycle.analysis.briefs" :key="brief.id" :value="brief.id" :label="brief.topic"/></el-select><el-select v-model="platform" aria-label="目标发布渠道"><el-option v-for="(label,key) in cycle.channels" :key="key" :value="key" :label="writingChannelLabel(cycle,key,label)" :disabled="!writingChannelEnabled(cycle,key)"/></el-select></div>
         <p v-if="selectedDestination && !destinationCanPrepare(selectedDestination)" class="hint">{{ destinationPublicationGate(selectedDestination).reason }}</p>
@@ -56,7 +59,8 @@
       </el-card>
       <el-card shadow="never">
         <h2>5 · 发布记录与同题复测</h2>
-        <GeoPublicationReview v-if="cycle" :cycle="cycle" :busy="busy" @updated="applyCycle"/>
+        <GeoExternalFeedback data-geo-section="feedback" :cycle="cycle" :busy="busy" @updated="applyCycle" @busy="setFeedbackBusy"/>
+        <GeoPublicationReview data-geo-section="publication" v-if="cycle" :cycle="cycle" :busy="busy" @updated="applyCycle"/>
         <p>发布器确认成功：{{ cycle.publications.length }} 条；用户登记：{{ cycle.reported_publications?.length || 0 }} 条（尚未独立核验）。演示和失败任务不计成功。</p>
         <p v-for="item in cycle.reported_publications" :key="item.id" class="hint"><el-tag type="info">用户登记，未核验</el-tag> {{ date(item.published_at) }} · <a :href="safeUrl(item.url)" target="_blank" rel="noopener noreferrer">查看登记链接</a></p>
         <p class="hint">复测使用原计划、原界面和原模型选项，新开一轮采集。发布不代表已被索引；条件相同也只能观察变化，不能证明因果。</p>
@@ -86,7 +90,7 @@
 </template>
 
 <script setup>
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { geoContentApi } from '@/api/geoContent'
@@ -97,6 +101,11 @@ import DoubaoPreparation from '@/components/DoubaoPreparation.vue'
 import DoubaoTaskRecovery from '@/components/DoubaoTaskRecovery.vue'
 import { doubaoTaskRecovery, scopedRecoveryCheckpoint } from '@/utils/geoTaskRecovery'
 import GeoPublicationReview from '@/components/GeoPublicationReview.vue'
+import GeoExternalFeedback from '@/components/GeoExternalFeedback.vue'
+import GeoWebsiteAudit from '@/components/GeoWebsiteAudit.vue'
+import GeoNextActions from '@/components/GeoNextActions.vue'
+import {diagnosticSection,focusDiagnosticSection} from '@/utils/geoNextActions'
+import {updateFeedbackBusy} from '@/utils/geoFeedbackBusy'
 import { destinationContinuationText, destinationPreparationText, destinationSupportsFill, isDestinationTask } from '@/utils/geoDestinationSession'
 import { createWritingPreferences } from '@/utils/geoWritingOptions'
 import { retestCollection } from '@/utils/geoFeedback'
@@ -104,7 +113,9 @@ import { destinationEnabled, destinationCanPrepare, destinationPublicationGate, 
 
 const route = useRoute(), router = useRouter()
 const reports = ref([]), cycles = ref([]), cycle = ref(null), cycleId = ref(''), reportId = ref(''), retestReportId = ref('')
-const loading = ref(false), working = ref(false), nativeAvailable = ref(false), task = ref({status:'idle'})
+const loading = ref(false), working = ref(false), nativeAvailable = ref(false), task = ref({status:'idle'}), websiteAuditBusy=ref(false)
+const feedbackBusyOwners=ref(new Set()),feedbackBusy=computed(()=>feedbackBusyOwners.value.size>0)
+const setFeedbackBusy=event=>{feedbackBusyOwners.value=updateFeedbackBusy(feedbackBusyOwners.value,event)}
 const clientMode = ref('consumer'), model = ref(''), factsText = ref(''), confirmed = ref(false), briefId = ref(''), platform = ref('zhihu')
 const factsConflict = ref('')
 const writingPreferences = createWritingPreferences({getItem:key=>window.localStorage.getItem(key),setItem:(key,value)=>window.localStorage.setItem(key,value)})
@@ -120,7 +131,7 @@ const selectWritingMode = value => {
 }
 const selectWritingModel = value => {model.value = typeof value === 'string' ? value : '';rememberWritingOptions()}
 const publicationVisible = ref(false), publication = ref({url:'',published_at:'',confirmed:false,note:''})
-const nativeBusy = computed(() => task.value.status === 'running'), busy = computed(() => working.value || nativeBusy.value)
+const nativeBusy = computed(() => task.value.status === 'running'), busy = computed(() => working.value || nativeBusy.value || websiteAuditBusy.value || feedbackBusy.value)
 const writingContextPending = computed(() => Boolean(cycleId.value && cycle.value?.id !== cycleId.value))
 const recoveryTask=ref(null),recoveryStorageError=ref(''),recoveryUnreadable=ref(false)
 const recoveryMemory=new Map()
@@ -152,6 +163,17 @@ const canDraft = computed(() => Boolean(cycle.value?.facts.length && confirmed.v
 const selectedDestination = computed(() => cycle.value?.destinations.find(item => item.key === platform.value))
 const journeyProjectId = computed(() => {const value=Number(route.query.journey_project);return Number.isSafeInteger(value)&&value>0?value:null})
 const returnToJourney = () => router.push({path:'/journey',query:{journey_project:String(journeyProjectId.value)}})
+const navigateDiagnostic=async action=>{
+  const section=diagnosticSection(action,cycle.value)
+  if(!section||busy.value)return
+  if(['maintenance','webmaster'].includes(section)){
+    const projectId=cycle.value?.project_id
+    if(!Number.isSafeInteger(projectId)||projectId<1){ElMessage.info('这份历史任务尚未关联品牌，请先在“开始优化”中选择对应品牌。');return}
+    await router.push({path:'/journey',query:{journey_project:String(projectId),cycle:cycleId.value,focus:section,...(section==='maintenance'&&action.target.task_id?{source_task:action.target.task_id}:{})}});return
+  }
+  await nextTick();focusDiagnosticSection(section)
+}
+
 const matchingRetests = computed(() => reports.value.filter(report => report.name === cycle.value?.profile.name && report.run_id !== cycle.value?.baseline.run_id))
 const currentTaskMessage = computed(() => scopedLoginMessage(task.value,loginScope.value,cycleId.value,working.value) || (task.value.cycle_id === cycleId.value ? (isDestinationTask(task.value) ? '平台任务的当前步骤与继续操作见下方对应平台准备卡。' : task.value.message || (nativeBusy.value ? '当前内容任务执行中，验证请在专用窗口完成。' : '本轮任务记录已保存。')) : (nativeBusy.value ? '另一个桌面任务正在执行，请完成后再开始写作。' : '平台登录、填写、写作与曝光采集分开记录。历史失败详情保留在任务记录。')))
 const feedbackStages = {collection_only:'尚无发布证据',conditions_mismatch:'复测条件不匹配',retest_precedes_publication:'复测早于发布时间',publication_time_unknown:'发布时间待核对',post_publication_observation:'发布后的采集观察'}
@@ -261,7 +283,7 @@ const generate = async (kind, provider) => {
       const result = (await geoContentApi.generate(scope.id,{kind,brief_id:briefId.value,platform:platform.value})).data
       if(!applyCycle(result.cycle,{scope}))return
       const items=(await geoContentApi.list()).data;if(!sameCycleScope(scope))return;cycles.value=items
-      ElMessage.success(kind === 'draft' ? '草稿已存入内容库，请审稿' : '选题已保存')
+      ElMessage.success(kind === 'draft' ? result.already_saved ? '相同资料已有草稿，已保留原稿，没有重复生成。' : '草稿已存入内容库，请审稿' : '选题已保存')
     }
   } catch (error) { if (sameCycleScope(scope)&&!error.response) ElMessage.error(error.message || '内容任务未完成') }
   finally { working.value = false }
@@ -347,6 +369,7 @@ onMounted(async () => {
   reportId.value = typeof route.query.report === 'string' ? route.query.report : ''
   await reload()
   if (!cycleId.value && cycles.value.length) { cycleId.value = cycles.value[0].id; await loadCycle() }
+  if(cycle.value?.id===cycleId.value&&typeof route.query.focus==='string'){await nextTick();focusDiagnosticSection(route.query.focus)}
   for (let attempt=0; attempt<20 && !window.pywebview?.api; attempt++) await new Promise(resolve=>setTimeout(resolve,100))
   nativeAvailable.value = Boolean(window.pywebview?.api)
   if (nativeAvailable.value) { await poll(); timer=setInterval(poll,1000) }

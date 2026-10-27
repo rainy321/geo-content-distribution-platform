@@ -6,8 +6,10 @@
     <p v-if="!canStart" class="probe-hint">单题复测暂不可用，已保存的对照记录仍可查看。</p>
     <p v-else-if="!cases.length" class="probe-hint">当前没有可复测的原问题，请先保存搜索基线。</p>
     <p class="probe-hint">名称或官网文字出现，不代表业务描述正确、推荐、索引，或某篇文章带来了效果。</p>
+    <GeoExternalFeedback :cycle="cycle" :busy="busy" @updated="emit('updated', $event)" @busy="emit('busy',$event)"/>
     <p v-if="!observations.length" class="probe-hint">尚无单题对照记录。取得最终回答后，可在这里查看原文与来源。</p>
-    <article v-for="item in observations" :key="item.id" class="probe-record" data-testid="single-probe-record">
+    <p v-if="observations.length" class="probe-hint">已保存 {{ observations.length }} 条单题记录；当前显示 {{ Math.min(recordLimit,observations.length) }} 条。</p>
+    <article v-for="item in observations.slice(0,recordLimit)" :key="item.id" class="probe-record" data-testid="single-probe-record">
       <div class="probe-heading"><strong>{{ isExternal(item) ? `关联 ${item.case_id} · 外部反馈` : `${item.case_id} · ${category(item.category)}` }}</strong><el-tag size="small" effect="plain">{{ origin(item) }}</el-tag><span>{{ isExternal(item) ? `反馈登记：${date(item.created_at)}` : date(item.collected_at || item.created_at) }}</span></div>
       <template v-if="isExternal(item)"><p v-if="item.observed_question" class="probe-record-question">实际提问：{{ item.observed_question }}</p><p v-else class="probe-hint">实际提问未提供，不能判定为严格同题对照。</p><details><summary>查看本轮关联问题</summary><p class="probe-record-question">{{ item.question }}</p></details></template>
       <p v-else class="probe-record-question">{{ item.question }}</p>
@@ -15,6 +17,7 @@
       <div v-if="contextAttestation(item)" class="probe-hint" data-testid="probe-context-attestation"><strong>用户确认：{{ contextAttestation(item).new_conversation ? '新建对话' : '已有对话' }} · {{ contextAttestation(item).first_message ? '首条提问' : '非首条提问' }}</strong><span v-if="contextAttestation(item).recorded_at"> · {{ date(contextAttestation(item).recorded_at) }}</span><p>这是用户对提问条件的声明，非软件采集核验；回答完整性、界面和模型仍按原记录展示。</p></div>
       <div class="probe-change"><span>回答出现官网地址</span><strong>{{ isExternal(item) ? presence(item.after,item) : `${presence(item.before)} → ${presence(item.after)}` }}</strong><small>只检查所提供文字中的官网域名，不等于核实引用链接。</small></div>
       <p class="probe-business-stage" :class="{'not-acknowledged':businessReview(item)?.status==='not_acknowledged'}" data-testid="probe-business-stage">{{ businessStage(item) }}</p><p class="probe-hint">交付能力与案例：未知，仍需独立核验。</p>
+      <GeoBusinessReview :cycle="cycle" :probe="item" :busy="busy" @updated="emit('updated',$event)" @busy="emit('busy',$event)"/>
       <details v-if="businessReview(item)"><summary>查看业务资料核对依据</summary><blockquote>{{ businessReview(item).quote }}</blockquote><p class="probe-hint">{{ reviewer(businessReview(item)) }}对照了 {{ businessReview(item).reference_fact_ids.length }} 条已确认资料；这是对原文的核对。</p></details>
       <div class="probe-columns" :class="{'external-only':isExternal(item)}">
         <section v-for="side in sides(item)" :key="side.key" class="probe-answer" :aria-label="side.label">
@@ -32,6 +35,7 @@
       <p class="probe-hint probe-conditions">{{ conditions(item) }}</p>
       <details v-if="Array.isArray(item.limitations) && item.limitations.length"><summary>查看这次观察的限制</summary><p v-for="(note,index) in item.limitations" :key="index" class="probe-hint">{{ note }}</p></details>
     </article>
+    <el-button v-if="observations.length>recordLimit" text @click="recordLimit+=3">再显示 3 条记录</el-button><el-button v-if="recordLimit>3" text @click="recordLimit=3">收起历史记录</el-button>
   </section>
 </template>
 
@@ -39,10 +43,13 @@
 import { computed, ref, watch } from 'vue'
 import { journeyDate } from '@/utils/geoJourney'
 import { publicationReviewUrl } from '@/utils/geoPublicationReview'
+import GeoExternalFeedback from '@/components/GeoExternalFeedback.vue'
+import GeoBusinessReview from '@/components/GeoBusinessReview.vue'
 
 const props=defineProps({cycle:{type:Object,required:true},busy:Boolean,canStart:Boolean})
-const emit=defineEmits(['probe'])
+const emit=defineEmits(['probe','updated','busy'])
 const selectedCaseId=ref('')
+const recordLimit=ref(3)
 const identifier=value=>typeof value==='string'&&/^[\w-]{1,100}$/.test(value)
 const cases=computed(()=>{
   const rows=Array.isArray(props.cycle?.baseline?.cases)?props.cycle.baseline.cases:[]
@@ -109,7 +116,7 @@ const sourceRows=side=>[
   ...(Array.isArray(side?.displayed_sources)?side.displayed_sources:[]).map(item=>({item,kind:'来源面板'}))
 ].filter(row=>row.item&&typeof row.item==='object').slice(0,6).map(({item,kind})=>({kind,
   title:typeof item.title==='string'&&item.title.trim()?item.title.slice(0,240):'来源条目',url:publicationReviewUrl(item.url)||null}))
-watch(()=>props.cycle?.id,()=>{selectedCaseId.value=''})
+watch(()=>props.cycle?.id,()=>{selectedCaseId.value='';recordLimit.value=3})
 </script>
 
 <style scoped>

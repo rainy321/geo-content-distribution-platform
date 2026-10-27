@@ -22,6 +22,7 @@ from flask import (
     send_from_directory,
     session,
 )
+from werkzeug.exceptions import RequestEntityTooLarge
 from conf import BASE_DIR
 from db.createTable import initialize_database
 from services.ai_service import (
@@ -362,7 +363,7 @@ def apply_security_headers(response):
         "Permissions-Policy",
         "camera=(), microphone=(), geolocation=()",
     )
-    if request.path.startswith("/api/auth"):
+    if request.path.startswith("/api/auth") or request.endpoint in ('geo_probe_business_reviews', 'geo_website_audit'):
         response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -911,6 +912,96 @@ def geo_content_cycle(identifier):
     return jsonify(code=200, data=cycle)
 
 
+def _feedback_same_origin():
+    origin = request.headers.get('Origin')
+    allowed = {request.host_url.rstrip('/'), *_cors_allowed_origins()}
+    if ((origin is not None and origin not in allowed)
+            or (origin is None and request.headers.get('Sec-Fetch-Site') in ('cross-site', 'same-site'))):
+        return jsonify(code=403, msg='请从当前软件页面访问反馈记录', data=None), 403
+    return None
+
+
+def _external_feedback_json(*, maximum=1100 * 1024):
+    """JSON-only same-origin/CORS writes, bounded independently of media uploads."""
+    if request.mimetype != 'application/json':
+        return None, (jsonify(code=415, msg='反馈记录只接受JSON文本，不接受文件或表单', data=None), 415)
+    rejected = _feedback_same_origin()
+    if rejected is not None:
+        return None, rejected
+    request.max_content_length = maximum
+
+    def unique_object(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError('Duplicate JSON field')
+            value[key] = item
+        return value
+
+    def finite_value(value):
+        raise ValueError('Nonfinite JSON number')
+
+    try:
+        raw = request.get_data(cache=False)
+        # Unknown-length streams can stop at Flask's limit without raising.
+        # Refuse that boundary rather than parsing a silently truncated body.
+        if len(raw) >= maximum:
+            raise RequestEntityTooLarge()
+        value = json.loads(raw, object_pairs_hook=unique_object, parse_constant=finite_value)
+    except (ValueError, UnicodeError, RecursionError):
+        raise ValueError('请提交完整JSON对象，不使用重复字段或非有限数值') from None
+    return value, None
+
+
+@app.route('/api/geo-content/cycles/<identifier>/external-observations', methods=['POST'])
+@app.route('/api/geo-content/cycles/<identifier>/external-observations/<probe_id>/context', methods=['POST'])
+def geo_external_observation(identifier, probe_id=None):
+    from services import geo_research_probe_service as probes
+    try:
+        data, rejected = _external_feedback_json()
+        if rejected is not None:
+            return rejected
+        database = app.config['DATABASE_PATH']
+        if probe_id is None:
+            record = probes.submit_external_observation(database, identifier, data)
+        else:
+            record = probes.submit_external_observation_context(database, identifier, probe_id, data)
+        response = jsonify(code=200, data={'probe': record, 'cycle': geo_content_store.get_cycle(database, identifier)})
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    except RequestEntityTooLarge:
+        return jsonify(code=413, msg='外部反馈JSON不能超过1100KiB，回答原文不能超过1MiB', data=None), 413
+    except geo_content_store.ResearchNotFoundError as error:
+        return jsonify(code=404, msg=str(error), data=None), 404
+    except (ValueError, TypeError, KeyError) as error:
+        return jsonify(code=400, msg=str(error), data=None), 400
+
+
+@app.route('/api/geo-content/cycles/<identifier>/probes/<probe_id>/business-reviews', methods=['GET', 'POST'])
+def geo_probe_business_reviews(identifier, probe_id):
+    from services import geo_research_probe_service as probes
+    try:
+        database = app.config['DATABASE_PATH']
+        if request.method == 'GET':
+            rejected = _feedback_same_origin()
+            if rejected is not None:
+                return rejected
+            if request.args or request.content_length:
+                raise ValueError('核对条件从本轮原记录读取，不接受覆盖字段')
+            return jsonify(code=200, data=probes.business_review_context(database, identifier, probe_id))
+        data, rejected = _external_feedback_json(maximum=64 * 1024)
+        if rejected is not None:
+            return rejected
+        record = probes.submit_operator_business_review(database, identifier, probe_id, data)
+        return jsonify(code=200, data={'probe': record, 'cycle': geo_content_store.get_cycle(database, identifier)})
+    except RequestEntityTooLarge:
+        return jsonify(code=413, msg='业务材料核对JSON不能超过64KiB', data=None), 413
+    except geo_content_store.ResearchNotFoundError as error:
+        return jsonify(code=404, msg=str(error), data=None), 404
+    except (ValueError, TypeError, KeyError) as error:
+        return jsonify(code=400, msg=str(error), data=None), 400
+
+
 @app.route('/api/geo-content/cycles/<identifier>/source-maintenance', methods=['GET', 'POST'])
 def geo_source_maintenance(identifier):
     from services import source_maintenance_service as maintenance
@@ -947,6 +1038,32 @@ def geo_webmaster(identifier):
     return jsonify(code=200, data=result)
 
 
+@app.route('/api/geo-content/cycles/<identifier>/website-audit', methods=['GET', 'POST'])
+def geo_website_audit(identifier):
+    from services import geo_website_audit as audit
+    try:
+        database = app.config['DATABASE_PATH']
+        if request.method == 'GET':
+            rejected = _feedback_same_origin()
+            if rejected is not None:
+                return rejected
+            if request.args or request.content_length:
+                raise ValueError('官网范围只从本轮登记资料读取，不接受覆盖网址')
+            return jsonify(code=200, data=audit.get_overview(database, identifier))
+        data, rejected = _external_feedback_json(maximum=64 * 1024)
+        if rejected is not None:
+            return rejected
+        return jsonify(code=200, data=audit.perform_audit(database, identifier, data))
+    except RequestEntityTooLarge:
+        return jsonify(code=413, msg='官网检查JSON不能超过64KiB', data=None), 413
+    except geo_content_store.ResearchNotFoundError as error:
+        return jsonify(code=404, msg=str(error), data=None), 404
+    except (ValueError, TypeError, KeyError) as error:
+        return jsonify(code=400, msg=str(error), data=None), 400
+    except sqlite3.Error:
+        return jsonify(code=503, msg='检测记录暂时无法安全保存，请检查原记录，不要自动重复检测', data=None), 503
+
+
 @app.route('/api/geo-content/cycles/<identifier>/generate', methods=['POST'])
 def geo_content_generate(identifier):
     data = request.get_json(silent=True)
@@ -973,6 +1090,8 @@ def geo_content_generate(identifier):
         raw = _request_chat_completion(settings=settings, prompt=prompt, temperature=0.3,
                                        http_post=research_requests.post, system_message=geo_content_research.SYSTEM)
         provenance = {'method': 'ai_api', 'model': settings.model, 'prompt_sha256': geo_content_research.fingerprint(prompt)}
+        if kind == 'analysis':
+            provenance['feedback_inputs_sha256'] = geo_content_research.fingerprint(geo_content_research.planning_feedback(cycle))
         if kind == 'draft':
             provenance['input_sha256'] = geo_content_research.fingerprint(geo_content_research.draft_input(cycle, data['brief_id'], data['platform']))
         result = {}

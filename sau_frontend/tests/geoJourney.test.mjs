@@ -1,6 +1,15 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import {sameResearchBrief} from '../src/utils/geoJourney.js'
 import { articleSnapshot, baselineEvidenceSummary, canRestoreArticleEdits, canRestoreFactEdits, entityProfileFields, journeyDraftLimits, journeyLengthReview, lastJourneyProject, normalizeWebsite, readJourney, reportEntityContext, restoreEntityDraftFields, sameBrand, targetDraftOutdated, websiteIdentity, writeJourney } from '../src/utils/geoJourney.js'
+test('a reused brief ID cannot select an article written from an earlier topic or feedback snapshot',()=>{
+  const brief={id:'b01',topic:'原主题',case_ids:['q01'],outline:['依据'],feedback_probe_ids:['probe-a']}
+  const saved={provenance:{brief:{outline:['依据'],case_ids:['q01'],topic:'原主题',id:'b01',feedback_probe_ids:['probe-a']}}}
+  assert.equal(sameResearchBrief(saved,brief),true)
+  assert.equal(sameResearchBrief(saved,{...brief,topic:'新主题'}),false)
+  assert.equal(sameResearchBrief(saved,{...brief,feedback_probe_ids:['probe-b']}),false)
+  assert.equal(sameResearchBrief({provenance:{}},brief),false)
+})
 
 test('same-entity unsaved workspace fields survive migration defaults, including explicit clearing',()=>{
   const project={id:7,name:'产品A',entity_type:'product',website:'https://example.org/products/a',company:'',audience:'',aliases:[],official_urls:[]}

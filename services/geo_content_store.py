@@ -303,6 +303,10 @@ def get_cycle(database, identifier):
         result['source_maintenance'] = overview(connection, result)
         from services.webmaster_service import overview as webmaster_overview
         result['webmaster'] = webmaster_overview(connection, result)
+        from services.geo_website_audit import overview as website_audit_overview
+        result['website_audit'] = website_audit_overview(connection, result)
+        from services.geo_feedback_diagnostics import diagnose_cycle
+        result['feedback_diagnostics'] = diagnose_cycle(result)
     return result
 
 
@@ -327,6 +331,11 @@ def save_analysis(database, identifier, raw, provenance, revision):
         connection.execute('BEGIN IMMEDIATE')
         cycle = _cycle(connection, identifier)
         _check_revision(cycle, revision)
+        from services.geo_research_probe_service import list_probes
+        from services.geo_planning_feedback import planning_feedback
+        cycle['probes'] = list_probes(connection, identifier)
+        if provenance.get('feedback_inputs_sha256') and provenance['feedback_inputs_sha256'] != fingerprint(planning_feedback(cycle)):
+            raise ValueError('策划期间后续反馈或核对意见变化，本次结果未覆盖，请重新核对后策划')
         analysis = parse_research(raw, cycle, provenance)
         connection.execute('UPDATE geo_content_cycles SET analysis=?,revision=revision+1,updated_at=? WHERE id=?', (_json(analysis), _now(), identifier))
     return get_cycle(database, identifier)
@@ -336,7 +345,7 @@ def existing_draft(database, cycle, brief_id, platform):
     key = fingerprint(draft_input(cycle, brief_id, platform))
     with closing(_connect(database)) as connection:
         row = connection.execute('SELECT article_id FROM geo_content_drafts WHERE cycle_id=? AND input_sha256=?', (cycle['id'], key)).fetchone()
-    return dict(row) if row else None
+    return {**dict(row), 'already_saved': True} if row else None
 
 
 def save_draft(database, identifier, brief_id, platform, raw, provenance, revision):
