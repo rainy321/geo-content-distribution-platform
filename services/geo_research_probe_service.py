@@ -308,6 +308,88 @@ def attach_external_observation(database, cycle_id, expected_case_id, raw_respon
     return record
 
 
+def attest_external_observation_context(database, cycle_id, probe_id, expected_response_sha256, attestation):
+    """Append an owner's context statement to the same unchanged external answer.
+
+    Domain-only; no collector receipt or independent sampling is manufactured.
+    The statement can clarify the actual question and session conditions, but
+    never changes answer completeness, mode, model, collection time or metrics.
+    """
+    from contextlib import closing
+    from services.geo_content_store import _connect, _cycle
+    fields = {'question', 'new_conversation', 'first_message', 'confirmation_text'}
+    if (not isinstance(cycle_id, str) or not cycle_id
+            or not isinstance(probe_id, str) or not re.fullmatch('[0-9a-f]{32}', probe_id)
+            or not isinstance(expected_response_sha256, str)
+            or not re.fullmatch('[0-9a-f]{64}', expected_response_sha256)
+            or not isinstance(attestation, dict) or set(attestation) != fields):
+        raise ValueError('请提供本轮外部记录、原文 SHA256 与明确的用户条件声明')
+    for key, maximum in (('question', 4000), ('confirmation_text', 3000)):
+        value = attestation[key]
+        if not isinstance(value, str) or not value.strip() or len(value) > maximum:
+            raise ValueError('实际题文与用户确认原文不能为空，且不能超过长度限制')
+    if any(type(attestation[key]) is not bool for key in ('new_conversation', 'first_message')):
+        raise ValueError('是否新会话及首条提问必须由用户明确声明为是或否')
+    # Detach the caller's mapping before hashing or persisting its exact text.
+    statement = {key: copy.deepcopy(attestation[key]) for key in sorted(fields)}
+    statement_sha = _sha(json.dumps(statement, ensure_ascii=False, sort_keys=True).encode('utf-8'))
+    with closing(_connect(database)) as connection, connection:
+        connection.execute('BEGIN IMMEDIATE')
+        cycle = _cycle(connection, cycle_id)
+        if not connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='geo_research_probes'").fetchone():
+            raise ValueError('外部反馈记录不存在，未新建记录')
+        row = connection.execute('SELECT source,record FROM geo_research_probes WHERE id=? AND cycle_id=?',
+                                 (probe_id, cycle_id)).fetchone()
+        if not row:
+            raise ValueError('外部反馈记录不属于本轮实验，未修改')
+        record = json.loads(row['record'])
+        if (row['source'] != 'user_reported_external' or record.get('source') != 'user_reported_external'
+                or record.get('id') != probe_id or record.get('cycle_id') != cycle_id
+                or record.get('native_verified') is not False or record.get('native_task_id') is not None):
+            raise ValueError('仅能补充本轮未原生验证的外部反馈条件')
+        after = record.get('after') or {}
+        response = after.get('response')
+        if (not isinstance(response, str) or _sha(response.encode('utf-8')) != expected_response_sha256
+                or record.get('response_sha256') != expected_response_sha256
+                or after.get('response_sha256') != expected_response_sha256):
+            raise ValueError('外部回答原文与预期 SHA256 不一致，未修改')
+        details = context(cycle, record.get('case_id'))
+        anchor_question = details['case']['question']
+        if (record.get('question') != anchor_question
+                or record.get('question_sha256') != _sha(anchor_question.encode('utf-8'))
+                or record.get('plan_sha256') != cycle['test_plan']['plan_sha256']):
+            raise ValueError('外部反馈的关联原题已变化，未修改')
+        history = record.get('context_attestations', [])
+        if not isinstance(history, list) or any(not isinstance(item, dict) for item in history):
+            raise ValueError('已有条件声明历史格式异常，未覆盖')
+        if history and history[-1].get('statement_sha256') == statement_sha:
+            return record
+        prior_context = {key: copy.deepcopy(record.get(key)) for key in
+            ('observed_question', 'observed_question_sha256', 'website_in_question', 'website_test_without_url')}
+        prior_context['same_question'] = (record.get('conditions') or {}).get('same_question')
+        question = statement['question']
+        website_in_question = _address_present(question, cycle['profile'])
+        without_url = not website_in_question and not bool(re.search(r'https?://\S+', question, re.I))
+        sequence = len(history) + 1
+        event_identity = {'probe_id': probe_id, 'response_sha256': expected_response_sha256,
+                          'sequence': sequence, 'statement_sha256': statement_sha}
+        entry = {'id': _sha(json.dumps(event_identity, sort_keys=True).encode('utf-8'))[:32],
+            'sequence': sequence, 'recorded_at': _now(), 'basis': 'user_statement',
+            'native_verified': False, 'independent_verification': False,
+            'response_sha256': expected_response_sha256, 'statement_sha256': statement_sha,
+            **statement, 'question_sha256': _sha(question.encode('utf-8')),
+            'prior_context': prior_context}
+        record['context_attestations'] = [*history, entry]
+        record['observed_question'] = question
+        record['observed_question_sha256'] = entry['question_sha256']
+        record['website_in_question'] = website_in_question
+        record['website_test_without_url'] = without_url
+        record['conditions'] = {**(record.get('conditions') or {}), 'same_question': question == anchor_question}
+        connection.execute('UPDATE geo_research_probes SET record=? WHERE id=? AND cycle_id=?',
+            (json.dumps(record, ensure_ascii=False), probe_id, cycle_id))
+    return record
+
+
 def review_probe_business(database, cycle_id, probe_id, review):
     """Attach an explicitly attributed local review to this unchanged answer."""
     from contextlib import closing

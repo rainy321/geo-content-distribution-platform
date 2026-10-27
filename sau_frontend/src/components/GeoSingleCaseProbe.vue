@@ -12,6 +12,7 @@
       <template v-if="isExternal(item)"><p v-if="item.observed_question" class="probe-record-question">实际提问：{{ item.observed_question }}</p><p v-else class="probe-hint">实际提问未提供，不能判定为严格同题对照。</p><details><summary>查看本轮关联问题</summary><p class="probe-record-question">{{ item.question }}</p></details></template>
       <p v-else class="probe-record-question">{{ item.question }}</p>
       <p class="probe-hint">{{ questionScope(item) }} · {{ isExternal(item) ? '用户提供的外部观察，采集条件未由软件核验' : '仅这一题的独立观察' }}</p>
+      <div v-if="contextAttestation(item)" class="probe-hint" data-testid="probe-context-attestation"><strong>用户确认：{{ contextAttestation(item).new_conversation ? '新建对话' : '已有对话' }} · {{ contextAttestation(item).first_message ? '首条提问' : '非首条提问' }}</strong><span v-if="contextAttestation(item).recorded_at"> · {{ date(contextAttestation(item).recorded_at) }}</span><p>这是用户对提问条件的声明，非软件采集核验；回答完整性、界面和模型仍按原记录展示。</p></div>
       <div class="probe-change"><span>回答出现官网地址</span><strong>{{ isExternal(item) ? presence(item.after,item) : `${presence(item.before)} → ${presence(item.after)}` }}</strong><small>只检查所提供文字中的官网域名，不等于核实引用链接。</small></div>
       <p class="probe-business-stage" :class="{'not-acknowledged':businessReview(item)?.status==='not_acknowledged'}" data-testid="probe-business-stage">{{ businessStage(item) }}</p><p class="probe-hint">交付能力与案例：未知，仍需独立核验。</p>
       <details v-if="businessReview(item)"><summary>查看业务资料核对依据</summary><blockquote>{{ businessReview(item).quote }}</blockquote><p class="probe-hint">{{ reviewer(businessReview(item)) }}对照了 {{ businessReview(item).reference_fact_ids.length }} 条已确认资料；这是对原文的核对。</p></details>
@@ -59,6 +60,18 @@ const excerpt=(value,limit=280)=>{const text=typeof value==='string'?value:'';re
 const date=value=>journeyDate(value)
 const mode=value=>value==='work'?'豆包工作':value==='consumer'?'豆包对话':'界面未知'
 const isExternal=item=>item?.source==='user_reported_external'
+const contextAttestation=item=>{
+  const history=item?.context_attestations
+  if(!isExternal(item)||!Array.isArray(history)||!history.length)return null
+  const value=history.at(-1),hash=item.response_sha256||item.after?.response_sha256
+  if(!value||typeof value!=='object'||Array.isArray(value)||value.basis!=='user_statement'
+    ||value.native_verified!==false||value.independent_verification!==false
+    ||typeof value.new_conversation!=='boolean'||typeof value.first_message!=='boolean'
+    ||typeof hash!=='string'||!/^[a-f0-9]{64}$/.test(hash)||value.response_sha256!==hash
+    ||item.response_sha256&&item.after?.response_sha256&&item.response_sha256!==item.after.response_sha256
+    ||typeof value.question!=='string'||!value.question.trim()||value.question!==item.observed_question)return null
+  return value
+}
 const origin=item=>isExternal(item)?'用户外部反馈':item.source==='research_prototype_import'?'研究结果导入':item.source==='native_collector'&&item.native_verified===true?'软件采集':'采集来源待确认'
 const sides=item=>isExternal(item)?[{key:'after',label:'用户提供原文',value:item.after}]:[{key:'before',label:'原基线回答',value:item.before},{key:'after',label:'本次单题回答',value:item.after}]
 const valueFor=(side,key,item)=>((isExternal(item)&&side===item.after&&key==='website_presence')||side?.answer_evaluable===true)&&typeof side?.[key]==='boolean'?side[key]:null

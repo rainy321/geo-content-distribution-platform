@@ -54,7 +54,7 @@
         <DoubaoSessionControls v-if="nativeAvailable && provider==='doubao'" :client-mode="clientMode" :model="model" :busy="busy" @mode="selectSessionMode" @model="model=$event" @login="login"/>
         <BaselineContext/>
         <div class="diagnosis"><p>{{ diagnosisPreview }}</p><details v-if="cycle.analysis?.diagnosis?.length>180" class="hint"><summary>查看完整分析</summary><p>{{ cycle.analysis.diagnosis }}</p></details><span v-if="needsAnalysis" class="hint">当前是规则整理的观察记录，下一步用 AI 制定选题。</span></div>
-        <el-collapse class="source-summary"><el-collapse-item :title="`来源线索：${sourceCounts.verified} 个网址平台候选 · ${sourceCounts.unknown} 组网址未知`" name="opportunities"><article v-for="item in cycle.opportunities || []" :key="item.id" class="source-row"><strong>{{ item.candidate?.name || item.domain || '网址未知' }}</strong><el-tag size="small" effect="plain">{{ surfaceLabels[item.surface] || '待核对' }}</el-tag><p>{{ item.note }}</p><p v-for="lead in item.title_leads || []" :key="lead.candidate.name" class="hint">标题线索：{{ lead.candidate.name }}，尚未核实网址。</p></article><el-button text @click="openDetails">接入或配置目标平台</el-button></el-collapse-item></el-collapse>
+        <el-collapse class="source-summary"><el-collapse-item :title="`来源线索：${sourceCounts.verified} 个网址平台候选 · ${sourceCounts.unknown} 组网址未知`" name="opportunities"><p class="hint">主体摘要只区分来源范围，不代表业务事实已核实；其他公司的来源仍可用于发现平台。</p><article v-for="item in cycle.opportunities || []" :key="item.id" class="source-row"><strong>{{ item.candidate?.name || item.domain || '网址未知' }}</strong><el-tag size="small" effect="plain">{{ surfaceLabels[item.surface] || '待核对' }}</el-tag><p>{{ item.note }}</p><p class="hint" data-testid="journey-source-identity-summary">{{ sourceIdentitySummary(item,cycle.observations?.sources) }}</p><p v-for="lead in item.title_leads || []" :key="lead.candidate.name" class="hint">标题线索：{{ lead.candidate.name }}，尚未核实网址。</p></article><el-button text @click="openDetails">接入或配置目标平台</el-button></el-collapse-item></el-collapse>
         <GeoSourceMaintenance :cycle="cycle" :busy="working || finishingTask || webmasterBusy || nativeBusy && (task.kind!=='source_maintenance' || task.cycle_id!==cycleId)" :native-task-active="nativeBusy && task.kind==='source_maintenance' && task.cycle_id===cycleId" :native-available="nativeAvailable" @busy="sourceMaintenanceBusy=$event" @task="adoptSourceMaintenanceTask"/>
         <GeoWebmaster :cycle="cycle" :busy="working || finishingTask || nativeBusy || sourceMaintenanceBusy" @busy="webmasterBusy=$event"/>
         <template v-if="!needsAnalysis">
@@ -137,6 +137,7 @@ import JourneySavedCycles from '@/components/JourneySavedCycles.vue'
 import { savedCycleContinuation, savedCycleFactEdits } from '@/utils/geoSavedCycles'
 import { baselineWritingOptions } from '@/utils/geoWritingOptions'
 import { feedbackCollectionTotals, retestCollection } from '@/utils/geoFeedback'
+import { sourceIdentitySummary } from '@/utils/geoSourceIdentity'
 import GeoPublicationReview from '@/components/GeoPublicationReview.vue'
 import GeoSingleCaseProbe from '@/components/GeoSingleCaseProbe.vue'
 import GeoSourceMaintenance from '@/components/GeoSourceMaintenance.vue'

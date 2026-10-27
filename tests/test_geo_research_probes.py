@@ -343,6 +343,164 @@ class ExternalObservationTests(ProbeFixture, unittest.TestCase):
             probes.review_probe_business(self.database, self.cycle['id'], 'not-this-cycle-probe', self.review)
         self.assert_original_unchanged()
 
+    def attest(self, record, changes=None, **scope):
+        statement = {'question': self.question, 'new_conversation': True, 'first_message': True,
+            'confirmation_text': '用户明确确认：新建空白对话，第一条只问这道原题。'}
+        statement.update(changes or {})
+        return probes.attest_external_observation_context(self.database,
+            scope.get('cycle_id', self.cycle['id']), scope.get('probe_id', record['id']),
+            scope.get('expected_response_sha256', record['response_sha256']), statement)
+
+    def test_context_attestation_updates_same_external_record_without_claiming_native_or_complete(self):
+        first = self.external({'business_relationship_review': self.review})
+        before_cycle = store.get_cycle(self.database, self.cycle['id'])
+        after = self.attest(first)
+        self.assertEqual(after['id'], first['id'])
+        self.assertEqual(after['run_id'], first['run_id'])
+        self.assertEqual(after['after'], first['after'])
+        self.assertEqual(after['business_relationship_review'], first['business_relationship_review'])
+        self.assertEqual(after['before'], first['before'])
+        self.assertEqual(after['question_role'], 'cycle_anchor_only')
+        self.assertEqual(after['observed_question'], self.question)
+        self.assertEqual(after['observed_question_sha256'], hashlib.sha256(self.question.encode()).hexdigest())
+        self.assertTrue(after['conditions']['same_question'])
+        self.assertFalse(after['website_in_question'])
+        self.assertTrue(after['website_test_without_url'])
+        self.assertFalse(after['native_verified'])
+        for field in ('client_mode', 'model_label', 'collected_at', 'answer_evaluable', 'official_citation_present'):
+            self.assertIsNone(after['after'][field])
+        self.assertIsNone(after['native_task_id'])
+        self.assertIsNone(after['execution'])
+        self.assertIsNone(after['evidence'])
+        self.assertIsNone(after['causal_effect'])
+        self.assertIsNone(after['conditions']['client_mode_match'])
+        self.assertIsNone(after['conditions']['model_label_match'])
+        entry = after['context_attestations'][0]
+        self.assertEqual(entry['basis'], 'user_statement')
+        self.assertFalse(entry['independent_verification'])
+        self.assertFalse(entry['native_verified'])
+        self.assertTrue(entry['new_conversation'])
+        self.assertTrue(entry['first_message'])
+        self.assertEqual(entry['response_sha256'], first['response_sha256'])
+        self.assertIsNone(entry['prior_context']['observed_question'])
+        self.assertIsNone(entry['prior_context']['same_question'])
+        after_cycle = store.get_cycle(self.database, self.cycle['id'])
+        self.assertEqual(len(after_cycle['probes']), 1)
+        self.assertEqual({k:v for k,v in before_cycle.items() if k != 'probes'},
+                         {k:v for k,v in after_cycle.items() if k != 'probes'})
+        self.assert_original_unchanged()
+
+    def test_context_attestation_preserves_other_probe_and_all_other_database_tables(self):
+        first = self.external()
+        other = self.external({'answer_complete': True}, raw=self.raw + '另一份外部回复。')
+        def snapshot():
+            with sqlite3.connect(self.database) as conn:
+                tables = [row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")]
+                return {table: conn.execute('SELECT * FROM "' + table + '" ORDER BY rowid').fetchall()
+                        for table in tables if table != 'geo_research_probes'}
+        before = snapshot()
+        self.attest(first)
+        self.assertEqual(snapshot(), before)
+        saved = store.get_cycle(self.database, self.cycle['id'])['probes']
+        self.assertEqual(len(saved), 2)
+        self.assertEqual(next(row for row in saved if row['id'] == other['id']), other)
+
+    def test_context_attestation_keeps_append_only_history_and_identical_retry_is_idempotent(self):
+        first = self.external()
+        confirmed = self.attest(first)
+        first_entry = copy.deepcopy(confirmed['context_attestations'][0])
+        original_bytes = self.database.read_bytes()
+        repeated = self.attest(first)
+        self.assertEqual(repeated, confirmed)
+        self.assertEqual(self.database.read_bytes(), original_bytes)
+        corrected = self.attest(first, {'first_message': False,
+            'confirmation_text': '用户补充说明：仍是这道题，但前面已有一条消息。'})
+        self.assertEqual(corrected['context_attestations'][0], first_entry)
+        self.assertEqual(len(corrected['context_attestations']), 2)
+        self.assertEqual(corrected['context_attestations'][1]['sequence'], 2)
+        self.assertFalse(corrected['context_attestations'][1]['first_message'])
+        self.assertNotEqual(corrected['context_attestations'][0]['id'], corrected['context_attestations'][1]['id'])
+        self.assertEqual(corrected['context_attestations'][1]['prior_context']['observed_question'], self.question)
+        # An old statement repeated after a correction is another append; it
+        # cannot delete the correction or silently rewind the stored history.
+        latest = self.attest(first)
+        self.assertEqual(latest['context_attestations'][:2], corrected['context_attestations'])
+        self.assertEqual(len(latest['context_attestations']), 3)
+        self.assertEqual(len({entry['id'] for entry in latest['context_attestations']}), 3)
+        self.assertEqual(len(store.get_cycle(self.database, self.cycle['id'])['probes']), 1)
+
+    def test_context_attestation_compares_actual_question_exactly_and_preserves_supplied_urls(self):
+        first = self.external()
+        for question, website, without_url in (
+                ('另一道问题', False, True),
+                (self.question + ' ', False, True),
+                ('请核对 https://synthetic.example.org 的公开业务。', True, False),
+                ('请核对 synthetic.example.org 的公开业务。', True, False),
+                ('请核对 https://another.example.org 的资料。', False, False)):
+            with self.subTest(question=question):
+                after = self.attest(first, {'question': question, 'confirmation_text': '用户明确提供实际提问：' + question})
+                self.assertEqual(after['observed_question'], question)
+                self.assertFalse(after['conditions']['same_question'])
+                self.assertIs(after['website_in_question'], website)
+                self.assertIs(after['website_test_without_url'], without_url)
+                self.assertEqual(after['after'], first['after'])
+
+    def test_context_attestation_rejects_unconfirmed_fields_and_fabricated_sampling_metadata(self):
+        first = self.external()
+        invalid = [None, {}, {'question': self.question},
+            {'question': self.question, 'new_conversation': True, 'first_message': True},
+            {'question': self.question, 'new_conversation': True, 'first_message': True,
+             'confirmation_text': '用户已确认', 'native_verified': True}]
+        for changes in ({'question': ''}, {'question': 'x' * 4001}, {'confirmation_text': ' '},
+                        {'confirmation_text': 'x' * 3001}, {'new_conversation': None},
+                        {'new_conversation': 1}, {'first_message': 'true'}, {'answer_complete': True},
+                        {'client_mode': 'consumer'}, {'independent_account': True}):
+            invalid.append({'question': self.question, 'new_conversation': True, 'first_message': True,
+                            'confirmation_text': '用户已确认', **changes})
+        for value in invalid:
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                probes.attest_external_observation_context(self.database, self.cycle['id'], first['id'],
+                    first['response_sha256'], value)
+        self.assertEqual(store.get_cycle(self.database, self.cycle['id'])['probes'], [first])
+
+    def test_context_attestation_rejects_wrong_cycle_source_probe_and_response_hash(self):
+        external = self.external()
+        native = probes.attach_probe(self.database, self.cycle['id'], self.native(), source='native_collector')
+        other_report = copy.deepcopy(self.baseline)
+        other_report['run_id'] = 'synthetic-other-original-round'
+        other_cycle = store.create_cycle(self.database, other_report, 'synthetic-other-report-reference')
+        self.assertNotEqual(other_cycle['id'], self.cycle['id'])
+        for scope in ({'probe_id':'f' * 32}, {'probe_id':native['id']},
+                      {'expected_response_sha256':'0' * 64}, {'expected_response_sha256':'bad'},
+                      {'cycle_id':other_cycle['id']}):
+            with self.subTest(scope=scope), self.assertRaises(ValueError):
+                self.attest(external, **scope)
+        saved = store.get_cycle(self.database, self.cycle['id'])['probes']
+        self.assertEqual(next(row for row in saved if row['id'] == external['id']), external)
+        self.assertEqual(next(row for row in saved if row['id'] == native['id']), native)
+
+    def test_context_attestation_does_not_promote_explicit_incomplete_or_private_answer(self):
+        for metadata, raw in (({'answer_complete': False}, self.raw),
+                              ({}, '根据内部资料，合成树科技提供软件服务。')):
+            with self.subTest(metadata=metadata):
+                first = self.external(metadata, raw)
+                after = self.attest(first)
+                self.assertFalse(after['after']['answer_evaluable'])
+                self.assertEqual(after['after'], first['after'])
+                self.assertEqual(after['status'], first['status'])
+                self.assertTrue(after['conditions']['same_question'])
+
+    def test_context_attestation_does_not_trust_a_hash_field_when_response_has_changed(self):
+        first = self.external()
+        changed = copy.deepcopy(first)
+        changed['after']['response'] += '被改动的原文'
+        with sqlite3.connect(self.database) as conn:
+            conn.execute('UPDATE geo_research_probes SET record=? WHERE id=?',
+                (json.dumps(changed, ensure_ascii=False), first['id']))
+        with self.assertRaisesRegex(ValueError, 'SHA256'):
+            self.attest(first)
+        self.assertEqual(store.get_cycle(self.database, self.cycle['id'])['probes'], [changed])
+
 
 if __name__ == '__main__':
     unittest.main()

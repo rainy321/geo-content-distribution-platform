@@ -618,6 +618,37 @@ async def _expand_sources(page: Any, config: CollectorConfig, run_dir: Path, *, 
     return items, screenshots, incomplete
 
 
+def _shuidi_company_separator_match(source_title: str, document: dict) -> str | None:
+    """Corroborate one observed Shuidi title variant, without fuzzy matching.
+
+    The citation uses an em dash; the public company page uses a hyphen.
+    Company spelling, publisher suffix, unique H1 and company-page route
+    must all agree. This does not authorize login, claim or search pages.
+    """
+    try:
+        parsed = urlsplit(document.get('url') or '')
+        if (parsed.scheme != 'https' or parsed.hostname != 'shuidi.cn'
+                or parsed.username or parsed.password or parsed.port not in (None, 443)
+                or not re.fullmatch(r'/company-[0-9a-fA-F]{32}\.html', parsed.path)):
+            return None
+    except ValueError:
+        return None
+    if not isinstance(source_title, str) or not isinstance(document.get('title'), str):
+        return None
+    source = re.fullmatch(r'(?P<company>.+(?:有限责任公司|股份有限公司|有限公司|股份公司))\s*—\s*水滴信用', source_title.strip())
+    if not source:
+        return None
+    company = source['company']
+    headlines = document.get('headlines')
+    if (not isinstance(headlines, list) or len(headlines) != 1
+            or not isinstance(headlines[0], dict) or not isinstance(headlines[0].get('text'), str)
+            or headlines[0]['text'].strip() != company):
+        return None
+    if not re.fullmatch(re.escape(company) + r'\s*-\s*水滴信用', document['title'].strip()):
+        return None
+    return 'shuidi_company_h1_and_publisher_separator_equivalent'
+
+
 def _citation_title_match(source_title: str, document: dict) -> str | None:
     """Require complete title equality, recording compatibility normalization."""
     # The observed Toutiao layout appends the public author to a source-card
@@ -655,7 +686,10 @@ def _citation_title_match(source_title: str, document: dict) -> str | None:
     # Full/half-width punctuation and compatibility glyphs can differ between
     # the visible source card and its observed destination. Keep both originals
     # in evidence; only complete NFKC-equivalent strings may authorize a match.
-    return match(lambda value: fold(unicodedata.normalize('NFKC', value or '')), 'nfkc_equivalent')
+    compatible = match(lambda value: fold(unicodedata.normalize('NFKC', value or '')), 'nfkc_equivalent')
+    if compatible:
+        return compatible
+    return _shuidi_company_separator_match(source_title, document)
 
 
 def _http_navigation_url(value):

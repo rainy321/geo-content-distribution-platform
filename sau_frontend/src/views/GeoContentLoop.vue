@@ -23,7 +23,7 @@
         <div class="row"><el-button v-if="nativeAvailable" type="primary" :disabled="busy" @click="generate('analysis', 'doubao')">豆包分析采集并制定选题</el-button><el-button :disabled="busy" @click="generate('analysis', 'api')">用已配置的 AI API 策划</el-button><el-button @click="download(cycle, 'research-task.json')">导出任务单</el-button></div>
         <div class="observations"><p v-for="item in cycle.observations.cases" :key="item.id"><strong>{{ item.id }} · {{ category[item.category] }}</strong>：{{ item.finding }}</p></div>
         <el-table :data="cycle.analysis.briefs" data-testid="research-briefs"><el-table-column label="优先级" width="90"><template #default="{row}">{{ row.priority === 'high' ? '优先' : '后续' }}</template></el-table-column><el-table-column prop="topic" label="选题" min-width="220"/><el-table-column label="采集依据 / 待补资料" min-width="300"><template #default="{row}"><p>{{ row.case_ids.join('、') }} · {{ row.why }}</p><p v-for="text in row.missing_evidence" :key="text" class="hint">待补：{{ text }}</p><p v-if="row.outline.length" class="hint">结构：{{ row.outline.join(' → ') }}</p></template></el-table-column></el-table>
-        <el-collapse><el-collapse-item title="查看观察到的来源（网址未知仍保留未知）" name="sources"><p class="hint">{{ cycle.observations.source_note }}</p><ul><li v-for="source in cycle.observations.sources" :key="source.id">{{ source.id }} · {{ source.case_id }} · {{ source.kind === 'citations' ? '正文引用' : '界面资料' }} · <a v-if="source.url" :href="safeUrl(source.url)" target="_blank" rel="noopener noreferrer">{{ source.title || source.domain }}</a><span v-else>{{ source.title || '标题未知' }} · 网址未确认</span></li></ul></el-collapse-item></el-collapse>
+        <el-collapse><el-collapse-item title="查看观察到的来源（网址未知仍保留未知）" name="sources"><p class="hint">{{ cycle.observations.source_note }}</p><p class="hint">主体标签只按来源域名、标题或已确认的关系区分范围，不等于业务事实已核实；其他公司的条目仍可作为平台线索。</p><ul><li v-for="source in cycle.observations.sources" :key="source.id">{{ source.id }} · {{ source.case_id }} · {{ source.kind === 'citations' ? '正文引用' : '界面资料' }} · <a v-if="source.url" :href="safeUrl(source.url)" target="_blank" rel="noopener noreferrer">{{ source.title || source.domain }}</a><span v-else>{{ source.title || '标题未知' }} · 网址未确认</span><GeoSourceIdentity :identity="source.source_identity" compact/></li></ul></el-collapse-item></el-collapse>
       </el-card>
       <GeoDestinations :cycle="cycle" :task="task" :busy="busy" :native-available="nativeAvailable" @updated="applyCycle" @select="selectDestination" @open="openDestination" @checked="poll"/>
       <el-card shadow="never">
@@ -92,6 +92,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { geoContentApi } from '@/api/geoContent'
 import { geoTestApi } from '@/api/geoTest'
 import GeoDestinations from '@/components/GeoDestinations.vue'
+import GeoSourceIdentity from '@/components/GeoSourceIdentity.vue'
 import DoubaoPreparation from '@/components/DoubaoPreparation.vue'
 import DoubaoTaskRecovery from '@/components/DoubaoTaskRecovery.vue'
 import { doubaoTaskRecovery, scopedRecoveryCheckpoint } from '@/utils/geoTaskRecovery'

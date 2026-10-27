@@ -131,6 +131,44 @@ test('external reports keep their unknown actual question and collection conditi
   assert.match(page.conditions({...value,conditions:{same_question:true,client_mode_match:true,model_label_match:true}}),/问题一致性未知.*界面是否一致未知.*模型是否一致未知/)
 })
 
+const contextStatement=(changes={})=>({basis:'user_statement',native_verified:false,independent_verification:false,
+  response_sha256:'a'.repeat(64),question:cases[1].question,new_conversation:true,first_message:true,recorded_at:'2026-10-27T12:00:00+08:00',...changes})
+
+test('the latest owner statement displays new conversation and first question without validating unknown model or raw answer',async()=>{
+  const value=externalProbe({observed_question:cases[1].question,context_attestations:[contextStatement()],
+    after:side({response:'用户提供的原始回答。<span>保留原文</span>',response_sha256:'a'.repeat(64),answer_evaluable:true,model_label:null,client_mode:null})})
+  const before=JSON.stringify(value),page=componentHarness(cycle({probes:[value]}))
+  assert.equal(page.contextAttestation(value),value.context_attestations[0])
+  assert.equal(page.sides(value)[0].value.answer_evaluable,true)
+  assert.match(page.conditions(value),/界面是否一致未知.*模型是否一致未知/)
+  const html=await renderComponent(page.props.cycle)
+  assert.match(html,/用户确认：新建对话 · 首条提问/)
+  assert.match(html,/非软件采集核验/);assert.match(html,/模型未知/)
+  assert.match(html,/&lt;span&gt;保留原文&lt;\/span&gt;/)
+  assert.equal(JSON.stringify(value),before)
+})
+
+test('a corrected latest statement replaces the displayed context claim without falling back to older fresh-session text',async()=>{
+  const value=externalProbe({observed_question:cases[1].question,context_attestations:[contextStatement(),contextStatement({new_conversation:false,first_message:false})]})
+  const page=componentHarness(cycle({probes:[value]})),html=await renderComponent(page.props.cycle)
+  assert.equal(page.contextAttestation(value).new_conversation,false)
+  assert.match(html,/用户确认：已有对话 · 非首条提问/)
+  assert.doesNotMatch(html,/用户确认：新建对话 · 首条提问/)
+  assert.equal(page.sides(value)[0].value.answer_evaluable,null)
+})
+
+test('missing or mismatched latest statements cannot borrow an earlier statement or alter the response assessment',()=>{
+  for(const latest of [null,contextStatement({first_message:'true'}),contextStatement({native_verified:true}),contextStatement({response_sha256:'b'.repeat(64)}),contextStatement({question:'另一个问题'})]){
+    const value=externalProbe({observed_question:cases[1].question,context_attestations:[contextStatement(),latest]})
+    const before=JSON.stringify(value),page=componentHarness(cycle({probes:[value]}))
+    assert.equal(page.contextAttestation(value),null)
+    assert.equal(page.sides(value)[0].value.answer_evaluable,null)
+    assert.equal(JSON.stringify(value),before)
+  }
+  const native=probe({context_attestations:[contextStatement()]})
+  assert.equal(componentHarness().contextAttestation(native),null)
+})
+
 test('website text and native provenance alone never acknowledge public business facts',()=>{
   const page=componentHarness(cycle({facts:[fact]}))
   for(const value of [probe(),probe({source:'native_collector',native_verified:true}),externalProbe({business_relationship_review:null})]){

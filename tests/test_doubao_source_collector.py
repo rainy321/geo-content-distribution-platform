@@ -85,6 +85,60 @@ class SourceEvidenceTests(unittest.TestCase):
             with self.subTest(change=change):
                 self.assertIsNone(_citation_title_match(source, {**document, **change}))
 
+    def test_shuidi_observed_separator_needs_full_company_h1_and_same_publisher(self):
+        company = '北京合成星野科技有限公司'
+        source = company + '—水滴信用'
+        document = {'url': 'https://shuidi.cn/company-' + 'a1' * 16 + '.html?from=doubao',
+                    'title': company + ' - 水滴信用', 'headlines': [{'text': company}], 'authors': []}
+        original = json.dumps(document, ensure_ascii=False)
+        method = 'shuidi_company_h1_and_publisher_separator_equivalent'
+        self.assertEqual(_citation_title_match(source, document), method)
+        self.assertEqual(_citation_title_match(source, {**document,
+            'url': 'https://shuidi.cn:443/company-' + 'a1' * 16 + '.html'}), method)
+        self.assertEqual(json.dumps(document, ensure_ascii=False), original)
+        for change in (
+            {'headlines': []}, {'headlines': [{'text': None}]},
+            {'headlines': [{'text': company}, {'text': company}]},
+            {'headlines': [{'text': company}, {'text': '其他文章'}]},
+            {'headlines': [{'text': '星野科技'}]},
+            {'headlines': [{'text': '上海合成星野科技有限公司'}]},
+            {'headlines': [{'text': '北京合成星业科技有限公司'}]},
+            {'title': '上海合成星野科技有限公司 - 水滴信用'},
+            {'title': company + ' - 企业资料'},
+            {'title': company + ' - 水滴信用 - 企业认领'},
+            {'title': '会员登录 - 水滴信用'},
+            {'title': company + ' – 水滴信用'},
+        ):
+            with self.subTest(change=change):
+                self.assertIsNone(_citation_title_match(source, {**document, **change}))
+        for title in ('上海合成星野科技有限公司—水滴信用', '星野科技—水滴信用',
+                      company + '—其他平台', company + '–水滴信用', company + ':水滴信用'):
+            with self.subTest(title=title):
+                self.assertIsNone(_citation_title_match(title, document))
+
+    def test_shuidi_separator_exception_never_relaxes_domain_route_or_url_trust(self):
+        company = '北京合成星野科技有限公司'
+        source = company + '—水滴信用'
+        path = '/company-' + 'a1' * 16 + '.html'
+        document = {'title': company + ' - 水滴信用', 'headlines': [{'text': company}]}
+        for url in (
+            'https://shuidi.cn.evil.example' + path, 'https://other.example' + path,
+            'https://www.shuidi.cn' + path, 'http://shuidi.cn' + path, 'ftp://shuidi.cn' + path,
+            'https://user:secret@shuidi.cn' + path, 'https://shuidi.cn:8443' + path,
+            'https://shuidi.cn/company-' + 'a1' * 15 + '.html',
+            'https://shuidi.cn/company-' + 'z1' * 16 + '.html',
+            'https://shuidi.cn/company-' + 'a1' * 16 + '.html/claim',
+            'https://shuidi.cn/claim?return=' + path,
+            'https://shuidi.cn/login?return=' + path,
+            'https://shuidi.cn/search?keyword=' + company,
+            'https://m.qixin.com/auth/login', 'https://m.qcc.com/mlogin',
+        ):
+            with self.subTest(url=url):
+                self.assertIsNone(_citation_title_match(source, {**document, 'url': url}))
+        # Existing exact-title recognition remains an independent, unchanged rule.
+        self.assertEqual(_citation_title_match(source, {**document, 'url': 'https://other.example/page',
+            'title': source}), 'document_title_exact')
+
     def test_only_ui_scopes_are_sources_and_missing_links_stay_missing(self):
         result = normalize_ui_sources([
             {"scope": "navigation", "title": "导航", "href": "https://other.example/"},
@@ -481,6 +535,37 @@ class BrowserExtractionTests(unittest.IsolatedAsyncioTestCase):
             evidence = json.loads((Path(directory)/'citation-1.json').read_text(encoding='utf-8'))
             self.assertEqual(evidence['destination_match_method'], 'document_title_exact')
             self.assertEqual(evidence['destination_headlines'][0]['text'], 'Build with every model. From one platform.')
+
+    async def test_shuidi_company_separator_records_click_and_public_identity_proof(self):
+        company = '北京合成星野科技有限公司'
+        source = company + '—水滴信用'
+        destination = company + ' - 水滴信用'
+        url = 'https://shuidi.cn/company-' + 'a1' * 16 + '.html?from=doubao'
+        await self.page.set_content(f'''<div data-message-role="assistant"><div data-testid="message-content">回答
+        <span class="container-sWvQla" onmouseenter="document.querySelector('[role=tooltip]').style.display='block'">水滴</span>
+        </div><button data-testid="message_action_copy">复制</button></div>
+        <div role="tooltip" class="semi-popover-wrapper-show" style="display:none">
+        <span class="footer-website-VEYotM">水滴</span>
+        <div class="title-ehsWfR" onclick="window.sourceClicks=(window.sourceClicks||0)+1;
+            window.open('{url}','_blank','noopener')">{source}</div></div>''')
+        await self.page.context.route('https://shuidi.cn/**', lambda route: route.fulfill(
+            status=200, content_type='text/html; charset=utf-8',
+            body='<title>' + destination + '</title><h1>' + company + '</h1>'))
+        with tempfile.TemporaryDirectory() as directory:
+            items, _, _ = await _expand_sources(self.page, CollectorConfig(client_mode='consumer'), Path(directory))
+            observed = normalize_ui_sources(items)[0]
+            self.assertEqual(observed['url'], url)
+            self.assertEqual(observed['title'], source)
+            self.assertEqual(await self.page.evaluate('window.sourceClicks'), 1)
+            evidence = json.loads((Path(directory)/'citation-1.json').read_text(encoding='utf-8'))
+            self.assertEqual(evidence['destination_match_method'],
+                             'shuidi_company_h1_and_publisher_separator_equivalent')
+            self.assertEqual(evidence['new_page_count'], 1)
+            self.assertEqual(evidence['clicked_title'], source)
+            self.assertEqual(evidence['clicked_publisher'], '水滴')
+            self.assertEqual(evidence['destination_title'], destination)
+            self.assertEqual(evidence['destination_headlines'][0]['text'], company)
+            self.assertEqual(evidence['observed_url'], url)
 
     async def test_multiple_context_pages_from_one_click_are_not_attributed(self):
         await self.page.set_content('''<div data-message-role="assistant"><div data-testid="message-content">回答
