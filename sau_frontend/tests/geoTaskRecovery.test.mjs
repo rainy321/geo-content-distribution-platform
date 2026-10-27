@@ -34,6 +34,21 @@ test('the known browser timeout has safe recovery text without admitting unknown
   }
 })
 
+test('a mode mismatch stays unsent and offers entry inspection across a separate login',()=>{
+  const original=failed({kind:'run',recovery:{failure_reason:'client_mode_mismatch',
+    requested_client_mode:'consumer',question_submission_attempted:false,question_submitted:false}})
+  const snapshot=JSON.stringify(original)
+  const retained=recoveryCheckpoint(original)
+  const recovery=doubaoTaskRecovery(retained)
+  assert.equal(recovery.clientMode,'consumer')
+  assert.equal(recovery.submission,'not_submitted')
+  assert.equal(recovery.requiresConfirmation,false)
+  assert.equal(recovery.loginLabel,'打开豆包检查入口')
+  assert.match(recovery.description,/换账号不保证切换模式/)
+  assert.equal(doubaoTaskRecovery(failed()).loginLabel,'重新登录豆包')
+  assert.equal(JSON.stringify(original),snapshot)
+})
+
 test('only two explicit false flags prove no submission; attempted and sent remain distinct',()=>{
   assert.equal(doubaoTaskRecovery(failed()).submission,'not_submitted')
   assert.equal(doubaoTaskRecovery(failed()).requiresConfirmation,false)

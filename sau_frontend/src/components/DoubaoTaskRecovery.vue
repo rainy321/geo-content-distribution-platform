@@ -1,7 +1,7 @@
 <template>
   <aside class="doubao-recovery" role="status" aria-live="polite" aria-label="豆包任务恢复" data-testid="doubao-task-recovery">
     <div class="recovery-copy"><strong>{{ recovery.title }}</strong><p>{{ recovery.description }}</p><p class="submission-state">{{ recovery.submissionText }}</p></div>
-    <el-button v-if="recovery.canLogin" :disabled="busy || !nativeAvailable" @click="$emit('login')">重新登录豆包</el-button>
+    <el-button v-if="recovery.canLogin" :disabled="busy || !nativeAvailable" @click="$emit('login')">{{ recovery.loginLabel || '重新登录豆包' }}</el-button>
     <details><summary>查看任务详情</summary><p>原因：{{ recovery.reason }} · {{ recovery.clientMode === 'work' ? '上次使用豆包工作' : recovery.clientMode === 'consumer' ? '上次使用豆包对话' : '上次界面尚未确认，请核对当前选项' }}</p><p>原始记录保留，不会自动重发。结束登录窗口不代表认证已核验。</p></details>
   </aside>
 </template>

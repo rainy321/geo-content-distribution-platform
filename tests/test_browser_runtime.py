@@ -61,7 +61,8 @@ class BrowserSessionChoiceTests(unittest.IsolatedAsyncioTestCase):
         next_context = object()
         playwright, launch = self.playwright([next_context])
         self.assertIs(await browser_runtime.launch_context(playwright, self.profile, self.options, 'chrome'), next_context)
-        launch.assert_awaited_once_with(str(self.alternate), **{**self.options, 'executable_path': 'chrome'})
+        launch.assert_awaited_once_with(str(self.alternate), **{**self.options, 'executable_path': 'chrome',
+                                                             'no_viewport': True, 'args': ['--example', '--start-maximized']})
         self.assertEqual(primary_data.read_bytes(), b'edge remains independent')
         self.assertEqual(alternate_data.read_bytes(), b'chrome stays logged in')
 
@@ -109,7 +110,8 @@ class BrowserSessionChoiceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(RuntimeError) as caught:
             await browser_runtime.launch_context(playwright, self.profile, self.options, 'chrome')
         self.assertIs(caught.exception, failure)
-        launch.assert_awaited_once_with(str(self.alternate), **{**self.options, 'executable_path': 'chrome'})
+        launch.assert_awaited_once_with(str(self.alternate), **{**self.options, 'executable_path': 'chrome',
+                                                             'no_viewport': True, 'args': ['--example', '--start-maximized']})
         self.assertEqual(self.marker.read_bytes(), original_marker)
 
     async def test_changed_or_missing_fallback_configuration_pauses_without_launch(self):
@@ -223,6 +225,65 @@ class BrowserSessionChoiceTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(browser_runtime.BrowserSessionSelectionError, '会话目录无法确认'):
                 await browser_runtime.launch_context(playwright, self.profile, self.options, 'chrome')
         launch.assert_not_awaited()
+
+    async def test_headed_desktop_uses_native_viewport_for_all_viewport_defaults(self):
+        for viewport in ('missing', None, {'width': 1440, 'height': 1000}):
+            with self.subTest(viewport=viewport):
+                options = {**self.options, 'screen': {'width': 1440, 'height': 1000}}
+                if viewport != 'missing':
+                    options['viewport'] = viewport
+                original_options = {**options, 'args': list(options['args'])}
+                playwright, launch = self.playwright([object()])
+                await browser_runtime.launch_context(playwright, self.profile, options)
+                launched = launch.call_args.kwargs
+                self.assertTrue(launched['no_viewport'])
+                self.assertNotIn('viewport', launched)
+                self.assertNotIn('screen', launched)
+                self.assertEqual(launched['args'], ['--example', '--start-maximized'])
+                self.assertEqual(options, original_options)
+
+    async def test_native_viewport_is_used_on_first_fallback_and_remembered_launch(self):
+        options = {**self.options, 'viewport': {'width': 1440, 'height': 1000},
+                   'screen': {'width': 1440, 'height': 1000}}
+        context = object()
+        playwright, launch = self.playwright([RuntimeError('primary failed'), context])
+        self.assertIs(await browser_runtime.launch_context(playwright, self.profile, options, 'chrome'), context)
+        for call in launch.call_args_list:
+            self.assertTrue(call.kwargs['no_viewport'])
+            self.assertNotIn('viewport', call.kwargs)
+            self.assertNotIn('screen', call.kwargs)
+        playwright, launch = self.playwright([context])
+        await browser_runtime.launch_context(playwright, self.profile, options, 'chrome')
+        self.assertTrue(launch.call_args.kwargs['no_viewport'])
+        self.assertNotIn('viewport', launch.call_args.kwargs)
+        self.assertNotIn('screen', launch.call_args.kwargs)
+
+    async def test_headless_and_implicit_launch_options_are_unchanged(self):
+        for headless in (True, 'missing'):
+            with self.subTest(headless=headless):
+                options = {'viewport': {'width': 1440, 'height': 1000}, 'args': ['--example']}
+                if headless != 'missing':
+                    options['headless'] = headless
+                playwright, launch = self.playwright([object()])
+                await browser_runtime.launch_context(playwright, self.profile, options)
+                launch.assert_awaited_once_with(str(self.profile), **options)
+
+    async def test_explicit_device_emulation_options_are_preserved(self):
+        for device_options in ({'is_mobile': True}, {'device_scale_factor': 2}, {'has_touch': True}):
+            with self.subTest(device_options=device_options):
+                options = {**self.options, 'viewport': {'width': 390, 'height': 844}, **device_options}
+                playwright, launch = self.playwright([object()])
+                await browser_runtime.launch_context(playwright, self.profile, options)
+                launch.assert_awaited_once_with(str(self.profile), **options)
+
+    async def test_explicit_window_startup_geometry_is_preserved(self):
+        for argument in ('--start-maximized', '--window-size=1000,700', '--start-fullscreen', '--kiosk'):
+            with self.subTest(argument=argument):
+                options = {**self.options, 'args': ['--example', argument]}
+                playwright, launch = self.playwright([object()])
+                await browser_runtime.launch_context(playwright, self.profile, options)
+                self.assertEqual(launch.call_args.kwargs['args'], options['args'])
+                self.assertTrue(launch.call_args.kwargs['no_viewport'])
 
 
 if __name__ == '__main__':

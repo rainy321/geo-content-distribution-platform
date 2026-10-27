@@ -98,6 +98,19 @@ def _remember_chrome(profile, executable):
 
 
 async def launch_context(playwright, profile_dir, options, fallback_executable=None):
+    # Interactive desktop pages must follow the real window, including smaller
+    # screens and later resizing. Keep deliberate device emulation unchanged.
+    if (options.get('headless') is False and not options.get('is_mobile')
+            and not options.get('has_touch') and options.get('device_scale_factor') is None):
+        options = dict(options)
+        options.pop('viewport', None)
+        options.pop('screen', None)
+        options['no_viewport'] = True
+        args = list(options.get('args') or [])
+        if not any(arg.split('=', 1)[0] in ('--start-maximized', '--window-size', '--start-fullscreen', '--kiosk')
+                   for arg in args):
+            args.append('--start-maximized')
+        options['args'] = args
     profile = Path(profile_dir)
     selected = _read_selection(profile / SELECTION_FILE)
     if selected:

@@ -5,7 +5,7 @@ const reasons = {
   login_required: ['需要登录豆包', '请在专用窗口正常登录。登录窗口结束后，回到当前步骤重新开始。', true],
   human_verification_required: ['需要完成豆包安全验证', '这次验证等待已经结束。请重新打开专用窗口，正常完成登录或验证后再开始。', true],
   manual_verification_window_closed: ['豆包验证窗口已关闭', '窗口关闭前未取得完整结果。请先核对豆包里的原会话，再决定是否重新开始。', true],
-  client_mode_mismatch: ['豆包界面与所选选项不一致', '请核对下方的豆包界面选项。豆包对话与豆包工作使用各自独立的登录会话。', true],
+  client_mode_mismatch: ['豆包实际模式与测试要求不同', '先在官方页面检查可用入口。登录成功或换账号不保证切换模式；普通对话未就绪时保留待测，工作模式的结果单独记录。', true],
   answer_timeout_or_selectors_changed: ['尚未确认豆包回答完成', '原始证据已保留。请先核对豆包里的原会话，再决定是否重新开始。', false],
   background_task_timeout: ['豆包调研尚未返回最终结果', '豆包可能仍在处理原请求。请先查看原会话，避免重复发起同一问题。', false],
   rate_limited: ['豆包暂时限制了请求', '请稍后再试，先保留当前资料与原任务记录。', false],
@@ -45,6 +45,7 @@ export function doubaoTaskRecovery(task) {
   const [title, description, canLogin] = reasons[reason]
   return {
     taskId: task.id, kind: task.kind, cycleId: identifier(task.cycle_id), reason, title, description, canLogin,
+    loginLabel: reason === 'client_mode_mismatch' ? '打开豆包检查入口' : '重新登录豆包',
     clientMode: mode(source.requested_client_mode),
     modelLabel: typeof source.requested_model_label === 'string' ? source.requested_model_label.slice(0, 200) : '',
     attempted, submitted, submission, requiresConfirmation: submission !== 'not_submitted',

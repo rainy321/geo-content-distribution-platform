@@ -11,7 +11,7 @@
       <h2>桌面自动测试</h2>
       <DoubaoPreparation/>
       <div class="form-grid">
-        <el-form-item label="豆包界面"><el-select v-model="desktopClientMode" :disabled="nativeBusy">
+        <el-form-item label="测试模式"><el-select v-model="desktopClientMode" :disabled="nativeBusy">
           <el-option label="豆包对话" value="consumer" /><el-option label="豆包工作" value="work" />
         </el-select></el-form-item>
         <el-form-item label="模型选项（可选）"><el-input v-model="desktopModel" :disabled="nativeBusy" placeholder="留空使用当前模型" /></el-form-item>
@@ -27,8 +27,11 @@
     </el-card>
 
     <el-card v-if="isDesktop" shadow="never" data-testid="desktop-history">
-      <h2>任务记录</h2>
-      <el-table :data="nativeHistory" empty-text="暂无任务记录">
+      <div class="card-heading history-heading">
+        <div><h2>任务记录</h2><p class="context">{{ historyExpanded ? '全部记录' : '最近 5 条' }} · {{ nativeHistory.length }} 条</p></div>
+        <el-button v-if="nativeHistory.length > 5" text :aria-expanded="historyExpanded" @click="toggleHistory">{{ historyExpanded ? '收起记录' : '查看更多记录' }}</el-button>
+      </div>
+      <el-table :data="visibleNativeHistory" empty-text="暂无任务记录">
         <el-table-column label="时间" min-width="155"><template #default="{ row }">{{ reportDate(row.created_at) }}</template></el-table-column>
         <el-table-column prop="client_name" label="客户" min-width="140" />
         <el-table-column label="任务" width="100"><template #default="{ row }">{{ taskNames[row.kind] || row.kind }}</template></el-table-column>
@@ -36,6 +39,8 @@
         <el-table-column label="详情" min-width="220"><template #default="{ row }">{{ row.message || '记录已保存' }}</template></el-table-column>
         <el-table-column width="80"><template #default="{ row }"><el-button link :disabled="nativeBusy" @click="showNativeTask(row.id)">查看</el-button></template></el-table-column>
       </el-table>
+      <el-pagination v-if="historyExpanded && nativeHistory.length > historyPageSize" v-model:current-page="historyPage" class="history-pagination"
+        :page-size="historyPageSize" :total="nativeHistory.length" layout="prev, pager, next" small />
     </el-card>
 
     <el-card shadow="never">
@@ -162,6 +167,15 @@ const useReport = async () => {
 }
 const desktopClientMode = ref('consumer'), desktopModel = ref(''), nativeTask = ref({ status: 'idle' })
 const nativeHistory = ref([]), nativeDetails = ref(null), restoringWorkspace = ref(false)
+const historyExpanded = ref(false), historyPage = ref(1), historyPageSize = 20
+const visibleNativeHistory = computed(() => {
+  const start = historyExpanded.value ? (historyPage.value - 1) * historyPageSize : 0
+  return nativeHistory.value.slice(start, start + (historyExpanded.value ? historyPageSize : 5))
+})
+const toggleHistory = () => { historyExpanded.value = !historyExpanded.value; historyPage.value = 1 }
+watch(() => nativeHistory.value.length, total => {
+  historyPage.value = Math.min(historyPage.value, Math.max(1, Math.ceil(total / historyPageSize)))
+})
 const workspaceSaveError = ref('')
 const nativeStarting=ref(false),nativeReady=ref(Boolean(window.pywebview?.api))
 const taskBinding=ref(null),recoveryRecord=ref(null),reportChoice=ref('automatic')
@@ -449,6 +463,9 @@ onUnmounted(() => {destroyed=true;searchEpoch++;nativeRequest++;restoreRequest++
 header, .card-heading { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 h1 { margin: 0; font-size: 28px; } h2 { margin: 0 0 16px; font-size: 20px; }
 header p, .context { color: #59696e; line-height: 1.7; }
+.history-heading h2 { margin-bottom: 4px; }
+.history-heading .context { margin: 0 0 12px; font-size: 13px; }
+.history-pagination { margin-top: 16px; justify-content: flex-end; }
 .form-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 16px; }
 .profile-grid { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px; }
 .el-select { width: 100%; } .link { margin-left: 16px; color: #0a756e; }
