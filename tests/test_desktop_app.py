@@ -10,8 +10,22 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from desktop_app import configure_environment, create_desktop_server, desktop_urls, migrate_workspace, shutdown_desktop_runtime
+from desktop_app import configure_environment, create_desktop_server, desktop_urls, migrate_workspace, shutdown_desktop_runtime, _paged_history_ready
 from services.desktop_geo_jobs import DesktopGeoJobs
+
+
+class TestPagedHistorySmoke(unittest.TestCase):
+    def test_paged_history_preserves_total_without_rendering_every_record(self):
+        self.assertTrue(_paged_history_ready({'history_rows': 5, 'history_total': 62}, 62))
+        self.assertTrue(_paged_history_ready({'history_rows': 20, 'history_total': 62}, 62))
+        self.assertTrue(_paged_history_ready({'history_rows': 0, 'history_total': 0}, 0))
+        self.assertTrue(_paged_history_ready({'history_rows': 3, 'history_total': 3}, 3))
+
+    def test_missing_records_and_missing_loaded_total_still_fail(self):
+        for observed in ({'history_rows': 5, 'history_total': 61}, {'history_rows': 4, 'history_total': 62},
+                         {'history_rows': 63, 'history_total': 62}, {'history_rows': 5},
+                         {'history_rows': True, 'history_total': 62}):
+            self.assertFalse(_paged_history_ready(observed, 62))
 
 
 class TestDesktopShutdown(unittest.TestCase):

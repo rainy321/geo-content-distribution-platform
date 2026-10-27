@@ -310,6 +310,12 @@ def shutdown_desktop_runtime(jobs, server, thread) -> None:
         thread.join(timeout=3)
 
 
+def _paged_history_ready(observed, expected):
+    rows = observed.get('history_rows')
+    return (type(rows) is int and type(observed.get('history_total')) is int
+            and observed['history_total'] == expected and min(expected, 5) <= rows <= expected)
+
+
 def run_smoke_check(window, data: Path, url: str) -> None:
     """Exercise the actual embedded window; no provider requests or fixtures."""
     status = {"passed": False, "embedded_window": True, "url": url, "mock_api": False}
@@ -360,13 +366,14 @@ def run_smoke_check(window, data: Path, url: str) -> None:
                     rates: [...document.querySelectorAll('.cohorts strong')].map(e => e.textContent),
                     native_bridge: typeof window.pywebview?.api?.start_run === 'function'
                     ,history_rows: document.querySelectorAll('[data-testid="desktop-history"] .el-table__row').length
+                    ,history_total: (() => { const count = document.querySelector('[data-testid="desktop-history"]')?.getAttribute('data-history-count'); return count !== null && count !== undefined ? Number(count) : null })()
                     ,draft_company: document.querySelector('input[data-testid="company-input"], [data-testid="company-input"] input')?.value
                     ,plan_heading: [...document.querySelectorAll('h2')].find(e => e.textContent.includes('测试计划'))?.textContent
                 })""")
                 observed = json.loads(observed) if isinstance(observed, str) else observed
                 restored_company = "company" not in workspace or observed.get("draft_company") == workspace["company"]
                 restored_plan = not workspace.get("plan") or observed.get("plan_heading") == workspace["plan"]["profile"]["name"] + " · 测试计划"
-                if observed and observed.get("heading") == "AI 搜索测试" and (not require_report or observed.get("report")) and observed.get("native_bridge") and observed.get("history_rows", 0) >= expected_history and restored_company and restored_plan:
+                if observed and observed.get("heading") == "AI 搜索测试" and (not require_report or observed.get("report")) and observed.get("native_bridge") and _paged_history_ready(observed, expected_history) and restored_company and restored_plan:
                     status.update(**observed)
                     status["workspace_restored"] = True
                     status["legacy_report_verified"] = bool(observed.get("report"))

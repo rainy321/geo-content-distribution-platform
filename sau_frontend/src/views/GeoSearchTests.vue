@@ -26,7 +26,7 @@
       <p v-if="!project && report" class="context">当前出题客户：{{ report.profile.name }}。也可在下方选择其他品牌项目。</p>
     </el-card>
 
-    <el-card v-if="isDesktop" shadow="never" data-testid="desktop-history">
+    <el-card v-if="isDesktop" shadow="never" data-testid="desktop-history" :data-history-count="nativeHistory.length">
       <div class="card-heading history-heading">
         <div><h2>任务记录</h2><p class="context">{{ historyExpanded ? '全部记录' : '最近 5 条' }} · {{ nativeHistory.length }} 条</p></div>
         <el-button v-if="nativeHistory.length > 5" text :aria-expanded="historyExpanded" @click="toggleHistory">{{ historyExpanded ? '收起记录' : '查看更多记录' }}</el-button>
