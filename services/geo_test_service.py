@@ -349,18 +349,29 @@ def _urls_complete(items) -> bool:
 
 
 def _uses_private_account_context(response: str, client_mode: str | None) -> bool:
-    """Exclude explicit work-account retrieval claims, not product descriptions.
+    """Exclude explicit account/history retrieval claims, not capabilities.
 
     This checks the answer's claim, not whether private retrieval truly occurred.
     A public-exposure measurement cannot use an answer that says it did.
     """
-    if client_mode != 'work' or not isinstance(response, str):
+    if not isinstance(response, str):
         return False
+    # A first-person answer explicitly citing this user's prior records is
+    # contaminated even when the UI mode is consumer or was not captured.
+    # Generic references to an organisation's internal records remain scoped
+    # to work mode below; a product may publicly describe that capability.
+    personal = (r'(?:你们|你|您)(?:的)?(?:(?:之前|此前|历史|过往|过去|先前)(?:的)?)?'
+                r'(?:(?:内部(?:飞书)?|飞书内部)?(?:工作记录|聊天记录|会话记录|对话记录|会议纪要|周报)'
+                r'|(?:内部(?:飞书)?|飞书内部)(?:官方)?(?:知识库|资料|文档|搜索结果))')
+    personal_claims = (
+        r'(?:从|根据|依据|基于|结合了?|参考了?|查阅了?|检索了?|读取了?|查询了?|搜索了?|使用了?|访问了?)' + personal,
+        personal + r'(?:中|里)?(?:已(?:经)?)?(?:显示|表明|记载|提到|出现过?|包含|指出|确认|发现|找到|可作为)',
+    )
     records = r'(?:工作记录|聊天记录|会议纪要|搜索结果|知识库|资料|文档|周报)'
     source = (r'(?:(?:内部(?:飞书)?|飞书内部)(?:官方)?' + records
               + r'|(?:企业|公司|团队|组织|账户|账号)(?:的)?内部(?:飞书)?(?:官方)?' + records
               + r'|(?:你|你们|贵司)(?:的)?飞书' + records + r')')
-    claims = (
+    work_claims = (
         r'(?:根据|依据|基于|结合|参考了|查阅了|检索了|检索到|读取了|查询了|搜索了|使用了|访问了)'
         r'(?:当前账号的|你提供的|你们的|你的|本企业的)?' + source,
         source + r'(?:中)?(?:已(?:经)?)?(?:显示|表明|记载|提到|出现过?|包含|指出|确认|发现|找到|可作为)',
@@ -372,14 +383,49 @@ def _uses_private_account_context(response: str, client_mode: str | None) -> boo
         source + r'(?:中|里)?(?:已(?:经)?)?(?:检索[到出]了|搜索[到出]了|查询[到出]了|查到了)',
         source + r'(?:中|里)?已(?:经)?检索[到出](?:了)?',
     )
+    claims = personal_claims + (work_claims if client_mode == 'work' else ())
     for clause in re.split(r'[。！？!?；;，,\n]', response):
+        capability_spans = []
         for pattern in claims:
             for match in re.finditer(pattern, clause):
+                # The generic work patterns can match the same personal-source
+                # phrase. Do not reclassify that exact feature description;
+                # another retrieval claim in the clause is still inspected.
+                if pattern in work_claims and any(start <= match.start() and match.end() <= end
+                                                 for start, end in capability_spans):
+                    continue
                 # Denials, hypothetical examples and proposed next steps are
                 # not evidence that the current answer used account records.
                 prefix = clause[:match.start()]
+                suffix = clause[match.end():]
+                if pattern in personal_claims:
+                    # "公开信息不足，但我已根据你的记录" is an affirmative
+                    # claim; unrelated 不 characters must not deny retrieval.
+                    active_prefix = re.split(r'但是|不过|然而|而是|但|却', prefix)[-1]
+                    if re.search(r'(?:未|尚未|没有|并未|无法|不能|不会|不曾|并不|不是|没|不)'
+                                 r'(?:(?:曾经|已经|实际|直接|真正|确实|主要|再|主动|明确)(?:地)?)?'
+                                 r'(?:使用|引用|访问|读取|参考|依据|借助)?$', active_prefix):
+                        continue
+                    if re.search(r'(?:产品|软件|工具|平台|系统|功能)[^，,。；;！？!?\n]{0,15}(?:支持|能够|可以|具备|能|可|会|是|为)$', active_prefix):
+                        capability_spans.append(match.span())
+                        continue
+                    if re.search(r'(?:我|我们)(?:会|将会|打算)$', active_prefix):
+                        continue
+                    # A product as grammatical subject can describe a feature
+                    # without a modal word. Completed/current retrieval claims
+                    # ("我已...", "该工具已...", "生成了...") do not qualify.
+                    if (re.fullmatch(r'(?:(?:该|此|某|这款|这项|上述|样例|示例))?(?:产品|软件|工具|平台|系统|功能)(?:的(?:功能|能力|用途))?[:：]?\s*', active_prefix)
+                            and re.match(r'(?:自动)?(?:生成|整理|制作|提取|总结|归纳)(?!了|出|到)', suffix)):
+                        capability_spans.append(match.span())
+                        continue
+                    if re.match(r'(?:中|里|内)?(?:(?:未|尚未|没有|并未|无法|不能)(?:使用|引用|访问|得到|获取|找到|查到|检索|搜索|查询|读取|发现|看到|确认)'
+                                r'|(?:检索|查询|搜索|查|找|看)不到)', suffix):
+                        continue
+                    if re.search(r'(?:如果|假如|假设|若|建议|请|需要|计划|准备|将|后续|可能|可以|是否|能否|可否|支持|用于|例如|比如|示例)[^，,。；;！？!?\n]{0,30}$', active_prefix):
+                        continue
+                    return True
                 if (re.search(r'(?:产品|软件|工具|平台|系统|功能)具备$', prefix)
-                        and re.match(r'检索的能力', clause[match.end():])):
+                        and re.match(r'检索的能力', suffix)):
                     continue
                 if re.search(r'(?:未|尚未|没有|并未|无法|不能|不会|不曾|不|如果|假如|假设|若|建议|请|需要|计划|准备|将|后续|可能|可以|是否|能否|可否|支持|用于|例如|比如|示例)[^，,。；;！？!?\n]{0,30}$', prefix):
                     continue
@@ -442,7 +488,7 @@ def assess_answer(profile: Mapping, result: dict, question: str) -> dict:
             "official_source_present": (source_hit or (False if source_complete else None)) if completed and has_scopes else None,
             "official_citation_present": (citation_hit or (False if citation_complete else None)) if completed and has_scopes else None,
             "recommended": None, "fact_accuracy": None,
-            "evaluation_note": ('回答声称使用工作账户的内部资料，不能作为公开 GEO 曝光；已排除有效题分母，各曝光指标未知。'
+            "evaluation_note": ('回答声称使用账户内部资料或个人历史记录，不能作为公开 GEO 曝光；已排除有效题分母，各曝光指标未知。'
                                 if answer_error == 'private_account_context' else
                                 "提及可能是否定或资料不足；推荐与事实正确性尚未评判")}
 

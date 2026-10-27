@@ -292,7 +292,7 @@ const BaselineContext=defineComponent({setup:()=>()=>{
   return h('aside',{class:'baseline-context',role:'note','aria-label':'采集依据与来源复查时间','data-testid':'journey-baseline-context'},[
     h('p',`${origin} · ${journeyDate(baseline.updated_at)} · ${counts}。接入发布器不会产生新的搜索引用。`),
     h('p',`测试对象：${entity.label} · ${baseline.profile?.name||'名称未知'}${entity.legacy?'（旧报告，混合统计口径）':''}`),
-    ...(baseline.cases?.some(item=>item.assessment?.answer_error==='private_account_context')?[h('p','含账号内部资料的回答已排除公开搜索统计，原回答保留。请用普通对话另建基线。')]:[]),
+    ...(baseline.cases?.some(item=>item.assessment?.answer_error==='private_account_context')?[h('p','回答声称使用账号资料或历史对话记录，已排除公开统计；原文保留，请用空白新对话另测。')]:[]),
     h('details',[h('summary','测试网址与统计口径'),h('p',entity.note),...entity.urls.map(url=>h('p',{key:url},safeLink(url)?h('a',{href:safeLink(url),target:'_blank',rel:'noopener noreferrer'},url):url))]),
     ...summary.inspections.map(item=>h('p',{key:item.caseId},`来源只读复查 ${item.caseId} · ${journeyDate(item.inspectedAt)}${item.originalAt?`（原回答 ${journeyDate(item.originalAt)}）`:''}；${item.partial?'来源仍有缺项，':''}不是新回答或同题复测。`))])
 }})

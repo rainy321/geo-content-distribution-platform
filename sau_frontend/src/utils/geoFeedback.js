@@ -11,7 +11,7 @@ const reasonText = reason => {
   if(reason==='human_verification_required')return '豆包需要正常安全验证'
   if(reason==='client_mode_mismatch')return '豆包界面与原测试界面不一致'
   if(reason==='manual_verification_window_closed'||reason==='browser_error:TargetClosedError')return '豆包窗口已关闭或连接中断'
-  if(reason==='private_account_context')return '回答使用账号内部资料，已排除公开统计'
+  if(reason==='private_account_context')return '回答声称使用账号资料或历史对话记录，已排除公开统计；原文保留，请用空白新对话另测'
   if(reason==='background_task_timeout'||reason==='background_task_not_final')return '尚未取得后台任务的完整回答'
   if(reason==='service_capacity_unavailable')return '豆包当前服务繁忙'
   if(reason==='website_temporarily_unavailable')return '豆包页面暂时不可用，请稍后再检查'

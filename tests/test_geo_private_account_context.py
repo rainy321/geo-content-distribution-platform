@@ -84,6 +84,141 @@ class PrivateAccountContextTests(unittest.TestCase):
             result = self.assess('内部资料已显示样例产品正在开发。', mode)
             self.assertTrue(result['answer_evaluable'])
 
+    def test_personal_history_source_claims_are_excluded_in_every_mode(self):
+        claims = (
+            '补充：从你之前内部工作记录（非公开企业宣传材料），内部业务面向样例客户，但这不属于对外公开可核验的信息。',
+            '根据你此前的聊天记录，合成团队在进行样例产品测试。',
+            '依据你历史的内部工作记录，合成团队有相关内部计划。',
+            '我读取了你的历史聊天记录，补充合成业务信息。',
+            '从你过往的内部工作记录中可以看出，样例项目仍在准备中。',
+            '你先前的内部工作记录中已显示样例项目的信息。',
+            '结合你们之前的内部资料，下面整理一份样例介绍。',
+        )
+        for mode in ('work', 'consumer', None):
+            for claim in claims:
+                with self.subTest(mode=mode, claim=claim):
+                    result = self.assess(claim, mode)
+                    self.assertFalse(result['answer_evaluable'])
+                    self.assertEqual(result['answer_error'], 'private_account_context')
+                    for field in ('brand_mentioned', 'official_source_present', 'official_citation_present'):
+                        self.assertIsNone(result[field])
+                    self.assertEqual(result['matched_terms'], [])
+                    self.assertEqual(result['mention_evidence'], [])
+
+    def test_personal_history_denials_hypotheses_and_capabilities_are_not_current_use(self):
+        public = (
+            '我没有使用你之前的内部工作记录，以下仅核对公开官网。',
+            '我并未根据你此前的聊天记录判断，仅使用公开来源。',
+            '如果从你之前内部工作记录作出判断，还需要额外授权。',
+            '假设根据你历史的内部工作记录进行核验，需要先确认权限。',
+            '请从你此前的聊天记录中核对，本文只说明操作步骤。',
+            '建议参考你之前的内部工作记录，再由你补充事实。',
+            '我会根据你此前的聊天记录协助整理，当前尚未访问。',
+            '我从你之前的内部工作记录中未检索到相关内容，以下仅依公开信息。',
+            '从你之前的内部工作记录中无法确认，本文只引用公开官网。',
+            '我从你之前的聊天记录中检索不到相关内容。',
+            '该产品能够从你之前的内部工作记录中检索信息，这是公开介绍的产品功能。',
+            '该工具会根据你此前的聊天记录生成摘要，本文介绍的是功能。',
+            '产品具备从你此前的内部工作记录中检索的能力。',
+            '根据你此前公开的工作记录，下面只引用公开材料。',
+        )
+        for mode in ('work', 'consumer', None):
+            for response in public:
+                with self.subTest(mode=mode, response=response):
+                    result = self.assess(response, mode)
+                    self.assertTrue(result['answer_evaluable'])
+                    self.assertIsNone(result['answer_error'])
+
+    def test_personal_history_supplement_contaminates_an_otherwise_public_answer(self):
+        response = ('以下信息根据公开官网整理，样例产品提供公开介绍的功能。\n'
+                    '补充：从你之前内部工作记录（非公开企业宣传材料），样例团队另有内部计划。')
+        for mode in ('work', 'consumer', None):
+            with self.subTest(mode=mode):
+                self.assertEqual(self.assess(response, mode)['answer_error'], 'private_account_context')
+
+    def test_unrelated_negation_and_contrast_do_not_hide_personal_history_claims(self):
+        claims = (
+            '公开信息不足但我已根据你此前的聊天记录补充了样例业务信息。',
+            '这不是公开来源而是从你此前的聊天记录提取的样例业务信息。',
+            '公开记录不多然而我已参考你之前的内部工作记录补充样例介绍。',
+            '公开信息不完整，我已根据你此前的聊天记录补充样例内容。',
+        )
+        for mode in ('work', 'consumer', None):
+            for claim in claims:
+                with self.subTest(mode=mode, claim=claim):
+                    self.assertEqual(self.assess(claim, mode)['answer_error'], 'private_account_context')
+
+    def test_adjacent_negation_still_denies_the_personal_retrieval_claim(self):
+        public = (
+            '我没有根据你此前的聊天记录补充内容，只引用公开官网。',
+            '我并未真正参考你之前的内部工作记录，以下只有公开来源。',
+            '我不能直接从你此前的聊天记录获取材料，本文只使用官网。',
+            '这不是从你此前的聊天记录提取的信息，而是公开官网内容。',
+            '公开信息不足但我没有根据你此前的聊天记录作出判断。',
+            '这不是公开来源而是示例，但我未使用你之前的内部工作记录。',
+        )
+        for mode in ('work', 'consumer', None):
+            for response in public:
+                with self.subTest(mode=mode, response=response):
+                    self.assertTrue(self.assess(response, mode)['answer_evaluable'])
+
+    def test_product_summary_feature_without_modal_is_not_current_personal_retrieval(self):
+        descriptions = (
+            '该产品根据你此前的聊天记录生成摘要，本文介绍公开产品功能。',
+            '该工具根据你此前的聊天记录生成摘要，本文未读取个人资料。',
+            '这款软件根据你之前的内部工作记录整理摘要，这是公开功能说明。',
+        )
+        actual_claims = (
+            '我已通过该工具根据你此前的聊天记录生成摘要。',
+            '该工具已根据你此前的聊天记录生成摘要。',
+            '该产品根据你此前的聊天记录生成了样例摘要。',
+        )
+        for mode in ('work', 'consumer', None):
+            for response in descriptions:
+                with self.subTest(mode=mode, description=response):
+                    self.assertTrue(self.assess(response, mode)['answer_evaluable'])
+            for claim in actual_claims:
+                with self.subTest(mode=mode, current_claim=claim):
+                    self.assertEqual(self.assess(claim, mode)['answer_error'], 'private_account_context')
+
+    def test_personal_capability_match_is_not_reclassified_by_work_generic_records(self):
+        descriptions = (
+            '该产品根据你的内部工作记录生成摘要，本文介绍公开产品功能。',
+            '该工具会根据你的内部工作记录生成摘要，本文介绍公开产品功能。',
+        )
+        for mode in ('work', 'consumer', None):
+            for response in descriptions:
+                with self.subTest(mode=mode, response=response):
+                    self.assertTrue(self.assess(response, mode)['answer_evaluable'])
+
+    def test_capability_match_suppression_does_not_hide_later_actual_claim(self):
+        response = ('该产品根据你的内部工作记录生成摘要'
+                    '但我已根据你的内部工作记录补充了样例说明。')
+        for mode in ('work', 'consumer', None):
+            with self.subTest(mode=mode):
+                self.assertEqual(self.assess(response, mode)['answer_error'], 'private_account_context')
+
+    def test_legacy_personal_history_claim_is_projected_for_all_modes_without_mutation(self):
+        baseline, _ = self.report()
+        for mode in ('work', 'consumer', None):
+            value = copy.deepcopy(baseline)
+            value['execution']['client_mode'] = mode
+            first = value['cases'][0]
+            first.update(status='success', client_mode=mode,
+                response='补充：从你之前内部工作记录（非公开企业宣传材料），样例计划仅是内部记录。')
+            first['assessment'].update(answer_evaluable=True, answer_error=None, brand_mentioned=True)
+            before = copy.deepcopy(value)
+            projected = project_report_evaluation(value)
+            with self.subTest(mode=mode):
+                self.assertEqual(value, before)
+                self.assertEqual(projected['cases'][0]['status'], 'private_account_context')
+                self.assertFalse(projected['cases'][0]['assessment']['answer_evaluable'])
+                self.assertIsNone(projected['cases'][0]['assessment']['brand_mentioned'])
+                self.assertEqual(projected['cases'][0]['response'], first['response'])
+                self.assertFalse(projected['evaluation_projection']['new_collection_performed'])
+                self.assertEqual(projected['run_id'], value['run_id'])
+                self.assertEqual(projected['plan_sha256'], value['plan_sha256'])
+
     def report(self):
         current = plan()
         state = {'run_id': 'synthetic-private-context', 'status': 'completed',

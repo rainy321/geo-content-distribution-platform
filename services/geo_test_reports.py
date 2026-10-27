@@ -161,7 +161,7 @@ def project_report_evaluation(report: dict) -> dict:
                     assessment[field]=None
             if error:
                 assessment.update(answer_error=error, matched_terms=[], mention_evidence=[],
-                                  evaluation_note=('回答声称使用工作账户的内部资料，不能作为公开 GEO 曝光；只读排除有效题分母，不作为零曝光。'
+                                  evaluation_note=('回答声称使用账户资料或个人历史记录，不能作为公开 GEO 曝光；只读排除有效题分母，不作为零曝光。'
                                                    if error == 'private_account_context' else
                                                    '读取时按当前规则排除未完成或不可用回答；不作为零曝光。'))
                 if row.get('status') in ('success', 'completed', 'partial', 'completed_with_gaps'):

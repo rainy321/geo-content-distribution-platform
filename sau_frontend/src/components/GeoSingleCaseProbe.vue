@@ -64,7 +64,7 @@ const sides=item=>isExternal(item)?[{key:'after',label:'用户提供原文',valu
 const valueFor=(side,key,item)=>((isExternal(item)&&side===item.after&&key==='website_presence')||side?.answer_evaluable===true)&&typeof side?.[key]==='boolean'?side[key]:null
 const presence=(side,item)=>valueFor(side,'website_presence',item)===true?'出现':valueFor(side,'website_presence',item)===false?'未出现':'未知'
 const observed=(side,key)=>valueFor(side,key)===true?'已观察到':valueFor(side,key)===false?'未观察到':'未知'
-const unavailable=side=>({service_capacity_unavailable:'本次办公能力不可用，未取得有效答案。',background_task_not_final:'仍是等待调研的提示，尚未取得最终答案。',private_account_context:'回答声称使用账号内部资料，已排除公开搜索统计。',human_verification_required:'验证尚未完成，未取得有效答案。',login_required:'登录尚未完成，未取得有效答案。'}[side?.answer_error]||'尚未确认完整有效回答，不能按“未搜到”统计。')
+const unavailable=side=>({service_capacity_unavailable:'本次办公能力不可用，未取得有效答案。',background_task_not_final:'仍是等待调研的提示，尚未取得最终答案。',private_account_context:'回答声称使用账号资料或历史对话记录，已排除公开统计；原文保留，请用空白新对话另测。',human_verification_required:'验证尚未完成，未取得有效答案。',login_required:'登录尚未完成，未取得有效答案。'}[side?.answer_error]||'尚未确认完整有效回答，不能按“未搜到”统计。')
 const questionScope=item=>{
   if(isExternal(item))return !item.observed_question?'实际提问的网址条件未知':item.website_in_question===true?'实际提问提供了官网地址':item.website_in_question===false&&item.website_test_without_url===true?'实际提问未提供官网地址':'实际提问的网址条件未知'
   return item.website_in_question===true||item.category==='website_guided'?'原题提供了官网地址':item.website_in_question===false&&item.website_test_without_url===true?'原题未提供官网地址':'题目是否带官网地址待确认'
