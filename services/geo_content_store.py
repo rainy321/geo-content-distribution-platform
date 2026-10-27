@@ -301,6 +301,8 @@ def get_cycle(database, identifier):
         result['probes'] = list_probes(connection, identifier)
         from services.source_maintenance_service import overview
         result['source_maintenance'] = overview(connection, result)
+        from services.webmaster_service import overview as webmaster_overview
+        result['webmaster'] = webmaster_overview(connection, result)
     return result
 
 

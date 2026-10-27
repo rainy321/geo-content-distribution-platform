@@ -932,6 +932,21 @@ def geo_source_maintenance(identifier):
     return jsonify(code=200, data=result)
 
 
+@app.route('/api/geo-content/cycles/<identifier>/webmaster', methods=['GET', 'POST'])
+def geo_webmaster(identifier):
+    from services import webmaster_service as webmaster
+    try:
+        if request.method == 'GET':
+            result = webmaster.get_overview(app.config['DATABASE_PATH'], identifier)
+        else:
+            result = webmaster.perform_action(app.config['DATABASE_PATH'], identifier, request.get_json(silent=True))
+    except geo_content_store.ResearchNotFoundError as error:
+        return jsonify(code=404, msg=str(error), data=None), 404
+    except (ValueError, TypeError, KeyError) as error:
+        return jsonify(code=400, msg=str(error), data=None), 400
+    return jsonify(code=200, data=result)
+
+
 @app.route('/api/geo-content/cycles/<identifier>/generate', methods=['POST'])
 def geo_content_generate(identifier):
     data = request.get_json(silent=True)

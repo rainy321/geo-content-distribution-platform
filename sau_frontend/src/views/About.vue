@@ -3,7 +3,7 @@
     <el-card class="about-card">
       <div class="about-header">
         <h1>GEO AI 搜索工作台</h1>
-        <p class="version">2026.10.26.7</p>
+        <p class="version">2026.10.27.1</p>
       </div>
 
       <el-divider />
@@ -23,6 +23,7 @@
           <el-tag effect="plain">豆包搜索采集</el-tag>
           <el-tag effect="plain">来源驱动内容</el-tag>
           <el-tag effect="plain">公司资料维护</el-tag>
+          <el-tag effect="plain">官网接入</el-tag>
           <el-tag effect="plain">平台发布</el-tag>
           <el-tag effect="plain">同题反馈</el-tag>
         </div>
@@ -40,6 +41,7 @@
           <li>符合恢复条件的旧超时任务，可继续未发送问题</li>
           <li>按原题做单题复测，保留前后回答与来源对照</li>
           <li>企查查公司官网与简介准备、人工处理及只读跟进</li>
+          <li>Bing 验证文件指引、公网核对与站长结果分别记录</li>
           <li>发布前核对正文与 AI 声明，未就绪时提示具体步骤</li>
           <li>分别查看发布状态、公开链接与 AI 引用观察</li>
         </ul>
@@ -49,6 +51,7 @@
         <h3>使用范围</h3>
         <p>当前已完成今日头条文章的真实发布走查。各平台的账号权限与页面不同，尚未验证的平台需单独接入和测试；稿件需审阅，发布不代表已被 AI 收录或引用。</p>
         <p>公司资料维护仅适用于公司档案，由用户本人在官方页面最终确认提交；待审核、公开资料更新与搜索采用分别记录。</p>
+        <p>Bing 登录、文件部署与后台操作由网站负责人完成；软件核对公网文件，并单独保存用户确认的验证、站点地图和索引状态。处理中不代表已索引，也不保证豆包采用。</p>
       </div>
     </el-card>
   </div>

@@ -302,6 +302,12 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                 )
             ''')
             cursor.execute('''
+                CREATE TABLE IF NOT EXISTS geo_webmaster_records (
+                    cycle_id TEXT PRIMARY KEY, record TEXT NOT NULL, updated_at TEXT NOT NULL,
+                    FOREIGN KEY(cycle_id) REFERENCES geo_content_cycles(id) ON DELETE CASCADE
+                )
+            ''')
+            cursor.execute('''
                 CREATE TABLE IF NOT EXISTS geo_distribution_targets (
                     id TEXT PRIMARY KEY, project_id INTEGER NOT NULL,
                     config TEXT NOT NULL, revision INTEGER NOT NULL DEFAULT 1,
