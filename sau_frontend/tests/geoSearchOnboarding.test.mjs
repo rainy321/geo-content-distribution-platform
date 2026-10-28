@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import test from 'node:test'
 import * as Vue from 'vue'
+import {renderToString} from '@vue/server-renderer'
 import {createHash} from 'node:crypto'
 import {parse,compileScript,compileTemplate,compileStyle} from '@vue/compiler-sfc'
 import * as search from '../src/utils/geoSearchOnboarding.js'
@@ -51,6 +52,23 @@ test('fixed official links and exact cycle/project/plan bind every overview',()=
   assert.equal(search.searchScopeKey(cycle()),search.searchScopeKey(cycle({revision:3})))
   assert.notEqual(search.searchScopeKey(cycle()),search.searchScopeKey(cycle({profile:{...cycle().profile,website:'https://example.org/another-product'}})))
 })
+
+test('website and domain copy values come only from the validated origin and preserve the actual www choice',()=>{
+  const validated=search.searchOverview(cycle(),view())
+  assert.equal(search.searchSiteCopyText(validated,'website'),'https://example.org/')
+  assert.equal(search.searchSiteCopyText(validated,'domain'),'example.org')
+  const wwwOwner=cycle({profile:{...cycle().profile,website:'https://www.example.org/products/one?source=profile'}})
+  const www=search.searchOverview(wwwOwner,view(wwwOwner,{site_origin:'https://www.example.org',sitemap_url:'https://www.example.org/sitemap.xml'}))
+  assert.equal(search.searchSiteCopyText(www,'website'),'https://www.example.org/')
+  assert.equal(search.searchSiteCopyText(www,'domain'),'www.example.org')
+  for(const site_origin of ['https://example.org/path','https://example.org/','https://example.org?query=one',
+      'https://example.org#fragment','https://user:secret@example.org','https://example.org:444','http://example.org','javascript:alert(1)',null]){
+    assert.equal(search.searchSiteCopyText({...validated,site_origin},'website'),'')
+    assert.equal(search.searchSiteCopyText({...validated,site_origin},'domain'),'')
+  }
+  for(const change of [{supported:false},{identity_sha256:null},{context_sha256:'unknown'}])assert.equal(search.searchSiteCopyText({...validated,...change},'website'),'')
+  assert.equal(search.searchSiteCopyText(validated,'https://arbitrary.example/'),'')
+})
 test('only exact user-statement receipts can confirm a frozen request; newer provider revisions never roll back',async()=>{
   const body=search.searchPayload(view(),'baidu',search.emptySearchProgress(),0),digest=await search.searchRequestSha(body),reply=await response(body)
   assert.equal(search.searchReceipt(reply,view(),body,digest).providers[0].record.revision,1)
@@ -74,6 +92,16 @@ function harness(api={},session=createFeedbackSession({entries:16,bytes:128*1024
     geoSearchOnboardingApi:{get:async id=>({code:200,data:view(id==='cycle-a'?owner:cycle({id,project_id:5}))}),save:async(_id,body)=>response(body),...api}}
   const methods=effect.run(()=>new Function(...Object.keys(deps),body+`;return {${names.join(',')}}`)(...Object.values(deps)))
   return {...methods,props,events,session,stopped,stop(){unmount.forEach(fn=>fn());effect.stop()}}
+}
+
+const renderGuide=async page=>{
+  const template=compileTemplate({source:descriptor.template.content,filename:'GeoOtherSearchEntries.vue',id:'search-copy-render',compilerOptions:{bindingMetadata:script.bindings}})
+  assert.deepEqual(template.errors,[])
+  const code=template.code.replace(/import \{([^}]+)\} from "vue"/g,(_all,imports)=>`const {${imports.split(',').map(item=>{const [name,alias]=item.trim().split(/\s+as\s+/);return alias?`${name}:${alias}`:name}).join(',')}}=Vue;`).replace('export function render','return function render')
+  const render=new Function('Vue',code)(Vue)
+  const app=Vue.createSSRApp({props:['busy'],setup:()=>({...search,...portal,journeyDate,...page}),render},{busy:false})
+  app.component('el-button',{props:['disabled'],setup:(props,{slots})=>()=>Vue.h('button',{disabled:props.disabled},slots.default?.())})
+  return renderToString(app)
 }
 test('mount only reads software progress, rapid save clicks send one request and owner busy releases on unmount',async()=>{
   const done=deferred(),calls=[],page=harness({save:(...args)=>{calls.push(args);return done.promise}})
@@ -188,6 +216,71 @@ test('a receipt matching this editor checkpoint cannot replace text edited after
   assert.equal(page.forms.baidu.note,'后来编辑');assert.equal(page.bases.baidu,0)
   assert.equal(search.searchRecord(page.view.value,'baidu').progress.note,'原请求');page.stop()
 })
+test('site copy uses only the overview origin, remains available during unknown saves, and never writes progress',async()=>{
+  const copied=[],calls={get:0,save:0},page=harness({
+    get:async()=>{calls.get++;return {data:view()}},save:async()=>{calls.save++;throw Error('lost receipt')}
+  },undefined,cycle(),undefined,{navigator:{clipboard:{writeText:async text=>copied.push(text)}}})
+  await flush();page.forms.baidu.note='原有填写';await page.save()
+  assert.equal(page.uncertain.baidu,true)
+  const before=clone({forms:page.forms,uncertain:page.uncertain,bases:page.bases,frozen:page.frozen,view:page.view.value,error:page.error.value,notice:page.notice.value})
+  await page.copySite('website','https://arbitrary.example/');assert.equal(page.siteCopyNotice.value,'官网地址已复制。')
+  await page.copySite('domain');assert.match(page.siteCopyNotice.value,/不含协议或路径/)
+  assert.deepEqual(copied,['https://example.org/','example.org'])
+  assert.deepEqual(clone({forms:page.forms,uncertain:page.uncertain,bases:page.bases,frozen:page.frozen,view:page.view.value,error:page.error.value,notice:page.notice.value}),before)
+  assert.deepEqual(calls,{get:1,save:1})
+  page.provider.value='toutiao';await page.copySite('domain');assert.equal(copied.length,2)
+  await page.copySite('website');assert.equal(copied.at(-1),'https://example.org/');page.stop()
+})
+
+test('site copy refuses unvalidated values and clipboard failures show a fixed short reason',async()=>{
+  let calls=0
+  const detail='Traceback: C:/SyntheticCustomer/private/profile.json'
+  const page=harness({},undefined,cycle(),undefined,{navigator:{clipboard:{writeText:async()=>{calls++;throw new Error(detail)}}}})
+  await flush();await page.copySite('website')
+  assert.equal(page.siteCopyError.value,'复制未完成，请选择上面的官网地址手动复制。')
+  assert.doesNotMatch(page.siteCopyError.value,/SyntheticCustomer|Traceback/)
+  const validated=clone(page.view.value)
+  for(const change of [{supported:false},{site_origin:'https://arbitrary.example/path'},{context_sha256:'unknown'}]){
+    page.view.value={...validated,...change};await page.copySite('website')
+  }
+  page.view.value=validated;await page.copySite('https://arbitrary.example/');assert.equal(calls,1);page.stop()
+})
+
+test('late clipboard success and failure cannot overwrite a new brand, platform or newer copy result',async()=>{
+  const transitions=[
+    page=>{page.provider.value='toutiao'},
+    page=>{page.provider.value='toutiao';page.provider.value='baidu'},
+    page=>{page.props.cycle=cycle({profile:{...cycle().profile,name:'另一品牌'}})},
+    page=>{page.props.cycle=cycle({profile:{...cycle().profile,name:'另一品牌'}});page.props.cycle=cycle()},
+    ()=>{}
+  ]
+  for(const transition of transitions)for(const rejected of [false,true]){
+    const done=deferred();let calls=0
+    const page=harness({},undefined,cycle(),undefined,{navigator:{clipboard:{writeText:async()=>{calls++;if(calls===1)await done.promise}}}})
+    await flush();const old=page.copySite('website');transition(page);await flush()
+    await page.copySite(page.provider.value==='baidu'?'domain':'website')
+    const current=page.siteCopyNotice.value
+    assert.ok(current);assert.equal(page.siteCopyError.value,'')
+    if(rejected)done.reject(new Error('old clipboard failure'));else done.resolve()
+    await old
+    assert.equal(page.siteCopyNotice.value,current);assert.equal(page.siteCopyError.value,'');page.stop()
+  }
+  const done=deferred(),page=harness({},undefined,cycle(),undefined,{navigator:{clipboard:{writeText:()=>done.promise}}})
+  await flush();const old=page.copySite('website');page.stop();done.resolve();await old
+  assert.equal(page.siteCopyNotice.value,'');assert.equal(page.siteCopyError.value,'')
+})
+
+test('guide renders a website copy action for both providers and domain/protocol/www guidance only for Baidu',async()=>{
+  const page=harness();await flush()
+  const baidu=await renderGuide(page)
+  assert.match(baidu,/>复制官网地址<\/button>/);assert.match(baidu,/>复制域名<\/button>/)
+  assert.match(baidu,/协议选 HTTPS/);assert.match(baidu,/www 主站建议.*实际官网主地址核对/)
+  page.provider.value='toutiao';await flush()
+  const toutiao=await renderGuide(page)
+  assert.match(toutiao,/>复制官网地址<\/button>/);assert.doesNotMatch(toutiao,/复制域名|协议选 HTTPS|www 主站建议/)
+  assert.equal(page.props.cycle.profile.website,'https://example.org/product');page.stop()
+})
+
 test('native link fallback is immediate, repeated clicks open once, and opening does not save provider progress',async()=>{
   const done=deferred(),calls=[],writes=[],copied=[]
   const page=harness({save:async(...args)=>writes.push(args)},undefined,cycle(),undefined,{

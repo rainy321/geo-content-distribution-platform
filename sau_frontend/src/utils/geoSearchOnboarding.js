@@ -7,6 +7,14 @@ export const searchProviders=Object.freeze({
   toutiao:{name:'头条搜索站长平台',entry:'https://zhanzhang.toutiao.com/',submit:'https://zhanzhang.toutiao.com/',help:'https://zhanzhang.toutiao.com/page/outer/docs'}
 })
 const hash=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value)
+export function searchSiteCopyText(view,kind){
+  if(view?.supported!==true||!hash(view.context_sha256)||!hash(view.identity_sha256)||typeof view.site_origin!=='string'||!['website','domain'].includes(kind))return ''
+  try{
+    const url=new URL(view.site_origin)
+    if(url.protocol!=='https:'||url.username||url.password||url.port||url.origin!==view.site_origin)return ''
+    return kind==='domain'?url.hostname:url.origin+'/'
+  }catch{return ''}
+}
 const number=value=>Number.isSafeInteger(value)&&value>=0&&value<=1000000
 const clone=value=>JSON.parse(JSON.stringify(value))
 export const emptySearchProgress=()=>({site_added:null,ownership_confirmed:null,sitemap_status:'unknown',note:''})
