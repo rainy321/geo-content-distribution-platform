@@ -363,7 +363,7 @@ def apply_security_headers(response):
         "Permissions-Policy",
         "camera=(), microphone=(), geolocation=()",
     )
-    if request.path.startswith("/api/auth") or request.endpoint in ('geo_probe_business_reviews', 'geo_website_audit'):
+    if request.path.startswith("/api/auth") or request.endpoint in ('geo_probe_business_reviews', 'geo_website_audit', 'geo_search_onboarding'):
         response.headers["Cache-Control"] = "no-store"
     return response
 
@@ -1031,6 +1031,29 @@ def geo_webmaster(identifier):
             result = webmaster.get_overview(app.config['DATABASE_PATH'], identifier)
         else:
             result = webmaster.perform_action(app.config['DATABASE_PATH'], identifier, request.get_json(silent=True))
+    except geo_content_store.ResearchNotFoundError as error:
+        return jsonify(code=404, msg=str(error), data=None), 404
+    except (ValueError, TypeError, KeyError) as error:
+        return jsonify(code=400, msg=str(error), data=None), 400
+    return jsonify(code=200, data=result)
+
+
+@app.route('/api/geo-content/cycles/<identifier>/search-onboarding', methods=['GET', 'POST'])
+def geo_search_onboarding(identifier):
+    from services import geo_search_onboarding as onboarding
+    try:
+        if request.method == 'GET':
+            rejected = _feedback_same_origin()
+            if rejected is not None:
+                return rejected
+            if request.args or request.content_length or request.stream.read(1):
+                return jsonify(code=400, msg='查询不接受覆盖当前任务范围的参数或正文', data=None), 400
+            result = onboarding.get_overview(app.config['DATABASE_PATH'], identifier)
+        else:
+            data, rejected = _external_feedback_json(maximum=16 * 1024)
+            if rejected is not None:
+                return rejected
+            result = onboarding.save_progress(app.config['DATABASE_PATH'], identifier, data)
     except geo_content_store.ResearchNotFoundError as error:
         return jsonify(code=404, msg=str(error), data=None), 404
     except (ValueError, TypeError, KeyError) as error:

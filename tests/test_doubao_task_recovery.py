@@ -7,11 +7,18 @@ from pathlib import Path
 from unittest.mock import patch
 
 from services.desktop_geo_jobs import DesktopGeoJobs
-from services.doubao_task_recovery import recovery_view
+from services.doubao_task_recovery import recovery_view, action_required, recovery_message
 from tests.test_geo_tests import plan
 
 
 class TaskRecoveryTests(unittest.TestCase):
+    def test_unacknowledged_send_requests_review_without_claiming_login_or_no_send(self):
+        self.assertTrue(action_required('submission_receipt_timeout'))
+        message = recovery_message('submission_receipt_timeout', attempted=True, submitted=False)
+        self.assertIn('这不代表问题未发送', message)
+        self.assertIn('不会自动重发', message)
+        self.assertNotIn('登录已失效', message)
+
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)

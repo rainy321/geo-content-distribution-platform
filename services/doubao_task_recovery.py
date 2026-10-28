@@ -130,10 +130,12 @@ def recovery_view(record, root, *, live_window=False):
 def action_required(reason, collection_status=None):
     return (collection_status == 'need_action' or reason in AUTH_REASONS
             or reason in ('browser_error:TargetClosedError', 'user_cancelled_submission_unknown', 'background_task_timeout',
-                          'website_temporarily_unavailable'))
+                          'website_temporarily_unavailable', 'submission_receipt_timeout'))
 
 
 def recovery_message(reason, *, attempted=None, submitted=None, failure_stage=None):
+    if reason == 'submission_receipt_timeout':
+        return '已尝试发送，但尚未取得可核对的提交回执。请先查看豆包原会话；这不代表问题未发送。原始证据已保留，不会自动重发。'
     if attempted is False and submitted is False:
         if reason in ('submission_send_button_not_unique_not_submitted', 'submission_send_button_not_ready_not_submitted'):
             return '豆包发送按钮暂不可用或无法唯一确认，本次问题尚未发送。请核对当前窗口后再手动开始；证据已保留，不会自动重试。'

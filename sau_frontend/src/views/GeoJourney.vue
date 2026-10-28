@@ -57,10 +57,11 @@
         <div class="diagnosis"><p>{{ diagnosisPreview }}</p><details v-if="cycle.analysis?.diagnosis?.length>180" class="hint"><summary>查看完整分析</summary><p>{{ cycle.analysis.diagnosis }}</p></details><span v-if="needsAnalysis" class="hint">当前是规则整理的观察记录，下一步用 AI 制定选题。</span></div>
         <div v-if="cycle.feedback_diagnostics?.planning_feedback?.needs_update" class="feedback-planning-note"><p>后来收到的单题或外部反馈尚未用于当前选题。可以重新策划；既有文章和发布记录会保留。</p><el-button :disabled="busy" data-testid="journey-update-from-feedback" @click="updateResearchFromFeedback">用后续反馈更新选题</el-button></div>
         <el-collapse class="source-summary"><el-collapse-item :title="`来源线索：${sourceCounts.verified} 个网址平台候选 · ${sourceCounts.unknown} 组网址未知`" name="opportunities"><p class="hint">主体摘要只区分来源范围，不代表业务事实已核实；其他公司的来源仍可用于发现平台。</p><article v-for="item in cycle.opportunities || []" :key="item.id" class="source-row"><strong>{{ item.candidate?.name || item.domain || '网址未知' }}</strong><el-tag size="small" effect="plain">{{ surfaceLabels[item.surface] || '待核对' }}</el-tag><p>{{ item.note }}</p><p class="hint" data-testid="journey-source-identity-summary">{{ sourceIdentitySummary(item,cycle.observations?.sources) }}</p><p v-for="lead in item.title_leads || []" :key="lead.candidate.name" class="hint">标题线索：{{ lead.candidate.name }}，尚未核实网址。</p></article><el-button text @click="openDetails">接入或配置目标平台</el-button></el-collapse-item></el-collapse>
-        <details class="journey-secondary-tools"><summary>官网与企业资料维护<span>{{ websiteAuditBusy || sourceMaintenanceBusy || webmasterBusy ? ' · 正在处理' : ' · 按需展开' }}</span></summary>
+        <details class="journey-secondary-tools"><summary>官网与企业资料维护（百度 / 头条接入）<span>{{ websiteAuditBusy || sourceMaintenanceBusy || webmasterBusy ? ' · 正在处理' : ' · 按需展开' }}</span></summary>
         <GeoSourceMaintenance :focus-task-id="sourceTaskFocus" data-geo-section="maintenance" :cycle="cycle" :busy="working || finishingTask || webmasterBusy || websiteAuditBusy || feedbackBusy || nativeBusy && (task.kind!=='source_maintenance' || task.cycle_id!==cycleId)" :native-task-active="nativeBusy && task.kind==='source_maintenance' && task.cycle_id===cycleId" :native-available="nativeAvailable" @busy="sourceMaintenanceBusy=$event" @task="adoptSourceMaintenanceTask"/>
         <GeoWebmaster data-geo-section="webmaster" :cycle="cycle" :busy="working || finishingTask || nativeBusy || sourceMaintenanceBusy || websiteAuditBusy || feedbackBusy" @busy="webmasterBusy=$event"/>
         <GeoWebsiteAudit :cycle="cycle" :busy="working || finishingTask || nativeBusy || sourceMaintenanceBusy || webmasterBusy || feedbackBusy" @busy="websiteAuditBusy=$event"/>
+        <GeoOtherSearchEntries :cycle="cycle" :busy="busy" @busy="setFeedbackBusy"/>
         </details>
         <template v-if="!needsAnalysis">
           <div class="form-pair"><el-form-item label="这次写什么"><el-select :model-value="briefId" :disabled="busy" aria-label="内容选题" @change="selectContent('brief', $event)"><el-option v-for="brief in cycle.analysis.briefs" :key="brief.id" :value="brief.id" :label="brief.topic"/></el-select></el-form-item><el-form-item label="写给哪个平台"><el-select :model-value="platform" :disabled="busy" placeholder="选择渠道或已接入平台" aria-label="目标平台" @change="selectContent('platform', $event)"><el-option v-for="(label,key) in cycle.channels" :key="key" :value="key" :label="channelOptionLabel(key,label)" :disabled="!writingChannelEnabled(cycle,key)"/></el-select></el-form-item></div>
@@ -104,10 +105,11 @@
         <el-button v-if="nativeAvailable" text :disabled="busy" @click="login">登录复测所用的豆包会话</el-button>
         <BaselineContext/>
         <div class="metric-grid feedback-metrics"><article><span>发布器成功回报</span><strong>{{ cycle.publications?.length || 0 }}</strong><small>排除演示任务与无链接任务</small></article><article><span>运营方自报提交</span><strong>{{ cycle.reported_publications?.length || 0 }}</strong><small>尚未独立核验发布成功</small></article><article><span>取得回答的复测</span><strong>{{ feedbackTotals.withAnswers }}</strong><small>共 {{ feedbackTotals.attempts }} 轮尝试，仍需检查比较条件</small></article></div>
-        <details class="journey-secondary-tools"><summary>官网与企业资料维护<span>{{ websiteAuditBusy || sourceMaintenanceBusy || webmasterBusy ? ' · 正在处理' : ' · 按需展开' }}</span></summary>
+        <details class="journey-secondary-tools"><summary>官网与企业资料维护（百度 / 头条接入）<span>{{ websiteAuditBusy || sourceMaintenanceBusy || webmasterBusy ? ' · 正在处理' : ' · 按需展开' }}</span></summary>
         <GeoSourceMaintenance :focus-task-id="sourceTaskFocus" data-geo-section="maintenance" :cycle="cycle" :busy="working || finishingTask || webmasterBusy || websiteAuditBusy || feedbackBusy || nativeBusy && (task.kind!=='source_maintenance' || task.cycle_id!==cycleId)" :native-task-active="nativeBusy && task.kind==='source_maintenance' && task.cycle_id===cycleId" :native-available="nativeAvailable" @busy="sourceMaintenanceBusy=$event" @task="adoptSourceMaintenanceTask"/>
         <GeoWebmaster data-geo-section="webmaster" :cycle="cycle" :busy="working || finishingTask || nativeBusy || sourceMaintenanceBusy || websiteAuditBusy || feedbackBusy" @busy="webmasterBusy=$event"/>
         <GeoWebsiteAudit :cycle="cycle" :busy="working || finishingTask || nativeBusy || sourceMaintenanceBusy || webmasterBusy || feedbackBusy" @busy="websiteAuditBusy=$event"/>
+        <GeoOtherSearchEntries :cycle="cycle" :busy="busy" @busy="setFeedbackBusy"/>
         </details>
         <div data-geo-section="feedback"><GeoSingleCaseProbe :cycle="cycle" :busy="busy" :can-start="singleProbeAvailable" @probe="startSingleCaseProbe" @updated="applyReviewCycle" @busy="setFeedbackBusy"/></div>
         <GeoPublicationReview data-geo-section="publication" v-if="hasPublicationReviewDrafts" :cycle="cycle" :busy="busy" @updated="applyReviewCycle"/>
@@ -154,6 +156,7 @@ import {updateFeedbackBusy} from '@/utils/geoFeedbackBusy'
 import GeoSourceMaintenance from '@/components/GeoSourceMaintenance.vue'
 import GeoWebmaster from '@/components/GeoWebmaster.vue'
 import GeoWebsiteAudit from '@/components/GeoWebsiteAudit.vue'
+import GeoOtherSearchEntries from '@/components/GeoOtherSearchEntries.vue'
 import { publicationReviewArticles } from '@/utils/geoPublicationReview'
 import DoubaoPreparation from '@/components/DoubaoPreparation.vue'
 import DoubaoSessionControls from '@/components/DoubaoSessionControls.vue'

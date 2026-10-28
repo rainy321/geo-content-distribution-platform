@@ -34,6 +34,22 @@ test('the known browser timeout has safe recovery text without admitting unknown
   }
 })
 
+test('missing receipts and historical unacknowledged sends never become unsent or login failures',()=>{
+  for(const reason of ['submission_receipt_timeout','answer_timeout_or_selectors_changed']){
+    const source=failed({status:'failed',recovery:{failure_reason:reason,
+      question_submission_attempted:true,question_submitted:false}})
+    const before=JSON.stringify(source),value=doubaoTaskRecovery(source)
+    assert.equal(value.title,'发送结果尚未确认')
+    assert.equal(value.submission,'unknown');assert.equal(value.requiresConfirmation,true)
+    assert.equal(value.canLogin,false);assert.equal(value.reason,reason)
+    assert.match(value.description,/这不代表问题未发送/)
+    assert.equal(doubaoTaskRecovery(recoveryCheckpoint(source)).submission,'unknown')
+    assert.equal(JSON.stringify(source),before)
+  }
+  assert.equal(doubaoTaskRecovery(failed({recovery:{failure_reason:'answer_timeout_or_selectors_changed',
+    question_submission_attempted:true,question_submitted:true}})).title,'尚未确认豆包回答完成')
+})
+
 test('a mode mismatch stays unsent and offers entry inspection across a separate login',()=>{
   const original=failed({kind:'run',recovery:{failure_reason:'client_mode_mismatch',
     requested_client_mode:'consumer',question_submission_attempted:false,question_submitted:false}})

@@ -81,6 +81,20 @@ class SubmissionCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result['question_submitted'])
         self.assertTrue(path.is_file())
 
+    async def test_missing_receipt_after_one_send_stays_unknown_and_needs_review(self):
+        self.editor.press.side_effect = None
+        result, path = await self.collect()
+        self.assertEqual(self.editor.press.await_count, 1)
+        self.assertTrue(result['question_submission_attempted'])
+        self.assertFalse(result['question_submitted'])
+        self.assertFalse(result['answer_completed'])
+        self.assertEqual(result['failure_reason'], 'submission_receipt_timeout')
+        self.assertEqual(result['collection_status'], 'need_action')
+        self.assertTrue(path.is_file())
+        saved = json.loads(path.read_text(encoding='utf-8'))
+        self.assertTrue(saved['question_submission_attempted'])
+        self.assertFalse(saved['question_submitted'])
+
     async def test_native_checkpoint_failure_prevents_enter_and_never_retries(self):
         jobs = DesktopGeoJobs(self.root)
         self.addCleanup(jobs.shutdown)

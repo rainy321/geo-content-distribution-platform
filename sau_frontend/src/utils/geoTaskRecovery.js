@@ -7,6 +7,7 @@ const reasons = {
   manual_verification_window_closed: ['豆包验证窗口已关闭', '窗口关闭前未取得完整结果。请先核对豆包里的原会话，再决定是否重新开始。', true],
   client_mode_mismatch: ['豆包实际模式与测试要求不同', '先在官方页面检查可用入口。登录成功或换账号不保证切换模式；普通对话未就绪时保留待测，工作模式的结果单独记录。', true],
   answer_timeout_or_selectors_changed: ['尚未确认豆包回答完成', '原始证据已保留。请先核对豆包里的原会话，再决定是否重新开始。', false],
+  submission_receipt_timeout: ['发送结果尚未确认', '已执行发送操作，但没有取得可核对的提交回执。请先查看豆包原会话；这不代表问题未发送，软件不会自动重发。', false],
   background_task_timeout: ['豆包调研尚未返回最终结果', '豆包可能仍在处理原请求。请先查看原会话，避免重复发起同一问题。', false],
   rate_limited: ['豆包暂时限制了请求', '请稍后再试，先保留当前资料与原任务记录。', false],
   service_capacity_unavailable: ['豆包当前服务繁忙', '这次没有取得完整结果。请稍后再试，当前资料仍保留。', false],
@@ -42,7 +43,10 @@ export function doubaoTaskRecovery(task) {
   const attempted = flag('question_submission_attempted')
   const submitted = flag('question_submitted')
   const submission = submitted === true ? 'submitted' : attempted === false && submitted === false ? 'not_submitted' : 'unknown'
-  const [title, description, canLogin] = reasons[reason]
+  // Improve old records' presentation without changing their saved reason or
+  // inventing a no-send claim from a timeout.
+  const receiptUnknown = reason === 'answer_timeout_or_selectors_changed' && attempted === true && submitted !== true
+  const [title, description, canLogin] = reasons[receiptUnknown ? 'submission_receipt_timeout' : reason]
   return {
     taskId: task.id, kind: task.kind, cycleId: identifier(task.cycle_id), reason, title, description, canLogin,
     loginLabel: reason === 'client_mode_mismatch' ? '打开豆包检查入口' : '重新登录豆包',

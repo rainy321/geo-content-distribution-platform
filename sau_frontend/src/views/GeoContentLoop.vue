@@ -19,6 +19,7 @@
     <template v-if="cycle">
       <GeoNextActions :cycle="cycle" :busy="busy" @navigate="navigateDiagnostic"/>
       <GeoWebsiteAudit :cycle="cycle" :busy="working || nativeBusy || feedbackBusy" @busy="websiteAuditBusy=$event"/>
+      <GeoOtherSearchEntries :cycle="cycle" :busy="busy" @busy="setFeedbackBusy"/>
       <el-card shadow="never">
         <div class="row"><h2>2 · {{ cycle.profile.name }} · 内容选题</h2><el-tag>{{ cycle.analysis.method === 'rule_observations_not_ai' ? '采集待办，尚未 AI 策划' : '已完成 AI 策划' }}</el-tag></div>
         <p>{{ cycle.analysis.diagnosis }}</p>
@@ -103,6 +104,7 @@ import { doubaoTaskRecovery, scopedRecoveryCheckpoint } from '@/utils/geoTaskRec
 import GeoPublicationReview from '@/components/GeoPublicationReview.vue'
 import GeoExternalFeedback from '@/components/GeoExternalFeedback.vue'
 import GeoWebsiteAudit from '@/components/GeoWebsiteAudit.vue'
+import GeoOtherSearchEntries from '@/components/GeoOtherSearchEntries.vue'
 import GeoNextActions from '@/components/GeoNextActions.vue'
 import {diagnosticSection,focusDiagnosticSection} from '@/utils/geoNextActions'
 import {updateFeedbackBusy} from '@/utils/geoFeedbackBusy'

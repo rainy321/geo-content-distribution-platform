@@ -1238,6 +1238,10 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                 elif not result["failure_reason"]:
                     if result.get('deferred_answer', {}).get('pending'):
                         result.update(collection_status='need_action', failure_reason='background_task_timeout')
+                    elif result['question_submission_attempted'] is True and result['question_submitted'] is not True:
+                        # A click/Enter is only an attempt. A missing receipt
+                        # neither proves rejection nor authorizes another send.
+                        result.update(collection_status='need_action', failure_reason='submission_receipt_timeout')
                     else:
                         result["failure_reason"] = "answer_timeout_or_selectors_changed"
             except Exception as exc:
