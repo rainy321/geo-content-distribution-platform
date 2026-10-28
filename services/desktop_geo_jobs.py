@@ -118,6 +118,10 @@ class DesktopGeoJobs:
             return [{key: value for key, value in item.items() if key != "result"}
                     for item in self.store.records()]
 
+    def open_search_portal(self, provider, purpose):
+        from services.desktop_external_links import open_search_portal
+        return open_search_portal(provider, purpose)
+
     def save_workspace_state(self, state):
         with self.lock:
             self.store.save_workspace(state)

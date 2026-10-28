@@ -8,6 +8,7 @@ import * as search from '../src/utils/geoSearchOnboarding.js'
 import {createFeedbackSession} from '../src/utils/geoFeedbackSession.js'
 import {externalWriteUncertain} from '../src/utils/geoExternalFeedback.js'
 import {journeyDate} from '../src/utils/geoJourney.js'
+import * as portal from '../src/utils/geoSearchPortal.js'
 
 const clone=value=>JSON.parse(JSON.stringify(value))
 const cycle=(changes={})=>({id:'cycle-a',project_id:4,revision:2,test_plan:{plan_sha256:'a'.repeat(64)},
@@ -65,9 +66,9 @@ const {descriptor,errors}=parse(source),script=compileScript(descriptor,{id:'oth
 assert.deepEqual(errors,[])
 const names=script.scriptSetupAst.filter(row=>row.type==='VariableDeclaration').flatMap(row=>row.declarations).flatMap(row=>row.id.type==='Identifier'?[row.id.name]:[])
 const body=descriptor.scriptSetup.content.replace(/^import .*$/gm,'')
-function harness(api={},session=createFeedbackSession({entries:16,bytes:128*1024}),owner=cycle(),stopped=search.createSearchStoppedReceipts()){
+function harness(api={},session=createFeedbackSession({entries:16,bytes:128*1024}),owner=cycle(),stopped=search.createSearchStoppedReceipts(),browser={}){
   const props=Vue.reactive({cycle:owner,busy:false}),events=[],unmount=[],effect=Vue.effectScope()
-  const deps={computed:Vue.computed,reactive:Vue.reactive,ref:Vue.ref,watch:Vue.watch,...search,searchOnboardingSession:session,searchStoppedReceipts:stopped,
+  const deps={computed:Vue.computed,reactive:Vue.reactive,ref:Vue.ref,watch:Vue.watch,...search,...portal,...browser,searchOnboardingSession:session,searchStoppedReceipts:stopped,
     onUnmounted:fn=>unmount.push(fn),defineProps:()=>props,defineEmits:()=>((...args)=>events.push(args)),externalWriteUncertain,
     exportFeedbackDraft:()=>{},journeyDate,ElMessageBox:{confirm:async()=>{}},
     geoSearchOnboardingApi:{get:async id=>({code:200,data:view(id==='cycle-a'?owner:cycle({id,project_id:5}))}),save:async(_id,body)=>response(body),...api}}
@@ -187,6 +188,71 @@ test('a receipt matching this editor checkpoint cannot replace text edited after
   assert.equal(page.forms.baidu.note,'后来编辑');assert.equal(page.bases.baidu,0)
   assert.equal(search.searchRecord(page.view.value,'baidu').progress.note,'原请求');page.stop()
 })
+test('native link fallback is immediate, repeated clicks open once, and opening does not save provider progress',async()=>{
+  const done=deferred(),calls=[],writes=[],copied=[]
+  const page=harness({save:async(...args)=>writes.push(args)},undefined,cycle(),undefined,{
+    openSearchPortal:(event,id,purpose)=>portal.openSearchPortal(event,id,purpose,{pywebview:{api:{open_search_portal:async(...args)=>{calls.push(args);return done.promise}}}}),
+    navigator:{clipboard:{writeText:async url=>copied.push(url)}}
+  })
+  await flush();page.forms.baidu.note='保留原填写'
+  let prevented=0
+  const pending=page.openPortal({preventDefault(){prevented++}},'entry')
+  assert.equal(prevented,1);assert.equal(page.portalUrl.value,search.searchProviders.baidu.entry)
+  await page.openPortal({preventDefault(){prevented++}},'entry');await flush()
+  assert.equal(prevented,2);assert.deepEqual(calls,[['baidu','entry']])
+  await page.copyPortal();assert.deepEqual(copied,[search.searchProviders.baidu.entry])
+  done.resolve({launch_requested:true,provider:'baidu',purpose:'entry',url:search.searchProviders.baidu.entry});await pending
+  assert.match(page.portalMessage.value,/已请求系统默认浏览器/);assert.match(page.portalMessage.value,/登录和页面状态需自行核对/)
+  assert.equal(page.portalOpening.value,false);assert.deepEqual(writes,[])
+  assert.equal(page.forms.baidu.note,'保留原填写');assert.equal(search.searchRecord(page.view.value,'baidu'),null);page.stop()
+})
+
+test('failed native launch and denied clipboard retain a readable full official URL',async()=>{
+  const page=harness({},undefined,cycle(),undefined,{
+    openSearchPortal:(event,id,purpose)=>portal.openSearchPortal(event,id,purpose,{pywebview:{api:{open_search_portal:async()=>({launch_requested:false,reason:'browser_request_rejected'})}}}),
+    navigator:{clipboard:{writeText:async()=>{throw Error('denied')}}}
+  })
+  await flush();await page.openPortal({preventDefault(){}},'help')
+  assert.match(page.portalError.value,/复制地址/);assert.equal(page.portalUrl.value,search.searchProviders.baidu.help)
+  await page.copyPortal();assert.match(page.portalError.value,/选择并复制上面的完整地址/)
+  assert.equal(page.portalUrl.value,search.searchProviders.baidu.help);page.stop()
+})
+
+test('switching providers discards late launch receipts without changing the new provider',async()=>{
+  const done=deferred(),page=harness({},undefined,cycle(),undefined,{
+    openSearchPortal:event=>{event.preventDefault();return done.promise}
+  })
+  await flush();const pending=page.openPortal({preventDefault(){}},'entry')
+  page.provider.value='toutiao';await flush()
+  assert.equal(page.portalUrl.value,'');assert.equal(page.portalOpening.value,false)
+  done.reject(new Error('old Baidu failure'));await pending
+  assert.equal(page.provider.value,'toutiao');assert.equal(page.portalError.value,'');assert.equal(page.portalMessage.value,'');page.stop()
+})
+
+test('component never renders raw bridge details even if an unexpected rejection contains a local traceback',async()=>{
+  const detail='Traceback: C:/SyntheticCustomer/private/profile.json\nRuntimeError: sensitive detail'
+  const page=harness({},undefined,cycle(),undefined,{openSearchPortal:event=>{event.preventDefault();return Promise.reject(new Error(detail))}})
+  await flush();await page.openPortal({preventDefault(){}},'entry')
+  assert.equal(page.portalError.value,portal.searchPortalErrorMessage(null))
+  assert.doesNotMatch(page.portalError.value,/SyntheticCustomer|Traceback|RuntimeError|sensitive/)
+  assert.equal(page.portalUrl.value,search.searchProviders.baidu.entry);page.stop()
+})
+
+test('component keeps timeout unknown with copy fallback and never automatically opens again after a late receipt',async context=>{
+  context.mock.timers.enable({apis:['setTimeout']})
+  const done=deferred(),calls=[],page=harness({},undefined,cycle(),undefined,{
+    openSearchPortal:(event,id,purpose)=>portal.openSearchPortal(event,id,purpose,{pywebview:{api:{open_search_portal:async(...args)=>{calls.push(args);return done.promise}}}})
+  })
+  await flush();const pending=page.openPortal({preventDefault(){}},'entry');await flush()
+  context.mock.timers.tick(8000);await pending
+  const unknown=page.portalError.value
+  assert.match(unknown,/打开状态未知/);assert.doesNotMatch(unknown,/失败|已打开/)
+  assert.equal(page.portalOpening.value,false);assert.equal(page.portalUrl.value,search.searchProviders.baidu.entry)
+  done.resolve({launch_requested:true,provider:'baidu',purpose:'entry',url:search.searchProviders.baidu.entry});await flush()
+  context.mock.timers.tick(60000);await flush()
+  assert.deepEqual(calls,[['baidu','entry']]);assert.equal(page.portalError.value,unknown);assert.equal(page.portalMessage.value,'');page.stop()
+})
+
 test('guide template and both page integrations compile with fixed official links and no file/token submission',()=>{
   assert.deepEqual(compileTemplate({source:descriptor.template.content,filename:'GeoOtherSearchEntries.vue',id:'other-search',compilerOptions:{bindingMetadata:script.bindings}}).errors,[])
   assert.deepEqual(compileStyle({source:descriptor.styles[0].content,id:'other-search'}).errors,[])

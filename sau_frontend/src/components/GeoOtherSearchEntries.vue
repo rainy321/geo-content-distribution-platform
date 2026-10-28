@@ -9,9 +9,10 @@
       <div class="search-provider-tabs" role="group" aria-label="搜索平台"><button v-for="(item,id) in searchProviders" :key="id" type="button" :aria-pressed="provider===id" :disabled="loading || saving || busy" @click="provider=id">{{ item.name }}</button></div>
       <p class="search-hint">官网：{{ view.site_origin }} · {{ searchRecord(view,provider) ? '已有用户登记进度' : '进度未知，尚未登记' }}</p>
       <details class="search-guide" open><summary>添加、验证与提交官网</summary>
-        <ol><li>使用自己的日常浏览器登录<a :href="searchProviders[provider].entry" target="_blank" rel="noopener noreferrer">{{ searchProviders[provider].name }}</a>，添加 {{ view.site_origin }}/。</li>
-          <li>按平台说明完成网站所有权验证，验证材料交网站维护者处理。<a :href="searchProviders[provider].help" target="_blank" rel="noopener noreferrer">查看官方帮助</a></li>
-          <li>验证通过后，前往<a :href="searchProviders[provider].submit" target="_blank" rel="noopener noreferrer">官方提交入口</a>提交站点地图或实际页面，再登记平台结果。</li></ol>
+        <ol><li>使用自己的日常浏览器登录<a :href="searchProviders[provider].entry" target="_blank" rel="noopener noreferrer" @click="openPortal($event,'entry')">{{ searchProviders[provider].name }}</a>，添加 {{ view.site_origin }}/。<template v-if="provider==='baidu'">登录后进入“用户中心 → 站点管理 → 添加网站”。首次添加如要求完善账户信息，请在百度页面填写，无需将联系方式填入本软件。</template></li>
+          <li>按平台说明准备网站所有权验证材料，交网站维护者部署，再返回平台执行验证。看到验证成功后，才在下方登记“验证通过”。<a :href="searchProviders[provider].help" target="_blank" rel="noopener noreferrer" @click="openPortal($event,'help')">查看官方帮助</a></li>
+          <li>验证通过后，前往<a :href="searchProviders[provider].submit" target="_blank" rel="noopener noreferrer" @click="openPortal($event,'submit')">官方提交入口</a>提交站点地图或实际页面，再登记平台结果。</li></ol>
+        <div v-if="portalUrl" class="search-value" data-testid="search-portal-fallback"><p v-if="portalError" class="search-warning" role="alert">{{ portalError }}</p><p v-else class="search-hint" role="status">{{ portalMessage }}</p><p>{{ portalUrl }} <el-button text @click="copyPortal">复制入口地址</el-button></p></div>
         <p class="search-value">{{ view.sitemap_url }} <el-button text :disabled="locked" @click="copySitemap">复制站点地图地址</el-button></p>
         <p class="search-hint">{{ view.providers.find(item=>item.id===provider)?.availability_note }}</p>
       </details>
@@ -19,6 +20,7 @@
         <label :for="`${owner}-${provider}-added`">该平台是否已添加官网</label><select :id="`${owner}-${provider}-added`" v-model="forms[provider].site_added" :disabled="locked"><option :value="null">未知 / 尚未核对</option><option :value="true">我确认已添加</option><option :value="false">我确认尚未添加</option></select>
         <label :for="`${owner}-${provider}-verified`">平台是否显示网站验证通过</label><select :id="`${owner}-${provider}-verified`" v-model="forms[provider].ownership_confirmed" :disabled="locked"><option :value="null">未知 / 尚未核对</option><option :value="true">我确认平台显示验证通过</option><option :value="false">尚未通过或已失效</option></select>
         <label :for="`${owner}-${provider}-sitemap`">站点地图提交状态</label><select :id="`${owner}-${provider}-sitemap`" v-model="forms[provider].sitemap_status" :disabled="locked"><option v-for="status in sitemapStatuses" :key="status" :value="status">{{ searchSitemapLabel(status) }}</option></select>
+        <p class="search-hint">此项只记录站点地图结果；单个页面的提交结果可写在备注。平台未提供地图提交入口时，保留“未知”或“尚未提交”。</p>
         <label :for="`${owner}-${provider}-note`">备注（可选，最多500字）</label><textarea :id="`${owner}-${provider}-note`" v-model="forms[provider].note" rows="2" maxlength="500" :disabled="locked" placeholder="记录平台显示的处理提示；无需填写账号、密码或验证文件。"/>
       </div>
       <p v-if="forms[provider].site_added===false && forms[provider].ownership_confirmed===true" class="search-warning">尚未添加官网与网站验证已通过互相矛盾，请按平台当前显示核对后保存。</p>
@@ -38,6 +40,7 @@ import {searchOnboardingSession,searchStoppedReceipts,searchProviders,emptySearc
 import {externalWriteUncertain} from '@/utils/geoExternalFeedback'
 import {exportFeedbackDraft} from '@/utils/geoFeedbackSession'
 import {journeyDate} from '@/utils/geoJourney'
+import {openSearchPortal,searchPortalUrl,searchPortalErrorMessage} from '@/utils/geoSearchPortal'
 const props=defineProps({cycle:{type:Object,required:true},busy:Boolean}),emit=defineEmits(['busy'])
 const view=ref(null),provider=ref('baidu'),loading=ref(false),saving=ref(''),error=ref(''),notice=ref(''),checkpointError=ref('')
 const forms=reactive({baidu:emptySearchProgress(),toutiao:emptySearchProgress()}),uncertain=reactive({baidu:false,toutiao:false})
@@ -45,10 +48,28 @@ const owner=searchOnboardingSession.owner('search'),sitemapStatuses=['unknown','
 const stoppedVersion=ref(0),stoppedUnknownCount=computed(()=>{stoppedVersion.value;return searchStoppedReceipts.list(view.value).length})
 const locked=computed(()=>props.busy||loading.value||Boolean(saving.value)||uncertain[provider.value])
 const tokens={},versions={},bases={},frozen={},digests={}
+const portalUrl=ref(''),portalMessage=ref(''),portalError=ref(''),portalOpening=ref(false)
 let generation=0,disposed=false,paused=false,readSequence=0
+let portalSequence=0
 const clone=value=>JSON.parse(JSON.stringify(value))
 const active=(epoch,scope)=>!disposed&&epoch===generation&&scope===searchScopeKey(props.cycle)
 const message=cause=>cause?.response?.data?.msg||cause?.message||'进度尚未确认，请核对原记录。'
+const openPortal=async(event,purpose)=>{
+  if(disposed)return
+  if(portalOpening.value){event.preventDefault();return}
+  const id=provider.value,pending=openSearchPortal(event,id,purpose)
+  if(!pending)return
+  const sequence=++portalSequence
+  portalUrl.value=searchPortalUrl(id,purpose);portalError.value='';portalMessage.value='正在请求系统浏览器；也可以复制地址自行打开。';portalOpening.value=true
+  try{await pending;if(!disposed&&sequence===portalSequence)portalMessage.value='已请求系统默认浏览器打开。若没有出现窗口，请复制地址到日常浏览器；登录和页面状态需自行核对。'}
+  catch(cause){if(!disposed&&sequence===portalSequence){portalMessage.value='';portalError.value=searchPortalErrorMessage(cause)}}
+  finally{if(!disposed&&sequence===portalSequence)portalOpening.value=false}
+}
+const copyPortal=async()=>{
+  const sequence=portalSequence,url=portalUrl.value
+  try{await navigator.clipboard.writeText(url);if(!disposed&&sequence===portalSequence){portalError.value='';portalMessage.value='入口地址已复制，请粘贴到日常浏览器。'}}
+  catch{if(!disposed&&sequence===portalSequence)portalError.value='复制未完成，请选择并复制上面的完整地址，到日常浏览器打开。'}
+}
 const remember=id=>{
   if(paused||!view.value?.supported)return true
   if(!frozen[id]&&searchProgressEqual(forms[id],searchRecord(view.value,id)?.progress||emptySearchProgress())&&!tokens[id])return true
@@ -136,7 +157,9 @@ const adoptSaved=async()=>{
 const copySitemap=async()=>{const epoch=generation,scope=searchScopeKey(props.cycle);try{await navigator.clipboard.writeText(view.value.sitemap_url);if(active(epoch,scope))notice.value='站点地图地址已复制。'}catch{if(active(epoch,scope))error.value='复制未完成，请直接选择上面的地址。'}}
 const exportDrafts=()=>exportFeedbackDraft({cycle_id:view.value?.cycle_id,site_origin:view.value?.site_origin,forms:clone(forms),frozen:clone(frozen),stopped_unknown_requests:searchStoppedReceipts.list(view.value)},'other-search-progress')
 watch(forms,rememberAll,{deep:true,flush:'sync'})
+watch(provider,()=>{portalSequence++;portalUrl.value='';portalMessage.value='';portalError.value='';portalOpening.value=false})
 watch(()=>searchScopeKey(props.cycle),()=>{
+  portalSequence++;portalUrl.value='';portalMessage.value='';portalError.value='';portalOpening.value=false
   rememberAll();paused=true;generation++;readSequence++;view.value=null;loading.value=false;saving.value='';error.value='';notice.value='';checkpointError.value=''
   for(const id of Object.keys(searchProviders)){Object.assign(forms[id],emptySearchProgress());uncertain[id]=false;delete tokens[id];delete versions[id];delete bases[id];delete frozen[id];delete digests[id]}
   paused=false;void refresh()
