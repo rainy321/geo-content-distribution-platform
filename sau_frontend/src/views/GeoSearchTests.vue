@@ -76,6 +76,8 @@
 
     <el-alert class="notice" type="info" :closable="false" show-icon
       title="行业问题不带品牌，用于观察自然提及；点名品牌和提供官网的核验问题分别统计。提及可能是否定回答或资料不足。" />
+    <p v-if="project && externalProfilePending" class="context">手机首轮记录使用已保存的测试资料；请先点击“保存测试资料”。</p>
+    <GeoExternalBaseline v-if="project" :project="project" :plan="planMatchesProject ? plan : null" :busy="nativeBusy || generating" :blocked="externalProfilePending" @busy="setExternalBaselineBusy" @created="openExternalCycle"/>
 
     <el-card v-if="plan" shadow="never">
       <div class="card-heading"><h2>{{ plan.profile.name }} · 测试计划</h2><el-button @click="download(plan, 'plan.json')">下载计划</el-button></div>
@@ -152,6 +154,9 @@ import { geoTestApi } from '@/api/geoTest'
 import { geoContentApi } from '@/api/geoContent'
 import DoubaoPreparation from '@/components/DoubaoPreparation.vue'
 import DoubaoTaskRecovery from '@/components/DoubaoTaskRecovery.vue'
+import GeoExternalBaseline from '@/components/GeoExternalBaseline.vue'
+import {isExternalCycle} from '@/utils/geoExternalBaseline'
+import {updateFeedbackBusy} from '@/utils/geoFeedbackBusy'
 import { entityLabel, entityProfileFields, profileLines, reportEntityContext, restoreEntityDraftFields, sameBrand } from '@/utils/geoJourney'
 import { restoredSearchRecords, sameSearchProject, searchProjectSnapshot, searchTaskMatchesContext, searchTaskMatchesProject, searchTaskRecoverySource } from '@/utils/geoSearchRestore'
 import { doubaoTaskRecovery } from '@/utils/geoTaskRecovery'
@@ -181,7 +186,13 @@ const nativeStarting=ref(false),nativeReady=ref(Boolean(window.pywebview?.api))
 const taskBinding=ref(null),recoveryRecord=ref(null),reportChoice=ref('automatic')
 const taskNames = { login: '登录豆包', plan: '生成问题', run: '采集测试', research: '采集内容策划', draft: '生成平台稿' }
 let workspaceSaveTimer = null, workspaceReady = false
-const nativeBusy = computed(() => restoringWorkspace.value || nativeStarting.value || nativeTask.value.status === 'running')
+const externalBaselineOwners=ref(new Set()),externalBaselineBusy=computed(()=>externalBaselineOwners.value.size>0)
+const setExternalBaselineBusy=event=>{externalBaselineOwners.value=updateFeedbackBusy(externalBaselineOwners.value,event)}
+const nativeBusy = computed(() => restoringWorkspace.value || nativeStarting.value || nativeTask.value.status === 'running' || externalBaselineBusy.value)
+const externalProfilePending=computed(()=>!project.value||company.value!==String(project.value.company||'')||audience.value!==String(project.value.audience||'')
+  ||JSON.stringify(profileLines(aliasesText.value))!==JSON.stringify(profileLines(project.value.aliases))
+  ||JSON.stringify(profileLines(officialUrlsText.value))!==JSON.stringify(profileLines(project.value.official_urls)))
+const openExternalCycle=value=>{if(!destroyed&&!externalProfilePending.value&&isExternalCycle(value)&&value.project_id===projectId.value&&sameBrand(value.profile,project.value))router.push({path:'/journey',query:{journey_project:String(projectId.value),cycle:value.id}})}
 const taskRecovery=computed(()=>{
   if(taskMatchesCurrent(nativeTask.value)) {
     const current=doubaoTaskRecovery(searchTaskRecoverySource(nativeTask.value));if(current)return current

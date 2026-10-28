@@ -154,7 +154,7 @@ def _reserve(database, cycle_id, payload):
     from services.geo_content_store import _connect, _cycle
     with closing(_connect(database)) as connection, connection:
         connection.execute('BEGIN IMMEDIATE')
-        cycle = _cycle(connection, cycle_id)
+        cycle = _cycle(connection, cycle_id, for_update=True)
         view = overview(connection, cycle)
         _validate(cycle, view, payload)
         stored = public_http._stored(connection, cycle_id)
@@ -290,7 +290,7 @@ def perform_audit(database, cycle_id, payload):
                   'message': '本次检测未安全完成，结果保持未知；未自动重试。'}
     with closing(_connect(database)) as connection, connection:
         connection.execute('BEGIN IMMEDIATE')
-        fresh_cycle = _cycle(connection, cycle_id)
+        fresh_cycle = _cycle(connection, cycle_id, for_update=True)
         fresh = overview(connection, fresh_cycle)
         stored = public_http._stored(connection, cycle_id)
         state = _state(stored)

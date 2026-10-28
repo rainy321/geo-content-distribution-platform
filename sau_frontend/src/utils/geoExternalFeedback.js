@@ -9,7 +9,8 @@ export function externalFeedbackScope(cycle) {
 }
 
 export function externalFeedbackCases(cycle) {
-  const rows = Array.isArray(cycle?.baseline?.cases) ? cycle.baseline.cases : []
+  const source = cycle?.baseline_source === 'user_reported_external' && cycle?.external_baseline?.kind === 'geo_external_baseline_v1' ? cycle?.test_plan : cycle?.baseline
+  const rows = Array.isArray(source?.cases) ? source.cases : []
   return rows.filter(row => identifier(row?.id) && typeof row.question === 'string' && row.question.trim()
     && rows.filter(other => other?.id === row.id).length === 1)
 }
@@ -23,8 +24,13 @@ export function externalFeedbackPayload(cycle, form) {
   if (!scope || !selected) throw new Error('请选择这轮实验中的一道关联问题。')
   if (typeof form.raw !== 'string' || !form.raw.trim()) throw new Error('请粘贴完整取得的回答原文。')
   if (new TextEncoder().encode(form.raw).length > 1024 * 1024) throw new Error('回答原文不能超过 1 MB。')
+  return {project_id: scope.projectId, case_id: selected.id, expected_plan_sha256: scope.plan,
+    expected_revision: scope.revision, raw_response_text: form.raw, metadata: externalAnswerMetadata(form, selected.question)}
+}
+
+export function externalAnswerMetadata(form, originalQuestion) {
   const metadata = {}
-  if (form.questionMode === 'same') metadata.question = selected.question
+  if (form.questionMode === 'same') metadata.question = originalQuestion
   else if (form.questionMode === 'custom') {
     if (typeof form.question !== 'string' || !form.question.trim() || form.question.length > 4000) throw new Error('请粘贴实际发送的题文，最多 4000 字。')
     metadata.question = form.question
@@ -55,8 +61,7 @@ export function externalFeedbackPayload(cycle, form) {
       return {url: value}
     })
   }
-  return {project_id: scope.projectId, case_id: selected.id, expected_plan_sha256: scope.plan,
-    expected_revision: scope.revision, raw_response_text: form.raw, metadata}
+  return metadata
 }
 
 export function externalContextPayload(cycle, probe, form) {

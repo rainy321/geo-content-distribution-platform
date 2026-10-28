@@ -953,6 +953,67 @@ def _external_feedback_json(*, maximum=1100 * 1024):
     return value, None
 
 
+from services.geo_external_baseline import ExternalBaselineConflict
+
+
+@app.errorhandler(ExternalBaselineConflict)
+def external_baseline_conflict_response(error):
+    response = jsonify(code=409, msg=str(error), data=None)
+    response.headers['Cache-Control'] = 'no-store'
+    return response, 409
+
+
+@app.route('/api/geo-content/external-baseline-plans', methods=['GET'])
+def geo_external_baseline_pending_plans():
+    from services import geo_external_baseline as external
+    rejected = _feedback_same_origin()
+    if rejected is not None:
+        return rejected
+    try:
+        if (set(request.args) - {'project_id', 'offset'} or 'project_id' not in request.args
+                or any(len(request.args.getlist(key)) != 1 for key in request.args)):
+            raise ValueError('请明确选择当前品牌项目和冻结计划页码')
+        project_value, offset_value = request.args['project_id'], request.args.get('offset', '0')
+        if (not re.fullmatch(r'[1-9][0-9]{0,14}', project_value)
+                or not re.fullmatch(r'(?:0|[1-9][0-9]{0,6})', offset_value)):
+            raise ValueError('品牌项目或冻结计划页码无效')
+        result = external.list_pending_plans(app.config['DATABASE_PATH'], int(project_value), offset=int(offset_value))
+        response = jsonify(code=200, data=result)
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    except geo_content_store.ResearchNotFoundError as error:
+        return jsonify(code=404, msg=str(error), data=None), 404
+    except ValueError as error:
+        return jsonify(code=400, msg=str(error), data=None), 400
+
+
+@app.route('/api/geo-content/external-baseline-plans/prepare', methods=['POST'])
+@app.route('/api/geo-content/external-baseline-plans/freeze', methods=['POST'])
+@app.route('/api/geo-content/external-cycles', methods=['POST'])
+def geo_external_baseline_entry():
+    from services import geo_external_baseline as external
+    operation = 'create' if request.path.endswith('/external-cycles') else request.path.rsplit('/', 1)[-1]
+    try:
+        data, rejected = _external_feedback_json(maximum=1100*1024 if operation == 'create' else 64*1024)
+        if rejected is not None:
+            return rejected
+        result = {'prepare': external.prepare, 'freeze': external.freeze, 'create': external.create}[operation](
+            app.config['DATABASE_PATH'], data)
+        response = jsonify(code=200, data=result)
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    except RequestEntityTooLarge:
+        return jsonify(code=413, msg='外部基线请求过大，原始回答不能超过1MiB', data=None), 413
+    except external.ExternalBaselineConflict as error:
+        return jsonify(code=409, msg=str(error), data=None), 409
+    except geo_content_store.ResearchNotFoundError as error:
+        return jsonify(code=404, msg=str(error), data=None), 404
+    except ValueError as error:
+        return jsonify(code=400, msg=str(error), data=None), 400
+    except (KeyError, TypeError):
+        return jsonify(code=400, msg='外部基线字段格式无效，请刷新并核对冻结原题', data=None), 400
+
+
 @app.route('/api/geo-content/cycles/<identifier>/external-observations', methods=['POST'])
 @app.route('/api/geo-content/cycles/<identifier>/external-observations/<probe_id>/context', methods=['POST'])
 def geo_external_observation(identifier, probe_id=None):

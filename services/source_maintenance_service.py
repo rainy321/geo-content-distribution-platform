@@ -129,7 +129,7 @@ def save_task(database, cycle_id, module, proposal, expected_context_sha256, ref
     from services.geo_content_store import _connect, _cycle
     with closing(_connect(database)) as connection, connection:
         connection.execute('BEGIN IMMEDIATE')
-        cycle = _cycle(connection, cycle_id)
+        cycle = _cycle(connection, cycle_id, for_update=True)
         company = _company(cycle)
         if expected_context_sha256 != digest(company):
             raise ValueError('公司官网或已确认资料已变化，请刷新预览后再保存')
@@ -232,7 +232,7 @@ def import_research_receipt(database, cycle_id, module, proposal, expected_conte
     payload = json.loads(raw_receipt.decode('utf-8'))
     with closing(_connect(database)) as connection, connection:
         connection.execute('BEGIN IMMEDIATE')
-        cycle = _cycle(connection, cycle_id)
+        cycle = _cycle(connection, cycle_id, for_update=True)
         company = _company(cycle)
         if digest(company) != expected_context_sha256:
             raise ValueError('公司或已确认事实已变化，未导入')

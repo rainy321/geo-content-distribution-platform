@@ -3,7 +3,7 @@
     <header><div><h3>补正企业公开资料</h3><p>把已核对的公司资料整理给企查查，补充企业官网或简介。</p></div><el-button v-if="company" text :disabled="locked" @click="refresh">刷新进度</el-button></header>
     <p v-if="!company" class="maintenance-hint" data-testid="source-maintenance-not-applicable">{{ view.reason }}</p>
     <template v-else>
-      <p class="maintenance-identity">{{ view.company_name || cycle.baseline?.profile?.name }}</p>
+      <p class="maintenance-identity">{{ view.company_name || profile?.name }}</p>
       <p class="maintenance-hint">软件准备公开说明并辅助填写；姓名、联系方式、证明材料及最终提交，只在官方浏览器由你处理。</p>
       <p class="maintenance-hint">费用和材料要求以当前官方提示为准。提交、审核通过、公开更新与搜索采用分别核对，未完成不计为 GEO 优化成功。</p>
       <p v-if="!view.supported" class="maintenance-notice" role="status">{{ view.reason }}</p>
@@ -45,7 +45,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { geoSourceMaintenanceApi } from '@/api/geoSourceMaintenance'
 import { journeyDate } from '@/utils/geoJourney'
-import { qccMaintenanceEntry, sourceMaintenanceModules, sourceMaintenanceCompany, sourceMaintenanceOverview,
+import { qccMaintenanceEntry, sourceMaintenanceModules, sourceMaintenanceProfile, sourceMaintenanceCompany, sourceMaintenanceOverview,
   sourceMaintenanceReadOnly, sourceMaintenanceEditable, sourceMaintenanceTask, sourceMaintenancePayload, sourceMaintenanceCanOpen,
   sourceMaintenanceNativeId, sourceMaintenanceStage, sourceMaintenanceError } from '@/utils/geoSourceMaintenance'
 
@@ -54,6 +54,7 @@ const emit=defineEmits(['busy','task'])
 const overview=ref(props.cycle.source_maintenance||null),selectedModule=ref('website'),proposal=ref(''),edited=ref(false),editorContext=ref(null)
 const loading=ref(false),saving=ref(false),opening=ref(''),checking=ref(''),error=ref(''),saveUncertain=ref(false)
 let scopeVersion=0,readVersion=0,disposed=false,pollTimer=null,polling=false
+const profile=computed(()=>sourceMaintenanceProfile(props.cycle))
 const company=computed(()=>sourceMaintenanceCompany(props.cycle))
 const view=computed(()=>sourceMaintenanceOverview(props.cycle,overview.value))
 const available=computed(()=>company.value&&typeof geoSourceMaintenanceApi.list==='function'&&Boolean(props.cycle.source_maintenance))
@@ -79,7 +80,7 @@ const canCheck=record=>Boolean(nativeReady.value&&sourceMaintenanceNativeId(reco
   &&view.value.tasks.some(item=>item.id===record.id)&&record.window_open===true&&record.stage!=='window_closed'&&record.stage!=='browser_rejected')
 const syncProposal=()=>{const record=selectedRecord.value;proposal.value=record?.proposal??selectedDefinition.value?.proposal??'';editorContext.value=view.value.context_sha256;edited.value=false}
 const selectModule=key=>{if(locked.value||!Object.hasOwn(sourceMaintenanceModules,key))return;selectedModule.value=key;error.value='';syncProposal()}
-const currentScope=()=>`${props.cycle.id}:${props.cycle.baseline?.profile?.entity_type}:${props.cycle.baseline?.profile?.name}`
+const currentScope=()=>`${props.cycle.id}:${profile.value?.entity_type}:${profile.value?.name}`
 const refreshOverview=async({manual=false}={})=>{
   if(!company.value||!available.value||disposed)return false
   const cycleId=props.cycle.id,scope=currentScope(),version=scopeVersion,read=++readVersion

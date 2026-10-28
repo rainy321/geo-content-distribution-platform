@@ -270,6 +270,26 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                 )
             ''')
             cursor.execute('''
+                CREATE TABLE IF NOT EXISTS geo_external_baseline_plans (
+                    id TEXT PRIMARY KEY, project_id INTEGER NOT NULL,
+                    profile_sha256 TEXT NOT NULL, plan_sha256 TEXT NOT NULL,
+                    profile TEXT NOT NULL, plan TEXT NOT NULL, created_at TEXT NOT NULL,
+                    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE RESTRICT
+                )
+            ''')
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS geo_external_baseline_requests (
+                    project_id INTEGER NOT NULL, operation TEXT NOT NULL,
+                    request_id TEXT NOT NULL, request_sha256 TEXT NOT NULL,
+                    frozen_plan_id TEXT NOT NULL, cycle_id TEXT, probe_id TEXT,
+                    created_at TEXT NOT NULL,
+                    PRIMARY KEY(project_id,operation,request_id),
+                    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE RESTRICT,
+                    FOREIGN KEY(frozen_plan_id) REFERENCES geo_external_baseline_plans(id) ON DELETE RESTRICT,
+                    FOREIGN KEY(cycle_id) REFERENCES geo_content_cycles(id) ON DELETE RESTRICT
+                )
+            ''')
+            cursor.execute('''
                 CREATE TABLE IF NOT EXISTS geo_content_drafts (
                     article_id INTEGER PRIMARY KEY, cycle_id TEXT NOT NULL,
                     brief_id TEXT NOT NULL, platform TEXT NOT NULL,

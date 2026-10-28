@@ -20,7 +20,7 @@ const sourceTask=(changes={})=>({id:'source-retest',kind:'run',status:'failed',c
 const harness=(source=sourceTask())=>{
   const calls={reads:[],resumes:[],wholeRounds:[],confirms:[],persist:[]}
   const checkpoint={id:'source-retest',kind:'retest',status:'need_action',cycle_id:'cycle-a',recovery:{question_submitted:true}}
-  const values={computed,step:ref(4),cycleId:ref('cycle-a'),nativeAvailable:ref(true),retestResume:ref(null),
+  const values={computed,step:ref(4),cycle:ref({id:'cycle-a'}),cycleId:ref('cycle-a'),nativeAvailable:ref(true),retestResume:ref(null),
     visibleRecoveryInfo:ref({kind:'retest',taskId:'source-retest',requiresConfirmation:true}),
     task:ref(source),taskId:ref('source-retest'),taskKind:ref('retest'),recoveryTask:ref(checkpoint),working:ref(false),error:ref('')}
   values.nativeBusy=computed(()=>values.task.value.status==='running')
@@ -41,6 +41,16 @@ const harness=(source=sourceTask())=>{
   `)(...Object.values(values))
   return {...values,...actions,calls,checkpoint}
 }
+
+test('an external or explicitly disabled cycle cannot resume a native request even if a stale task matches its ID',async()=>{
+  for(const value of [{id:'cycle-a',baseline_source:'user_reported_external'},{id:'cycle-a',capabilities:{native_retest:false}}]){
+    const page=harness();page.cycle.value=value
+    await page.refreshRetestResume()
+    assert.equal(page.canResumeRetest.value,false)
+    await page.resumeUnsentRetest()
+    assert.equal(page.calls.resumes.length,0);assert.equal(page.calls.wholeRounds.length,0)
+  }
+})
 
 test('a real-shaped timeout reaches same-cycle feedback recovery and enables only its unsent continuation',async()=>{
   const actualSource=sourceTask({failure_reason:'browser_error:TimeoutError',

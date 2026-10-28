@@ -16,6 +16,9 @@ const overview=(changes={})=>({supported:true,reason:'',platform:'qcc',entry_url
   modules:[{key:'website',label:'企业官网',proposal:'公司官网为 https://example.org/ 。',max_length:500,reference_fact_ids:['fact-web']},
     {key:'introduction',label:'企业简介',proposal:'示例公司提供团队协作服务。',max_length:500,reference_fact_ids:['fact-web']}],tasks:[],...changes})
 const cycle=(changes={})=>({id:'cycle-a',baseline:{profile:{entity_type:'company',name,website:'https://example.org/'}},facts:[fact],source_maintenance:overview(),...changes})
+const externalCycle=(changes={})=>cycle({baseline:null,baseline_source:'user_reported_external',external_baseline:{kind:'geo_external_baseline_v1'},
+  profile:Object.freeze({entity_type:'company',name,website:'https://example.org/'}),test_plan:Object.freeze({cases:[]}),
+  capabilities:{native_probe:false,native_retest:false,native_metrics:false},...changes})
 const filename=new URL('../src/components/GeoSourceMaintenance.vue',import.meta.url)
 const {descriptor,errors}=parse(fs.readFileSync(filename,'utf8'),{filename:filename.pathname})
 assert.deepEqual(errors,[])
@@ -68,6 +71,45 @@ test('company and cycle identity are mandatory; product maintenance stays explic
   const html=await render(product)
   assert.match(html,/适用于公司档案/);assert.doesNotMatch(html,/source-maintenance-save|source-maintenance-open-/)
   for(const change of [{platform:'other'},{company_name:'别的公司'},{context_sha256:'unknown'}])assert.equal(helpers.sourceMaintenanceOverview(cycle(),overview(change)).supported,false)
+})
+
+test('only typed external company cycles use the frozen top-level profile for maintenance',async()=>{
+  const value=externalCycle()
+  assert.equal(helpers.sourceMaintenanceCompany(value),true)
+  assert.equal(helpers.sourceMaintenanceOverview(value).supported,true)
+  assert.deepEqual(helpers.sourceMaintenancePayload(value,value.source_maintenance,'introduction','已核对的公司简介。'),
+    {module:'introduction',proposal:'已核对的公司简介。',expected_context_sha256:hash,reference_fact_ids:['fact-web']})
+  assert.equal(helpers.sourceMaintenanceCanOpen(record(),value),true)
+  for(const invalid of [externalCycle({baseline_source:'unknown'}),externalCycle({external_baseline:{kind:'untyped'}}),
+    externalCycle({profile:{entity_type:'product',name,company:name}}),cycle({baseline:null,profile:value.profile})]){
+    const page=harness(invalid)
+    assert.equal(page.view.value.supported,false)
+    await page.refresh();await page.saveProposal();await page.openWindow(record())
+    assert.deepEqual(page.calls.list,[]);assert.deepEqual(page.calls.save,[]);assert.deepEqual(page.calls.open,[])
+  }
+  assert.equal(helpers.sourceMaintenanceCompany(cycle({profile:{entity_type:'product',name:'无关的顶层产品'}})),true)
+  assert.equal(helpers.sourceMaintenanceCompany(cycle({baseline:{profile:{entity_type:'product',name:'原生产品'}},profile:value.profile})),false)
+  const html=await render(value)
+  assert.match(html,new RegExp(name));assert.match(html,/source-maintenance-save/)
+  assert.doesNotMatch(html,/source-maintenance-not-applicable/)
+})
+
+test('disabled native experiment capabilities still allow exact-company maintenance save, open and check',async()=>{
+  const page=harness(externalCycle())
+  assert.equal(page.canSave.value,true)
+  page.proposal.value='本人核对的外部基线公司官网说明。'
+  await page.saveProposal()
+  assert.equal(page.calls.save.length,1)
+  assert.equal(page.calls.save[0][0],'cycle-a')
+  assert.equal(page.calls.save[0][1].expected_context_sha256,hash)
+  const original=page.moduleTasks.value[0]
+  await page.openWindow(original)
+  const active={...original,window_open:true,native_task_id:'native-external',stage:'waiting_verification',can_edit:false}
+  page.setServer(overview({tasks:[active]}));await page.refresh();await page.checkWindow(page.moduleTasks.value[0])
+  assert.deepEqual(page.calls.open,[['cycle-a','maintenance-web']]);assert.deepEqual(page.calls.check,[['native-external']])
+  for(const change of [{company_name:'其他公司'},{cycle_id:'other-cycle'}])assert.equal(helpers.sourceMaintenanceCanOpen(record(change),page.props.cycle),false)
+  assert.equal(helpers.sourceMaintenanceOverview(page.props.cycle,overview({company_name:'其他公司'})).supported,false)
+  assert.throws(()=>helpers.sourceMaintenancePayload(page.props.cycle,overview({tasks:[record({cycle_id:'prior-cycle'})]}),'website','新说明。'),/原申请/)
 })
 
 test('modules and tasks remain isolated by company and module while prior-cycle originals are visible',()=>{
@@ -237,6 +279,18 @@ test('a delayed previous-company result cannot be saved into the current company
   assert.equal(page.calls.save.length,0);assert.equal(page.view.value.supported,false)
 })
 
+test('a delayed external company read cannot save or open after its top-level profile changes',async()=>{
+  for(const action of ['save','open']){
+    const wait=deferred(),page=harness(externalCycle({source_maintenance:overview({tasks:[record()]})}),{api:{list:()=>wait.promise}})
+    page.proposal.value='已核对的公司公开说明。'
+    const pending=action==='save'?page.saveProposal():page.openWindow(record())
+    page.props.cycle.profile={entity_type:'company',name:'另一外部公司'}
+    wait.resolve({data:overview({tasks:[record()]})});await pending;await Vue.nextTick()
+    assert.equal(page.calls.save.length,0);assert.equal(page.calls.open.length,0)
+    assert.equal(page.view.value.supported,false);assert.equal(page.moduleTasks.value.length,0)
+  }
+})
+
 test('late reads and writes cannot replace another company cycle or open its browser',async()=>{
   const wait=deferred(),page=harness(cycle({source_maintenance:overview({tasks:[record()]})}),{api:{list:()=>wait.promise}})
   const opening=page.openWindow(record());page.props.cycle=cycle({id:'cycle-b'})
@@ -254,11 +308,13 @@ test('same-company prior-cycle tasks remain visible and cannot become a new appl
 })
 
 test('an edited proposal keeps its original fact context until the user reloads and reviews it',async()=>{
-  const page=harness(cycle());page.proposal.value='原来已经核对的公开说明。'
-  page.setServer(overview({context_sha256:'b'.repeat(64)}));await page.saveProposal()
-  assert.equal(page.calls.save.length,0);assert.match(page.error.value,/已确认资料有变化/);assert.equal(page.contextIssue.value,true)
-  assert.equal(page.proposal.value,'原来已经核对的公开说明。');assert.equal(page.canSave.value,false)
-  page.syncProposal();await page.refresh();assert.equal(page.contextIssue.value,false);assert.equal(page.canSave.value,true)
+  for(const value of [cycle(),externalCycle()]){
+    const page=harness(value);page.proposal.value='原来已经核对的公开说明。'
+    page.setServer(overview({context_sha256:'b'.repeat(64)}));await page.saveProposal()
+    assert.equal(page.calls.save.length,0);assert.match(page.error.value,/已确认资料有变化/);assert.equal(page.contextIssue.value,true)
+    assert.equal(page.proposal.value,'原来已经核对的公开说明。');assert.equal(page.canSave.value,false)
+    page.syncProposal();await page.refresh();assert.equal(page.contextIssue.value,false);assert.equal(page.canSave.value,true)
+  }
 })
 
 test('login before any content write is not falsely described as a read-only application',async()=>{

@@ -11,6 +11,10 @@ const row=(id='cycle-a',project_id=1,report_ref='report-a',draft_count=3)=>({id,
 const full=(listed=row(),profile=project())=>({...listed,profile,baseline:{profile,run_id:listed.report_ref},analysis:{briefs:[]},drafts:[{article_id:1,title:'同轮文章'}]})
 const deferred=()=>{let resolve,reject;const promise=new Promise((done,fail)=>{resolve=done;reject=fail});return {promise,resolve,reject}}
 const continuationValue=(id='cycle-a')=>({...full(row(id)),baseline:{profile:project(),run_id:'original-run',cases:[{id:'q01',question:'原问题'}],execution:{client_mode:'work',requested_model_label:'实际请求选项'}},facts:[{id:'f01',text:'已确认事实',source_url:'https://tongyuye.com/products/software',confirmed:true}],analysis:{briefs:[{id:'b01'},{id:'b02'}]},channels:{target_t1:'合成社区'},drafts:[{article_id:6,brief_id:'b02',platform:'target_t1'},{article_id:5,brief_id:'b01',platform:'target_t1'}]})
+const externalRow=()=>({...row('external-cycle',1,'external-baseline:frozen-a'),baseline_source:'user_reported_external',baseline_kind:'geo_external_baseline_v1'})
+const externalValue=()=>({...continuationValue('external-cycle'),...externalRow(),baseline:null,profile:Object.freeze(project()),
+  test_plan:Object.freeze({cases:[{id:'q01',question:'原问题'}]}),external_baseline:{kind:'geo_external_baseline_v1',observations:[]},
+  capabilities:{native_probe:false,native_retest:false,native_metrics:false}})
 
 test('continuing saved content restores that exact baseline and an article from its own brief/channel',()=>{
   const value=continuationValue(),selection=savedCycleContinuation(value,project())
@@ -18,6 +22,17 @@ test('continuing saved content restores that exact baseline and an article from 
   assert.deepEqual([selection.briefId,selection.platform,selection.articleId],['b02','target_t1',6])
   assert.equal(value.baseline.cases[0].question,'原问题')
   for(const change of [{project_id:2},{baseline:{...value.baseline,profile:project(1,'https://tongyuye.com/products/other')}},{baseline:{...value.baseline,cases:undefined}}])assert.throws(()=>savedCycleContinuation({...value,...change},project()),/阻止混用/)
+})
+
+test('external saved content continues with its scoped plan and drafts without inventing a native report',()=>{
+  const value=externalValue(),selection=savedCycleContinuation(value,project())
+  assert.equal(selection.cycle,value);assert.equal(selection.report,null);assert.equal(selection.reportId,'')
+  assert.deepEqual([selection.briefId,selection.platform,selection.articleId],['b02','target_t1',6])
+  assert.equal(value.report_ref,'external-baseline:frozen-a');assert.equal(value.test_plan.cases[0].question,'原问题')
+  for(const change of [{project_id:2},{profile:project(1,'https://tongyuye.com/products/other')},
+    {baseline_source:'native_report'},{external_baseline:{kind:'unknown'}},{test_plan:{}}]){
+    assert.throws(()=>savedCycleContinuation({...value,...change},project()),/阻止混用/)
+  }
 })
 
 test('unchanged saved or suggested facts do not create false recovery warnings',()=>{
@@ -83,6 +98,22 @@ test('old list rows use exact project IDs and preserve each cycle report/count w
   assert.match(savedCycleLabel({...row(),draft_count:null}),/稿件数待核对/)
   assert.throws(()=>savedCycleRows({},current))
   assert.deepEqual(savedCycleRows([row('same'),row('same'),row('../wrong'),{...row(),report_ref:null}],current),[])
+})
+
+test('external list metadata and report references remain explicit and must agree with the selected cycle',async()=>{
+  const listed=externalRow(),value=externalValue(),rows=savedCycleRows([listed],project())
+  assert.equal(rows[0].report_ref,listed.report_ref)
+  assert.equal(rows[0].baseline_source,'user_reported_external');assert.equal(rows[0].baseline_kind,'geo_external_baseline_v1')
+  assert.match(savedCycleLabel(rows[0]),/手机或外部观察基线 external-baseline:frozen-a/)
+  assert.doesNotMatch(savedCycleLabel(rows[0]),/基线报告/)
+  assert.equal(savedCycleMatches(value,rows[0],project()),true)
+  for(const change of [{report_ref:'different-external-ref'},{baseline_source:'native_report'},{baseline_kind:'geo_search_test_report'}]){
+    assert.equal(savedCycleMatches(value,{...rows[0],...change},project()),false)
+  }
+  const page=harness({list:async()=>({data:[listed]}),get:async()=>({data:value})})
+  await page.change(project());assert.equal(await page.reader.select(listed.id),value);assert.deepEqual(page.emitted,[value])
+  const wrong=harness({list:async()=>({data:[{...listed,baseline_source:'native_report'}]}),get:async()=>({data:value})})
+  await wrong.change(project());assert.equal(await wrong.reader.select(listed.id),null);assert.deepEqual(wrong.emitted,[])
 })
 
 test('a full cycle must match its exact listing, complete entity URL and baseline; no latest substitution',()=>{

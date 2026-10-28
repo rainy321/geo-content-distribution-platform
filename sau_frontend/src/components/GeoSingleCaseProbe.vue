@@ -52,7 +52,8 @@ const selectedCaseId=ref('')
 const recordLimit=ref(3)
 const identifier=value=>typeof value==='string'&&/^[\w-]{1,100}$/.test(value)
 const cases=computed(()=>{
-  const rows=Array.isArray(props.cycle?.baseline?.cases)?props.cycle.baseline.cases:[]
+  const source=props.cycle?.baseline_source==='user_reported_external'&&props.cycle?.external_baseline?.kind==='geo_external_baseline_v1'?props.cycle.test_plan:props.cycle?.baseline
+  const rows=Array.isArray(source?.cases)?source.cases:[]
   return rows.filter(item=>identifier(item?.id)&&typeof item.question==='string'&&item.question.trim()
     &&rows.filter(other=>other?.id===item.id).length===1)
 })

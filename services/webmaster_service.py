@@ -401,7 +401,7 @@ def perform_action(database, cycle_id, payload):
     checks = _public_checks(view) if payload['action'] == 'check_public' else None
     with closing(_connect(database)) as connection, connection:
         connection.execute('BEGIN IMMEDIATE')
-        cycle = _cycle(connection, cycle_id)
+        cycle = _cycle(connection, cycle_id, for_update=True)
         fresh = overview(connection, cycle)
         _require_context(fresh, payload['context_sha256'])
         record = copy.deepcopy(fresh['record'] or _default_record(fresh))

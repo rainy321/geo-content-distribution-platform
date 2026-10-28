@@ -1,10 +1,15 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import test from 'node:test'
-import { parse, compileScript } from '@vue/compiler-sfc'
-import { computed, ref, watch } from 'vue'
+import { parse, compileScript, compileTemplate } from '@vue/compiler-sfc'
+import * as Vue from 'vue'
+import { renderToString } from '@vue/server-renderer'
 import { baselineWritingOptions, createWritingPreferences } from '../src/utils/geoWritingOptions.js'
 import { doubaoTaskRecovery, scopedRecoveryCheckpoint } from '../src/utils/geoTaskRecovery.js'
+import { isExternalCycle, nativeCycleCapability } from '../src/utils/geoExternalBaseline.js'
+import { writingChannelEnabled } from '../src/utils/geoDestinationAvailability.js'
+
+const {computed,ref,watch}=Vue
 
 const storage = () => {
   const values = new Map()
@@ -12,6 +17,10 @@ const storage = () => {
 }
 const cycle = (id, mode='work', model='') => ({id,baseline:{execution:{client_mode:mode,requested_model_label:model}},
   facts:[],analysis:{briefs:[{id:`${id}-brief`}]},channels:{zhihu:'知乎'}})
+const externalCycle = () => ({...cycle('external-a'),baseline:null,baseline_source:'user_reported_external',profile:{name:'外部公司'},
+  test_plan:{cases:[{id:'q01',question:'原题'}]},external_baseline:{kind:'geo_external_baseline_v1'},
+  capabilities:{native_probe:false,native_retest:false,native_metrics:false},publications:[],retests:[],
+  facts:[{text:'已核对的公开事实',confirmed:true}]})
 
 test('writing defaults use the baseline request without turning observed model labels into a request',()=>{
   assert.deepEqual(baselineWritingOptions(cycle('a','work','  模型 A  ')),{client_mode:'work',model_label:'模型 A'})
@@ -60,9 +69,9 @@ const loginWatcher=script.scriptSetupAst.find(node=>node.type==='ExpressionState
 assert.ok(loginWatcher)
 
 const harness = (api,local=storage()) => {
-  const names=['applyWritingOptions','rememberWritingOptions','selectWritingMode','selectWritingModel','cycleScope','sameCycleScope','recoveryStorageKey','loadContentRecovery','storeContentRecovery','rememberContentRecovery','contentRecovery','applyCycle','loadCycle','options','generate','login','poll','retest']
-  const make=new Function('ref','computed','watch','createWritingPreferences','geoContentApi','doubaoTaskRecovery','scopedRecoveryCheckpoint','local',`
-    const cycleId=ref(''),cycle=ref(null),clientMode=ref('consumer'),model=ref(''),factsText=ref(''),confirmed=ref(false),factsConflict=ref(''),briefId=ref(''),platform=ref('zhihu'),publicationVisible=ref(false),working=ref(false),task=ref({status:'idle'}),loginScope=ref(null),cycles=ref([]),nativeAvailable=ref(true);
+  const names=['applyWritingOptions','rememberWritingOptions','selectWritingMode','selectWritingModel','cycleScope','sameCycleScope','recoveryStorageKey','loadContentRecovery','storeContentRecovery','rememberContentRecovery','contentRecovery','factsValue','canDraft','externalCycle','nativeRetestAllowed','matchingRetests','applyCycle','loadCycle','options','generate','login','poll','retest','attachRetest']
+  const make=new Function('ref','computed','watch','createWritingPreferences','geoContentApi','doubaoTaskRecovery','scopedRecoveryCheckpoint','isExternalCycle','nativeCycleCapability','writingChannelEnabled','local',`
+    const cycleId=ref(''),cycle=ref(null),clientMode=ref('consumer'),model=ref(''),factsText=ref(''),confirmed=ref(false),factsConflict=ref(''),briefId=ref(''),platform=ref('zhihu'),publicationVisible=ref(false),working=ref(false),task=ref({status:'idle'}),loginScope=ref(null),cycles=ref([]),reports=ref([]),retestReportId=ref(''),nativeAvailable=ref(true);
     const recoveryTask=ref(null),recoveryStorageError=ref(''),recoveryUnreadable=ref(false),recoveryMemory=new Map();
     const busy=computed(()=>working.value||task.value.status==='running');
     const writingPreferences=createWritingPreferences();
@@ -76,15 +85,73 @@ const harness = (api,local=storage()) => {
     const stopMode=${source.slice(modeWatcher.start,modeWatcher.end).replace(/;$/,'')};
     const stopLogin=${source.slice(loginWatcher.start,loginWatcher.end).replace(/;$/,'')};
     const stop=()=>{destroyed=true;cycleEpoch++;stopMode();stopLogin()};
-    return {cycleId,cycle,clientMode,model,task,loginScope,working,factsText,confirmed,factsConflict,recoveryTask,recoveryStorageError,recoveryUnreadable,contentRecovery,messages,ElMessageBox,cycleScope,sameCycleScope,applyCycle,loadCycle,selectWritingMode,selectWritingModel,generate,login,poll,retest,stop,
+    return {cycleId,cycle,clientMode,model,task,loginScope,working,factsText,confirmed,factsConflict,recoveryTask,recoveryStorageError,recoveryUnreadable,contentRecovery,messages,ElMessageBox,cycleScope,sameCycleScope,applyCycle,loadCycle,selectWritingMode,selectWritingModel,generate,login,poll,retest,attachRetest,externalCycle,nativeRetestAllowed,matchingRetests,reports,retestReportId,canDraft,stop,
       native:value=>{window.pywebview.api=value}};
   `)
-  return make(ref,computed,watch,createWritingPreferences,api,doubaoTaskRecovery,scopedRecoveryCheckpoint,local)
+  return make(ref,computed,watch,createWritingPreferences,api,doubaoTaskRecovery,scopedRecoveryCheckpoint,isExternalCycle,nativeCycleCapability,writingChannelEnabled,local)
 }
 const deferred = () => {let resolve;const promise=new Promise(done=>{resolve=done});return {promise,resolve}}
 const interrupted=(id='failed-a',cycle_id='a')=>({id,kind:'draft',cycle_id,status:'need_action',message:'private account text',
   recovery:{failure_reason:'login_required',question_submission_attempted:null,question_submitted:null,
     requested_client_mode:'work',raw:'private evidence'}})
+
+const renderFeedback=async page=>{
+  const start=descriptor.template.content.indexOf('<h2>5'),source=descriptor.template.content.slice(start,descriptor.template.content.indexOf('</el-card>',start))
+  const template=compileTemplate({source,filename:filename.pathname,id:'content-feedback-test',compilerOptions:{bindingMetadata:script.bindings}})
+  assert.deepEqual(template.errors,[])
+  const code=template.code.replace(/import \{([^}]+)\} from "vue"/g,(_all,imports)=>`const {${imports.split(',').map(item=>{const [name,alias]=item.trim().split(/\s+as\s+/);return alias?`${name}:${alias}`:name}).join(',')}}=Vue;`).replace('export function render','return function render')
+  const GeoExternalFeedback={setup:()=>()=>Vue.h('button',{'data-testid':'append-external-observation'},'录入外部回答')}
+  const GeoPublicationReview={setup:()=>()=>Vue.h('div')}
+  const app=Vue.createSSRApp({setup:()=>({...page,GeoExternalFeedback,GeoPublicationReview,busy:ref(false),nativeAvailable:ref(true),date:value=>value,safeUrl:value=>value}),render:new Function('Vue',code)(Vue)})
+  for(const [name,tag] of [['el-button','button'],['el-select','select'],['el-option','option'],['el-tag','span'],['el-table','table'],['el-table-column','td']]){
+    app.component(name,{setup:(_props,{slots})=>()=>Vue.h(tag,null,slots.default?.())})
+  }
+  return renderToString(app)
+}
+
+test('external cycles reject native retest and report attachment while showing external append feedback',async()=>{
+  let started=0,attached=0,confirmed=0
+  const value=externalCycle(),page=harness({retest:async()=>{attached++;return {data:value}}})
+  page.native({start_research_retest:async()=>{started++;return {id:'should-not-start'}}})
+  page.ElMessageBox.confirm=async()=>{confirmed++}
+  page.cycleId.value=value.id;page.applyCycle(value)
+  page.reports.value=[{id:'native-report',name:value.profile.name,run_id:'other-run'}];page.retestReportId.value='native-report'
+  assert.equal(page.externalCycle.value,true);assert.equal(page.nativeRetestAllowed.value,false)
+  assert.deepEqual(page.matchingRetests.value,[])
+  await page.retest();await page.attachRetest()
+  assert.deepEqual([started,attached,confirmed],[0,0,0])
+  const html=await renderFeedback(page)
+  assert.match(html,/append-external-observation/);assert.match(html,/原生复测与原生指标比较不可用/)
+  assert.match(html,/写作选择不代表实际采样模式/)
+  assert.doesNotMatch(html,/按原计划开始新一轮复测|关联并比较|关联复测报告/)
+  assert.match(descriptor.template.content,/只用于后续写作，不代表实际采样模式/)
+  page.stop()
+})
+
+test('native report matching stays scoped and a missing baseline never offers comparison',()=>{
+  const page=harness({}),value={...cycle('native-a'),profile:{name:'同一公司'}}
+  value.baseline.run_id='baseline-run'
+  page.cycleId.value=value.id;page.applyCycle(value)
+  page.reports.value=[{id:'baseline',name:'同一公司',run_id:'baseline-run'},
+    {id:'match',name:'同一公司',run_id:'other-run'},{id:'foreign',name:'其他公司',run_id:'foreign-run'}]
+  assert.equal(page.nativeRetestAllowed.value,true);assert.deepEqual(page.matchingRetests.value.map(item=>item.id),['match'])
+  page.applyCycle({...value,baseline:null})
+  assert.equal(page.nativeRetestAllowed.value,false);assert.deepEqual(page.matchingRetests.value,[])
+  page.stop()
+})
+
+test('external experiment restrictions keep WORK editorial planning and drafting plus API generation enabled',async()=>{
+  const calls=[],value=externalCycle(),page=harness({generate:async(id,payload)=>{calls.push(['api',id,payload.kind]);return {data:{cycle:value}}},list:async()=>({data:[]})})
+  page.native({generate_research:async(id,kind,_brief,_platform,options)=>{calls.push(['doubao',id,kind,options]);return {id:`writing-${kind}`,kind,status:'completed'}}})
+  page.cycleId.value=value.id;page.applyCycle(value);page.selectWritingMode('work');page.selectWritingModel('写作模型')
+  assert.equal(page.canDraft.value,true)
+  for(const provider of ['doubao','api'])for(const kind of ['analysis','draft'])await page.generate(kind,provider)
+  assert.deepEqual(calls.map(item=>item.slice(0,3)),[['doubao',value.id,'analysis'],['doubao',value.id,'draft'],['api',value.id,'analysis'],['api',value.id,'draft']])
+  for(const call of calls.filter(item=>item[0]==='doubao'))assert.deepEqual(call[3],{client_mode:'work',model_label:'写作模型'})
+  assert.equal(page.cycle.value.baseline,null);assert.equal(page.cycle.value.capabilities.native_retest,false)
+  assert.equal(page.model.value,'写作模型');assert.equal(page.clientMode.value,'work')
+  page.stop()
+})
 
 test('the actual content flow initializes WORK plus requested model and preserves explicit changes on refresh',()=>{
   const page=harness({})

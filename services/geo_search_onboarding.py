@@ -116,7 +116,7 @@ def save_progress(database,cycle_id,payload):
     request_sha=_digest(payload)
     with closing(_connect(database)) as connection,connection:
         connection.execute('BEGIN IMMEDIATE')
-        cycle=_cycle(connection,cycle_id);view=overview(connection,cycle)
+        cycle=_cycle(connection,cycle_id,for_update=True);view=overview(connection,cycle)
         if (not view['supported'] or not ((type(payload['project_id']) is int and payload['project_id']>0)
                 or (payload['project_id'] is None and cycle['project_id'] is None))
                 or payload['project_id']!=cycle['project_id'] or payload['expected_plan_sha256']!=view['plan_sha256']):

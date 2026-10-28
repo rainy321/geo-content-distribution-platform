@@ -13,9 +13,9 @@
         <ol><li v-if="provider==='baidu'">添加前先核对百度账号的实名认证状态。可在百度 App“账号管理 → 身份认证”查看，未实名可能影响站点验证权限；证件资料只在百度官方页面提交。切换账号后，请重新核对网站添加、验证和提交状态，再更新本页记录。</li>
           <li>使用自己的日常浏览器登录<a :href="searchProviders[provider].entry" target="_blank" rel="noopener noreferrer" @click="openPortal($event,'entry')">{{ searchProviders[provider].name }}</a>，添加 {{ view.site_origin }}/。<template v-if="provider==='baidu'">登录后进入“用户中心 → 站点管理 → 添加网站”。首次添加如要求完善账户信息，请在百度页面填写，无需将联系方式填入本软件。协议与域名分栏时，协议选 HTTPS，域名栏只填主机名，可使用上方“复制域名”。若出现 www 主站建议，请按实际官网主地址核对后选择。</template></li>
           <li>按平台说明准备网站所有权验证材料，交网站维护者部署，再返回平台执行验证。看到验证成功后，才在下方登记“验证通过”。<a :href="searchProviders[provider].help" target="_blank" rel="noopener noreferrer" @click="openPortal($event,'help')">查看官方帮助</a></li>
-          <li>验证通过后，前往<a :href="searchProviders[provider].submit" target="_blank" rel="noopener noreferrer" @click="openPortal($event,'submit')">官方提交入口</a>提交站点地图或实际页面，再登记平台结果。</li></ol>
+          <li>验证通过后，前往<a :href="searchProviders[provider].submit" target="_blank" rel="noopener noreferrer" @click="openPortal($event,'submit')">官方提交入口</a>。<template v-if="provider==='baidu'">在“普通收录 → 手动提交”填写当前站点的实际网页地址，每行一个、每批最多20条，以平台当前限制为准；不要在这个表单填写站点地图。只提交一次，再核对成功提示或“数据反馈”；若只是输入框清空或没有明确回执，先在备注记录“结果未知”，不要重复提交。</template><template v-else>按平台当前提供的入口提交站点地图或实际页面，再登记平台结果。</template></li></ol>
         <div v-if="portalUrl" class="search-value" data-testid="search-portal-fallback"><p v-if="portalError" class="search-warning" role="alert">{{ portalError }}</p><p v-else class="search-hint" role="status">{{ portalMessage }}</p><p>{{ portalUrl }} <el-button text @click="copyPortal">复制入口地址</el-button></p></div>
-        <p class="search-value">{{ view.sitemap_url }} <el-button text :disabled="locked" @click="copySitemap">复制站点地图地址</el-button></p>
+        <p class="search-value">{{ provider==='baidu' ? '供平台提供的站点地图入口使用，不填入“手动提交”表单：' : '' }}{{ view.sitemap_url }} <el-button text :disabled="locked" @click="copySitemap">复制站点地图地址</el-button></p>
         <p class="search-hint">{{ view.providers.find(item=>item.id===provider)?.availability_note }}</p>
       </details>
       <div class="search-form">

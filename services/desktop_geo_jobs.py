@@ -416,8 +416,12 @@ class DesktopGeoJobs:
     def start_run(self, plan, options, cycle_id=None):
         try:
             plan = copy.deepcopy(validate_plan(plan))
+            if cycle_id:
+                cycle = geo_content_store.get_cycle(self.data / 'database.db', cycle_id)
+                if cycle.get('baseline_source') == 'user_reported_external':
+                    raise ValueError('外部用户基线不能启动原生复测，请另建独立原生基线')
             config = self._config(options)
-        except (ValueError, TypeError, KeyError) as error:
+        except (ValueError, TypeError, KeyError, geo_content_store.ResearchNotFoundError) as error:
             return {"error": str(error)}
         run_dir = self.data / "geo-tests/desktop-runs" / uuid.uuid4().hex
         async def run():
@@ -433,6 +437,8 @@ class DesktopGeoJobs:
     def start_research_retest(self, cycle_id):
         try:
             cycle = geo_content_store.get_cycle(self.data / 'database.db', cycle_id)
+            if cycle.get('baseline_source') == 'user_reported_external':
+                raise ValueError('本轮是用户提供的外部基线，请继续登记外部观察或另建原生基线；不会自动提问')
             execution = cycle['baseline'].get('execution') or {}
             options = {'client_mode': execution.get('client_mode') or next((case.get('client_mode') for case in cycle['baseline']['cases'] if case.get('client_mode')), 'consumer'),
                        'model_label': execution.get('requested_model_label') or ''}
@@ -539,6 +545,8 @@ class DesktopGeoJobs:
             cycle = geo_content_store.get_cycle(database, cycle_id)
         except sqlite3.Error as error:
             raise ValueError('本机实验记录无法读取，请先核对原记录') from error
+        if cycle.get('baseline_source') == 'user_reported_external':
+            raise ValueError('外部用户基线没有可续采的原生任务，请继续登记外部观察或另建原生基线')
         details = resume_source(self.data, source, cycle)
         details['task'] = source
         return details

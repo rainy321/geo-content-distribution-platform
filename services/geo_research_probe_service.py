@@ -31,6 +31,8 @@ def _now():
 
 
 def context(cycle, case_id):
+    if cycle.get('baseline_source') == 'user_reported_external':
+        raise ValueError('本轮是用户提供的外部基线，不能当作原生采集复测；请继续登记外部观察或另建原生基线')
     if not isinstance(case_id, str):
         raise ValueError('请选择原计划中的一道问题')
     selected = [case for case in cycle['test_plan']['cases'] if case['id'] == case_id]
@@ -49,6 +51,13 @@ def context(cycle, case_id):
         raise ValueError('原回答等待时间无法确认，未发送')
     return {'case': copy.deepcopy(selected[0]), 'before': copy.deepcopy(previous[0]),
             'execution': {'client_mode': mode, 'requested_model_label': model, 'timeout_seconds': timeout}}
+
+
+def _observation_context(cycle, case_id):
+    if cycle.get('baseline_source') == 'user_reported_external':
+        from services.geo_external_baseline import external_context
+        return external_context(cycle, case_id)
+    return context(cycle, case_id)
 
 
 def _domains(profile):
@@ -178,7 +187,7 @@ def attach_probe(database, cycle_id, value, *, source, native_task_id=None, evid
     from services.geo_content_store import _connect, _cycle
     with closing(_connect(database)) as connection, connection:
         connection.execute('BEGIN IMMEDIATE')
-        cycle = _cycle(connection, cycle_id)
+        cycle = _cycle(connection, cycle_id, for_update=True)
         if source == 'research_prototype_import':
             record = normalize_import(cycle, value)
             raw_baseline = connection.execute('SELECT baseline FROM geo_content_cycles WHERE id=?', (cycle_id,)).fetchone()[0]
@@ -316,7 +325,8 @@ def submit_external_observation_context(database, cycle_id, probe_id, payload):
         expected_scope={key: payload[key] for key in ('project_id', 'expected_plan_sha256', 'expected_revision')})
 
 
-def attach_external_observation(database, cycle_id, expected_case_id, raw_response_text, metadata, *, expected_scope=None):
+def attach_external_observation(database, cycle_id, expected_case_id, raw_response_text, metadata, *, expected_scope=None,
+                                _connection=None, observation_role=None):
     """Save owner-provided external answer text; never pretend a native collection.
 
     The finite browser facade requires current project/plan/revision identity.
@@ -341,17 +351,30 @@ def attach_external_observation(database, cycle_id, expected_case_id, raw_respon
     if mode not in (None, 'work', 'consumer') or (complete is not None and type(complete) is not bool):
         raise ValueError('外部界面或完整性只能使用明确提供的信息，缺失请保持未知')
     source_links = _external_source_links(metadata['source_links']) if 'source_links' in metadata else []
-    with closing(_connect(database)) as connection, connection:
-        connection.execute('BEGIN IMMEDIATE')
-        cycle = _cycle(connection, cycle_id)
+    from contextlib import contextmanager
+    @contextmanager
+    def transaction():
+        if _connection is not None:
+            yield _connection
+        else:
+            with closing(_connect(database)) as own, own:
+                own.execute('BEGIN IMMEDIATE')
+                yield own
+    with transaction() as connection:
+        cycle = _cycle(connection, cycle_id, for_update=True)
         _check_external_scope(cycle, expected_scope)
-        details = context(cycle, expected_case_id)
+        if cycle.get('baseline_source') == 'user_reported_external':
+            from services.geo_external_baseline import external_context, check_profile_current
+            check_profile_current(connection, cycle)
+            details = external_context(cycle, expected_case_id)
+        else:
+            details = context(cycle, expected_case_id)
         observed_question = metadata.get('question')
         raw_sha = _sha(raw_response_text.encode('utf-8'))
         identity = {'cycle_id': cycle_id, 'case_id': expected_case_id, 'response_sha256': raw_sha,
                     'metadata': {key: value for key, value in metadata.items() if key != 'business_relationship_review'}}
         identifier = _sha(json.dumps(identity, ensure_ascii=False, sort_keys=True).encode('utf-8'))[:32]
-        before = _side(cycle['profile'], details['before'])
+        before = details['external_before'] if 'external_before' in details else _side(cycle['profile'], details['before'])
         # Existing explicit private/deferred/capacity exclusions also protect
         # pasted text. No submission or completion receipt is manufactured.
         error = answer_evaluation_error(raw_response_text, client_mode=mode or 'work')
@@ -389,6 +412,14 @@ def attach_external_observation(database, cycle_id, expected_case_id, raw_respon
             record['external_submission'] = {'channel': 'software_json_text_entry', 'basis': 'user_reported',
                 'project_id': cycle['project_id'], 'cycle_revision': cycle['revision'],
                 'plan_sha256': cycle['test_plan']['plan_sha256'], 'independent_verification': False}
+        if observation_role is not None:
+            if observation_role != 'baseline' or cycle.get('baseline_source') != 'user_reported_external':
+                raise ValueError('外部观察角色无效')
+            record['observation_role'] = observation_role
+        if cycle.get('baseline_source') == 'user_reported_external':
+            from services.geo_external_baseline import question_has_url
+            record['question_with_url'] = question_has_url(details['case']['question'], cycle['profile'])
+            record['question_marker_basis'] = 'frozen_plan_text'
         if metadata.get('business_relationship_review') is not None:
             record['business_relationship_review'] = _business_review(cycle, record, metadata['business_relationship_review'])
         connection.execute(CREATE_PROBES)
@@ -432,8 +463,10 @@ def attest_external_observation_context(database, cycle_id, probe_id, expected_r
     statement_sha = _sha(json.dumps(statement, ensure_ascii=False, sort_keys=True).encode('utf-8'))
     with closing(_connect(database)) as connection, connection:
         connection.execute('BEGIN IMMEDIATE')
-        cycle = _cycle(connection, cycle_id)
+        cycle = _cycle(connection, cycle_id, for_update=True)
         _check_external_scope(cycle, expected_scope)
+        from services.geo_external_baseline import check_profile_current
+        check_profile_current(connection, cycle)
         if not connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='geo_research_probes'").fetchone():
             raise ValueError('外部反馈记录不存在，未新建记录')
         row = connection.execute('SELECT source,record FROM geo_research_probes WHERE id=? AND cycle_id=?',
@@ -453,7 +486,7 @@ def attest_external_observation_context(database, cycle_id, probe_id, expected_r
                 or record.get('response_sha256') != expected_response_sha256
                 or after.get('response_sha256') != expected_response_sha256):
             raise ValueError('外部回答原文与预期 SHA256 不一致，未修改')
-        details = context(cycle, record.get('case_id'))
+        details = _observation_context(cycle, record.get('case_id'))
         anchor_question = details['case']['question']
         if (record.get('question') != anchor_question
                 or record.get('question_sha256') != _sha(anchor_question.encode('utf-8'))
@@ -515,7 +548,9 @@ def _reviewed_probe(connection, cycle, probe_id, *, expected_case_id=None, expec
             or record.get('native_verified') is not (row['source'] == 'native_collector')
             or (expected_case_id is not None and record.get('case_id') != expected_case_id)):
         raise ValueError('单题记录的来源或关联原题不一致，未修改')
-    details = context(cycle, record.get('case_id'))
+    if cycle.get('baseline_source') == 'user_reported_external' and record.get('source') != 'user_reported_external':
+        raise ValueError('外部起始轮不能包含伪造的原生采集身份')
+    details = _observation_context(cycle, record.get('case_id'))
     question = details['case']['question']
     if (record.get('question') != question or record.get('question_sha256') != _sha(question.encode('utf-8'))
             or record.get('plan_sha256') != cycle['test_plan']['plan_sha256']):
@@ -604,8 +639,10 @@ def review_probe_business(database, cycle_id, probe_id, review, *, expected_scop
     from services.geo_content_store import _connect, _cycle
     with closing(_connect(database)) as connection, connection:
         connection.execute('BEGIN IMMEDIATE')
-        cycle = _cycle(connection, cycle_id)
+        cycle = _cycle(connection, cycle_id, for_update=True)
         _check_external_scope(cycle, expected_scope, allow_unassigned_project=True)
+        from services.geo_external_baseline import check_profile_current
+        check_profile_current(connection, cycle)
         record, response_sha = _reviewed_probe(connection, cycle, probe_id,
             expected_case_id=expected_case_id, expected_response_sha256=expected_response_sha256)
         history = _business_review_history(record)

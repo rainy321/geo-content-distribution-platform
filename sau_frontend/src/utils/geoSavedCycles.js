@@ -1,4 +1,5 @@
 import { sameBrand, journeyDate } from './geoJourney.js'
+import { isExternalCycle } from './geoExternalBaseline.js'
 
 const cycleId = value => typeof value === 'string' && /^[a-z0-9_-]{1,120}$/i.test(value)
 const projectSnapshot = project => project ? Object.freeze({id:project.id,name:project.name,website:project.website,entity_type:project.entity_type}) : null
@@ -13,26 +14,33 @@ export function savedCycleRows(rows, project) {
   for(const row of matching)counts.set(row.id,(counts.get(row.id)||0)+1)
   return matching.filter(row=>counts.get(row.id)===1).map(row=>Object.freeze({
     id:row.id,project_id:row.project_id,report_ref:row.report_ref,
+    ...(typeof row.baseline_source==='string'?{baseline_source:row.baseline_source}:{}),
+    ...(typeof row.baseline_kind==='string'?{baseline_kind:row.baseline_kind}:{}),
     updated_at:row.updated_at,created_at:row.created_at,
     draft_count:Number.isSafeInteger(row.draft_count)&&row.draft_count>=0?row.draft_count:null
   }))
 }
 
-export const savedCycleLabel = row => `更新于 ${journeyDate(row.updated_at||row.created_at)} · 基线报告 ${row.report_ref} · ${row.draft_count==null?'稿件数待核对':`${row.draft_count} 篇稿件`}`
+export const savedCycleLabel = row => `更新于 ${journeyDate(row.updated_at||row.created_at)} · ${row.baseline_source==='user_reported_external'?'手机或外部观察基线':'基线报告'} ${row.report_ref} · ${row.draft_count==null?'稿件数待核对':`${row.draft_count} 篇稿件`}`
 
 export function savedCycleMatches(value, row, project) {
+  const external=isExternalCycle(value)
   return Boolean(value && row && validProject(project) && value.id===row.id &&
     row.project_id===project.id && value.project_id===project.id &&
     typeof row.report_ref==='string' && row.report_ref.trim() && value.report_ref===row.report_ref &&
-    sameBrand(value.profile,project) && sameBrand(value.baseline?.profile,project) &&
+    (row.baseline_source===undefined||row.baseline_source===(external?'user_reported_external':'native_report')) &&
+    (row.baseline_kind===undefined||row.baseline_kind===(external?'geo_external_baseline_v1':'geo_search_test_report')) &&
+    (value.baseline_source!=='user_reported_external'||external) &&
+    sameBrand(value.profile,project) && (external||sameBrand(value.baseline?.profile,project)) &&
     Array.isArray(value.drafts) && Array.isArray(value.analysis?.briefs))
 }
 
 export function savedCycleContinuation(value, project) {
   const row={id:value?.id,project_id:value?.project_id,report_ref:value?.report_ref}
-  if(!savedCycleMatches(value,row,project) || !Array.isArray(value.baseline?.cases))throw new Error('已有内容与当前对象或原基线不一致，已阻止混用。')
+  const external=isExternalCycle(value)
+  if(!savedCycleMatches(value,row,project) || !Array.isArray(external?value.test_plan?.cases:value.baseline?.cases))throw new Error('已有内容与当前对象或原基线不一致，已阻止混用。')
   const draft=value.drafts.find(item=>value.analysis.briefs.some(brief=>brief.id===item.brief_id) && Object.hasOwn(value.channels || {},item.platform))
-  return {report:value.baseline,reportId:value.report_ref,cycle:value,
+  return {report:external?null:value.baseline,reportId:external?'':value.report_ref,cycle:value,
     briefId:draft?.brief_id || value.analysis.briefs[0]?.id || '',
     platform:draft?.platform || '',articleId:draft?.article_id || null}
 }

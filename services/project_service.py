@@ -250,6 +250,9 @@ def delete_project(database_path: str | Path, project_id: int) -> None:
             research_count = conn.execute('SELECT COUNT(*) FROM geo_content_cycles WHERE project_id=?', (project_id,)).fetchone()[0]
             if research_count:
                 raise ProjectHasArticlesError('项目下仍有关联的采集内容任务单，不能删除')
+            if (conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='geo_external_baseline_plans'").fetchone()
+                    and conn.execute('SELECT COUNT(*) FROM geo_external_baseline_plans WHERE project_id=?', (project_id,)).fetchone()[0]):
+                raise ProjectHasArticlesError('项目下仍有已冻结的外部问题计划，历史记录保留，不能删除')
             if conn.execute('SELECT COUNT(*) FROM geo_distribution_targets WHERE project_id=?', (project_id,)).fetchone()[0]:
                 raise ProjectHasArticlesError('项目下仍有平台接入记录，不能删除')
             conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))

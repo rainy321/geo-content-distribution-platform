@@ -1,3 +1,5 @@
+import { isExternalCycle } from './geoExternalBaseline.js'
+
 export const qccMaintenanceEntry = 'https://help.qcc.com/spt/support/handle-dissent'
 export const sourceMaintenanceModules = {website:'企业官网',introduction:'企业简介'}
 
@@ -6,9 +8,10 @@ const digest=value=>typeof value==='string'&&/^[a-f0-9]{64}$/i.test(value)
 const knownStages=new Set(['draft','opening','awaiting_login','awaiting_human_verification','needs_manual_input',
   'confirmation_ready','submitted_pending_review','submission_unknown','needs_manual_review','fee_required_stopped','window_closed','browser_rejected','waiting_verification'])
 
-export const sourceMaintenanceCompany=cycle=>cycle?.baseline?.profile?.entity_type==='company'
+export const sourceMaintenanceProfile=cycle=>isExternalCycle(cycle)?cycle.profile:cycle?.baseline?.profile
+export const sourceMaintenanceCompany=cycle=>sourceMaintenanceProfile(cycle)?.entity_type==='company'
 export function sourceMaintenanceOverview(cycle,overview=cycle?.source_maintenance) {
-  const company=sourceMaintenanceCompany(cycle),name=cycle?.baseline?.profile?.name
+  const company=sourceMaintenanceCompany(cycle),name=sourceMaintenanceProfile(cycle)?.name
   const scoped=Boolean(company&&identifier(cycle?.id)&&overview?.platform==='qcc'
     &&typeof name==='string'&&name.trim()&&overview.company_name===name)
   const supported=Boolean(scoped&&overview.supported===true&&digest(overview.context_sha256))
@@ -44,7 +47,7 @@ export function sourceMaintenancePayload(cycle,overview,module,proposal) {
   return {module,proposal,expected_context_sha256:current.context_sha256,...(facts?{reference_fact_ids:[...facts]}:{}),...(record?{task_id:record.id}:{})}
 }
 export const sourceMaintenanceCanOpen=(record,cycle)=>Boolean(identifier(record?.id)&&record.cycle_id===cycle?.id
-  &&sourceMaintenanceCompany(cycle)&&record.company_name===cycle.baseline.profile.name&&record.can_open===true&&knownStages.has(record.stage)
+  &&sourceMaintenanceCompany(cycle)&&record.company_name===sourceMaintenanceProfile(cycle).name&&record.can_open===true&&knownStages.has(record.stage)
   &&record.stage!=='browser_rejected')
 export const sourceMaintenanceNativeId=record=>identifier(record?.native_task_id)?record.native_task_id:null
 export function sourceMaintenanceStage(record) {

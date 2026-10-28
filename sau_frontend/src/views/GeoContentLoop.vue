@@ -11,7 +11,7 @@
     <el-card v-if="nativeAvailable" shadow="never">
       <DoubaoPreparation/>
       <div class="row"><strong>豆包写作会话</strong><el-select :model-value="clientMode" :disabled="busy || writingContextPending" aria-label="写作豆包界面" @update:model-value="selectWritingMode"><el-option label="豆包对话" value="consumer"/><el-option label="豆包工作" value="work"/></el-select><el-input :model-value="model" :disabled="busy || writingContextPending" placeholder="模型选项可留空" aria-label="写作模型选项" @update:model-value="selectWritingModel"/><el-button :disabled="busy || writingContextPending" @click="login">登录豆包</el-button><el-button v-if="nativeBusy" @click="stop">停止任务</el-button></div>
-      <p class="hint">{{ writingContextPending ? '正在读取本轮写作选项，请稍候。' : '写作会话初始沿用本轮基线的界面和模型选项；你调整后的选择会按任务单保留。留空表示使用当前模型。' }}</p>
+      <p class="hint">{{ writingContextPending ? '正在读取本轮写作选项，请稍候。' : externalCycle ? '本轮基线来自手机或外部观察。这里的界面和模型选择只用于后续写作，不代表实际采样模式；实际采样条件按各条外部记录保留。留空表示使用当前写作模型。' : '写作会话初始沿用本轮基线的界面和模型选项；你调整后的选择会按任务单保留。留空表示使用当前模型。' }}</p>
       <p v-if="!contentRecovery || (task.kind==='login' && loginScope?.taskId===task.id && loginScope?.cycleId===cycleId)" class="hint" aria-live="polite">{{ currentTaskMessage }}</p>
       <DoubaoTaskRecovery v-if="contentRecovery" :recovery="contentRecovery" :busy="busy" :native-available="nativeAvailable" @login="login"/>
       <p v-if="recoveryStorageError" class="hint" role="status">{{ recoveryStorageError }}</p>
@@ -21,7 +21,7 @@
       <GeoWebsiteAudit :cycle="cycle" :busy="working || nativeBusy || feedbackBusy" @busy="websiteAuditBusy=$event"/>
       <GeoOtherSearchEntries :cycle="cycle" :busy="busy" @busy="setFeedbackBusy"/>
       <el-card shadow="never">
-        <div class="row"><h2>2 · {{ cycle.profile.name }} · 内容选题</h2><el-tag>{{ cycle.analysis.method === 'rule_observations_not_ai' ? '采集待办，尚未 AI 策划' : '已完成 AI 策划' }}</el-tag></div>
+        <div class="row"><h2>2 · {{ cycle.profile.name }} · 内容选题</h2><el-tag>{{ cycle.analysis.method === 'user_reported_external_editorial_clues' ? '外部原文线索，尚未 AI 策划' : cycle.analysis.method === 'rule_observations_not_ai' ? '采集待办，尚未 AI 策划' : '已完成 AI 策划' }}</el-tag></div>
         <p>{{ cycle.analysis.diagnosis }}</p>
         <p v-if="cycle.feedback_diagnostics?.planning_feedback?.needs_update" class="hint" data-testid="research-feedback-planning-stale">后来收到的单题或外部反馈尚未用于当前选题。用下方 AI 策划按钮更新后，旧稿与原发布任务仍会保留。</p>
         <div class="row"><el-button v-if="nativeAvailable" type="primary" :disabled="busy" @click="generate('analysis', 'doubao')">豆包分析采集并制定选题</el-button><el-button :disabled="busy" @click="generate('analysis', 'api')">用已配置的 AI API 策划</el-button><el-button @click="download(cycle, 'research-task.json')">导出任务单</el-button></div>
@@ -59,11 +59,13 @@
         <el-empty v-if="!cycle.drafts.length" description="尚未生成平台稿"/>
       </el-card>
       <el-card shadow="never">
-        <h2>5 · 发布记录与同题复测</h2>
+        <h2>5 · {{ externalCycle ? '发布记录与外部观察' : '发布记录与同题复测' }}</h2>
         <GeoExternalFeedback data-geo-section="feedback" :cycle="cycle" :busy="busy" @updated="applyCycle" @busy="setFeedbackBusy"/>
         <GeoPublicationReview data-geo-section="publication" v-if="cycle" :cycle="cycle" :busy="busy" @updated="applyCycle"/>
         <p>发布器确认成功：{{ cycle.publications.length }} 条；用户登记：{{ cycle.reported_publications?.length || 0 }} 条（尚未独立核验）。演示和失败任务不计成功。</p>
         <p v-for="item in cycle.reported_publications" :key="item.id" class="hint"><el-tag type="info">用户登记，未核验</el-tag> {{ date(item.published_at) }} · <a :href="safeUrl(item.url)" target="_blank" rel="noopener noreferrer">查看登记链接</a></p>
+        <p v-if="externalCycle" class="hint" data-testid="external-baseline-feedback-note">本轮基线来自用户提供的手机或外部观察，原生复测与原生指标比较不可用。请在上方“录入外部回答”中按原题追加后续观察，逐条保留原文与采样条件；写作选择不代表实际采样模式。</p>
+        <template v-if="nativeRetestAllowed">
         <p class="hint">复测使用原计划、原界面和原模型选项，新开一轮采集。发布不代表已被索引；条件相同也只能观察变化，不能证明因果。</p>
         <el-button v-if="nativeAvailable" :disabled="busy" @click="retest">按原计划开始新一轮复测</el-button>
         <div class="row"><el-select v-model="retestReportId" aria-label="关联复测报告" placeholder="或选择本品牌的其他报告"><el-option v-for="report in matchingRetests" :key="report.id" :value="report.id" :label="`${report.name} · ${date(report.updated_at)}`"/></el-select><el-button :disabled="!retestReportId || busy" @click="attachRetest">关联并比较</el-button></div>
@@ -80,6 +82,7 @@
           <p class="hint">{{ report.comparison.note }}</p><p v-for="link in report.comparison.publication_citations" :key="link.url" class="hint">{{ link.url }} · {{ link.observed_in_citations === true ? '在本次正文引用中观察到' : '暂未观察到引用，是否被索引未知' }}</p>
           </template>
         </article>
+        </template>
       </el-card>
     </template>
     <el-dialog v-model="publicationVisible" title="登记已在平台提交的公开文章" width="620px" :close-on-click-modal="false">
@@ -110,6 +113,7 @@ import {diagnosticSection,focusDiagnosticSection} from '@/utils/geoNextActions'
 import {updateFeedbackBusy} from '@/utils/geoFeedbackBusy'
 import { destinationContinuationText, destinationPreparationText, destinationSupportsFill, isDestinationTask } from '@/utils/geoDestinationSession'
 import { createWritingPreferences } from '@/utils/geoWritingOptions'
+import { isExternalCycle, nativeCycleCapability } from '@/utils/geoExternalBaseline'
 import { retestCollection } from '@/utils/geoFeedback'
 import { destinationEnabled, destinationCanPrepare, destinationPublicationGate, writingChannelEnabled, writingChannelLabel, inactiveDestinationMessage } from '@/utils/geoDestinationAvailability'
 
@@ -135,6 +139,8 @@ const selectWritingModel = value => {model.value = typeof value === 'string' ? v
 const publicationVisible = ref(false), publication = ref({url:'',published_at:'',confirmed:false,note:''})
 const nativeBusy = computed(() => task.value.status === 'running'), busy = computed(() => working.value || nativeBusy.value || websiteAuditBusy.value || feedbackBusy.value)
 const writingContextPending = computed(() => Boolean(cycleId.value && cycle.value?.id !== cycleId.value))
+const externalCycle = computed(() => isExternalCycle(cycle.value))
+const nativeRetestAllowed = computed(() => Boolean(cycle.value?.baseline && nativeCycleCapability(cycle.value,'native_retest')))
 const recoveryTask=ref(null),recoveryStorageError=ref(''),recoveryUnreadable=ref(false)
 const recoveryMemory=new Map()
 const contentRecovery = computed(() => cycleId.value ? doubaoTaskRecovery(scopedRecoveryCheckpoint(task.value,cycleId.value))
@@ -176,7 +182,7 @@ const navigateDiagnostic=async action=>{
   await nextTick();focusDiagnosticSection(section)
 }
 
-const matchingRetests = computed(() => reports.value.filter(report => report.name === cycle.value?.profile.name && report.run_id !== cycle.value?.baseline.run_id))
+const matchingRetests = computed(() => nativeRetestAllowed.value ? reports.value.filter(report => report.name === cycle.value?.profile?.name && report.run_id !== cycle.value?.baseline?.run_id) : [])
 const currentTaskMessage = computed(() => scopedLoginMessage(task.value,loginScope.value,cycleId.value,working.value) || (task.value.cycle_id === cycleId.value ? (isDestinationTask(task.value) ? '平台任务的当前步骤与继续操作见下方对应平台准备卡。' : task.value.message || (nativeBusy.value ? '当前内容任务执行中，验证请在专用窗口完成。' : '本轮任务记录已保存。')) : (nativeBusy.value ? '另一个桌面任务正在执行，请完成后再开始写作。' : '平台登录、填写、写作与曝光采集分开记录。历史失败详情保留在任务记录。')))
 const feedbackStages = {collection_only:'尚无发布证据',conditions_mismatch:'复测条件不匹配',retest_precedes_publication:'复测早于发布时间',publication_time_unknown:'发布时间待核对',post_publication_observation:'发布后的采集观察'}
 const date = value => value ? new Date(value).toLocaleString('zh-CN', {timeZone:'Asia/Hong_Kong',hour12:false}) : '时间未知'
@@ -321,7 +327,7 @@ const fillDestination = async draft => {
   catch(error) {if(error instanceof Error) ElMessage.error(error.message)}
 }
 const retest = async () => {
-  if(busy.value||!cycleId.value||cycle.value?.id!==cycleId.value)return
+  if(busy.value||!nativeRetestAllowed.value||!cycleId.value||cycle.value?.id!==cycleId.value)return
   const scope = cycleScope()
   working.value=true
   try {
@@ -329,7 +335,7 @@ const retest = async () => {
     const recovery=contentRecovery.value
     const reminder=recovery?.requiresConfirmation?`${recovery.submissionText} `:recoveryUnreadable.value?'上次任务的发送状态未能读取，请先核对豆包原会话。 ':''
     await ElMessageBox.confirm(`${reminder}将按基线问题开启新一轮豆包采集，会再次提问。发布后的索引时滞未知，采集结果只作观察。`,'开始同题复测',{type:'info'})
-    if(!sameCycleScope(scope))return
+    if(!sameCycleScope(scope)||!nativeRetestAllowed.value)return
     const result = await window.pywebview.api.start_research_retest(scope.id)
     if (result.error) throw new Error(result.error)
     if(typeof result.id!=='string'||!result.id)throw new Error('复测任务尚未确认启动，原任务提醒仍保留')
@@ -337,7 +343,7 @@ const retest = async () => {
   } catch(error) { if (sameCycleScope(scope)&&error instanceof Error) ElMessage.error(error.message) }
   finally {working.value=false}
 }
-const attachRetest = async () => { const scope=cycleScope();applyCycle((await geoContentApi.retest(scope.id,retestReportId.value)).data,{scope}) }
+const attachRetest = async () => { if(!nativeRetestAllowed.value)return;const scope=cycleScope();applyCycle((await geoContentApi.retest(scope.id,retestReportId.value)).data,{scope}) }
 const edit = draft => router.push({path:'/content-create',query:{articleId:draft.article_id}})
 const legacyChannel = draft => draft.provenance.destination ? draft.provenance.destination.channel : draft.platform
 const publish = draft => {if(draft.provenance.destination && !destinationCanPrepare(draftDestination(draft))){ElMessage.info(destinationPublicationGate(draftDestination(draft)).reason);return}router.push({path:'/publish-center',query:{article_id:draft.article_id,platform:legacyChannel(draft)}})}

@@ -88,6 +88,20 @@ class _View:
 
 
 def _baseline(view, cycle):
+    if cycle.get('baseline_source') == 'user_reported_external':
+        records = _rows(_dict(cycle.get('external_baseline')).get('observations'))
+        valid = {}
+        for row in records:
+            case_id = _id(row.get('case_id'))
+            if not case_id:
+                continue
+            ref = view.reference('probe', row['id'], '用户提供的外部基线原文 ' + case_id,
+                                 case_id=case_id, native_verified=False, independent_verification=False)
+            if _dict(row.get('after')).get('response') and not _dict(row.get('after')).get('answer_error'):
+                valid[case_id] = ref
+        ref = view.reference('cycle', view.cycle_id, '外部用户基线，原生指标不可用')
+        view.issue('external_baseline_unverified', '本轮来自用户提供的外部原文，采样条件、完整性和内容未独立核验；不进入原生曝光指标，也不能从原文生成客户事实。', [ref])
+        return valid
     rows = _rows(_dict(cycle.get('baseline')).get('cases'))
     valid, incomplete = {}, []
     for row in rows:
@@ -113,7 +127,8 @@ def _baseline(view, cycle):
 
 
 def _feedback(view, cycle, fact_refs):
-    probes = [row for row in _rows(cycle.get('probes'), 50) if row.get('cycle_id') == view.cycle_id]
+    probes = [row for row in _rows(cycle.get('probes'), 50) if row.get('cycle_id') == view.cycle_id
+              and row.get('observation_role') != 'baseline']
     external = [row for row in probes if row.get('source') == 'user_reported_external' and row.get('native_verified') is False]
     native = [row for row in probes if row.get('source') == 'native_collector' and row.get('native_verified') is True]
     for row in external:

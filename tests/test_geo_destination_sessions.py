@@ -62,7 +62,8 @@ class DestinationSessionTests(unittest.IsolatedAsyncioTestCase):
     asyncSetUp = gates.DestinationBrowserGateTests.asyncSetUp
     load = gates.DestinationBrowserGateTests.load
 
-    async def start_session(self, *, login='', editor=EMPTY, article=None, progress=None, session_config=None):
+    async def start_session(self, *, login='', editor=EMPTY, article=None, progress=None, session_config=None,
+                            initial_wait_seconds=10):
         configuration = {**CONFIG, 'login_url': LOGIN_URL, **(session_config or {})}
         self.documents[LOGIN_URL] = '<!doctype html><body>' + login + '</body>'
         self.documents[configuration['editor_url']] = '<!doctype html><body>' + editor + '</body>'
@@ -82,7 +83,8 @@ class DestinationSessionTests(unittest.IsolatedAsyncioTestCase):
             {'config': configuration}, Path(temporary) / 'profile', 'isolated-fixture',
             article=article, progress=save, check_requested=self.check, wait_seconds=20))
         self.addAsyncCleanup(self.cancel_session)
-        await self.wait_until(lambda: self.events and self.events[-1]['destination_session']['can_check'])
+        await self.wait_until(lambda: self.events and self.events[-1]['destination_session']['can_check'],
+                              timeout=initial_wait_seconds)
         return self.events[-1]['destination_session']
 
     async def cancel_session(self):
@@ -90,11 +92,10 @@ class DestinationSessionTests(unittest.IsolatedAsyncioTestCase):
             self.session_task.cancel()
         await asyncio.gather(self.session_task, return_exceptions=True)
 
-    async def wait_until(self, predicate):
-        # The real isolated CSDN import/probe can take just over five seconds
-        # on Windows. Keep a bounded fixture budget without changing product
-        # waits, readiness checks, write markers or the no-replay assertions.
-        deadline = asyncio.get_running_loop().time() + 10
+    async def wait_until(self, predicate, *, timeout=10):
+        # The caller may bound an initial multi-stage import separately. Later
+        # checks keep this budget; product waits and readiness stay unchanged.
+        deadline = asyncio.get_running_loop().time() + timeout
         while not predicate():
             if self.session_task.done():
                 await self.session_task
@@ -269,7 +270,11 @@ class DestinationSessionTests(unittest.IsolatedAsyncioTestCase):
     async def test_real_fixed_csdn_adapter_is_dispatched_without_generic_selectors(self):
         from services import csdn_editor
         await self.start_session(editor=csdn_document(), article=ARTICLE, session_config={
-            'editor_url': 'https://editor.csdn.net/md/', 'title_selector': '', 'body_selector': ''})
+            'editor_url': 'https://editor.csdn.net/md/', 'title_selector': '', 'body_selector': ''},
+            # Isolated Windows profiling completed one import in 12.1s: eleven
+            # exact field snapshots plus gate checks and full readback. Give
+            # only this first import headroom; every later check remains 10s.
+            initial_wait_seconds=30)
         self.assertTrue(self.events[-1]['destination_session']['content_write_attempted'])
         self.assertEqual(self.events[-1]['state'], 'filled')
         self.assertEqual(await self.page.locator(csdn_editor.TITLE).input_value(), ARTICLE['title'])

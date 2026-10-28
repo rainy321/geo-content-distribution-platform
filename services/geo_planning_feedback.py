@@ -33,12 +33,14 @@ def planning_feedback(cycle):
     """Return a stable public projection; omit private/incomplete/foreign text."""
     identifier=cycle.get('id')
     plan=cycle.get('test_plan') or {}
-    allowed={row.get('id') for row in (cycle.get('baseline') or {}).get('cases',[]) if isinstance(row,dict)}
+    anchors=cycle.get('test_plan') if cycle.get('baseline_source')=='user_reported_external' else cycle.get('baseline')
+    allowed={row.get('id') for row in (anchors or {}).get('cases',[]) if isinstance(row,dict)}
     probes=cycle.get('probes') or []
     if not isinstance(probes,list):return []
     rows=[]
     seen=set()
     for probe in sorted((item for item in probes if isinstance(item,dict)),key=lambda row:(str(row.get('created_at','')),str(row.get('id',''))),reverse=True):
+        if probe.get('observation_role')=='baseline':continue
         probe_id=probe.get('id');after=probe.get('after') or {};source=probe.get('source')
         if (not isinstance(probe_id,str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,100}',probe_id) or probe_id in seen
                 or probe.get('cycle_id')!=identifier or probe.get('case_id') not in allowed

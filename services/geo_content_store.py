@@ -43,7 +43,7 @@ def _connect(database):
     return connection
 
 
-def _cycle(connection, identifier):
+def _cycle(connection, identifier, *, for_update=False):
     row = connection.execute('SELECT * FROM geo_content_cycles WHERE id=?', (identifier,)).fetchone()
     if not row:
         raise ResearchNotFoundError('内容迭代记录不存在')
@@ -52,10 +52,22 @@ def _cycle(connection, identifier):
         result[field] = json.loads(result[field])
     # Re-evaluate the view, preserving the stored cycle identity, digest, plan,
     # timestamps and raw answer evidence. Existing cycles are never recreated.
-    result['baseline'] = project_report_evaluation(result['baseline'])
-    result['profile'] = result['baseline']['profile']
-    result['test_plan'] = plan_from_report(result['baseline'])
-    result['observations'] = public_research_observations(result['baseline'], result['observations'])
+    from services.geo_external_baseline import KIND, project_cycle
+    if result['baseline'].get('kind') == KIND:
+        project_cycle(connection, result, result['baseline'])
+        if for_update:
+            # Only explicit editors enforce current project CAS. Immutable
+            # historical views remain readable even inside a read transaction.
+            from services.geo_external_baseline import check_profile_current
+            check_profile_current(connection, result)
+    else:
+        result['baseline'] = project_report_evaluation(result['baseline'])
+        result['profile'] = result['baseline']['profile']
+        result['test_plan'] = plan_from_report(result['baseline'])
+        result['observations'] = public_research_observations(result['baseline'], result['observations'])
+        result['baseline_source'] = 'native_report'
+        result['capabilities'] = {'native_probe': True, 'native_retest': True, 'native_metrics': True,
+                                  'editorial_research': True, 'work_drafting': True, 'external_observations': True}
     result['destinations'] = destinations.targets_for_connection(connection, result['project_id'])
     result['channels'] = {**CHANNELS, **{target['key']: target['config']['name'] for target in result['destinations']}}
     result['opportunities'] = destinations.opportunities(result['observations'], result['destinations'], result['profile'].get('website', ''))
@@ -159,9 +171,16 @@ def list_cycles(database):
                 if not isinstance(profile, dict):
                     profile = {}
             except (TypeError, ValueError):
+                baseline = {}
                 profile = {}
             item['website'] = profile.get('website') if isinstance(profile.get('website'), str) else ''
             item['entity_type'] = profile.get('entity_type') if profile.get('entity_type') in ('company', 'product') else ''
+            external = isinstance(baseline, dict) and baseline.get('kind') == 'geo_external_baseline_v1'
+            item['baseline_source'] = 'user_reported_external' if external else 'native_report'
+            item['baseline_kind'] = 'geo_external_baseline_v1' if external else 'geo_search_test_report'
+            item['capabilities'] = {'native_probe': not external, 'native_retest': not external,
+                                    'native_metrics': not external, 'editorial_research': True,
+                                    'work_drafting': True, 'external_observations': True}
             result.append(item)
         return result
 
@@ -293,6 +312,11 @@ def get_cycle(database, identifier):
         result['retests'] = []
         for row in connection.execute('SELECT report FROM geo_content_retests WHERE cycle_id=? ORDER BY created_at DESC', (identifier,)):
             report = json.loads(row['report'])
+            if result.get('baseline_source') == 'user_reported_external':
+                result['retests'].append({'run_id': report.get('run_id'), 'updated_at': report.get('updated_at'),
+                    'comparison': {'supported': False, 'reason': '外部用户基线不提供原生报告前后比较'},
+                    'collection': collection_summary(report)})
+                continue
             comparison = compare_reports(result['baseline'], report, publication_urls)
             comparison.update(publication_feedback(comparison, report, publication_records))
             result['retests'].append({'run_id': report['run_id'], 'updated_at': report.get('updated_at'),
@@ -310,9 +334,12 @@ def get_cycle(database, identifier):
     return result
 
 
-def _check_revision(cycle, revision):
+def _check_revision(cycle, revision, connection=None):
     if type(revision) is not int or cycle['revision'] != revision:
         raise ValueError('采集任务单或事实资料已变更，本次 AI 结果未覆盖新资料，请重新核对')
+    if connection is not None:
+        from services.geo_external_baseline import check_profile_current
+        check_profile_current(connection, cycle)
 
 
 def save_facts(database, identifier, facts, revision):
@@ -320,7 +347,7 @@ def save_facts(database, identifier, facts, revision):
     with closing(_connect(database)) as connection, connection:
         connection.execute('BEGIN IMMEDIATE')
         cycle = _cycle(connection, identifier)
-        _check_revision(cycle, revision)
+        _check_revision(cycle, revision, connection)
         if facts != cycle['facts']:
             connection.execute('UPDATE geo_content_cycles SET facts=?,revision=revision+1,updated_at=? WHERE id=?', (_json(facts), _now(), identifier))
     return get_cycle(database, identifier)
@@ -330,7 +357,7 @@ def save_analysis(database, identifier, raw, provenance, revision):
     with closing(_connect(database)) as connection, connection:
         connection.execute('BEGIN IMMEDIATE')
         cycle = _cycle(connection, identifier)
-        _check_revision(cycle, revision)
+        _check_revision(cycle, revision, connection)
         from services.geo_research_probe_service import list_probes
         from services.geo_planning_feedback import planning_feedback
         cycle['probes'] = list_probes(connection, identifier)
@@ -352,7 +379,7 @@ def save_draft(database, identifier, brief_id, platform, raw, provenance, revisi
     with closing(_connect(database)) as connection, connection:
         connection.execute('BEGIN IMMEDIATE')
         cycle = _cycle(connection, identifier)
-        _check_revision(cycle, revision)
+        _check_revision(cycle, revision, connection)
         inputs = draft_input(cycle, brief_id, platform)
         key = fingerprint(inputs)
         if provenance.get('input_sha256') and provenance['input_sha256'] != key:
@@ -369,9 +396,12 @@ def save_draft(database, identifier, brief_id, platform, raw, provenance, revisi
             (project_id,title,summary,content,tags,geo_score,geo_analysis,status) VALUES(?,?,?,?,?,?,?,'draft')''',
             (cycle['project_id'], draft['title'], draft['summary'], draft['content'], _json(draft['tags']), score['score'],
              _json({'dimensions': score['dimensions'], 'suggestions': score['suggestions']}))).lastrowid
-        context = {**provenance, 'report_digest': cycle['report_digest'], 'baseline_run_id': cycle['baseline']['run_id'],
+        from services.geo_external_baseline import baseline_id
+        context = {**provenance, 'report_digest': cycle['report_digest'], 'baseline_run_id': baseline_id(cycle),
                    'plan_sha256': cycle['test_plan']['plan_sha256'], 'brief': inputs['brief'], 'facts': inputs['facts'],
                    'used_fact_ids': draft['used_fact_ids'], 'review_state': 'draft_requires_editorial_review'}
+        if cycle.get('baseline_source') == 'user_reported_external':
+            context.update(baseline_source='user_reported_external', native_verified=False)
         if inputs.get('destination'):
             context['destination'] = inputs['destination']
             context['destination_config_sha256'] = inputs['destination_config_sha256']
@@ -427,7 +457,7 @@ def save_moderation_observation(database, identifier, value):
                      'url': url, 'article_sha256': expected, 'content_confirmed': content_confirmed})
     with closing(_connect(database)) as connection, connection:
         connection.execute('BEGIN IMMEDIATE')
-        cycle = _cycle(connection, identifier)
+        cycle = _cycle(connection, identifier, for_update=True)
         article = connection.execute('''SELECT a.*,d.platform FROM articles a
             JOIN geo_content_drafts d ON d.article_id=a.id
             WHERE a.id=? AND d.cycle_id=? AND a.project_id=?''',
@@ -486,7 +516,7 @@ def save_reported_publication(database, identifier, value):
         raise ValueError('发布备注不能超过 1000 字')
     with closing(_connect(database)) as connection, connection:
         connection.execute('BEGIN IMMEDIATE')
-        cycle = _cycle(connection, identifier)
+        cycle = _cycle(connection, identifier, for_update=True)
         row = connection.execute('''SELECT a.*,d.platform FROM articles a
             JOIN geo_content_drafts d ON d.article_id=a.id
             WHERE a.id=? AND d.cycle_id=? AND a.project_id=?''', (article_id, identifier, cycle['project_id'])).fetchone()
@@ -505,7 +535,7 @@ def save_reported_publication(database, identifier, value):
             fingerprint({'title': row['title'], 'content': row['content']}), url)
         if observation and observation['state'] in ('pending', 'rejected'):
             raise ValueError('本篇文章已记录待审核或审核未通过，不能登记为公开发布；请先核对该文章的公开正文，保留原审核记录')
-        for case in cycle['baseline']['cases']:
+        for case in (cycle['baseline']['cases'] if cycle['baseline'] else []):
             if not case['assessment']['answer_evaluable']:
                 continue
             try:
@@ -519,12 +549,13 @@ def save_reported_publication(database, identifier, value):
             if prior['article_id'] != article_id or prior['target_id'] != target_id:
                 raise ValueError('该链接已登记给另一篇文章，不能重复认作不同内容')
         else:
+            from services.geo_external_baseline import baseline_id
             connection.execute('''INSERT INTO geo_content_publications
                 (id,cycle_id,article_id,target_id,target_revision,target_snapshot,url,published_at,evidence_level,note,
                  baseline_run_id,report_digest,plan_sha256,article_sha256,created_at)
                 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)''',
                 (uuid.uuid4().hex, identifier, article_id, target_id, target_row['revision'], target_row['config'], url,
-                 published.isoformat(), 'owner_reported', note.strip(), cycle['baseline']['run_id'], cycle['report_digest'],
+                 published.isoformat(), 'owner_reported', note.strip(), baseline_id(cycle), cycle['report_digest'],
                  cycle['test_plan']['plan_sha256'], fingerprint({'title': row['title'], 'content': row['content']}), _now()))
             connection.execute('UPDATE geo_content_cycles SET updated_at=? WHERE id=?', (_now(), identifier))
     return get_cycle(database, identifier)
@@ -534,6 +565,8 @@ def attach_retest(database, identifier, report):
     plan_from_report(report)
     with closing(_connect(database)) as connection, connection:
         cycle = _cycle(connection, identifier)
+        if cycle.get('baseline_source') == 'user_reported_external':
+            raise ValueError('外部用户基线不能作为原生报告效果比较，请保留外部观察并另建原生基线')
         if report['run_id'] == cycle['baseline']['run_id']:
             raise ValueError('基线报告本身不能作为发布后的复测')
         if report['profile']['name'].strip().casefold() != cycle['profile']['name'].strip().casefold():

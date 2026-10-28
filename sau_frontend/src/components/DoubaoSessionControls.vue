@@ -1,7 +1,7 @@
 <template>
   <aside class="doubao-session" aria-label="豆包写作会话" data-testid="doubao-session-controls">
     <div class="session-row"><strong>豆包写作会话</strong><el-select :model-value="clientMode" :disabled="busy" aria-label="写作豆包界面" @update:model-value="$emit('mode', $event)"><el-option label="豆包对话" value="consumer"/><el-option label="豆包工作" value="work"/></el-select><el-button :disabled="busy" @click="$emit('login')">登录豆包</el-button></div>
-    <p>两个界面的登录独立保存。需要时在专用窗口完成正常验证。</p>
+    <p>软件为两种界面选项分别保存专用会话；选项不会切换网页实际模式。需要时在专用窗口完成正常验证。</p>
     <details><summary>模型选项与登录说明</summary><el-input :model-value="model" :disabled="busy" placeholder="模型选项可留空，使用当前模型" aria-label="写作模型选项" @update:model-value="$emit('model', $event)"/><DoubaoPreparation/></details>
   </aside>
 </template>
