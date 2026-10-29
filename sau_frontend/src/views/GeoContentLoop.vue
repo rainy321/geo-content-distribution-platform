@@ -17,6 +17,7 @@
       <p v-if="recoveryStorageError" class="hint" role="status">{{ recoveryStorageError }}</p>
     </el-card>
     <template v-if="cycle">
+      <GeoOptimizationProgress v-if="progressProject" :project="progressProject" :busy="busy" @busy="setFeedbackBusy"/>
       <GeoNextActions :cycle="cycle" :busy="busy" @navigate="navigateDiagnostic"/>
       <GeoWebsiteAudit :cycle="cycle" :busy="working || nativeBusy || feedbackBusy" @busy="websiteAuditBusy=$event"/>
       <GeoOtherSearchEntries :cycle="cycle" :busy="busy" @busy="setFeedbackBusy"/>
@@ -108,6 +109,7 @@ import GeoPublicationReview from '@/components/GeoPublicationReview.vue'
 import GeoExternalFeedback from '@/components/GeoExternalFeedback.vue'
 import GeoWebsiteAudit from '@/components/GeoWebsiteAudit.vue'
 import GeoOtherSearchEntries from '@/components/GeoOtherSearchEntries.vue'
+import GeoOptimizationProgress from '@/components/GeoOptimizationProgress.vue'
 import GeoNextActions from '@/components/GeoNextActions.vue'
 import {diagnosticSection,focusDiagnosticSection} from '@/utils/geoNextActions'
 import {updateFeedbackBusy} from '@/utils/geoFeedbackBusy'
@@ -140,6 +142,7 @@ const publicationVisible = ref(false), publication = ref({url:'',published_at:''
 const nativeBusy = computed(() => task.value.status === 'running'), busy = computed(() => working.value || nativeBusy.value || websiteAuditBusy.value || feedbackBusy.value)
 const writingContextPending = computed(() => Boolean(cycleId.value && cycle.value?.id !== cycleId.value))
 const externalCycle = computed(() => isExternalCycle(cycle.value))
+const progressProject = computed(() => Number.isSafeInteger(cycle.value?.project_id)&&cycle.value.project_id>0?{...cycle.value.profile,id:cycle.value.project_id}:null)
 const nativeRetestAllowed = computed(() => Boolean(cycle.value?.baseline && nativeCycleCapability(cycle.value,'native_retest')))
 const recoveryTask=ref(null),recoveryStorageError=ref(''),recoveryUnreadable=ref(false)
 const recoveryMemory=new Map()

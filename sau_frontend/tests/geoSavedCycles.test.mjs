@@ -48,7 +48,7 @@ const continuationHarness=()=>{
   const filename=new URL('../src/views/GeoJourney.vue',import.meta.url),{descriptor}=parse(fs.readFileSync(filename,'utf8'))
   const compiled=compileScript(descriptor,{id:'journey-continuation'}),declaration=compiled.scriptSetupAst.flatMap(node=>node.type==='VariableDeclaration'?node.declarations:[]).find(node=>node.id.name==='continueSavedCycle')
   const expression=descriptor.scriptSetup.content.slice(declaration.init.start,declaration.init.end)
-  const values={run:async action=>action(),savedCycleContinuation,savedCycleFactEdits,baselineWritingOptions,
+  const values={run:async action=>action(),persist:()=>{},syncCycleRoute:async()=>{},savedCycleContinuation,savedCycleFactEdits,baselineWritingOptions,
     project:ref(project()),profileDirty:ref(false),cycleId:ref('cycle-a'),cycle:ref(continuationValue()),editorDirty:ref(true),
     editor:reactive({title:'本机未保存修改',content:'本机正文',summary:'',tags:['本机标签']}),
     recoveryDraft:ref(null),recoveryFacts:ref(null),articleId:ref(5),activeDraft:ref({article_id:5}),

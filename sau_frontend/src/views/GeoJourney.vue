@@ -7,6 +7,7 @@
     <nav class="journey-steps" aria-label="优化流程">
       <button v-for="(label,index) in steps" :key="label" type="button" :disabled="busy || !canVisit(index)" :aria-current="step === index ? 'step' : undefined" :class="{active:step===index,done:step!==index&&stepComplete(index)}" @click="step=index"><span>{{ index+1 }}</span>{{ label }}<el-icon v-if="step!==index&&stepComplete(index)"><Check /></el-icon></button>
     </nav>
+    <GeoOptimizationProgress v-if="project" :project="project" :busy="busy" :blocked="profileDirty" @busy="setFeedbackBusy"/>
     <GeoNextActions v-if="cycle && step>=2" :cycle="cycle" :busy="busy" @navigate="navigateDiagnostic"/>
     <el-alert v-if="error && !recoveredTaskError" type="error" :title="error" :closable="false" show-icon class="journey-alert"/>
     <DoubaoTaskRecovery v-if="visibleRecoveryInfo" :recovery="visibleRecoveryInfo" :busy="busy" :native-available="nativeAvailable" @login="login"/>
@@ -159,6 +160,7 @@ import GeoSourceMaintenance from '@/components/GeoSourceMaintenance.vue'
 import GeoWebmaster from '@/components/GeoWebmaster.vue'
 import GeoWebsiteAudit from '@/components/GeoWebsiteAudit.vue'
 import GeoOtherSearchEntries from '@/components/GeoOtherSearchEntries.vue'
+import GeoOptimizationProgress from '@/components/GeoOptimizationProgress.vue'
 import { publicationReviewArticles } from '@/utils/geoPublicationReview'
 import DoubaoPreparation from '@/components/DoubaoPreparation.vue'
 import DoubaoSessionControls from '@/components/DoubaoSessionControls.vue'
@@ -368,6 +370,26 @@ const adoptSourceMaintenanceTask=value=>{
   task.value={...value,message:'请在企查查官方窗口处理当前步骤；软件不执行最终提交。'}
   taskId.value=value.id;taskKind.value='source_maintenance';liveTaskId=value.id;handledTask='';persist()
 }
+const syncCycleRoute=async value=>{
+  const selectedProject=projectId.value,selectedCycle=cycleId.value,epoch=contextEpoch
+  const current=()=>!destroyed&&Number.isSafeInteger(selectedProject)&&selectedProject>0&&typeof selectedCycle==='string'&&/^[A-Za-z0-9_-]{1,100}$/.test(selectedCycle)
+    &&epoch===contextEpoch&&selectedProject===projectId.value&&selectedCycle===cycleId.value
+    &&value?.id===selectedCycle&&value.project_id===selectedProject&&sameBrand(value.profile,project.value)&&route.path==='/journey'
+  if(!current())return false
+  const queryMatches=(actual,expected)=>actual===expected||Array.isArray(actual)&&actual.length===1&&actual[0]===expected
+  const sameSelection=queryMatches(route.query.cycle,selectedCycle)&&queryMatches(route.query.journey_project||route.query.project,String(selectedProject))
+  const query={...route.query,journey_project:String(selectedProject),cycle:selectedCycle}
+  delete query.project
+  if(!sameSelection){delete query.focus;delete query.source_task;sourceTaskFocus.value='';pendingDiagnosticSection=null}
+  if(JSON.stringify(query)===JSON.stringify(route.query))return true
+  try{
+    await router.replace({path:'/journey',query})
+    if(!current())return false
+    if(queryMatches(route.query.journey_project,String(selectedProject))&&queryMatches(route.query.cycle,selectedCycle)&&!Object.hasOwn(route.query,'project'))return true
+  }catch{ /* The saved cycle and local recovery copies must survive a navigation failure. */ }
+  if(current())error.value='本轮内容已保存，但页面地址未能更新。当前内容与本机副本保留；离开后请从“继续已有内容”选择这一轮，不要重复录入回答。'
+  return false
+}
 const continueSavedCycle=value=>run(async()=>{
   if(profileDirty.value)throw new Error('品牌资料已修改，请先保存或重新选择对象，再继续已有内容。')
   const selection=savedCycleContinuation(value,project.value),sameCycle=cycleId.value===value.id
@@ -382,13 +404,16 @@ const continueSavedCycle=value=>run(async()=>{
     if(!sameCycle){const options=baselineWritingOptions(selection.cycle);clientMode.value=options.client_mode;model.value=options.model_label}
     step.value=2
   } finally {restoring=false}
+  persist();await syncCycleRoute(value)
 })
-const adoptExternalCycle=value=>{
-  if(destroyed||profileDirty.value||!isExternalCycle(value)||value.project_id!==projectId.value||!sameBrand(value.profile,project.value))return
+const adoptExternalCycle=async value=>{
+  if(destroyed||working.value||profileDirty.value||!isExternalCycle(value)||value.project_id!==projectId.value||!sameBrand(value.profile,project.value))return
   if(editorDirty.value)recoveryDraft.value={previous:recoveryDraft.value||undefined,cycle_id:cycleId.value,article_id:articleId.value,editor:{...editor,tags:[...editor.tags]},baseline:articleSnapshot(activeDraft.value)}
   if(savedCycleFactEdits(cycle.value,factRows.value,project.value))recoveryFacts.value={previous:recoveryFacts.value||undefined,cycle_id:cycleId.value,facts:factRows.value.map(item=>({...item}))}
   plan.value=null;planConfirmed.value=false;briefId.value='';platform.value='';articleId.value=null;replacementSourceId.value=null
   applyCycle(value);step.value=2;persist()
+  working.value=true
+  try{await syncCycleRoute(value)}finally{working.value=false;if(!destroyed)persist()}
 }
 const loadReports=async()=>{
   const all=(await geoTestApi.listReports()).data||[], sameName=all.filter(item=>item.name?.trim().toLocaleLowerCase()===project.value?.name.trim().toLocaleLowerCase())
@@ -599,21 +624,28 @@ watch(()=>[form.name,form.website,form.entity_type,form.company,form.audience,fo
 watch(()=>[editor.title,editor.content],()=>{reviewConfirmed.value=false},{flush:'sync'})
 watch([briefId,platform],()=>{if(restoring)return;articleId.value=matchingDrafts.value[0]?.article_id||null;loadEditor()},{flush:'sync'})
 onMounted(async()=>{
+  const entryQuery={...route.query},entryPath=route.fullPath
+  const returningFromDetails=Boolean(entryQuery.journey_project)&&!entryQuery.cycle
   window.addEventListener('pywebviewready',activateNative)
   working.value=true
   try{projects.value=(await projectApi.getProjects()).data||[];for(let attempt=0;attempt<50&&!nativeMethodsReady()&&!destroyed;attempt++)await new Promise(resolve=>setTimeout(resolve,100));nativeAvailable.value=nativeMethodsReady();if(!nativeAvailable.value)provider.value='api'}catch(cause){error.value=cause.message||'品牌资料加载失败'}finally{working.value=false}
   if(destroyed)return
-  const requested=Number(route.query.journey_project||route.query.project)||lastJourneyProject();if(projects.value.some(item=>item.id===requested))await chooseProject(requested)
-  const requestedCycle=typeof route.query.cycle==='string'&&/^[A-Za-z0-9_-]{1,100}$/.test(route.query.cycle)?route.query.cycle:null
-  if(requestedCycle&&project.value){try{const value=(await geoContentApi.get(requestedCycle)).data;await continueSavedCycle(value)}catch(cause){error.value=cause.message||'未能打开指定内容任务，请核对当前品牌。'}}
-  if(route.query.journey_project&&cycle.value&&activeDraft.value)step.value=4
-  const section=route.query.focus
+  const requested=Number(entryQuery.journey_project||entryQuery.project)||lastJourneyProject();if(projects.value.some(item=>item.id===requested))await chooseProject(requested)
+  const finish=()=>{if(destroyed)return;initialized=true;if(!activateNative())bridgeTimer=setInterval(activateNative,250)}
+  const requestedCycle=typeof entryQuery.cycle==='string'&&/^[A-Za-z0-9_-]{1,100}$/.test(entryQuery.cycle)?entryQuery.cycle:null
+  if(requestedCycle&&project.value){
+    const epoch=contextEpoch,selectedProject=projectId.value,current=()=>!destroyed&&epoch===contextEpoch&&selectedProject===projectId.value&&route.fullPath===entryPath
+    if(!current()){finish();return}
+    try{const value=(await geoContentApi.get(requestedCycle)).data;if(!current()){finish();return}await continueSavedCycle(value)}catch{if(current())error.value='未能打开指定内容任务，请核对当前品牌。'}
+  }
+  if(destroyed)return
+  if(returningFromDetails&&cycle.value&&activeDraft.value)step.value=4
+  const section=entryQuery.focus
   if(requestedCycle===cycleId.value&&['maintenance','webmaster','feedback','publication'].includes(section)){
-    if(section==='maintenance'&&(cycle.value?.source_maintenance?.tasks||[]).some(item=>item.id===route.query.source_task&&item.company_name===cycle.value.profile.name))sourceTaskFocus.value=route.query.source_task
+    if(section==='maintenance'&&(cycle.value?.source_maintenance?.tasks||[]).some(item=>item.id===entryQuery.source_task&&item.company_name===cycle.value.profile.name))sourceTaskFocus.value=entryQuery.source_task
     pendingDiagnosticSection=section;step.value=4;await nextTick();focusPendingDiagnostic()
   }
-  initialized=true
-  if(!activateNative())bridgeTimer=setInterval(activateNative,250)
+  finish()
 })
 onUnmounted(()=>{persist();destroyed=true;clearInterval(timer);clearInterval(bridgeTimer);window.removeEventListener('pywebviewready',activateNative)})
 </script>

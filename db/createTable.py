@@ -290,6 +290,25 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                 )
             ''')
             cursor.execute('''
+                CREATE TABLE IF NOT EXISTS geo_optimization_progress (
+                    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+                    id TEXT NOT NULL UNIQUE, project_id INTEGER NOT NULL,
+                    request_id TEXT NOT NULL, request_sha256 TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN ('observed_improvement','not_observed','preparation')),
+                    evidence_kind TEXT NOT NULL, action_at TEXT, recorded_at TEXT NOT NULL,
+                    record TEXT NOT NULL, UNIQUE(project_id,request_id),
+                    FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE RESTRICT
+                )
+            ''')
+            cursor.execute('''CREATE INDEX IF NOT EXISTS geo_optimization_progress_project
+                ON geo_optimization_progress(project_id,sequence)''')
+            cursor.execute('''CREATE TRIGGER IF NOT EXISTS geo_optimization_progress_no_update
+                BEFORE UPDATE ON geo_optimization_progress BEGIN
+                SELECT RAISE(ABORT,'Optimization history is append-only'); END''')
+            cursor.execute('''CREATE TRIGGER IF NOT EXISTS geo_optimization_progress_no_delete
+                BEFORE DELETE ON geo_optimization_progress BEGIN
+                SELECT RAISE(ABORT,'Optimization history is append-only'); END''')
+            cursor.execute('''
                 CREATE TABLE IF NOT EXISTS geo_content_drafts (
                     article_id INTEGER PRIMARY KEY, cycle_id TEXT NOT NULL,
                     brief_id TEXT NOT NULL, platform TEXT NOT NULL,

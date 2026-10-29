@@ -987,6 +987,52 @@ def geo_external_baseline_pending_plans():
         return jsonify(code=400, msg=str(error), data=None), 400
 
 
+@app.route('/api/geo-content/projects/<int:project_id>/progress', methods=['GET', 'POST'])
+def geo_optimization_progress(project_id):
+    from services import geo_optimization_progress as progress
+    try:
+        if request.method == 'POST':
+            if request.args:
+                raise ValueError('保存进展不接受额外查询参数')
+            data, rejected = _external_feedback_json(maximum=64 * 1024)
+            if rejected is not None:
+                return rejected
+            result = progress.append_progress(app.config['DATABASE_PATH'], project_id, data)
+        else:
+            rejected = _feedback_same_origin()
+            if rejected is not None:
+                return rejected
+            if (set(request.args) - {'offset', 'probe_offset', 'snapshot_sequence', 'include_probes', 'expected_project_identity_sha256'}
+                    or any(len(request.args.getlist(key)) != 1 for key in request.args)):
+                raise ValueError('进展列表查询字段无效')
+            values = {}
+            for key in ('offset', 'probe_offset', 'snapshot_sequence'):
+                raw = request.args.get(key)
+                if raw is not None:
+                    if not re.fullmatch(r'(?:0|[1-9][0-9]{0,18})', raw):
+                        raise ValueError('进展页码或快照编号无效')
+                    values[key] = int(raw)
+            include = request.args.get('include_probes', 'true')
+            if include not in ('true', 'false'):
+                raise ValueError('证据列表选项无效')
+            if 'expected_project_identity_sha256' in request.args:
+                values['expected_project_identity_sha256'] = request.args['expected_project_identity_sha256']
+            result = progress.list_progress(app.config['DATABASE_PATH'], project_id, include_probes=include == 'true', **values)
+        response = jsonify(code=200, data=result)
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    except RequestEntityTooLarge:
+        return jsonify(code=413, msg='进展请求过大，请缩短摘要或原文摘录', data=None), 413
+    except progress.OptimizationProgressConflict as error:
+        return jsonify(code=409, msg=str(error), data=None), 409
+    except geo_content_store.ResearchNotFoundError as error:
+        return jsonify(code=404, msg=str(error), data=None), 404
+    except ValueError as error:
+        return jsonify(code=400, msg=str(error), data=None), 400
+    except (KeyError, TypeError, OverflowError):
+        return jsonify(code=400, msg='进展字段格式无效，请核对后再保存', data=None), 400
+
+
 @app.route('/api/geo-content/external-baseline-plans/prepare', methods=['POST'])
 @app.route('/api/geo-content/external-baseline-plans/freeze', methods=['POST'])
 @app.route('/api/geo-content/external-cycles', methods=['POST'])

@@ -1,10 +1,13 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import test from 'node:test'
-import {computed,ref} from 'vue'
+import {computed,reactive,ref,watch} from 'vue'
+import {createRouter,createMemoryHistory} from 'vue-router'
 import {parse,compileScript,compileTemplate,compileStyle} from '@vue/compiler-sfc'
 import {articleSnapshot,sameBrand,sameResearchBrief} from '../src/utils/geoJourney.js'
 import {isExternalCycle,nativeCycleCapability} from '../src/utils/geoExternalBaseline.js'
+import {savedCycleContinuation,savedCycleFactEdits} from '../src/utils/geoSavedCycles.js'
+import {baselineWritingOptions} from '../src/utils/geoWritingOptions.js'
 const load=path=>{
   const filename=new URL(path,import.meta.url),{descriptor,errors}=parse(fs.readFileSync(filename,'utf8'),{filename:filename.pathname})
   assert.deepEqual(errors,[])
@@ -20,6 +23,130 @@ const profile={name:'合成公开服务有限公司',website:'https://example.or
 const external=(changes={})=>({id:'external-a',project_id:7,profile,baseline:null,baseline_source:'user_reported_external',
   external_baseline:{kind:'geo_external_baseline_v1'},capabilities:{native_probe:false,native_retest:false,native_metrics:false,editorial_research:true,work_drafting:true},
   test_plan:{cases:[{id:'q01',question:'原题'}]},facts:[],analysis:{method:'user_reported_external_editorial_clues',briefs:[]},drafts:[],channels:{owned_web:'官网'},...changes})
+const clone=value=>JSON.parse(JSON.stringify(value))
+const deferred=()=>{let resolve;const promise=new Promise(done=>resolve=done);return {promise,resolve}}
+const settle=async predicate=>{for(let i=0;i<100&&!predicate();i++)await new Promise(setImmediate);assert.ok(predicate())}
+const routedPages=[]
+test.afterEach(()=>{while(routedPages.length)routedPages.pop().destroy()})
+
+async function routedJourney({url='/journey?project=7&cycle=native-old&focus=feedback&source_task=old-task',storage=new Map(),database=new Map(),router:existingRouter}={}){
+  const router=existingRouter||createRouter({history:createMemoryHistory(),routes:[{path:'/journey',component:{}},{path:'/geo-content',component:{}},{path:'/elsewhere',component:{}}]})
+  router.onError(()=>{})
+  if(!existingRouter){await router.push(url);await router.isReady()}
+  const route=new Proxy({},{get:(_target,key)=>router.currentRoute.value[key]})
+  const brief={id:'b01',topic:'合成原主题'},oldDraft={article_id:5,brief_id:'b01',platform:'owned_web',title:'旧稿标题',content:'旧稿正文',provenance:{brief}}
+  const original={id:'native-old',project_id:7,report_ref:'native-report',profile,baseline:{profile,run_id:'native-run',cases:[{id:'q01',question:'原题'}]},analysis:{briefs:[brief]},drafts:[oldDraft],channels:{owned_web:'官网'},facts:[]}
+  const persisted=[],reads=[]
+  const values={computed,watch,projectId:ref(7),project:ref({id:7,...profile}),sameBrand,sameResearchBrief,articleSnapshot,isExternalCycle,savedCycleContinuation,savedCycleFactEdits,baselineWritingOptions,
+    route,router,cycle:ref(original),cycleId:ref(original.id),profileDirty:ref(false),editorDirty:ref(true),editor:reactive({title:'未保存合成标题',content:'未保存合成正文',tags:['合成标签']}),
+    recoveryDraft:ref(null),recoveryFacts:ref(null),error:ref(''),briefId:ref('b01'),platform:ref('owned_web'),articleId:ref(5),factRows:ref([{text:'未保存的合成事实',source_url:'',confirmed:false}]),
+    report:ref(original.baseline),reportId:ref(original.report_ref),historyReportId:ref(original.report_ref),reportOrigin:ref('history'),plan:ref({plan_sha256:'a'.repeat(64)}),planConfirmed:ref(true),replacementSourceId:ref(9),
+    clientMode:ref('work'),model:ref('合成模型'),step:ref(1),working:ref(false),reviewConfirmed:ref(false),sourceTaskFocus:ref('old-task')}
+  values.busy=computed(()=>values.working.value)
+  values.matchingDrafts=computed(()=>values.cycle.value.drafts.filter(item=>item.brief_id===values.briefId.value&&item.platform===values.platform.value))
+  values.activeDraft=computed(()=>values.matchingDrafts.value.find(item=>item.article_id===values.articleId.value)||null)
+  values.persist=()=>{const saved={project_id:values.projectId.value,cycleId:values.cycleId.value,recoveryDraft:clone(values.recoveryDraft.value),recoveryFacts:clone(values.recoveryFacts.value)};persisted.push(saved);storage.set(saved.project_id,saved)}
+  const names=['loadEditor','applyCycle','syncCycleRoute','run','continueSavedCycle','adoptExternalCycle','chooseProject']
+  const actions=Function(...Object.keys(values),`let restoring=false,destroyed=false,contextEpoch=0,pendingDiagnosticSection='maintenance';const stop=watch([projectId,cycleId],()=>contextEpoch++,{flush:'sync'});${names.map(name=>`const ${name}=${journey.expression(name)};`).join('\n')}return {${names.join(',')},epoch:()=>contextEpoch,isDestroyed:()=>destroyed,focus:()=>pendingDiagnosticSection,destroy:()=>{destroyed=true;stop()}};`)(...Object.values(values))
+  const actualApply=actions.applyCycle
+  const mount=async({get}={})=>{
+    const node=journey.compiled.scriptSetupAst.find(node=>node.type==='ExpressionStatement'&&node.expression?.callee?.name==='onMounted')
+    const callback=node.expression.arguments[0],expression=journey.descriptor.scriptSetup.content.slice(callback.start,callback.end)
+    values.editorDirty.value=false
+    const deps={...values,...actions,window:{addEventListener:()=>{}},projects:ref([]),nativeMethodsReady:()=>true,nativeAvailable:ref(true),provider:ref('doubao'),projectApi:{getProjects:async()=>({data:[values.project.value]})},lastJourneyProject:()=>null,
+      chooseProject:async id=>{values.projectId.value=id;const saved=storage.get(id);if(saved?.cycleId){actualApply(database.get(saved.cycleId));values.recoveryDraft.value=clone(saved.recoveryDraft);values.recoveryFacts.value=clone(saved.recoveryFacts)}},
+      geoContentApi:{get:async id=>{reads.push(id);if(get)return get(id);assert.ok(database.has(id),'read an existing cycle only');return {data:database.get(id)}}},activateNative:()=>true}
+    Object.defineProperties(deps,{contextEpoch:{get:actions.epoch},destroyed:{get:actions.isDestroyed}})
+    await Function('deps',`with(deps){let initialized=false,bridgeTimer,pendingDiagnosticSection=null;return (${expression})();}`)(deps)
+  }
+  const page={...values,...actions,mount,persisted,reads,storage,database};routedPages.push(page);return page
+}
+
+test('adopting an external receipt replaces the old explicit query and survives actual history return and reload selection',async()=>{
+  const page=await routedJourney(),value=external({report_ref:'external-baseline:synthetic-frozen'})
+  page.database.set(value.id,value)
+  await page.adoptExternalCycle(value)
+  assert.equal(page.cycleId.value,value.id);assert.equal(page.report.value,null);assert.equal(page.step.value,2)
+  assert.deepEqual({...page.route.query},{journey_project:'7',cycle:value.id})
+  assert.equal(page.sourceTaskFocus.value,'');assert.equal(page.focus(),null)
+  assert.equal(page.storage.get(7).cycleId,value.id)
+  assert.equal(page.recoveryDraft.value.editor.title,'未保存合成标题');assert.equal(page.recoveryFacts.value.facts[0].text,'未保存的合成事实')
+  await page.router.push({path:'/geo-content',query:{cycle:value.id,journey_project:'7'}})
+  const returned=new Promise(resolve=>{const stop=page.router.afterEach(()=>{stop();resolve()})});page.router.back();await returned
+  assert.equal(page.route.query.cycle,value.id);assert.equal(page.route.query.journey_project,'7')
+  const reopened=await routedJourney({router:page.router,storage:page.storage,database:page.database});await reopened.mount()
+  assert.equal(reopened.projectId.value,7);assert.equal(reopened.cycleId.value,value.id);assert.equal(reopened.cycle.value.baseline_source,'user_reported_external')
+  assert.equal(reopened.recoveryDraft.value.editor.title,'未保存合成标题');assert.equal(reopened.recoveryFacts.value.facts[0].text,'未保存的合成事实')
+  assert.deepEqual(reopened.reads,[value.id]);assert.equal(page.database.size,1)
+})
+
+test('canonical cycle reloads with drafts continue content while an actual details return or explicit feedback link remains distinct',async()=>{
+  const brief={id:'b01',topic:'合成选题'},value=external({report_ref:'external-baseline:synthetic-frozen',analysis:{method:'configured_ai',briefs:[brief]},
+    drafts:[{article_id:8,brief_id:'b01',platform:'owned_web',title:'合成已存标题',content:'合成已存正文',provenance:{brief}}]})
+  for(const [url,expected] of [['/journey?journey_project=7&cycle=external-a',2],['/journey?journey_project=7',4]]){
+    const database=new Map([[value.id,value]]),storage=new Map([[7,{cycleId:value.id,recoveryDraft:null,recoveryFacts:null}]])
+    const page=await routedJourney({url,database,storage});await page.mount()
+    assert.equal(page.cycleId.value,value.id);assert.equal(page.step.value,expected)
+    assert.equal(page.cycle.value.baseline,null)
+  }
+})
+
+test('explicit saved-cycle continuation synchronizes its own query and preserves same-cycle focus and local edits',async()=>{
+  const page=await routedJourney(),value=external({report_ref:'external-baseline:synthetic-frozen'})
+  page.database.set(value.id,value);await page.continueSavedCycle(value)
+  assert.deepEqual({...page.route.query},{journey_project:'7',cycle:value.id});assert.equal(page.storage.get(7).cycleId,value.id)
+  assert.equal(page.recoveryDraft.value.editor.title,'未保存合成标题')
+  await page.router.replace({path:'/journey',query:{journey_project:'7',cycle:value.id,focus:'feedback'}})
+  await page.continueSavedCycle(value);assert.equal(page.route.query.focus,'feedback')
+  assert.equal(page.report.value,null);assert.equal(page.cycle.value.capabilities.native_retest,false)
+})
+
+test('rejected and thrown route writes keep the acknowledged cycle, persistence and recovery copies without another save',async()=>{
+  for(const thrown of [false,true]){
+    const page=await routedJourney(),value=external({report_ref:'external-baseline:synthetic-frozen'})
+    page.database.set(value.id,value)
+    page.router.beforeEach(to=>{if(to.query.cycle===value.id){if(thrown)throw Error('PRIVATE_ROUTER_DETAIL');return false}})
+    await page.adoptExternalCycle(value)
+    assert.equal(page.route.query.cycle,'native-old');assert.equal(page.cycleId.value,value.id)
+    assert.equal(page.storage.get(7).cycleId,value.id);assert.equal(page.database.size,1);assert.equal(page.working.value,false)
+    assert.equal(page.recoveryDraft.value.editor.title,'未保存合成标题');assert.equal(page.recoveryFacts.value.facts[0].text,'未保存的合成事实')
+    assert.match(page.error.value,/本轮内容已保存.*地址未能更新/);assert.doesNotMatch(page.error.value,/PRIVATE_ROUTER_DETAIL/)
+  }
+})
+
+test('route settlement locks normal project switching and foreign or stale receipts cannot replace the selected project',async()=>{
+  const page=await routedJourney(),gate=deferred(),value=external({report_ref:'external-baseline:synthetic-frozen'})
+  page.router.beforeEach(to=>to.query.cycle===value.id?gate.promise:undefined)
+  const adoption=page.adoptExternalCycle(value);await settle(()=>page.working.value)
+  await page.chooseProject(8);assert.equal(page.projectId.value,7);assert.equal(page.cycleId.value,value.id)
+  gate.resolve();await adoption
+  const count=page.persisted.length
+  await page.adoptExternalCycle(external({project_id:8}));assert.equal(page.persisted.length,count);assert.equal(page.route.query.journey_project,'7')
+  page.profileDirty.value=true;await page.adoptExternalCycle(external({id:'later-receipt'}));assert.equal(page.cycleId.value,value.id)
+  page.profileDirty.value=false;page.destroy();await page.adoptExternalCycle(external({id:'after-unmount'}));assert.equal(page.route.query.cycle,value.id)
+})
+
+test('equivalent canonical singleton query values do not report a failed save on duplicated navigation',async()=>{
+  const page=await routedJourney(),value=external({report_ref:'external-baseline:synthetic-frozen'})
+  await page.router.replace({path:'/journey',query:{journey_project:['7'],cycle:value.id}})
+  await page.adoptExternalCycle(value)
+  assert.equal(page.cycleId.value,value.id);assert.equal(page.error.value,'');assert.equal(page.working.value,false)
+})
+
+test('a late initial query read cannot override a newer explicit cycle selection, including A to B to A or unmount',async()=>{
+  for(const change of ['new-cycle','aba','unmount']){
+    const entry=external({id:'entry-cycle',report_ref:'external-baseline:entry'}),selected=external({id:'selected-cycle',report_ref:'external-baseline:selected'})
+    const page=await routedJourney({url:'/journey?project=7&cycle=entry-cycle'}),read=deferred()
+    const mounting=page.mount({get:()=>read.promise});await settle(()=>page.reads.length===1)
+    if(change==='new-cycle')await page.adoptExternalCycle(selected)
+    else if(change==='aba'){page.cycleId.value='intermediate';page.cycleId.value='native-old'}
+    else page.destroy()
+    read.resolve({data:entry});await mounting
+    assert.equal(page.cycleId.value,change==='new-cycle'?selected.id:'native-old')
+    assert.notEqual(page.cycleId.value,entry.id)
+    if(change==='new-cycle')assert.equal(page.route.query.cycle,selected.id)
+  }
+})
 
 test('the phone entry prefers the page plan and reuses only the exact current project cycle original plan',()=>{
   const frozenOriginal={plan_sha256:'a'.repeat(64),profile,cases:[{id:'q01',question:'已加载周期的原题'}]}
