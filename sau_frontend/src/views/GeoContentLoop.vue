@@ -30,6 +30,7 @@
         <el-table :data="cycle.analysis.briefs" data-testid="research-briefs"><el-table-column label="优先级" width="90"><template #default="{row}">{{ row.priority === 'high' ? '优先' : '后续' }}</template></el-table-column><el-table-column prop="topic" label="选题" min-width="220"/><el-table-column label="采集依据 / 待补资料" min-width="300"><template #default="{row}"><p>{{ row.case_ids.join('、') }} · {{ row.why }}</p><p v-for="text in row.missing_evidence" :key="text" class="hint">待补：{{ text }}</p><p v-if="row.outline.length" class="hint">结构：{{ row.outline.join(' → ') }}</p></template></el-table-column></el-table>
         <el-collapse data-geo-section="sources"><el-collapse-item title="查看观察到的来源（网址未知仍保留未知）" name="sources"><p class="hint">{{ cycle.observations.source_note }}</p><p class="hint">主体标签只按来源域名、标题或已确认的关系区分范围，不等于业务事实已核实；其他公司的条目仍可作为平台线索。</p><ul><li v-for="source in cycle.observations.sources" :key="source.id">{{ source.id }} · {{ source.case_id }} · {{ source.kind === 'citations' ? '正文引用' : '界面资料' }} · <a v-if="source.url" :href="safeUrl(source.url)" target="_blank" rel="noopener noreferrer">{{ source.title || source.domain }}</a><span v-else>{{ source.title || '标题未知' }} · 网址未确认</span><GeoSourceIdentity :identity="source.source_identity" compact/></li></ul></el-collapse-item></el-collapse>
       </el-card>
+      <GeoOptimizationPlan :cycle="cycle" :selected-brief-id="briefId" :busy="busy" @select="briefId=$event"/>
       <GeoDestinations data-geo-section="destinations" :cycle="cycle" :task="task" :busy="busy" :native-available="nativeAvailable" @updated="applyCycle" @select="selectDestination" @open="openDestination" @checked="poll"/>
       <el-card shadow="never" data-geo-section="facts">
         <h2>3 · 补充可用于写作的事实</h2>
@@ -110,6 +111,7 @@ import GeoExternalFeedback from '@/components/GeoExternalFeedback.vue'
 import GeoWebsiteAudit from '@/components/GeoWebsiteAudit.vue'
 import GeoOtherSearchEntries from '@/components/GeoOtherSearchEntries.vue'
 import GeoOptimizationProgress from '@/components/GeoOptimizationProgress.vue'
+import GeoOptimizationPlan from '@/components/GeoOptimizationPlan.vue'
 import GeoNextActions from '@/components/GeoNextActions.vue'
 import {diagnosticSection,focusDiagnosticSection} from '@/utils/geoNextActions'
 import {updateFeedbackBusy} from '@/utils/geoFeedbackBusy'
@@ -390,5 +392,5 @@ onUnmounted(()=>{destroyed=true;cycleEpoch++;cycleLoadRequest++;reloadRequest++;
 
 <style scoped>
 .journey-return{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:16px 20px;border:1px solid var(--geo-border,#dce6e5);border-radius:14px;background:#fff;font-size:13px;color:var(--geo-muted,#52676d)}.fact-reuse{display:flex;align-items:center;gap:16px;margin-bottom:16px;padding:12px;background:#f3f8f7;border-radius:10px;font-size:13px}
-.content-loop{max-width:1200px;margin:auto;display:grid;gap:20px}.row,header{display:flex;align-items:center;gap:12px;flex-wrap:wrap}header{justify-content:space-between}h1{margin:0;font-size:28px}h2{font-size:20px;margin:0 0 16px}h3{font-size:17px}.hint,header p{color:#59696e;line-height:1.8}.row{margin:12px 0}.row .el-select{width:300px}.row .el-input{width:210px}.observations,.draft{background:#f4f8f7;padding:16px;margin-top:18px;border-radius:8px}pre{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.8;font-family:inherit}li{margin:8px 0}a{color:#0a756e}.el-select{max-width:100%}@media(max-width:600px){.row .el-select,.row .el-input{width:100%}}
+.content-loop{width:100%;min-width:0;max-width:1200px;margin:auto;display:grid;grid-template-columns:minmax(0,1fr);gap:20px}.content-loop>*{min-width:0}.row,header{display:flex;align-items:center;gap:12px;flex-wrap:wrap}header{justify-content:space-between}h1{margin:0;font-size:28px}h2{font-size:20px;margin:0 0 16px}h3{font-size:17px}.hint,header p{color:#59696e;line-height:1.8}.row{margin:12px 0}.row .el-select{width:300px}.row .el-input{width:210px}.observations,.draft{background:#f4f8f7;padding:16px;margin-top:18px;border-radius:8px}pre{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.8;font-family:inherit}li{margin:8px 0}a{color:#0a756e}.el-select{max-width:100%}@media(max-width:600px){.row .el-select,.row .el-input{width:100%}}
 </style>

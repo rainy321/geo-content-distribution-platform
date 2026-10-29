@@ -3,7 +3,7 @@
     <el-card class="about-card">
       <div class="about-header">
         <h1>GEO AI 搜索工作台</h1>
-        <p class="version">2026.10.29.2</p>
+        <p class="version">2026.10.29.3</p>
       </div>
 
       <el-divider />
@@ -11,7 +11,7 @@
       <div class="about-section">
         <h3>系统简介</h3>
         <p>
-          从品牌和产品资料开始，观察 AI 如何回答与引用来源，再把采集发现转成选题、平台稿件和发布后的复测记录。
+          从品牌和产品资料开始，观察 AI 如何回答与引用来源，再把采集发现转成 GEO 行动方案、平台稿件和发布后的复测记录。
           品牌、报告、稿件与任务保存在本机工作区，关闭软件后可以继续。
         </p>
       </div>
@@ -22,6 +22,7 @@
           <el-tag effect="plain">品牌资料</el-tag>
           <el-tag effect="plain">豆包搜索采集</el-tag>
           <el-tag effect="plain">来源驱动内容</el-tag>
+          <el-tag effect="plain">GEO 行动方案</el-tag>
           <el-tag effect="plain">公司资料维护</el-tag>
           <el-tag effect="plain">官网接入</el-tag>
           <el-tag effect="plain">平台发布</el-tag>
@@ -35,6 +36,8 @@
           <li>记录实际回答、可见引用和采集时间，按品牌隔离</li>
           <li>明确的个人记录来源声明保留原文，排除公开 GEO 统计</li>
           <li>根据来源发现平台，按目标要求生成待审文章</li>
+          <li>按原题区分自然需求发现、品牌业务识别与官网资料采用，明确改动、所需证据和复测观察点</li>
+          <li>将行动方案带入 AI 写作，围绕用户问题、主体关系、依据和适用边界组织内容</li>
           <li>区分来源中的目标公司、其他主体与待核对项</li>
           <li>已接入平台逐篇确认发布；其他平台可配置辅助填写</li>
           <li>沿用有效登录会话，按平台实际要求处理验证</li>

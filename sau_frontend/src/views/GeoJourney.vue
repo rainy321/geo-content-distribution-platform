@@ -8,7 +8,9 @@
       <button v-for="(label,index) in steps" :key="label" type="button" :disabled="busy || !canVisit(index)" :aria-current="step === index ? 'step' : undefined" :class="{active:step===index,done:step!==index&&stepComplete(index)}" @click="step=index"><span>{{ index+1 }}</span>{{ label }}<el-icon v-if="step!==index&&stepComplete(index)"><Check /></el-icon></button>
     </nav>
     <GeoOptimizationProgress v-if="project" :project="project" :busy="busy" :blocked="profileDirty" @busy="setFeedbackBusy"/>
-    <GeoNextActions v-if="cycle && step>=2" :cycle="cycle" :busy="busy" @navigate="navigateDiagnostic"/>
+    <GeoOptimizationPlan v-if="cycle && step===2" :cycle="cycle" :selected-brief-id="briefId" :busy="busy" @select="selectContent('brief',$event)"/>
+    <details v-if="cycle && step===2 && hasOptimizationPlan" class="journey-secondary-tools" data-testid="journey-other-actions"><summary>其他推进事项</summary><GeoNextActions :cycle="cycle" :busy="busy" @navigate="navigateDiagnostic"/></details>
+    <GeoNextActions v-else-if="cycle && step>=2" :cycle="cycle" :busy="busy" @navigate="navigateDiagnostic"/>
     <el-alert v-if="error && !recoveredTaskError" type="error" :title="error" :closable="false" show-icon class="journey-alert"/>
     <DoubaoTaskRecovery v-if="visibleRecoveryInfo" :recovery="visibleRecoveryInfo" :busy="busy" :native-available="nativeAvailable" @login="login"/>
     <div v-if="canResumeRetest" class="retest-resume" role="group" aria-label="继续当前复测未发送问题"><div><strong>继续当前复测</strong><p>继续未发送题，已发送题不会重发。</p></div><el-button :disabled="busy" :loading="working" data-testid="journey-resume-retest" @click="resumeUnsentRetest">继续未发送问题</el-button></div>
@@ -161,6 +163,8 @@ import GeoWebmaster from '@/components/GeoWebmaster.vue'
 import GeoWebsiteAudit from '@/components/GeoWebsiteAudit.vue'
 import GeoOtherSearchEntries from '@/components/GeoOtherSearchEntries.vue'
 import GeoOptimizationProgress from '@/components/GeoOptimizationProgress.vue'
+import GeoOptimizationPlan from '@/components/GeoOptimizationPlan.vue'
+import {optimizationPlanView} from '@/utils/geoOptimizationPlan'
 import { publicationReviewArticles } from '@/utils/geoPublicationReview'
 import DoubaoPreparation from '@/components/DoubaoPreparation.vue'
 import DoubaoSessionControls from '@/components/DoubaoSessionControls.vue'
@@ -183,6 +187,7 @@ const emptyBrand=()=>({name:'',website:'',description:'',entity_type:'product',c
 const form=reactive(emptyBrand()), clientMode=ref('consumer'), model=ref('')
 const plan=ref(null), planConfirmed=ref(false), report=ref(null), reportId=ref(''), reportOrigin=ref('history'), reports=ref([]), historyReportId=ref('')
 const cycle=ref(null), cycleId=ref(''), briefId=ref(''), platform=ref(''), articleId=ref(null), factRows=ref([]), reviewConfirmed=ref(false)
+const hasOptimizationPlan=computed(()=>Boolean(optimizationPlanView(cycle.value,briefId.value)))
 const replacementSourceId=ref(null)
 const editor=reactive({title:'',content:'',summary:'',tags:[]}), publication=reactive({url:'',publishedAt:null,confirmed:false})
 const recoveryDraft=ref(null), recoveryFacts=ref(null)

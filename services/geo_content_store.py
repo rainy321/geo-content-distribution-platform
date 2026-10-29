@@ -331,6 +331,8 @@ def get_cycle(database, identifier):
         result['website_audit'] = website_audit_overview(connection, result)
         from services.geo_feedback_diagnostics import diagnose_cycle
         result['feedback_diagnostics'] = diagnose_cycle(result)
+        from services.geo_optimization_strategy import optimization_plan
+        result['optimization_plan'] = optimization_plan(result)
     return result
 
 
@@ -399,7 +401,8 @@ def save_draft(database, identifier, brief_id, platform, raw, provenance, revisi
         from services.geo_external_baseline import baseline_id
         context = {**provenance, 'report_digest': cycle['report_digest'], 'baseline_run_id': baseline_id(cycle),
                    'plan_sha256': cycle['test_plan']['plan_sha256'], 'brief': inputs['brief'], 'facts': inputs['facts'],
-                   'used_fact_ids': draft['used_fact_ids'], 'review_state': 'draft_requires_editorial_review'}
+                   'used_fact_ids': draft['used_fact_ids'], 'review_state': 'draft_requires_editorial_review',
+                   'optimization_action': inputs['action_plan']}
         if cycle.get('baseline_source') == 'user_reported_external':
             context.update(baseline_source='user_reported_external', native_verified=False)
         if inputs.get('destination'):
