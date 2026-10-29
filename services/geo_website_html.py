@@ -17,7 +17,7 @@ from services import webmaster_service as public_http
 
 
 _TYPES = frozenset(('Organization', 'Corporation', 'LocalBusiness', 'WebSite', 'WebPage', 'Product',
-                    'SoftwareApplication', 'Article', 'TechArticle', 'FAQPage'))
+                    'Service', 'SoftwareApplication', 'WebApplication', 'Article', 'TechArticle', 'FAQPage'))
 
 
 def text(value, maximum):

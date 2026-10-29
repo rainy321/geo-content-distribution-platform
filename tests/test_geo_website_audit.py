@@ -109,6 +109,58 @@ class HTMLObservationTests(unittest.TestCase):
         self.assertIsNone(result['name_text_match']['body_text_present'])
         self.assertIsNone(result['title'])
 
+    def test_service_and_web_application_graphs_remain_distinct_from_the_organization(self):
+        product = 'Orbit Relay'
+        company_id = 'https://synthetic.example.org/#organization'
+        service_id = 'https://synthetic.example.org/products/relay/#service'
+        graph = {'@context': 'https://schema.org', '@graph': [
+            {'@type': 'Organization', '@id': company_id, 'name': '澄星软件有限公司',
+             'url': 'https://synthetic.example.org/'},
+            {'@type': 'https://schema.org/Service', '@id': service_id, 'name': product,
+             'url': 'https://synthetic.example.org/products/relay/', 'provider': {'@id': company_id}},
+            {'@type': ['WebApplication', 'SoftwareApplication', 'FutureUnknownType'],
+             '@id': 'https://api.synthetic.example.org/#application', 'name': product,
+             'url': 'https://api.synthetic.example.org/', 'publisher': {'@id': company_id},
+             'about': {'@id': service_id}},
+            {'@type': 'FutureUnknownType', 'name': product}]}
+        raw = ('<html><head><script type="application/ld+json">' +
+            json.dumps(graph, ensure_ascii=False) + '</script></head><body><h1>' + product + '</h1></body></html>').encode()
+        with patch('requests.sessions.Session.request', side_effect=AssertionError('No context or entity retrieval')), \
+             patch('socket.getaddrinfo', side_effect=AssertionError('No DNS')):
+            result = html.inspect_html(raw, {'content_type': 'text/html'},
+                'https://synthetic.example.org/products/relay/', product, lambda value: False)
+        entries = result['json_ld']['entries']
+        self.assertEqual(len(entries), 3)
+        by_type = {kind: entry for entry in entries for kind in entry['types']}
+        self.assertEqual(by_type['Organization']['name'], '澄星软件有限公司')
+        self.assertFalse(by_type['Organization']['configured_name_equal'])
+        self.assertEqual(by_type['Service']['url'], 'https://synthetic.example.org/products/relay/')
+        self.assertEqual(by_type['WebApplication']['url'], 'https://api.synthetic.example.org/')
+        self.assertEqual(by_type['WebApplication']['types'], ['WebApplication', 'SoftwareApplication'])
+        self.assertTrue(by_type['Service']['configured_name_equal'])
+        self.assertTrue(by_type['WebApplication']['configured_name_equal'])
+        self.assertNotIn('FutureUnknownType', by_type)
+        self.assertEqual(result['json_ld']['basis'], 'server_markup_not_independent_fact_check')
+        self.assertFalse(result['json_ld']['remote_contexts_fetched'])
+        self.assertFalse(result['json_ld']['standards_validation_performed'])
+        self.assertFalse(result['name_text_match']['identity_verified'])
+        self.assertNotIn('score', result)
+        self.assertNotIn('ai_adoption', result)
+
+    def test_service_and_web_application_entries_keep_existing_graph_and_entry_budgets(self):
+        graph = {'@context': 'http://169.254.169.254/latest/meta-data', '@graph': [
+            {'@type': 'Service' if index % 2 else 'WebApplication', 'name': '合成服务' + str(index)}
+            for index in range(60)]}
+        raw = ('<html><head><script type="application/ld+json">' + json.dumps(graph) +
+            '</script></head><body></body></html>').encode()
+        with patch('requests.sessions.Session.request', side_effect=AssertionError('No remote context')), \
+             patch('socket.getaddrinfo', side_effect=AssertionError('No DNS')):
+            result = self.inspect(raw)
+        entries = result['json_ld']['entries']
+        self.assertEqual(len(entries), 20)
+        self.assertEqual({kind for entry in entries for kind in entry['types']}, {'Service', 'WebApplication'})
+        self.assertFalse(result['json_ld']['remote_contexts_fetched'])
+
     def test_parser_structure_and_output_text_link_limits(self):
         raw = document(body=''.join('<a href="/p' + str(index) + '">' + 'a' * 300 + '</a>' for index in range(100)))
         result = self.inspect(raw)
