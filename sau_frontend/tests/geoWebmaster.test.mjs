@@ -76,6 +76,25 @@ test('payloads allow exact supported fields and never accept file paths or arbit
   assert.throws(() => helpers.webmasterPayload(view, 'record_inspection', { url: 'https://example.org/', status: 'indexed', note: '😀'.repeat(501) }))
 })
 
+test('saved inspections match the same site, exact path and query without changing stored results', () => {
+  const state = record({ inspections: [
+    { url: 'https://example.org/about', status: 'indexed', note: '保留旧索引结论' },
+    { url: 'https://example.org/about/', status: 'unknown', note: '尾斜线页面未确认' },
+    { url: 'https://example.org/about?lang=en', status: 'not_indexed', note: '单独的英文网址' },
+    { url: 'https://other.org/about', status: 'indexed', note: '其他站点' }
+  ] })
+  const original = structuredClone(state)
+  assert.equal(helpers.webmasterSavedInspection(state, 'https://example.org/about', 'https://example.org').status, 'indexed')
+  assert.equal(helpers.webmasterSavedInspection(state, 'https://example.org/about/', 'https://example.org').status, 'unknown')
+  assert.equal(helpers.webmasterSavedInspection(state, 'https://example.org/about?lang=en', 'https://example.org').status, 'not_indexed')
+  for (const value of ['https://other.org/about', 'https://example.org/about?lang=zh', 'https://example.org/about#part', 'https://example.org/about-more', 'https://example.org/old/../about', 'https://example.org/%61bout', 'http:// https://example.org/about']) {
+    assert.equal(helpers.webmasterSavedInspection(state, value, 'https://example.org'), null, value)
+  }
+  assert.notEqual(helpers.webmasterInspectionKey('https://example.org/?a=1&b=2', 'https://example.org'), helpers.webmasterInspectionKey('https://example.org/?b=2&a=1', 'https://example.org'))
+  assert.equal(helpers.webmasterInspectionKey('https://example.org', 'https://example.org'), 'https://example.org/')
+  assert.deepEqual(state, original)
+})
+
 test('deployment instructions are website-specific and do not claim submission, indexing or server access', () => {
   const text = helpers.webmasterDeploymentText(helpers.webmasterOverview(cycle()))
   assert.match(text, /https:\/\/example.org\/BingSiteAuth.xml/)
@@ -140,6 +159,18 @@ test('submitted sitemap remains processing and zero discovered URLs never become
   assert.match(html, /索引状态未知/); assert.match(html, /Bing 发现网址数：0/); assert.doesNotMatch(html, /已索引 18|已索引 0|已收录 0/)
 })
 
+test('saved processing or successful sitemaps guide users to the result instead of another submission', async () => {
+  for (const status of ['pending', 'success']) {
+    const state = record({ sitemap_submission: { status, evidence_source: 'user_reported_platform_result' } })
+    const page = harness(cycle({ webmaster: overview({ record: state }) }))
+    const html = await render(page.props.cycle, 3)
+    assert.match(html, /已登记站点地图提交结果/); assert.match(html, /无需重复提交/)
+    assert.doesNotMatch(html, /点击 Submit sitemap/)
+    assert.deepEqual(page.calls.update, [])
+  }
+  assert.match(await render(cycle(), 3), /尚未提交时/)
+})
+
 test('only same-site inspections are displayed and unknown remains an explicit saved result', async () => {
   const state = record({ inspections: [{ url: 'https://example.org/', status: 'unknown', evidence_source: 'user_reported_platform_result', note: '<script>未确认</script>' }, { url: 'https://other.org/', status: 'indexed' }] })
   const page = harness(cycle({ webmaster: overview({ record: state }) }))
@@ -165,7 +196,121 @@ test('inspection copy uses one complete valid URL and interface errors remain un
   page.inspectionNote.value = 'Bing 接口 Error，未取得结果'; await page.saveInspection()
   assert.equal(page.calls.update[0][1].status, 'unknown')
   const html = await render(page.props.cycle, 3)
-  assert.match(html, /Ctrl\+A/); assert.match(html, /接口 Error 时，索引状态仍未知/)
+  assert.match(html, /Ctrl\+A/); assert.match(html, /本次未取得新结果，保留已有结论/)
+})
+
+test('selecting a recorded page restores its status and note before saving a snapshot observation', async () => {
+  const state = record({ inspections: [{ url: 'https://example.org/about', status: 'indexed', note: '旧抓取时间未知；已收录。' }] })
+  const original = structuredClone(state), page = harness(cycle({ webmaster: overview({ record: state }) }))
+  page.inspectionUrl.value = 'https://example.org/about'
+  assert.equal(page.inspectionStatus.value, 'indexed'); assert.equal(page.inspectionNote.value, '旧抓取时间未知；已收录。')
+  page.inspectionNote.value += 'HTML / HTTP 预览空白，快照未知；更新请求已收到（用户确认），提交时间未知。'
+  await page.saveInspection()
+  assert.deepEqual(page.calls.update[0][1], { action: 'record_inspection', context_sha256: hash,
+    url: 'https://example.org/about', status: 'indexed', note: page.inspectionNote.value })
+  assert.deepEqual(state, original)
+})
+
+test('selecting another path or query never carries a known indexed status into an unconfirmed page', () => {
+  const state = record({ inspections: [{ url: 'https://example.org/about', status: 'indexed', note: '已索引页面' },
+    { url: 'https://example.org/about?lang=en', status: 'unknown', note: '英文页面未知' }] })
+  const page = harness(cycle({ webmaster: overview({ record: state }) }))
+  page.inspectionUrl.value = 'https://example.org/about'
+  assert.equal(page.inspectionStatus.value, 'indexed')
+  page.inspectionUrl.value = 'https://example.org/about?lang=en'
+  assert.equal(page.inspectionStatus.value, 'unknown'); assert.equal(page.inspectionNote.value, '英文页面未知')
+  page.inspectionUrl.value = 'https://example.org/about/'
+  assert.equal(page.inspectionStatus.value, 'unknown'); assert.equal(page.inspectionNote.value, '')
+})
+
+test('refresh and same-URL input corrections preserve unsaved inspection status and note', async () => {
+  const state = record({ inspections: [{ url: 'https://example.org/about', status: 'indexed', note: '原备注' }] })
+  const page = harness(cycle({ webmaster: overview({ record: state }) }))
+  page.inspectionUrl.value = 'https://example.org/about'
+  page.inspectionStatus.value = 'unknown'; page.markInspectionStatusEdited(); page.inspectionNote.value = '用户尚未保存的新观察'
+  page.inspectionUrl.value = ''
+  page.inspectionUrl.value = 'https://example.org/about'
+  assert.equal(page.inspectionStatus.value, 'unknown'); assert.equal(page.inspectionNote.value, '用户尚未保存的新观察')
+  page.setServer(overview({ context_sha256: otherHash, record: record({ inspections: [{ url: 'https://example.org/about', status: 'not_indexed', note: '服务器的新备注' }] }) }))
+  await page.refresh()
+  assert.equal(page.inspectionStatus.value, 'unknown'); assert.equal(page.inspectionNote.value, '用户尚未保存的新观察')
+  assert.deepEqual(page.calls.update, [])
+})
+
+test('a new indexed result on refresh replaces an untouched default status while retaining the draft note', async () => {
+  const page = harness()
+  page.inspectionUrl.value = 'https://example.org/about'
+  assert.equal(page.inspectionStatus.value, 'unknown')
+  page.inspectionNote.value = '用户未保存的预览观察'
+  const latest = overview({ context_sha256: otherHash, record: record({ inspections: [{ url: 'https://example.org/about', status: 'indexed', note: '服务器新登记的结论' }] }) })
+  page.setServer(latest); await page.refresh()
+  assert.equal(page.inspectionStatus.value, 'indexed'); assert.equal(page.inspectionNote.value, '用户未保存的预览观察')
+  await page.saveInspection()
+  assert.deepEqual(page.calls.update[0][1], { action: 'record_inspection', context_sha256: otherHash,
+    url: 'https://example.org/about', status: 'indexed', note: '用户未保存的预览观察' })
+})
+
+test('an explicit user-selected unknown is retained through refresh and becomes clean only after saving', async () => {
+  const page = harness(cycle({ webmaster: overview({ record: record({ inspections: [{ url: 'https://example.org/about', status: 'indexed', note: '原备注' }] }) }) }))
+  page.inspectionUrl.value = 'https://example.org/about'
+  page.inspectionStatus.value = 'unknown'; page.markInspectionStatusEdited(); page.inspectionNote.value = '用户明确选择暂未确认'
+  await page.refresh()
+  assert.equal(page.inspectionStatus.value, 'unknown'); assert.equal(page.inspectionStatusEdited.value, true)
+  await page.saveInspection()
+  assert.equal(page.calls.update[0][1].status, 'unknown'); assert.equal(page.inspectionStatusEdited.value, false)
+})
+
+test('a foreign URL cannot load another site record or save the retained local draft', async () => {
+  const page = harness(cycle({ webmaster: overview({ record: record({ inspections: [{ url: 'https://example.org/about', status: 'indexed', note: '本网站草稿' },
+    { url: 'https://other.org/about', status: 'not_indexed', note: '不属于本网站' }] }) }) }))
+  page.inspectionUrl.value = 'https://example.org/about'
+  page.inspectionUrl.value = 'https://other.org/about'
+  assert.equal(page.validInspection.value, false); assert.equal(page.inspectionNote.value, '本网站草稿')
+  await page.saveInspection(); assert.deepEqual(page.calls.update, [])
+})
+
+test('a context conflict cannot save or replace an unsaved inspection draft', async () => {
+  const page = harness(cycle({ webmaster: overview({ record: record({ inspections: [{ url: 'https://example.org/about', status: 'indexed', note: '原备注' }] }) }) }))
+  page.inspectionUrl.value = 'https://example.org/about'; page.inspectionStatus.value = 'not_indexed'; page.markInspectionStatusEdited(); page.inspectionNote.value = '未保存的快照观察'
+  page.setServer(overview({ context_sha256: otherHash, record: record({ inspections: [{ url: 'https://example.org/about', status: 'unknown', note: '新服务器值' }] }) }))
+  await page.saveInspection()
+  assert.deepEqual(page.calls.update, []); assert.match(page.error.value, /已变化/)
+  assert.equal(page.inspectionStatus.value, 'not_indexed'); assert.equal(page.inspectionNote.value, '未保存的快照观察')
+})
+
+test('an indexed result arriving at the save preflight aborts the stale context before any unknown write', async () => {
+  const page = harness()
+  page.inspectionUrl.value = 'https://example.org/about'; page.inspectionNote.value = '保留本次快照说明'
+  page.setServer(overview({ context_sha256: otherHash, record: record({ inspections: [{ url: 'https://example.org/about', status: 'indexed', note: '新索引结论' }] }) }))
+  await page.saveInspection()
+  assert.deepEqual(page.calls.update, []); assert.match(page.error.value, /已变化/)
+  assert.equal(page.inspectionStatus.value, 'indexed'); assert.equal(page.inspectionNote.value, '保留本次快照说明')
+  await page.saveInspection()
+  assert.equal(page.calls.update.length, 1); assert.equal(page.calls.update[0][1].status, 'indexed')
+})
+
+test('changing cycles clears the prior inspection selection even when both use the same website', async () => {
+  const first = record({ inspections: [{ url: 'https://example.org/about', status: 'indexed', note: '第一项目' }] })
+  const second = overview({ record: record({ inspections: [{ url: 'https://example.org/about', status: 'unknown', note: '第二项目尚未确认' }] }) })
+  const page = harness(cycle({ webmaster: overview({ record: first }) }))
+  page.inspectionUrl.value = 'https://example.org/about'; page.inspectionNote.value = '第一项目未保存输入'
+  page.setServer(second); page.props.cycle = cycle({ id: 'cycle-b', webmaster: second })
+  await Vue.nextTick()
+  assert.equal(page.inspectionUrl.value, ''); assert.equal(page.inspectionStatus.value, 'unknown'); assert.equal(page.inspectionNote.value, '')
+  page.inspectionUrl.value = 'https://example.org/about'
+  assert.equal(page.inspectionStatus.value, 'unknown'); assert.equal(page.inspectionNote.value, '第二项目尚未确认')
+})
+
+test('indexed results, blank cached previews, live content and update receipts remain distinct', async () => {
+  const stamp = '2026-10-30T03:00:00Z', note = 'HTML / HTTP 快照空白；Live URL 可见新版；更新请求已提交，实际时间未知。'
+  const state = record({ inspections: [{ url: 'https://example.org/about', status: 'indexed', note, observed_at: stamp }] })
+  const original = structuredClone(state), html = await render(cycle({ webmaster: overview({ record: state }) }), 3)
+  assert.match(html, /已索引（用户确认）/); assert.ok(html.includes(note))
+  assert.match(html, /不据此把已收录改为未索引/); assert.match(html, /无需反复打开空白页签/)
+  assert.match(html, /本次实时检测可读取，不证明新版已入索引或被豆包采用/)
+  assert.match(html, /仅表示更新请求已收到/); assert.match(html, /不要记成站点地图处理结果/)
+  assert.ok(html.includes(`记录时间 ${journeyDate(stamp)}`))
+  assert.deepEqual(state, original)
 })
 
 test('writes refresh the latest context and block concurrent clicks while pending', async () => {

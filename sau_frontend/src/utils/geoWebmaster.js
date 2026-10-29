@@ -30,6 +30,23 @@ export function webmasterSiteUrl(value, origin) {
   } catch { return false }
 }
 
+export function webmasterInspectionKey(value, origin) {
+  if (!webmasterSiteUrl(value, origin)) return ''
+  // Preserve the stored path/query just like the backend; do not resolve dot
+  // segments, decode escapes, merge trailing slashes or reorder parameters.
+  const tail = value.replace(/#$/, '').match(/^https:\/\/[^/?#\\]+([^#\\]*)$/i)?.[1]
+  if (tail === undefined) return ''
+  const question = tail.indexOf('?'), path = (question < 0 ? tail : tail.slice(0, question)) || '/'
+  const query = question < 0 ? '' : tail.slice(question + 1)
+  return `${origin}${path}${query ? `?${query}` : ''}`
+}
+
+export function webmasterSavedInspection(record, value, origin) {
+  const key = webmasterInspectionKey(value, origin)
+  if (!key || !Array.isArray(record?.inspections)) return null
+  return record.inspections.find(item => webmasterInspectionKey(item?.url, origin) === key) || null
+}
+
 export function webmasterPayload(view, action, fields = {}) {
   if (!view?.supported || !digest(view.context_sha256)) throw new Error('官网资料已变化，请先刷新进度。')
   const payload = { action, context_sha256: view.context_sha256 }

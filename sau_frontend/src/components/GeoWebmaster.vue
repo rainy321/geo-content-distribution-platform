@@ -31,22 +31,24 @@
             <div class="webmaster-actions"><el-button :disabled="locked" :loading="saving==='check_public'" data-testid="webmaster-check-public" @click="perform('check_public')">核对公网文件和站点地图</el-button></div>
             <p class="webmaster-hint">公网文件与原件一致后，回 Bing 点击 Verify / Try Again。只有 Bing 显示验证成功、进入网站控制台，才勾选下方结果。</p>
             <template v-if="record.ownership?.status!=='confirmed'"><label class="webmaster-confirm"><input v-model="ownershipConfirmed" type="checkbox" :disabled="locked"/>我已在 Bing 完成验证并进入网站控制台</label><el-button :disabled="locked || !ownershipConfirmed" :loading="saving==='confirm_ownership'" data-testid="webmaster-confirm-ownership" @click="confirmOwnership">保存 Bing 验证结果</el-button></template>
-            <p v-else class="webmaster-hint" data-testid="webmaster-owner-confirmed">网站验证完成（用户确认） · {{ date(record.ownership.observed_at) }}<el-button text :disabled="locked" @click="step=3">继续站点地图与索引检查</el-button></p>
+            <p v-else class="webmaster-hint" data-testid="webmaster-owner-confirmed">网站验证完成（用户确认） · 记录时间 {{ date(record.ownership.observed_at) }}<el-button text :disabled="locked" @click="step=3">继续站点地图与索引检查</el-button></p>
           </div>
           <div v-else key="index" class="webmaster-panel">
-            <h4>提交站点地图，记录实际索引状态</h4><p>在 Bing 左侧打开 Sitemaps，点击 Submit sitemap，填入下方地址提交一次。</p>
+            <h4>站点地图与页面索引结果</h4><p v-if="['pending','success'].includes(record.sitemap_submission?.status)" data-testid="webmaster-sitemap-recorded">已登记站点地图提交结果，请在 Bing 的 Sitemaps 查看当前处理状态，无需重复提交。</p><p v-else>尚未提交时，在 Bing 左侧打开 Sitemaps，点击 Submit sitemap，填入下方地址提交一次。已有提交回执时，先查看处理状态。</p>
             <div class="webmaster-value">{{ view.sitemap_url }}<el-button text :disabled="locked" @click="copyText(view.sitemap_url)">复制</el-button></div>
             <p v-if="record.sitemap_check?.status==='ok'" class="webmaster-hint">软件已访问到站点地图，包含 {{ record.sitemap_check.entries }} 条网址。此数量不是已索引页数。</p>
             <label :for="`webmaster-sitemap-${cycle.id}`">Bing 站点地图列表的实际状态</label><select :id="`webmaster-sitemap-${cycle.id}`" v-model="sitemapStatus" :disabled="locked" data-testid="webmaster-sitemap-status"><option value="">请选择当前显示的结果</option><option value="pending">已提交，正在处理 / Processing</option><option value="success">Bing 处理成功 / Success</option><option value="failed">处理失败 / Failed</option></select>
             <details class="webmaster-sitemap-detail"><summary>补充 Bing 显示的数据（可选）</summary><label :for="`webmaster-discovered-${cycle.id}`">Bing 发现的网址数，未知时留空</label><input :id="`webmaster-discovered-${cycle.id}`" v-model.number="discoveredUrls" type="number" min="0" step="1" :disabled="locked" data-testid="webmaster-discovered"/><label :for="`webmaster-sitemap-note-${cycle.id}`">处理提示、最后抓取时间等</label><textarea :id="`webmaster-sitemap-note-${cycle.id}`" v-model="sitemapNote" rows="2" maxlength="500" :disabled="locked" placeholder="照实记录；最后抓取为空时写“未显示”"/></details>
             <el-button :disabled="locked || !sitemapStatus" :loading="saving==='record_sitemap'" data-testid="webmaster-save-sitemap" @click="saveSitemap">保存处理状态</el-button><p class="webmaster-hint">{{ sitemapLabel }}。收到“提交成功”提示后，列表仍显示 Processing 时，请选择“正在处理”。</p>
             <p v-if="Number.isInteger(record.sitemap_submission?.discovered_urls)" class="webmaster-hint">Bing 发现网址数：{{ record.sitemap_submission.discovered_urls }}（用户确认，非已索引页数）</p><p v-if="record.sitemap_submission?.note" class="webmaster-hint">{{ record.sitemap_submission.note }}</p>
-            <details class="webmaster-inspection"><summary>检查页面的抓取与索引结果</summary><p>在 Bing 左侧打开 URL Inspection，逐页检查。先在它的网址输入框按 Ctrl+A 全选，再粘贴完整网址，避免重复拼上 http://。</p><el-button text :disabled="locked" data-testid="webmaster-copy-inspection" @click="copyText(inspectionCopyUrl)">{{ validInspection ? '复制待检查网址' : '复制官网首页网址' }}</el-button><p class="webmaster-hint">记录“索引”结果；Live URL 能访问页面只证明本次可抓取。输入错误或接口 Error 时，索引状态仍未知。</p>
+            <details class="webmaster-inspection"><summary>检查页面的抓取与索引结果</summary><p>在 Bing 左侧打开 URL Inspection，逐页检查。先在它的网址输入框按 Ctrl+A 全选，再粘贴完整网址，避免重复拼上 http://。</p><el-button text :disabled="locked" data-testid="webmaster-copy-inspection" @click="copyText(inspectionCopyUrl)">{{ validInspection ? '复制待检查网址' : '复制官网首页网址' }}</el-button><p class="webmaster-hint">记录 URL Inspection 明确显示的索引结论。输入错误或检查失败时，本次未取得新结果，保留已有结论；从未确认过时选择“未知”。</p>
+              <p class="webmaster-hint" data-testid="webmaster-indexed-preview-hint">View Indexed page 的 HTML / HTTP 页签空白，只表示本次未取得可查看的快照或明细，不据此把已收录改为未索引。无需反复打开空白页签，也不要因此重复提交。</p>
+              <p class="webmaster-hint" data-testid="webmaster-live-preview-hint">Live URL / Tested page 显示新版内容，只证明本次实时检测可读取，不证明新版已入索引或被豆包采用。Request indexing 提示提交成功，仅表示更新请求已收到；可记入本页备注，不要记成站点地图处理结果。</p>
               <label :for="`webmaster-url-${cycle.id}`">检查的完整页面网址</label><input :id="`webmaster-url-${cycle.id}`" v-model="inspectionUrl" type="url" :list="`webmaster-urls-${cycle.id}`" :disabled="locked" :placeholder="`${view.site_origin}/`" data-testid="webmaster-inspection-url"/><datalist :id="`webmaster-urls-${cycle.id}`"><option v-for="url in view.target_urls" :key="url" :value="url"/></datalist>
-              <label :for="`webmaster-index-${cycle.id}`">索引状态</label><select :id="`webmaster-index-${cycle.id}`" v-model="inspectionStatus" :disabled="locked"><option value="unknown">未知 / 尚未确认</option><option value="indexed">Bing 明确显示已索引</option><option value="not_indexed">Bing 明确显示未索引</option></select>
-              <label :for="`webmaster-note-${cycle.id}`">页面提示与抓取时间（可选）</label><textarea :id="`webmaster-note-${cycle.id}`" v-model="inspectionNote" maxlength="500" rows="2" :disabled="locked" placeholder="照实记录 Bing 提示、最后抓取时间等"/>
+              <label :for="`webmaster-index-${cycle.id}`">索引状态</label><select :id="`webmaster-index-${cycle.id}`" v-model="inspectionStatus" :disabled="locked" @change="markInspectionStatusEdited"><option value="unknown">未知 / 尚未确认</option><option value="indexed">Bing 明确显示已索引</option><option value="not_indexed">Bing 明确显示未索引</option></select>
+              <label :for="`webmaster-note-${cycle.id}`">页面提示与抓取时间（可选）</label><textarea :id="`webmaster-note-${cycle.id}`" v-model="inspectionNote" maxlength="500" rows="2" :disabled="locked" placeholder="可分别记录索引结论、快照/实时检测和更新请求回执；平台时间未知时注明，不用记录时间代替"/>
               <el-button :disabled="locked || !validInspection" :loading="saving==='record_inspection'" data-testid="webmaster-save-inspection" @click="saveInspection">保存页面检查结果</el-button>
-              <article v-for="item in inspections" :key="item.url" class="webmaster-inspection-row"><strong>{{ indexLabel(item.status) }}（用户确认）</strong><p>{{ item.url }}</p><p v-if="item.note">{{ item.note }}</p><small>{{ date(item.observed_at) }}</small></article>
+              <article v-for="item in inspections" :key="item.url" class="webmaster-inspection-row"><strong>{{ indexLabel(item.status) }}（用户确认）</strong><p>{{ item.url }}</p><p v-if="item.note">{{ item.note }}</p><small>记录时间 {{ date(item.observed_at) }}</small></article>
             </details>
           </div>
         </Transition>
@@ -63,15 +65,16 @@ import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { geoWebmasterApi } from '@/api/geoWebmaster'
 import { journeyDate } from '@/utils/geoJourney'
 import { bingWebmasterEntry, webmasterOverview, webmasterOrigin, webmasterPayload, webmasterReadFile, webmasterDecodeFile,
-  webmasterDeploymentText, webmasterStage, webmasterPublicLabel, webmasterSitemapLabel, webmasterSiteUrl, webmasterIndexLabel, webmasterError } from '@/utils/geoWebmaster'
+  webmasterDeploymentText, webmasterStage, webmasterPublicLabel, webmasterSitemapLabel, webmasterSiteUrl, webmasterInspectionKey, webmasterSavedInspection, webmasterIndexLabel, webmasterError } from '@/utils/geoWebmaster'
 
 const props = defineProps({ cycle: { type: Object, required: true }, busy: Boolean })
 const emit = defineEmits(['busy'])
 const overview = ref(props.cycle.webmaster || null), loading = ref(false), saving = ref(''), readingFile = ref(false)
 const error = ref(''), notice = ref(''), writeUncertain = ref(false), ownershipConfirmed = ref(false)
 const step = ref(webmasterStage(props.cycle.webmaster?.record)), sitemapStatus = ref(''), discoveredUrls = ref(''), sitemapNote = ref(''), inspectionUrl = ref(''), inspectionStatus = ref('unknown'), inspectionNote = ref('')
+const inspectionStatusEdited = ref(false)
 const steps = ['添加官网', '准备文件', '完成验证', '站点地图与索引']
-let scopeVersion = 0, readVersion = 0, disposed = false
+let scopeVersion = 0, readVersion = 0, disposed = false, selectedInspectionKey = ''
 const currentScope = () => `${props.cycle.id}:${webmasterOrigin(props.cycle)}`
 const view = computed(() => webmasterOverview(props.cycle, overview.value))
 const record = computed(() => view.value.record || {})
@@ -83,7 +86,26 @@ const deploymentText = computed(() => webmasterDeploymentText(view.value))
 const validInspection = computed(() => webmasterSiteUrl(inspectionUrl.value, view.value.site_origin) && Array.from(inspectionNote.value).length <= 500)
 const inspectionCopyUrl = computed(() => validInspection.value ? inspectionUrl.value : `${view.value.site_origin}/`)
 const date = value => journeyDate(value), indexLabel = status => webmasterIndexLabel(status)
-const apply = value => { overview.value = value; ownershipConfirmed.value = false }
+const markInspectionStatusEdited = () => { inspectionStatusEdited.value = true }
+const apply = value => {
+  overview.value = value; ownershipConfirmed.value = false
+  if (!inspectionStatusEdited.value) {
+    const saved = webmasterSavedInspection(record.value, inspectionUrl.value, view.value.site_origin)
+    if (saved) inspectionStatus.value = ['indexed', 'not_indexed', 'unknown'].includes(saved.status) ? saved.status : 'unknown'
+  }
+}
+
+// Selecting a URL loads its saved result. Refresh only advances untouched
+// status above; it must not replace an edited status or any in-progress note.
+watch(inspectionUrl, value => {
+  const key = webmasterInspectionKey(value, view.value.site_origin)
+  if (!key || key === selectedInspectionKey) return
+  selectedInspectionKey = key
+  inspectionStatusEdited.value = false
+  const saved = webmasterSavedInspection(record.value, value, view.value.site_origin)
+  inspectionStatus.value = ['indexed', 'not_indexed', 'unknown'].includes(saved?.status) ? saved.status : 'unknown'
+  inspectionNote.value = typeof saved?.note === 'string' ? saved.note : ''
+}, { flush: 'sync' })
 
 const refreshOverview = async () => {
   if (disposed || !webmasterOrigin(props.cycle)) return false
@@ -133,7 +155,9 @@ const uploadFile = async event => {
 }
 const confirmOwnership = async () => { if (ownershipConfirmed.value && await perform('confirm_ownership', { confirmed: true })) step.value = 3 }
 const saveSitemap = () => perform('record_sitemap', { status: sitemapStatus.value, discovered_urls: discoveredUrls.value === '' ? null : discoveredUrls.value, note: sitemapNote.value })
-const saveInspection = () => validInspection.value && perform('record_inspection', { url: inspectionUrl.value, status: inspectionStatus.value, note: inspectionNote.value })
+const saveInspection = async () => {
+  if (validInspection.value && await perform('record_inspection', { url: inspectionUrl.value, status: inspectionStatus.value, note: inspectionNote.value })) inspectionStatusEdited.value = false
+}
 const copyText = async text => {
   if (locked.value || !text) return
   const version = scopeVersion
@@ -153,6 +177,8 @@ watch(localBusy, value => emit('busy', value), { immediate: true, flush: 'sync' 
 watch(() => props.cycle.webmaster, value => { if (!localBusy.value) apply(value || null) }, { flush: 'sync' })
 watch(currentScope, () => {
   scopeVersion++; readVersion++; overview.value = props.cycle.webmaster || null; loading.value = false; saving.value = ''; readingFile.value = false
+  selectedInspectionKey = ''
+  inspectionStatusEdited.value = false
   error.value = ''; notice.value = ''; writeUncertain.value = false; ownershipConfirmed.value = false; sitemapStatus.value = ''; discoveredUrls.value = ''; sitemapNote.value = ''; inspectionUrl.value = ''; inspectionStatus.value = 'unknown'; inspectionNote.value = ''
   step.value = webmasterStage(props.cycle.webmaster?.record); void refresh()
 }, { flush: 'sync' })
