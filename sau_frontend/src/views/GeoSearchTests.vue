@@ -20,7 +20,6 @@
       <el-button :disabled="nativeBusy" @click="startNative('login')">登录豆包</el-button>
       <el-radio-group v-if="!sourceRequested" v-model="collectionPath" :disabled="nativeBusy" aria-label="网页采集方式"><el-radio-button value="automatic">软件自动采集（当前可用网页界面）</el-radio-button><el-radio-button value="explicit">指定网页模式</el-radio-button></el-radio-group></details>
       <el-button :disabled="nativeBusy || sourceRequested || (!project && !report) || collectionPath==='automatic' && !automaticReady" @click="startNative('plan',collectionPath==='automatic')">用豆包生成问题</el-button>
-      <el-button type="primary" :disabled="nativeBusy || !displayPlan || !displayPlanMatchesProject || (collectionPath==='automatic' || sourceRequested) && (!automaticReady || !(sourceRequested ? sourceConfirmed : autoPlanConfirmed))" @click="startNative('run',collectionPath==='automatic' || sourceRequested)">{{ collectionPath==='automatic' || sourceRequested ? '开始软件自动采集' : '按指定模式开始测试' }}</el-button>
       <el-button v-if="nativeBusy" type="warning" @click="stopNative">停止任务</el-button>
       <DoubaoTaskRecovery v-if="taskRecovery" :recovery="taskRecovery" :busy="nativeBusy" :native-available="nativeReady" @login="startNative('login')"/>
       <p v-if="nativeMessage" class="context">{{ nativeMessage }}</p>
@@ -28,22 +27,7 @@
       <p v-if="!project && report" class="context">当前出题客户：{{ report.profile.name }}。也可在下方选择其他品牌项目。</p>
     </el-card>
 
-    <el-card v-if="isDesktop" shadow="never" data-testid="desktop-history" :data-history-count="nativeHistory.length">
-      <div class="card-heading history-heading">
-        <div><h2>任务记录</h2><p class="context">{{ historyExpanded ? '全部记录' : '最近 5 条' }} · {{ nativeHistory.length }} 条</p></div>
-        <el-button v-if="nativeHistory.length > 5" text :aria-expanded="historyExpanded" @click="toggleHistory">{{ historyExpanded ? '收起记录' : '查看更多记录' }}</el-button>
-      </div>
-      <el-table :data="visibleNativeHistory" empty-text="暂无任务记录">
-        <el-table-column label="时间" min-width="155"><template #default="{ row }">{{ reportDate(row.created_at) }}</template></el-table-column>
-        <el-table-column prop="client_name" label="客户" min-width="140" />
-        <el-table-column label="任务" width="100"><template #default="{ row }">{{ taskNames[row.kind] || row.kind }}</template></el-table-column>
-        <el-table-column label="状态" width="130"><template #default="{ row }">{{ nativeStatusLabel(row) }}</template></el-table-column>
-        <el-table-column label="详情" min-width="220"><template #default="{ row }">{{ row.message || '记录已保存' }}</template></el-table-column>
-        <el-table-column width="80"><template #default="{ row }"><el-button link :disabled="nativeBusy" @click="showNativeTask(row.id)">查看</el-button></template></el-table-column>
-      </el-table>
-      <el-pagination v-if="historyExpanded && nativeHistory.length > historyPageSize" v-model:current-page="historyPage" class="history-pagination"
-        :page-size="historyPageSize" :total="nativeHistory.length" layout="prev, pager, next" small />
-    </el-card>
+
 
     <el-card v-if="!sourceRequested" shadow="never">
       <h2>已保存报告</h2>
@@ -93,6 +77,7 @@
         <el-table-column prop="intent" label="测试目的" min-width="180" />
       </el-table>
       <el-checkbox v-if="sourceRequested" v-model="sourceConfirmed" :disabled="nativeBusy">已核对固定原题，另建独立软件自动测试</el-checkbox><el-checkbox v-else-if="collectionPath==='automatic'" v-model="autoPlanConfirmed" :disabled="nativeBusy">已核对这些问题，可以开始软件自动采集</el-checkbox>
+      <el-button type="primary" :disabled="nativeBusy || !displayPlan || !displayPlanMatchesProject || (collectionPath==='automatic' || sourceRequested) && (!automaticReady || !(sourceRequested ? sourceConfirmed : autoPlanConfirmed))" @click="startNative('run',collectionPath==='automatic' || sourceRequested)">{{ collectionPath==='automatic' || sourceRequested ? '开始软件自动采集' : '按指定模式开始测试' }}</el-button>
     </el-card>
 
     <el-card v-if="report" ref="reportCard" shadow="never">
@@ -133,6 +118,23 @@
         </el-collapse-item>
       </el-collapse>
       <p class="context">单轮小样本与账户、模型和时间有关；提及不等于推荐。事实正确性仍需结合回答与来源核验。</p>
+    </el-card>
+
+    <el-card v-if="isDesktop" shadow="never" data-testid="desktop-history" :data-history-count="nativeHistory.length">
+      <div class="card-heading history-heading">
+        <div><h2>任务记录</h2><p class="context">{{ historyExpanded ? '全部记录' : '最近 5 条' }} · {{ nativeHistory.length }} 条</p></div>
+        <el-button v-if="nativeHistory.length > 5" text :aria-expanded="historyExpanded" @click="toggleHistory">{{ historyExpanded ? '收起记录' : '查看更多记录' }}</el-button>
+      </div>
+      <el-table :data="visibleNativeHistory" empty-text="暂无任务记录">
+        <el-table-column label="时间" min-width="155"><template #default="{ row }">{{ reportDate(row.created_at) }}</template></el-table-column>
+        <el-table-column prop="client_name" label="客户" min-width="140" />
+        <el-table-column label="任务" width="100"><template #default="{ row }">{{ taskNames[row.kind] || row.kind }}</template></el-table-column>
+        <el-table-column label="状态" width="130"><template #default="{ row }">{{ nativeStatusLabel(row) }}</template></el-table-column>
+        <el-table-column label="详情" min-width="220"><template #default="{ row }">{{ row.message || '记录已保存' }}</template></el-table-column>
+        <el-table-column width="80"><template #default="{ row }"><el-button link :disabled="nativeBusy" @click="showNativeTask(row.id)">查看</el-button></template></el-table-column>
+      </el-table>
+      <el-pagination v-if="historyExpanded && nativeHistory.length > historyPageSize" v-model:current-page="historyPage" class="history-pagination"
+        :page-size="historyPageSize" :total="nativeHistory.length" layout="prev, pager, next" small />
     </el-card>
 
     <el-card v-if="!isDesktop" shadow="never">

@@ -3,7 +3,7 @@
     <el-card class="about-card">
       <div class="about-header">
         <h1>GEO AI 搜索工作台</h1>
-        <p class="version">2026.10.31.1</p>
+        <p class="version">2026.11.01.1</p>
       </div>
 
       <el-divider />
