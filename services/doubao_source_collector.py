@@ -381,7 +381,8 @@ SNAPSHOT_JS = r"""({s, question, allowExternalPanels, submissionFormat, literalP
     // A visible input alone is insufficient: require the normal chat composer
     // and visible model control on the expected chat origin and route.
     const modelControl = all(document, s.model_label)[0];
-    const chatInterfaceReady = location.protocol === 'https:' && ['doubao.com', 'www.doubao.com'].includes(location.hostname)
+    const chatInterfaceReady = location.protocol === 'https:' && location.port === ''
+        && ['doubao.com', 'www.doubao.com'].includes(location.hostname)
         && /^\/chat(?:\/|$)/.test(location.pathname)
         && !!modelControl && !!text(modelControl)
         && all(document, s.editor).some(e => e.isContentEditable || (e.tagName === 'TEXTAREA' && !e.disabled && !e.readOnly));
@@ -1404,6 +1405,8 @@ async def _wait_for_manual_verification(page: Any, config: CollectorConfig, run_
 _LOGIN_OBSERVATION_JS = r"""s => {
     const unknown = {client_mode: null, login_required: null, challenge: null};
     if (!['doubao.com', 'www.doubao.com'].includes(location.hostname)) return unknown;
+    if (s.require_chat_origin && (location.protocol !== 'https:' || location.port !== ''
+            || !/^\/chat(?:\/|$)/.test(location.pathname))) return unknown;
     const visible = e => !!e && e.getClientRects().length > 0
         && getComputedStyle(e).visibility !== 'hidden' && getComputedStyle(e).display !== 'none';
     const any = selector => [...document.querySelectorAll(selector)].some(visible);
@@ -1424,6 +1427,7 @@ async def _read_login_observation(page: Any, config: CollectorConfig) -> dict[st
     value = await page.evaluate(_LOGIN_OBSERVATION_JS, {
         'login_dialog': config.selectors.login_dialog, 'challenge': config.selectors.challenge,
         'editor': config.selectors.editor,
+        'require_chat_origin': config.strict_client_mode,
     })
     value = value if isinstance(value, dict) else {}
     return {'client_mode': value.get('client_mode') if value.get('client_mode') in ('consumer', 'work') else None,

@@ -54,12 +54,14 @@ async def inspect_available_doubao_session(config: CollectorConfig, *, progress=
     }
     write_json(target, result)
     context = page = None
+    closed_before_cleanup = False
     try:
         async with (playwright_factory or async_playwright)() as playwright:
             options = {'headless': False, 'locale': 'zh-CN', 'timezone_id': 'Asia/Hong_Kong'}
             if config.executable_path:
                 options['executable_path'] = config.executable_path
             context = await launch_context(playwright, config.profile_dir.resolve(), options, config.fallback_executable_path)
+            primary_error = None
             try:
                 page = context.pages[0] if context.pages else await context.new_page()
                 await _navigate_to_doubao(page, config.navigation_timeout_seconds)
@@ -115,16 +117,25 @@ async def inspect_available_doubao_session(config: CollectorConfig, *, progress=
                     started_poll = time.monotonic()
                     await asyncio.sleep(0.25)
                     waited += time.monotonic() - started_poll
+            except BaseException as error:
+                primary_error = error
+                closed_before_cleanup = page is not None and page.is_closed()
+                raise
             finally:
                 if context is not None:
-                    await context.close()
+                    try:
+                        await context.close()
+                    except Exception as error:
+                        if primary_error is None:
+                            raise
+                        result['cleanup_error_type'] = type(error).__name__
     except asyncio.CancelledError:
         result.update(collection_status='need_action', failure_reason='preflight_cancelled_not_submitted', actual_client_mode=None)
         raise
     except Exception as error:
         result['collection_status'] = 'need_action'
         result['actual_client_mode'] = None
-        if page is not None and page.is_closed():
+        if closed_before_cleanup:
             result['failure_reason'] = 'manual_verification_window_closed'
         else:
             result['failure_reason'] = _browser_error_reason(error)

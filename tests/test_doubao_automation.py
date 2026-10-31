@@ -1,7 +1,7 @@
 """Automatic web readiness and native orchestration; no real browser or network."""
 import asyncio
 from contextlib import asynccontextmanager
-from dataclasses import asdict
+from dataclasses import asdict, replace
 import copy
 import json
 from pathlib import Path
@@ -13,7 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 from services.desktop_geo_jobs import DesktopGeoJobs
 from services.doubao_automation import inspect_available_doubao_session, _READY_JS
-from services.doubao_source_collector import CollectorConfig, read_snapshot
+from services.doubao_source_collector import CollectorConfig, read_snapshot, _read_login_observation
 from services.geo_research_probe_service import context
 from services.geo_test_runner import RunConfig, run_test_plan, write_json
 from services.geo_test_service import validate_plan
@@ -70,6 +70,7 @@ class PreflightTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result['actual_client_mode'])
 
     async def test_spa_hydration_can_finish_before_the_finite_startup_budget(self):
+        self.config = replace(self.config, navigation_timeout_seconds=2)
         unknown = {'client_mode': None, 'login_required': None, 'challenge': None}
         work = {'client_mode': 'work', 'login_required': False, 'challenge': False}
         result, _ = await self.inspect([unknown, unknown, work, work])
@@ -77,6 +78,7 @@ class PreflightTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['actual_client_mode'], 'work')
 
     async def test_normal_redirect_during_ready_evaluation_retries_without_early_close(self):
+        self.config = replace(self.config, navigation_timeout_seconds=2)
         work = {'client_mode': 'work', 'login_required': False, 'challenge': False}
         seen = []
         async def ready(*args):
@@ -92,6 +94,7 @@ class PreflightTests(unittest.IsolatedAsyncioTestCase):
         self.browser_context.close.assert_awaited_once()
 
     async def test_normal_redirect_during_strict_observation_retries_without_early_close(self):
+        self.config = replace(self.config, navigation_timeout_seconds=2)
         calls = []
         async def observe(*args):
             self.assertEqual(self.browser_context.close.await_count, 0)
@@ -133,6 +136,16 @@ class PreflightTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result['actual_client_mode'])
         self.page.evaluate.assert_not_awaited()
 
+    async def test_our_cleanup_does_not_relabel_a_network_failure_as_user_closure(self):
+        async def close():
+            self.closed = True
+        self.browser_context.close.side_effect = close
+        with patch('services.doubao_automation.launch_context', AsyncMock(return_value=self.browser_context)), \
+             patch('services.doubao_automation._navigate_to_doubao', AsyncMock(side_effect=RuntimeError('net::ERR_CONNECTION_RESET'))):
+            result, _ = await inspect_available_doubao_session(self.config, playwright_factory=self.factory)
+        self.assertEqual(result['failure_reason'], 'network_error:ERR_CONNECTION_RESET')
+        self.assertFalse(result['question_submission_attempted'])
+
     async def test_unknown_authentication_or_missing_composer_stops_without_send(self):
         for value in ({'client_mode': 'consumer', 'login_required': None, 'challenge': False},
                       {'client_mode': 'consumer', 'login_required': False, 'challenge': None}):
@@ -170,7 +183,7 @@ class PreflightTests(unittest.IsolatedAsyncioTestCase):
 class BrowserReadinessTests(unittest.IsolatedAsyncioTestCase):
     async def test_real_readiness_js_on_local_intercepted_bare_and_www_origins(self):
         from playwright.async_api import async_playwright
-        html = ('<html><body><button data-testid="workspace-switch-chip">豆包 工作</button>'
+        html = ('<html><head><meta charset="utf-8"></head><body><button data-testid="workspace-switch-chip">豆包 工作</button>'
                 '<button data-testid="chat_input_action_model">快速</button>'
                 '<div class="tiptap" contenteditable="true"></div></body></html>')
         async with async_playwright() as playwright:
@@ -180,7 +193,7 @@ class BrowserReadinessTests(unittest.IsolatedAsyncioTestCase):
                 requests = []
                 async def fulfill(route):
                     requests.append(route.request.url)
-                    await route.fulfill(status=200, content_type='text/html', body=html)
+                    await route.fulfill(status=200, content_type='text/html; charset=utf-8', body=html)
                 await context.route('**/*', fulfill)
                 page = await context.new_page()
                 for url, expected in [
@@ -191,6 +204,11 @@ class BrowserReadinessTests(unittest.IsolatedAsyncioTestCase):
                     await page.goto(url)
                     result = await page.evaluate(_READY_JS, asdict(CollectorConfig().selectors))
                     self.assertEqual(result['chat_interface_ready'], expected, url)
+                    strict = await _read_login_observation(page, CollectorConfig(strict_client_mode=True))
+                    self.assertEqual(strict['client_mode'], 'work' if expected else None, url)
+                    snapshot = await read_snapshot(page, CollectorConfig(strict_client_mode=True))
+                    self.assertEqual(snapshot['client_mode'], 'work' if expected else None, url)
+                    self.assertEqual(snapshot['chat_interface_ready'], expected, url)
                 self.assertEqual(len(requests), 6)
             finally:
                 await browser.close()
