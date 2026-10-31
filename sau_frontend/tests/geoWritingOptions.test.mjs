@@ -8,6 +8,7 @@ import { baselineWritingOptions, createWritingPreferences } from '../src/utils/g
 import { doubaoTaskRecovery, scopedRecoveryCheckpoint } from '../src/utils/geoTaskRecovery.js'
 import { isExternalCycle, nativeCycleCapability } from '../src/utils/geoExternalBaseline.js'
 import { writingChannelEnabled } from '../src/utils/geoDestinationAvailability.js'
+import {storedSessionScope} from '../src/utils/geoAutomaticCollection.js'
 
 const {computed,ref,watch}=Vue
 
@@ -70,7 +71,7 @@ assert.ok(loginWatcher)
 
 const harness = (api,local=storage()) => {
   const names=['applyWritingOptions','rememberWritingOptions','selectWritingMode','selectWritingModel','cycleScope','sameCycleScope','recoveryStorageKey','loadContentRecovery','storeContentRecovery','rememberContentRecovery','contentRecovery','factsValue','canDraft','externalCycle','nativeRetestAllowed','matchingRetests','applyCycle','loadCycle','options','generate','login','poll','retest','attachRetest']
-  const make=new Function('ref','computed','watch','createWritingPreferences','geoContentApi','doubaoTaskRecovery','scopedRecoveryCheckpoint','isExternalCycle','nativeCycleCapability','writingChannelEnabled','local',`
+  const make=new Function('ref','computed','watch','createWritingPreferences','geoContentApi','doubaoTaskRecovery','scopedRecoveryCheckpoint','isExternalCycle','nativeCycleCapability','writingChannelEnabled','local','storedSessionScope',`
     const cycleId=ref(''),cycle=ref(null),clientMode=ref('consumer'),model=ref(''),factsText=ref(''),confirmed=ref(false),factsConflict=ref(''),briefId=ref(''),platform=ref('zhihu'),publicationVisible=ref(false),working=ref(false),task=ref({status:'idle'}),loginScope=ref(null),cycles=ref([]),reports=ref([]),retestReportId=ref(''),nativeAvailable=ref(true);
     const recoveryTask=ref(null),recoveryStorageError=ref(''),recoveryUnreadable=ref(false),recoveryMemory=new Map();
     const busy=computed(()=>working.value||task.value.status==='running');
@@ -88,8 +89,19 @@ const harness = (api,local=storage()) => {
     return {cycleId,cycle,clientMode,model,task,loginScope,working,factsText,confirmed,factsConflict,recoveryTask,recoveryStorageError,recoveryUnreadable,contentRecovery,messages,ElMessageBox,cycleScope,sameCycleScope,applyCycle,loadCycle,selectWritingMode,selectWritingModel,generate,login,poll,retest,attachRetest,externalCycle,nativeRetestAllowed,matchingRetests,reports,retestReportId,canDraft,stop,
       native:value=>{window.pywebview.api=value}};
   `)
-  return make(ref,computed,watch,createWritingPreferences,api,doubaoTaskRecovery,scopedRecoveryCheckpoint,isExternalCycle,nativeCycleCapability,writingChannelEnabled,local)
+  return make(ref,computed,watch,createWritingPreferences,api,doubaoTaskRecovery,scopedRecoveryCheckpoint,isExternalCycle,nativeCycleCapability,writingChannelEnabled,local,storedSessionScope)
 }
+
+test('native actual work mode retains consumer profile for both content login and writing until an explicit mode change',async()=>{
+  const page=harness({}),calls=[]
+  page.native({open_login:async options=>{calls.push(['login',options]);return {id:'login',kind:'login',status:'completed'}},
+    generate_research:async(...args)=>{calls.push(['write',args[4]]);return {id:'write',kind:'draft',status:'completed'}}})
+  const value=cycle('a','work','');Object.assign(value.baseline.execution,{profile_mode:'consumer',mode_policy:'available_web'})
+  page.cycleId.value='a';page.applyCycle(value);await page.login();await page.generate('draft','doubao')
+  assert.deepEqual(calls,[['login',{client_mode:'work',model_label:'',profile_mode:'consumer',mode_policy:'available_web'}],['write',{client_mode:'work',model_label:'',profile_mode:'consumer',mode_policy:'available_web'}]])
+  page.selectWritingMode('consumer');await page.login();assert.deepEqual(calls.at(-1),['login',{client_mode:'consumer',model_label:''}])
+  page.stop()
+})
 const deferred = () => {let resolve;const promise=new Promise(done=>{resolve=done});return {promise,resolve}}
 const interrupted=(id='failed-a',cycle_id='a')=>({id,kind:'draft',cycle_id,status:'need_action',message:'private account text',
   recovery:{failure_reason:'login_required',question_submission_attempted:null,question_submitted:null,

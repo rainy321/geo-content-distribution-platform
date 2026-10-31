@@ -61,8 +61,9 @@ test('completed native tasks preserve stopped report semantics without inventing
 
 const filename=new URL('../src/views/GeoSearchTests.vue',import.meta.url)
 const {descriptor,errors}=parse(fs.readFileSync(filename,'utf8'),{filename:filename.pathname})
-assert.deepEqual(errors,[]);compileScript(descriptor,{id:'geo-search-restore'})
+assert.deepEqual(errors,[]);const searchScript=compileScript(descriptor,{id:'geo-search-restore'})
 const body=descriptor.scriptSetup.content.replace(/^import .*$/gm,'')
+const searchExpression=name=>{const node=searchScript.scriptSetupAst.flatMap(item=>item.type==='VariableDeclaration'?item.declarations:[]).find(item=>item.id.name===name);assert.ok(node,name);return descriptor.scriptSetup.content.slice(node.init.start,node.init.end)}
 function harness({saved={project_id:1,plan:plan(),report:null},currentTask=task(),api={},reports=[{id:'saved-a',run_id:'run-a'}],reportApi={},contentApi={},query={desktop:'1'},confirm=async()=>{}}={}) {
   const messages=[],unmount=[],scope=effectScope()
   const native={get_workspace_state:async()=>saved,get_task:async()=>currentTask,list_tasks:async()=>[currentTask],save_workspace_state:async()=>({saved:true}),...api}
@@ -140,6 +141,23 @@ test('source-cycle lookup failures never substitute a saved native plan or enabl
     assert.match(page.sourceLoadError.value,/不一致/);assert.equal(page.displayPlan.value,null);assert.equal(page.sourcePreview.value,null)
     assert.equal(page.plan.value.plan_sha256,'a'.repeat(64),'normal plan is retained, not used as source fallback')
   }finally{page.stop()}
+})
+
+test('source preview cannot save brand fields or generate a replacement plan through the actual action functions',async()=>{
+  const values={sourceRequested:ref(true),nativeBusy:ref(false),generating:ref(false),project:ref(profile()),persistProfile:()=>assert.fail('no profile write'),
+    geoTestApi:{generatePlan:()=>assert.fail('no plan generation')}}
+  for(const name of ['saveProfile','generate'])await Function(...Object.keys(values),`return (${searchExpression(name)})`)(...Object.values(values))()
+  await assert.rejects(Function('sourceRequested',`return (${searchExpression('persistProfile')})`)(values.sourceRequested)(),/只读预览/)
+  assert.match(descriptor.template.content,/<el-card v-if="!sourceRequested" shadow="never">\s*<el-form/)
+})
+
+test('automatic session controls and source IDs stay in closed advanced disclosures while confirmation stays visible',()=>{
+  const template=descriptor.template.content
+  const advanced=template.match(/<details class="context" data-testid="automatic-advanced-options">([\s\S]*?)<\/details>/)?.[0]
+  assert.ok(advanced);assert.match(advanced,/<summary>高级采集选项<\/summary>/)
+  assert.match(advanced,/v-model="desktopClientMode"/);assert.match(advanced,/v-model="desktopModel"/);assert.doesNotMatch(advanced,/\sopen(?:\s|>)/)
+  assert.match(template,/<details v-if="sourcePreview" class="context"><summary>查看原任务单依据<\/summary><p>原任务单：[\s\S]*?displayPlan.plan_sha256[\s\S]*?<\/details>/)
+  assert.match(template,/<el-checkbox v-if="sourceRequested" v-model="sourceConfirmed"/)
 })
 
 test('an explicitly selected current report survives workspace restoration and terminal polling',async()=>{

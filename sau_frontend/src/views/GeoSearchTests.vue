@@ -2,7 +2,7 @@
   <main class="search-tests">
     <header>
       <div><h1>AI 搜索测试</h1><p>按客户业务生成问题，查看 AI 回答中实际出现的品牌与来源。</p></div>
-      <el-button :disabled="nativeBusy" @click="importInput?.click()">导入计划或报告</el-button>
+      <el-button :disabled="nativeBusy || sourceRequested" @click="importInput?.click()">导入计划或报告</el-button>
       <input ref="importInput" type="file" accept=".json,application/json" hidden @change="importRecord" />
     </header>
     <el-alert v-if="workspaceSaveError" type="error" :title="workspaceSaveError" :closable="false" />
@@ -11,13 +11,14 @@
       <h2>软件自动采集</h2><p class="context">先检查专用会话，再采集回答和来源；需要登录或安全验证时在软件提示的窗口完成，原请求继续等待。实际工作网页与普通对话结果分开保留。</p>
       <el-alert v-if="(collectionPath==='automatic' || sourceRequested) && !automaticReady" type="warning" :closable="false" :title="automaticCollectionUnavailable"/>
       <DoubaoPreparation/>
-      <div class="form-grid">
+      <details class="context" data-testid="automatic-advanced-options"><summary>高级采集选项</summary><div class="form-grid">
         <el-form-item :label="collectionPath==='automatic' || sourceRequested ? '专用会话（实际界面由软件检查）' : '指定网页模式'"><el-select v-model="desktopClientMode" :disabled="nativeBusy">
           <el-option label="普通对话专用会话" value="consumer" /><el-option label="工作专用会话" value="work" />
         </el-select></el-form-item>
         <el-form-item label="模型选项（可选）"><el-input v-model="desktopModel" :disabled="nativeBusy" placeholder="留空使用当前模型" /></el-form-item>
       </div>
       <el-button :disabled="nativeBusy" @click="startNative('login')">登录豆包</el-button>
+      <el-radio-group v-if="!sourceRequested" v-model="collectionPath" :disabled="nativeBusy" aria-label="网页采集方式"><el-radio-button value="automatic">软件自动采集（当前可用网页界面）</el-radio-button><el-radio-button value="explicit">指定网页模式</el-radio-button></el-radio-group></details>
       <el-button :disabled="nativeBusy || sourceRequested || (!project && !report) || collectionPath==='automatic' && !automaticReady" @click="startNative('plan',collectionPath==='automatic')">用豆包生成问题</el-button>
       <el-button type="primary" :disabled="nativeBusy || !displayPlan || !displayPlanMatchesProject || (collectionPath==='automatic' || sourceRequested) && (!automaticReady || !(sourceRequested ? sourceConfirmed : autoPlanConfirmed))" @click="startNative('run',collectionPath==='automatic' || sourceRequested)">{{ collectionPath==='automatic' || sourceRequested ? '开始软件自动采集' : '按指定模式开始测试' }}</el-button>
       <el-button v-if="nativeBusy" type="warning" @click="stopNative">停止任务</el-button>
@@ -25,7 +26,6 @@
       <p v-if="nativeMessage" class="context">{{ nativeMessage }}</p>
       <p class="context">任务、计划和客户资料会自动保存，重开后恢复。采集中的验证完成后保持窗口打开，继续同一请求；请勿反复开始新任务。</p>
       <p v-if="!project && report" class="context">当前出题客户：{{ report.profile.name }}。也可在下方选择其他品牌项目。</p>
-      <details v-if="!sourceRequested" class="context"><summary>高级采集方式</summary><el-radio-group v-model="collectionPath" :disabled="nativeBusy" aria-label="网页采集方式"><el-radio-button value="automatic">软件自动采集（当前可用网页界面）</el-radio-button><el-radio-button value="explicit">指定网页模式</el-radio-button></el-radio-group></details>
     </el-card>
 
     <el-card v-if="isDesktop" shadow="never" data-testid="desktop-history" :data-history-count="nativeHistory.length">
@@ -45,7 +45,7 @@
         :page-size="historyPageSize" :total="nativeHistory.length" layout="prev, pager, next" small />
     </el-card>
 
-    <el-card shadow="never">
+    <el-card v-if="!sourceRequested" shadow="never">
       <h2>已保存报告</h2>
       <el-select v-model="selectedReportId" placeholder="选择本机已采集的报告" :loading="reportLoading" :disabled="nativeBusy" @change="loadSavedReport">
         <el-option v-for="item in savedReports" :key="item.id" :value="item.id"
@@ -54,7 +54,7 @@
       <p v-if="!savedReports.length" class="context">暂无已保存报告。完成本机采集后刷新页面，或导入报告文件。</p>
     </el-card>
 
-    <el-card shadow="never">
+    <el-card v-if="!sourceRequested" shadow="never">
       <el-form label-position="top" @submit.prevent="generate">
         <div class="form-grid">
           <el-form-item label="品牌项目">
@@ -84,7 +84,7 @@
     <el-card v-if="displayPlan" shadow="never">
       <div class="card-heading"><h2>{{ displayPlan.profile.name }} · 测试计划</h2><el-button @click="download(displayPlan, 'plan.json')">下载计划</el-button></div>
       <p class="context">{{ sourceRequested ? '原任务单的固定问题，只读沿用；另建独立网页基线，不附加到外部观察，也不直接计算同比。' : '运行前请检查问题是否符合客户业务。复测使用同一份计划。' }}</p>
-      <p v-if="sourcePreview" class="context">原任务单：{{ sourcePreview.cycleId }} · 原题摘要：{{ displayPlan.plan_sha256 }}</p>
+      <details v-if="sourcePreview" class="context"><summary>查看原任务单依据</summary><p>原任务单：{{ sourcePreview.cycleId }} · 原题摘要：{{ displayPlan.plan_sha256 }}</p></details>
       <p class="context">测试对象：{{ entityLabel(displayPlan.profile) }} · {{ displayPlan.profile.website }}。</p><p v-if="!displayPlanMatchesProject" class="context">这份计划与当前选择的对象不一致，只供查看；请为当前对象重新生成问题。</p>
       <p v-if="reportEntityContext(displayPlan).legacy" class="context">{{ reportEntityContext(displayPlan).note }}</p>
       <el-table :data="displayPlan.cases">
@@ -321,6 +321,7 @@ const reportContext=computed(()=>reportEntityContext(report.value))
 const relatedCompanyMention=item=>Object.hasOwn(item.assessment,'related_company_mentioned')?item.assessment.related_company_mentioned:item.assessment.company_mentioned
 const editableProfile=()=>({...project.value,...entityProfileFields({...project.value,company:company.value,audience:audience.value,aliases:aliasesText.value,official_urls:officialUrlsText.value})})
 const persistProfile=async()=>{
+  if(sourceRequested.value)throw new Error('当前为固定原题只读预览，不能修改品牌测试资料。')
   if(!project.value){if(!report.value?.profile)throw new Error('请先选择测试对象');return report.value.profile}
   const id=projectId.value,fields=entityProfileFields(editableProfile())
   const saved=(await projectApi.updateProject(id,fields)).data
@@ -328,7 +329,7 @@ const persistProfile=async()=>{
   projects.value=projects.value.map(item=>item.id===id?saved:item)
   return {...saved,...fields}
 }
-const saveProfile=async()=>{if(nativeBusy.value||generating.value)return;generating.value=true;try{await persistProfile();ElMessage.success('测试资料已保存到项目档案')}catch(error){ElMessage.error(error.response?.data?.msg||error.message||'保存资料失败')}finally{generating.value=false}}
+const saveProfile=async()=>{if(sourceRequested.value||nativeBusy.value||generating.value)return;generating.value=true;try{await persistProfile();ElMessage.success('测试资料已保存到项目档案')}catch(error){ElMessage.error(error.response?.data?.msg||error.message||'保存资料失败')}finally{generating.value=false}}
 const categories = ['discovery', 'brand_identity', 'website_guided']
 const categoryNames = { discovery: '行业自然发现', brand_identity: '品牌核验', website_guided: '官网引导核验' }
 const statusNames = { completed: '全部完成', completed_with_gaps: '完成（有缺口）', running: '采集中', pending: '待采集', stopped: '已停止', needs_review: '需要检查', success: '完成', partial: '来源不完整', failed: '失败', need_action: '等待人工处理', service_unavailable: '服务容量不足', private_account_context: '声称使用账号资料或历史记录' }
@@ -430,7 +431,7 @@ const download = (value, filename) => {
 }
 const downloadProfile = () => {try{download(editableProfile(),'client-profile.json')}catch(error){ElMessage.error(error.message)}}
 const generate = async () => {
-  if(generating.value||nativeBusy.value||!project.value)return
+  if(sourceRequested.value||generating.value||nativeBusy.value||!project.value)return
   const id=projectId.value
   generating.value = true
   try {

@@ -11,6 +11,18 @@ export function requireAutomaticBridge(api){
   if(!automaticBridgeReady(api))throw Error(automaticCollectionUnavailable)
   return api
 }
+export function storedSessionScope(execution={}){
+  const scope={}
+  if(Object.hasOwn(execution,'profile_mode')){
+    if(!['consumer','work'].includes(execution.profile_mode))throw Error('原测试专用会话范围无效，请核对原记录；未打开其他会话。')
+    scope.profile_mode=execution.profile_mode
+  }
+  if(Object.hasOwn(execution,'mode_policy')){
+    if(execution.mode_policy!=='available_web'||!scope.profile_mode)throw Error('原自动测试会话策略或范围未核对，未打开其他会话。')
+    scope.mode_policy=execution.mode_policy
+  }
+  return scope
+}
 const identifier=value=>typeof value==='string'&&/^[A-Za-z0-9_-]{1,100}$/.test(value)
 export function automaticSourceRequest(query){
   if(query?.source_cycle===undefined)return null

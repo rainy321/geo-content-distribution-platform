@@ -8,6 +8,7 @@ import {articleSnapshot,sameBrand,sameResearchBrief} from '../src/utils/geoJourn
 import {isExternalCycle,nativeCycleCapability} from '../src/utils/geoExternalBaseline.js'
 import {savedCycleContinuation,savedCycleFactEdits} from '../src/utils/geoSavedCycles.js'
 import {baselineWritingOptions} from '../src/utils/geoWritingOptions.js'
+import {storedSessionScope} from '../src/utils/geoAutomaticCollection.js'
 const load=path=>{
   const filename=new URL(path,import.meta.url),{descriptor,errors}=parse(fs.readFileSync(filename,'utf8'),{filename:filename.pathname})
   assert.deepEqual(errors,[])
@@ -18,7 +19,7 @@ const load=path=>{
   }}
 }
 const journey=load('../src/views/GeoJourney.vue'),search=load('../src/views/GeoSearchTests.vue'),content=load('../src/views/GeoContentLoop.vue')
-const run=(page,name,values)=>Function(...Object.keys(values),`return (${page.expression(name)})`)(...Object.values(values))
+const run=(page,name,values)=>{const scope={storedSessionScope,...values};return Function(...Object.keys(scope),`return (${page.expression(name)})`)(...Object.values(scope))}
 const profile={name:'合成公开服务有限公司',website:'https://example.org/company',entity_type:'company',description:'公开说明'}
 const external=(changes={})=>({id:'external-a',project_id:7,profile,baseline:null,baseline_source:'user_reported_external',
   external_baseline:{kind:'geo_external_baseline_v1'},capabilities:{native_probe:false,native_retest:false,native_metrics:false,editorial_research:true,work_drafting:true},

@@ -23,6 +23,11 @@ test('automatic bridges are explicit capabilities and missing either cannot sile
   assert.deepEqual(automatic.automaticCollectionOptions('work'),{profile_mode:'work',model_label:''})
   for(const [profile,model] of [['auto',''],['work',null],['consumer','x'.repeat(101)]])assert.throws(()=>automatic.automaticCollectionOptions(profile,model))
 })
+test('stored session scope uses only the native whitelist and never silently substitutes an invalid profile',()=>{
+  assert.deepEqual(automatic.storedSessionScope({}),{})
+  assert.deepEqual(automatic.storedSessionScope({client_mode:'work',profile_mode:'consumer',mode_policy:'available_web',cookie:'private'}),{profile_mode:'consumer',mode_policy:'available_web'})
+  for(const execution of [{profile_mode:'foreign'},{profile_mode:null},{profile_mode:'consumer',mode_policy:'force_consumer'},{mode_policy:'available_web'}])assert.throws(()=>automatic.storedSessionScope(execution))
+})
 test('an external cycle supplies an independently cloned exact frozen plan and a route without starting or comparing',async()=>{
   const cycle=await frozen(),prior=JSON.stringify(cycle),plan=await automatic.automaticPlanFromExternalCycle(cycle,owner)
   assert.deepEqual(plan,cycle.test_plan);assert.notEqual(plan,cycle.test_plan);assert.notEqual(plan.cases,cycle.test_plan.cases)

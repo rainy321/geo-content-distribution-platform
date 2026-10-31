@@ -4,6 +4,7 @@ import test from 'node:test'
 import { computed, ref } from 'vue'
 import { parse, compileScript, compileTemplate, compileStyle } from '@vue/compiler-sfc'
 import { doubaoTaskRecovery, recoveryCheckpoint, scopedRecoveryCheckpoint } from '../src/utils/geoTaskRecovery.js'
+import {storedSessionScope} from '../src/utils/geoAutomaticCollection.js'
 
 const failed=(changes={})=>({id:'failed-draft',kind:'draft',status:'need_action',cycle_id:'cycle-a',
   recovery:{failure_reason:'session_redirected_to_logout',question_submission_attempted:false,question_submitted:false,
@@ -133,7 +134,7 @@ const harness=()=>{
     step:ref(2),clientMode:ref('consumer'),model:ref('当前模型'),busy:ref(false),working:ref(false),
     report:ref(null),reports:ref([]),reportId:ref(''),reportOrigin:ref(''),historyReportId:ref(''),project:ref({}),
     plan:ref(null),planConfirmed:ref(false),replacementSourceId:ref(null),selectedTarget:ref(null),matchingDrafts:ref([]),articleId:ref(null),
-    doubaoTaskRecovery,recoveryCheckpoint,scopedRecoveryCheckpoint,computed}
+    doubaoTaskRecovery,recoveryCheckpoint,scopedRecoveryCheckpoint,computed,storedSessionScope}
   const confirms=[],calls=[],applies=[]
   values.recoveryInfo=computed(()=>doubaoTaskRecovery(values.recoveryTask.value))
   values.ElMessageBox={confirm:async(...args)=>confirms.push(args)}
@@ -160,6 +161,22 @@ test('separate login does not rerun content or clear the original recovery warni
 test('feedback login uses the original retest session instead of unrelated writing choices',async()=>{
   const page=harness();page.step.value=4;await page.login()
   assert.deepEqual(page.calls,[{client_mode:'work',model_label:'原模型'}])
+})
+
+test('feedback login retains the original profile when actual work mode was collected in the consumer session',async()=>{
+  const page=harness();page.step.value=4
+  page.cycle.value.baseline.execution={client_mode:'work',requested_model_label:'',profile_mode:'consumer',mode_policy:'available_web'}
+  await page.login();assert.deepEqual(page.calls,[{client_mode:'work',model_label:'',profile_mode:'consumer',mode_policy:'available_web'}])
+  const damaged=harness();damaged.step.value=4;damaged.cycle.value.baseline.execution={client_mode:'work',profile_mode:'foreign',mode_policy:'available_web'}
+  await damaged.login();assert.equal(damaged.calls.length,0);assert.match(damaged.error.value,/会话范围无效/)
+})
+
+test('same-mode Journey writing keeps the native scope while explicit mode changes and external observations do not inherit it',()=>{
+  const page=harness();page.cycle.value.baseline.execution={client_mode:'work',profile_mode:'consumer',mode_policy:'available_web'}
+  page.clientMode.value='work';assert.equal(page.options().profile_mode,'consumer');assert.equal(page.options().mode_policy,'available_web')
+  page.clientMode.value='consumer';assert.deepEqual(page.options(),{client_mode:'consumer',model_label:'当前模型'})
+  page.clientMode.value='work';page.cycle.value.baseline_source='user_reported_external'
+  assert.deepEqual(page.options(),{client_mode:'work',model_label:'当前模型'})
 })
 
 test('unknown or sent retries wait for an explicit decision and cancellation never sends',async()=>{

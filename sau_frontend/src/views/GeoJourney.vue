@@ -174,7 +174,7 @@ import DoubaoTaskRecovery from '@/components/DoubaoTaskRecovery.vue'
 import GeoExternalBaseline from '@/components/GeoExternalBaseline.vue'
 import {isExternalCycle,nativeCycleCapability,externalBaselineSummary} from '@/utils/geoExternalBaseline'
 import { doubaoTaskRecovery, recoveryCheckpoint, scopedRecoveryCheckpoint } from '@/utils/geoTaskRecovery'
-import {automaticBridgeReady,automaticCollectionOptions,automaticCollectionUnavailable,requireAutomaticBridge,externalAutomaticRoute,actualCollectionMode} from '@/utils/geoAutomaticCollection'
+import {automaticBridgeReady,automaticCollectionOptions,automaticCollectionUnavailable,requireAutomaticBridge,externalAutomaticRoute,actualCollectionMode,storedSessionScope} from '@/utils/geoAutomaticCollection'
 import { destinationContinuationText, destinationPreparationText, destinationSupportsFill, isDestinationTask } from '@/utils/geoDestinationSession'
 import { destinationEnabled, destinationCanPrepare, destinationPublicationGate, writingChannelEnabled, writingChannelLabel, inactiveDestinationMessage } from '@/utils/geoDestinationAvailability'
 import { articleSnapshot, baselineEvidenceSummary, canRestoreArticleEdits, canRestoreFactEdits, entityLabel, entityProfileFields, entityType, journeyDate, journeyDraftLimits, journeyLengthReview, lastJourneyProject, normalizeWebsite, profileLines, readJourney, reportEntityContext, restoreEntityDraftFields, safeLink, sameBrand, sameResearchBrief, targetDraftOutdated, writeJourney } from '@/utils/geoJourney'
@@ -319,7 +319,7 @@ const primaryDisabled=computed(()=>{
 })
 const actionHint=computed(()=>busy.value?'任务进行中，当前品牌和步骤已锁定':step.value===0?'品牌资料用于出题，不视为独立核验事实':step.value===1?externalCycle.value?'可沿用原题另建独立软件自动测试':report.value?'分析将使用上方标注时间的采集报告':plan.value?'检查问题并勾选确认后，由软件自动采集回答与来源':'软件先检查网页会话，再生成问题供你预览':step.value===2?'草稿需要审稿，不会自动发布':step.value===3?'一次处理一篇，最终提交以平台结果为准':externalCycle.value?'外部原文逐条保留，采样条件未知不算成立':'复测记录变化，不承诺被索引或被引用')
 const rate=value=>typeof value==='number'&&Number.isFinite(value)?`${Math.round(value*100)}%`:'未知'
-const options=()=>({client_mode:clientMode.value,model_label:model.value.trim()})
+const options=()=>{const execution=cycle.value?.baseline_source==='user_reported_external'?{}:cycle.value?.baseline?.execution||{};return {client_mode:clientMode.value,model_label:model.value.trim(),...(execution.client_mode===clientMode.value?storedSessionScope(execution):{})}}
 watch([collectionPath,clientMode,model],()=>{planConfirmed.value=false},{flush:'sync'})
 const resetStageScroll=()=>{const element=document.querySelector('.workspace-main');if(element)element.scrollTop=0}
 let pendingDiagnosticSection=null
@@ -532,7 +532,7 @@ const startSingleCaseProbe=selection=>run(async()=>{
   task.value={...result,kind:'probe',cycle_id:id,case_id:selected.id};taskId.value=result.id;liveTaskId=result.id;taskKind.value='probe';handledTask=''
   persist()
 })
-const retestSessionOptions=()=>{if(cycle.value?.capabilities?.native_retest===false||cycle.value?.baseline_source==='user_reported_external')throw new Error('外部起始观察不提供原生复测会话，请在反馈中追加实际原文');const baseline=cycle.value?.baseline||{},execution=baseline.execution||{};return {client_mode:execution.client_mode||baseline.cases?.find(item=>item.client_mode)?.client_mode||'consumer',model_label:execution.requested_model_label||''}}
+const retestSessionOptions=()=>{if(cycle.value?.capabilities?.native_retest===false||cycle.value?.baseline_source==='user_reported_external')throw new Error('外部起始观察不提供原生复测会话，请在反馈中追加实际原文');const baseline=cycle.value?.baseline||{},execution=baseline.execution||{},mode=execution.client_mode||baseline.cases?.find(item=>item.client_mode)?.client_mode||'consumer';if(!['consumer','work'].includes(mode))throw new Error('原采集界面未核对，未打开其他会话');return {client_mode:mode,model_label:typeof execution.requested_model_label==='string'?execution.requested_model_label:'',...storedSessionScope(execution)}}
 const login=()=>run(()=>startNative('login',()=>window.pywebview.api.open_login(step.value===4?retestSessionOptions():options())))
 const makePlan=()=>run(async()=>{if(profileDirty.value)throw new Error('测试对象资料已变更，请先保存，再为该对象生成新问题');planConfirmed.value=false;const profile={...project.value,...formProfile()};if(provider.value==='doubao'){if(!nativeAvailable.value)throw new Error('桌面豆包采集服务尚未就绪');await startNative('plan',()=>collectionPath.value==='automatic'?requireAutomaticBridge(window.pywebview.api).plan_automatic(profile,3,automaticCollectionOptions(clientMode.value,model.value)):window.pywebview.api.plan_with_doubao(profile,3,options()))}else plan.value=(await geoTestApi.generatePlan({project_id:projectId.value,case_count:3,...entityProfileFields(profile)})).data})
 const collectBaseline=()=>collectionPath.value==='automatic'?requireAutomaticBridge(window.pywebview?.api).start_automatic_run(plan.value,automaticCollectionOptions(clientMode.value,model.value)):window.pywebview.api.start_run(plan.value,options())

@@ -117,6 +117,7 @@ import {diagnosticSection,focusDiagnosticSection} from '@/utils/geoNextActions'
 import {updateFeedbackBusy} from '@/utils/geoFeedbackBusy'
 import { destinationContinuationText, destinationPreparationText, destinationSupportsFill, isDestinationTask } from '@/utils/geoDestinationSession'
 import { createWritingPreferences } from '@/utils/geoWritingOptions'
+import {storedSessionScope} from '@/utils/geoAutomaticCollection'
 import { isExternalCycle, nativeCycleCapability } from '@/utils/geoExternalBaseline'
 import { retestCollection } from '@/utils/geoFeedback'
 import { destinationEnabled, destinationCanPrepare, destinationPublicationGate, writingChannelEnabled, writingChannelLabel, inactiveDestinationMessage } from '@/utils/geoDestinationAvailability'
@@ -275,7 +276,7 @@ const savePublication = async () => {
   catch(error) {if(!error.response) ElMessage.error(error.message)}
   finally {working.value=false}
 }
-const options = () => ({client_mode:clientMode.value,model_label:model.value.trim()})
+const options = () => {const execution=cycle.value?.baseline_source==='user_reported_external'?{}:cycle.value?.baseline?.execution||{};return {client_mode:clientMode.value,model_label:model.value.trim(),...(execution.client_mode===clientMode.value?storedSessionScope(execution):{})}}
 const generate = async (kind, provider) => {
   if(working.value||task.value.status==='running'||(cycleId.value&&cycle.value?.id!==cycleId.value))return
   const scope = cycleScope()
