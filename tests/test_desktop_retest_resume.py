@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import patch, AsyncMock
 
 from services.desktop_geo_jobs import DesktopGeoJobs
 from services.geo_retest_resume import source_manifest, file_digest
@@ -114,6 +114,47 @@ class DesktopRetestResumeTests(unittest.TestCase):
         self.assertEqual(config.executable_path, 'ordinary-edge.exe')
         self.assertEqual(config.fallback_executable_path, 'ordinary-chrome.exe')
         self.assertTrue((Path(saved['run_dir'])/'resume-source-manifest.json').is_file())
+
+    def test_automatic_resume_keeps_consumer_profile_with_actual_work_mode(self):
+        self.state['execution'].update(profile_mode='consumer', mode_policy='available_web', automation_scope='doubao_web')
+        self.source.update(profile_mode='consumer', mode_policy='available_web', automation_scope='doubao_web')
+        self.save_state()
+        self.jobs.store.save(self.source)
+        original = source_manifest(self.source_dir)
+        configurations = []
+        async def collect(config, **kwargs):
+            return answer(config.question), self.root / 'synthetic-resumed.json'
+        async def no_sleep(_):
+            pass
+        async def runner(value, config, **kwargs):
+            configurations.append(config)
+            return await run_test_plan(value, config, collect=collect, sleep=no_sleep, **kwargs)
+        with patch('services.desktop_geo_jobs.geo_content_store.get_cycle', return_value=self.cycle), \
+             patch('services.desktop_geo_jobs.geo_content_store.attach_retest'), \
+             patch('services.desktop_geo_jobs.run_test_plan', runner):
+            started = self.resume()
+            self.assertEqual(started['status'], 'running')
+            self.jobs.worker.join(timeout=5)
+            self.assertFalse(self.jobs.worker.is_alive())
+            saved = self.jobs.get_task(started['id'])
+        config = configurations[0]
+        self.assertEqual(config.collector.profile_dir, self.root / 'doubao/consumer-browser-profile')
+        self.assertEqual(config.collector.client_mode, 'work')
+        self.assertTrue(config.collector.strict_client_mode)
+        self.assertEqual(config.profile_mode, 'consumer')
+        self.assertEqual(config.mode_policy, 'available_web')
+        self.assertEqual(saved['profile_mode'], 'consumer')
+        self.assertEqual(saved['mode_policy'], 'available_web')
+        self.assertEqual(saved['result']['report']['execution']['profile_mode'], 'consumer')
+        self.assertEqual(source_manifest(self.source_dir), original)
+
+    def test_resume_rejects_new_session_policy_without_matching_original_task(self):
+        self.state['execution'].update(profile_mode='consumer', mode_policy='available_web')
+        self.save_state()
+        with patch('services.desktop_geo_jobs.geo_content_store.get_cycle', return_value=self.cycle), \
+             patch('services.desktop_geo_jobs.run_test_plan', new_callable=AsyncMock) as run:
+            self.assertIn('error', self.resume())
+        run.assert_not_awaited()
 
     def test_pending_with_any_attempt_trace_unknown_metadata_or_receipt_is_rejected(self):
         original = copy.deepcopy(self.state)

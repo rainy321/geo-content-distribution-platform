@@ -65,8 +65,14 @@ class RunConfig:
     run_dir: Path
     collector: CollectorConfig
     cooldown_seconds: float = 15
+    profile_mode: str | None = None
+    mode_policy: str | None = None
 
     def __post_init__(self):
+        if self.profile_mode not in (None, 'consumer', 'work') or self.mode_policy not in (None, 'available_web'):
+            raise ValueError('网页会话配置无效')
+        if self.mode_policy == 'available_web' and (self.profile_mode is None or not self.collector.strict_client_mode):
+            raise ValueError('自动网页任务必须保留会话目录选择与严格模式检查')
         if not math.isfinite(self.cooldown_seconds) or not 10 <= self.cooldown_seconds <= 300:
             raise ValueError("连续问题的间隔必须是 10 到 300 秒")
 
@@ -87,6 +93,11 @@ async def run_test_plan(plan: dict, config: RunConfig, *, resume: bool = False,
                 raise ValueError("恢复时必须使用原界面类型；更换界面请开启新的一轮")
             if (state.get("execution") or {}).get("requested_model_label") != config.collector.requested_model_label:
                 raise ValueError("恢复时必须使用原模型选项；更换模型请开启新的一轮")
+            execution = state.get('execution') or {}
+            if (execution.get('profile_mode', execution.get('client_mode', 'consumer'))
+                    != (config.profile_mode or config.collector.client_mode)
+                    or execution.get('mode_policy') != config.mode_policy):
+                raise ValueError('恢复时必须保留原网页会话目录与模式策略')
             if set(state.get("cases", {})) != {case["id"] for case in plan["cases"]}:
                 raise ValueError("任务问题清单不一致")
             for entry in state["cases"].values():
@@ -107,6 +118,10 @@ async def run_test_plan(plan: dict, config: RunConfig, *, resume: bool = False,
                                    "client_mode": config.collector.client_mode,
                                    "requested_model_label": config.collector.requested_model_label},
                      "cases": {case["id"]: {"status": "pending"} for case in plan["cases"]}}
+            if config.profile_mode is not None:
+                state['execution']['profile_mode'] = config.profile_mode
+            if config.mode_policy is not None:
+                state['execution'].update(mode_policy=config.mode_policy, automation_scope='doubao_web')
             write_json(run_dir / "plan.json", plan)
         state.update(status="running", stop_reason=None)
         _checkpoint(run_dir, plan, state)

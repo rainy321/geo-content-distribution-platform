@@ -134,6 +134,8 @@ def action_required(reason, collection_status=None):
 
 
 def recovery_message(reason, *, attempted=None, submitted=None, failure_stage=None):
+    if failure_stage == 'web_preflight' and attempted is False and submitted is False:
+        return '电脑端豆包就绪检查未通过，本次没有发送问题。请核对页面的登录、验证及可用界面；原检查记录已保留。'
     if reason == 'submission_receipt_timeout':
         return '已尝试发送，但尚未取得可核对的提交回执。请先查看豆包原会话；这不代表问题未发送。原始证据已保留，不会自动重发。'
     if attempted is False and submitted is False:

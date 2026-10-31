@@ -70,10 +70,13 @@ class CollectorConfig:
     fallback_executable_path: str | None = None
     client_mode: str = "consumer"
     requested_model_label: str | None = None
+    strict_client_mode: bool = False
     submission_format: str = 'plain'
     selectors: DoubaoSelectors = DoubaoSelectors()
 
     def __post_init__(self) -> None:
+        if type(self.strict_client_mode) is not bool:
+            raise ValueError('strict_client_mode 必须是布尔值')
         if self.client_mode not in {"consumer", "work"}:
             raise ValueError("client_mode 必须是 consumer 或 work")
         if self.submission_format not in {'plain', 'verbatim_fenced'}:
@@ -378,7 +381,7 @@ SNAPSHOT_JS = r"""({s, question, allowExternalPanels, submissionFormat, literalP
     // A visible input alone is insufficient: require the normal chat composer
     // and visible model control on the expected chat origin and route.
     const modelControl = all(document, s.model_label)[0];
-    const chatInterfaceReady = location.origin === 'https://www.doubao.com'
+    const chatInterfaceReady = location.protocol === 'https:' && ['doubao.com', 'www.doubao.com'].includes(location.hostname)
         && /^\/chat(?:\/|$)/.test(location.pathname)
         && !!modelControl && !!text(modelControl)
         && all(document, s.editor).some(e => e.isContentEditable || (e.tagName === 'TEXTAREA' && !e.disabled && !e.readOnly));
@@ -422,7 +425,10 @@ async def read_snapshot(page: Any, config: CollectorConfig, *, allow_external_pa
                'literalFence': submission_fence(config.question) if config.submission_format == 'verbatim_fenced' else None}
     for attempt in range(3):
         try:
-            return await page.evaluate(SNAPSHOT_JS, payload)
+            value = await page.evaluate(SNAPSHOT_JS, payload)
+            if config.strict_client_mode:
+                value['client_mode'] = (await _read_login_observation(page, config))['client_mode']
+            return value
         except Exception as exc:
             if attempt == 2 or not any(reason in str(exc) for reason in ("Execution context was destroyed", "Cannot find context")):
                 raise
@@ -1106,6 +1112,10 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                     # Re-read even when the already-visible model matched;
                     # never infer an unknown label or trust a stale header.
                     baseline = await read_snapshot(page, config)
+                    if config.strict_client_mode and baseline.get('client_mode') != config.client_mode:
+                        result.update(collection_status='need_action', failure_reason='client_mode_mismatch',
+                                      finished_at=datetime.now(HK_TIME).isoformat())
+                        return result, write_evidence_result(run_dir, result)
                     if requested_label not in re.sub(r"\s+", "", baseline.get("model_label") or ""):
                         raise ValueError("model_selection_not_confirmed")
                     result["environment"].update(model_label=baseline["model_label"], requested_model_label=config.requested_model_label)

@@ -49,8 +49,13 @@ def context(cycle, case_id):
     timeout = execution.get('timeout_seconds', 180)
     if type(timeout) not in (int, float) or not 0 < timeout <= 600:
         raise ValueError('原回答等待时间无法确认，未发送')
+    session = {key: execution[key] for key in ('profile_mode', 'mode_policy') if key in execution}
+    if session.get('profile_mode') not in (None, 'consumer', 'work') or session.get('mode_policy') not in (None, 'available_web'):
+        raise ValueError('原网页会话配置无法确认，未发送')
+    if session.get('mode_policy') == 'available_web' and session.get('profile_mode') is None:
+        raise ValueError('原专用网页会话类型缺失，未发送')
     return {'case': copy.deepcopy(selected[0]), 'before': copy.deepcopy(previous[0]),
-            'execution': {'client_mode': mode, 'requested_model_label': model, 'timeout_seconds': timeout}}
+            'execution': {'client_mode': mode, 'requested_model_label': model, 'timeout_seconds': timeout, **session}}
 
 
 def _observation_context(cycle, case_id):

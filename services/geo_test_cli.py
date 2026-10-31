@@ -77,6 +77,7 @@ async def _plan_with_doubao(profile, args, config, *, progress=None):
         "client_mode": (result.get("environment") or {}).get("client_mode"),
         "prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
         "role": "question_planning_not_exposure_test",
+        **({'mode_policy': 'available_web', 'automation_scope': 'doubao_web'} if config.strict_client_mode else {}),
     })
 
 

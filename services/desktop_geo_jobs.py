@@ -16,7 +16,8 @@ from dataclasses import replace
 from services.doubao_source_collector import CollectorConfig, open_doubao_session
 from services.geo_test_cli import _plan_with_doubao
 from services.geo_test_runner import RunConfig, exclusive_lock, run_test_plan, write_json
-from services.geo_test_service import build_report, normalize_profile, validate_plan
+from services.geo_test_service import build_report, normalize_profile, validate_plan, build_planning_prompt
+from services.doubao_automation import inspect_available_doubao_session
 from services.desktop_task_store import DesktopTaskStore, now
 from services import geo_content_store, geo_content_research, geo_destination_service
 from services.doubao_source_collector import collect_doubao_sources, MANUAL_AUTH_REASONS
@@ -147,9 +148,13 @@ class DesktopGeoJobs:
         # Keep public chat separate from a work account's enterprise connectors.
         # The existing profile remains the work profile; no sessions are copied.
         client_mode = options.get("client_mode", "consumer")
-        profile = "consumer-browser-profile" if client_mode == "consumer" else "browser-profile"
+        profile_mode = options.get('profile_mode', client_mode)
+        if profile_mode not in ('consumer', 'work') or options.get('mode_policy') not in (None, 'available_web'):
+            raise ValueError('网页会话配置无效')
+        profile = "consumer-browser-profile" if profile_mode == "consumer" else "browser-profile"
         return CollectorConfig(profile_dir=self.data / "doubao" / profile, headed=True,
                                manual_wait_seconds=None, client_mode=client_mode,
+                               strict_client_mode=options.get('mode_policy') == 'available_web',
                                requested_model_label=options.get("model_label") or None,
                                executable_path=edge_executable(), fallback_executable_path=chrome_executable())
 
@@ -246,7 +251,8 @@ class DesktopGeoJobs:
             self.job.update(progress=safe, message=messages[name])
             self._persist()
 
-    def _start(self, kind, operation, *, client_name="", cycle_id=None, target_id=None, collector_config=None):
+    def _start(self, kind, operation, *, client_name="", cycle_id=None, target_id=None, collector_config=None,
+               automation_profile_mode=None, session_profile_mode=None):
         with self.lock:
             if self.job["status"] == "running":
                 return {"error": "已有任务正在执行，请先等待或停止"}
@@ -256,6 +262,12 @@ class DesktopGeoJobs:
             if collector_config is not None:
                 self.job.update(requested_client_mode=collector_config.client_mode,
                                 requested_model_label=collector_config.requested_model_label)
+            if session_profile_mode is not None:
+                self.job.update(profile_mode=session_profile_mode, mode_policy='available_web', automation_scope='doubao_web')
+            if automation_profile_mode is not None:
+                self.job.update(automation_scope='doubao_web', mode_policy='available_web',
+                    profile_mode=automation_profile_mode, requested_client_mode=None,
+                    message='正在检查电脑端豆包界面；本步不发送问题。遇到登录或验证会在当前窗口等待。')
             if cycle_id:
                 self.job['cycle_id'] = cycle_id
             if target_id:
@@ -413,6 +425,75 @@ class DesktopGeoJobs:
             return {"plan": value}
         return self._start("plan", plan, client_name=profile["name"], collector_config=config)
 
+    def _automatic_config(self, options):
+        if not isinstance(options, dict) or set(options) - {'model_label', 'profile_mode'}:
+            raise ValueError('自动网页选项只支持模型标签与专用会话类型')
+        profile_mode = options.get('profile_mode', 'consumer')
+        if profile_mode not in ('consumer', 'work'):
+            raise ValueError('请选择有效的专用网页会话')
+        model = options.get('model_label')
+        if model is not None and not isinstance(model, str):
+            raise ValueError('模型标签必须是界面文字')
+        return self._config({'client_mode': profile_mode, 'profile_mode': profile_mode,
+            'model_label': model, 'mode_policy': 'available_web'}), profile_mode
+
+    async def _prepare_automatic(self, config, profile_mode, output):
+        # The preflight owns and normally closes only the browser it launched.
+        # The existing runner then reopens the same profile, never another account.
+        with exclusive_lock(config.profile_dir / '.geo-test.lock'):
+            result, path = await inspect_available_doubao_session(
+                replace(config, output_root=output), progress=self._collector_progress)
+        mode = result.get('actual_client_mode')
+        if result.get('collection_status') != 'preflight_ready' or mode not in ('consumer', 'work'):
+            self._collector_progress({'event': 'collector_finished', 'collection_status': 'need_action',
+                'failure_reason': result.get('failure_reason') or 'web_mode_unknown_not_submitted',
+                'failure_stage': 'web_preflight', 'evidence_path': str(path),
+                'question_submission_attempted': False, 'question_submitted': False})
+            raise ValueError('网页就绪检查尚未通过，本次没有发送问题；请查看豆包窗口与任务详情。')
+        with self.lock:
+            self.job.update(requested_client_mode=mode, observed_client_mode=mode,
+                preflight_evidence_path=str(path), profile_mode=profile_mode,
+                message=f'已观察并锁定{"豆包工作" if mode == "work" else "豆包对话"}，继续电脑端自动流程。')
+            self._persist()
+        return replace(config, client_mode=mode, strict_client_mode=True)
+
+    def plan_automatic(self, profile, case_count, options):
+        try:
+            profile = normalize_profile(profile)
+            build_planning_prompt(profile, case_count)
+            config, profile_mode = self._automatic_config(options)
+        except (ValueError, TypeError) as error:
+            return {'error': str(error)}
+        output = self.data / 'geo-tests/desktop-plans' / uuid.uuid4().hex / 'plan.json'
+        async def plan():
+            locked = await self._prepare_automatic(config, profile_mode, output.parent / 'preflight')
+            value = await _plan_with_doubao(profile, SimpleNamespace(case_count=case_count, output=output),
+                                          locked, progress=self._collector_progress)
+            value['planner'].update(profile_mode=profile_mode, mode_policy='available_web', automation_scope='doubao_web')
+            write_json(output, value)
+            return {'plan': value}
+        return self._start('plan', plan, client_name=profile['name'], collector_config=config,
+                           automation_profile_mode=profile_mode)
+
+    def start_automatic_run(self, plan, options):
+        """Create a separate native web run, never reinterpret an external baseline."""
+        try:
+            plan = copy.deepcopy(validate_plan(plan))
+            config, profile_mode = self._automatic_config(options)
+        except (ValueError, TypeError, KeyError) as error:
+            return {'error': str(error)}
+        run_dir = self.data / 'geo-tests/desktop-runs' / uuid.uuid4().hex
+        async def run():
+            locked = await self._prepare_automatic(config, profile_mode, run_dir / 'preflight')
+            with self.lock:
+                self.job.update(run_dir=str(run_dir))
+                self._persist()
+            report = await run_test_plan(plan, RunConfig(run_dir, locked, profile_mode=profile_mode,
+                                                        mode_policy='available_web'), progress=self._collector_progress)
+            return {'report': report}
+        return self._start('run', run, client_name=plan['profile']['name'], collector_config=config,
+                           automation_profile_mode=profile_mode)
+
     def start_run(self, plan, options, cycle_id=None):
         try:
             plan = copy.deepcopy(validate_plan(plan))
@@ -428,11 +509,13 @@ class DesktopGeoJobs:
             with self.lock:
                 self.job["run_dir"] = str(run_dir)
                 self._persist()
-            report = await run_test_plan(plan, RunConfig(run_dir, config), progress=self._collector_progress)
+            report = await run_test_plan(plan, RunConfig(run_dir, config, profile_mode=options.get('profile_mode'),
+                mode_policy=options.get('mode_policy')), progress=self._collector_progress)
             if cycle_id:
                 geo_content_store.attach_retest(self.data / 'database.db', cycle_id, report)
             return {"report": report}
-        return self._start("run", run, client_name=plan["profile"]["name"], cycle_id=cycle_id, collector_config=config)
+        return self._start("run", run, client_name=plan["profile"]["name"], cycle_id=cycle_id, collector_config=config,
+                           session_profile_mode=options.get('profile_mode') if options.get('mode_policy') == 'available_web' else None)
 
     def start_research_retest(self, cycle_id):
         try:
@@ -442,6 +525,9 @@ class DesktopGeoJobs:
             execution = cycle['baseline'].get('execution') or {}
             options = {'client_mode': execution.get('client_mode') or next((case.get('client_mode') for case in cycle['baseline']['cases'] if case.get('client_mode')), 'consumer'),
                        'model_label': execution.get('requested_model_label') or ''}
+            for key in ('profile_mode', 'mode_policy'):
+                if key in execution:
+                    options[key] = execution[key]
             return self.start_run(cycle['test_plan'], options, cycle_id=cycle_id)
         except (ValueError, geo_content_store.ResearchNotFoundError) as error:
             return {'error': str(error)}
@@ -457,7 +543,8 @@ class DesktopGeoJobs:
             details = context(cycle, case_id)
             execution = details['execution']
             config = replace(self._config({'client_mode': execution['client_mode'],
-                'model_label': execution['requested_model_label']}),
+                'model_label': execution['requested_model_label'],
+                **{key: execution[key] for key in ('profile_mode', 'mode_policy') if key in execution}}),
                 question=details['case']['question'], timeout_seconds=execution['timeout_seconds'])
         except (ValueError, TypeError, KeyError, sqlite3.Error, geo_content_store.ResearchNotFoundError) as error:
             return {'error': str(error)}
@@ -527,7 +614,7 @@ class DesktopGeoJobs:
                 raise asyncio.CancelledError()
             return outcome
         return self._start('probe', probe, client_name=cycle['profile']['name'], cycle_id=cycle_id,
-                           collector_config=config)
+                           collector_config=config, session_profile_mode=execution.get('profile_mode'))
 
     def _resume_research_source(self, source_task_id, cycle_id):
         if not isinstance(source_task_id, str) or not isinstance(cycle_id, str) or not source_task_id or not cycle_id:
@@ -556,7 +643,8 @@ class DesktopGeoJobs:
             details = self._resume_research_source(source_task_id, cycle_id)
             execution = details['execution']
             config = self._config({'client_mode': execution['client_mode'],
-                                   'model_label': execution.get('requested_model_label')})
+                                   'model_label': execution.get('requested_model_label'),
+                                   **{key: execution[key] for key in ('profile_mode', 'mode_policy') if key in execution}})
             config = replace(config, timeout_seconds=execution.get('timeout_seconds', config.timeout_seconds))
             cooldown = execution.get('cooldown_seconds', 15)
             source = details['run_dir']
@@ -564,7 +652,8 @@ class DesktopGeoJobs:
             task_path = self.data / 'desktop-jobs' / (source_task_id + '.json')
             task_hash = file_digest(task_path)
             destination = self.data / 'geo-tests/desktop-runs' / uuid.uuid4().hex
-            RunConfig(destination, config, cooldown)
+            RunConfig(destination, config, cooldown, profile_mode=execution.get('profile_mode'),
+                      mode_policy=execution.get('mode_policy'))
         except (ValueError, OSError, KeyError, TypeError, geo_content_store.ResearchNotFoundError) as error:
             return {'error': str(error)}
 
@@ -583,12 +672,13 @@ class DesktopGeoJobs:
             # The original plan and logical run stay fixed. build_report in
             # the existing runner recomputes every assessment and cohort from
             # saved case results; stale cached cohort rates are never reused.
-            report = await run_test_plan(details['plan'], RunConfig(destination, config, cooldown),
+            report = await run_test_plan(details['plan'], RunConfig(destination, config, cooldown,
+                                         profile_mode=execution.get('profile_mode'), mode_policy=execution.get('mode_policy')),
                                          resume=True, progress=self._collector_progress)
             geo_content_store.attach_retest(self.data / 'database.db', cycle_id, report)
             return {'report': report, 'message': '未发送问题已继续采集；已发送问题保留原结果，没有重发。'}
         return self._start('run', resume, client_name=details['plan']['profile']['name'],
-                           cycle_id=cycle_id, collector_config=config)
+                           cycle_id=cycle_id, collector_config=config, session_profile_mode=execution.get('profile_mode'))
 
     def generate_research(self, cycle_id, kind, brief_id, platform, options):
         database = self.data / 'database.db'

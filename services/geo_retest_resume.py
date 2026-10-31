@@ -84,6 +84,12 @@ def resume_source(data, source, cycle):
             or source.get('requested_client_mode') != execution['client_mode']
             or source.get('requested_model_label') != execution.get('requested_model_label')):
         raise ValueError('原采集界面或模型配置缺失或不一致')
+    if ('profile_mode' in execution and (execution['profile_mode'] not in ('consumer', 'work')
+            or source.get('profile_mode') != execution['profile_mode'])):
+        raise ValueError('原专用网页会话类型缺失或不一致')
+    if ('mode_policy' in execution and (execution['mode_policy'] != 'available_web'
+            or source.get('mode_policy') != execution['mode_policy'] or 'profile_mode' not in execution)):
+        raise ValueError('原网页模式策略缺失或不一致')
     return {'run_dir': path, 'plan': plan, 'state': state, 'case_ids': pending, 'execution': execution}
 
 
