@@ -31,6 +31,13 @@ const brief=(value,max)=>{
   const characters=Array.from(value.replace(/\s+/g,' ').trim())
   return characters.slice(0,max).join('')+(characters.length>max?'…':'')
 }
+export function progressEvidenceLayout(value){
+  const sides=['before','after'].filter(side=>Boolean(value?.[side]))
+  const paired=sides.length===2&&['observed_improvement','not_observed'].includes(value?.status)
+  return {paired,heading:paired?'查看前后精确摘录':'查看观察摘录',entries:sides.map((side,index)=>({side,
+    label:paired?(side==='before'?'之前的回答摘录':'之后的回答摘录'):sides.length===1?'本次观察摘录':`关联观察 ${index+1}`,
+    evidence:value[side]}))}
+}
 const evidence=(label,value)=>{
   const quote=typeof value?.quote==='string'&&value.quote.trim()?escapeHtml(value.quote):'未提供摘录'
   return `<section class="evidence"><h3>${label}</h3><pre class="excerpt"><span>${quote}</span></pre><dl>
@@ -39,7 +46,7 @@ ${timeRow('录入时间',value?.recorded_at)}${timeRow('采集时间',value?.col
 }
 const record=value=>`<li class="record"><article><h2>${field(value?.direction)} · ${Object.hasOwn(statusLabels,value?.status)?statusLabels[value.status]:'状态未知'}</h2><p class="action-summary">${field(value?.action_summary)}</p><dl class="details">
 ${timeRow('行动时间',value?.action_at)}${timeRow('记录时间',value?.recorded_at)}${row('对象范围',entityScope(value?.current_entity_match))}${row('记录对象',value?.entity?.name)}${row('记录官网（纯文本）',value?.entity?.website)}
-</dl>${value?.before||value?.after?`<div class="evidence-pair">${evidence('之前的回答摘录',value?.before)}${evidence('之后的回答摘录',value?.after)}</div>`:''}<dl>${row('核对备注',value?.review_note)}</dl>
+</dl>${value?.before||value?.after?`<div class="${progressEvidenceLayout(value).paired?'evidence-pair':'evidence-observations'}">${progressEvidenceLayout(value).entries.map(item=>evidence(item.label,item.evidence)).join('')}</div>`:''}<dl>${row('核对备注',value?.review_note)}</dl>
 <details class="appendix"><summary>记录编号与对象依据</summary><dl>${row('记录 ID',value?.id)}${row('记录对象类型',entityType(value?.entity?.entity_type))}${row('对象依据',entityBasis(value?.entity?.basis))}</dl></details></article></li>`
 
 // Deliberately select individual summary and excerpt fields. Full responses,
@@ -59,7 +66,7 @@ export function optimizationProgressHtml(project,view,generatedAt){
 <meta name="referrer" content="no-referrer"><title>${field(project?.name)} · 优化进展记录</title>
 <style>
 @page{size:A4;margin:16mm}*{box-sizing:border-box}body{margin:0;background:#f4f7f5;color:#173e3b;font:14px/1.7 system-ui,sans-serif}main{max-width:960px;margin:auto;padding:28px}h1{font-size:26px;margin:0 0 14px}h2{font-size:18px;margin:0 0 14px}h3{font-size:15px;margin:0 0 8px}header,.record{padding:22px;border:1px solid #dce6e2;border-radius:10px;background:#fff}dl{margin:0}dl>div{display:grid;grid-template-columns:140px minmax(0,1fr);gap:10px;margin:5px 0}dt{color:#63736f}dd{margin:0;white-space:pre-wrap;overflow-wrap:anywhere}.note{color:#63736f;margin:16px 0 0}.counts{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:20px 0}.count{padding:14px;border:1px solid #dce6e2;border-radius:8px;background:#fff}.count strong{display:block;font-size:24px}.records{padding:0;margin:0;list-style:none;display:grid;gap:20px}.evidence-pair{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;margin-top:20px}.evidence{min-width:0}.excerpt{font:inherit;white-space:pre-wrap;overflow-wrap:anywhere;background:#f4f7f5;border-left:3px solid #afd2c8;padding:12px;margin:0 0 12px}.evidence dl>div{grid-template-columns:110px minmax(0,1fr)}.empty{padding:22px;background:#fff;border:1px solid #dce6e2;border-radius:10px;color:#63736f}@media(max-width:640px){main{padding:14px}.counts,.evidence-pair{grid-template-columns:1fr}dl>div,.evidence dl>div{grid-template-columns:1fr;gap:0}}@media print{body{background:#fff;color:#111}main{max-width:none;padding:0}header,.record,.count{border-color:#bbb;border-radius:0}.record{break-inside:auto}h1,h2,h3{break-after:avoid}.evidence{break-inside:avoid}.excerpt{background:#fff}.note,dt{color:#444}}
-.action-summary{white-space:pre-wrap;overflow-wrap:anywhere;margin:0 0 14px}.appendix{font-size:12px;color:#63736f;margin-top:12px}.appendix summary{cursor:pointer}main>section{margin-top:20px}@media print{.appendix{break-inside:avoid}}
+.action-summary{white-space:pre-wrap;overflow-wrap:anywhere;margin:0 0 14px}.appendix{font-size:12px;color:#63736f;margin-top:12px}.appendix summary{cursor:pointer}main>section{margin-top:20px}.evidence-observations{display:grid;grid-template-columns:minmax(0,1fr);gap:18px;margin-top:20px}@media print{.appendix{break-inside:avoid}}
 </style></head><body><main>
 <header><h1>优化进展记录</h1><dl>${row('项目',project?.name)}${row('项目 ID',project?.id)}${row('对象类型',entityType(project?.entity_type))}${row('官网（纯文本）',project?.website)}${timeRow('导出时间',generatedAt)}</dl>
 <p class="note">以下用户记录和所选摘录仅供核对，不能证明改动导致回答改善。</p></header>

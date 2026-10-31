@@ -9,6 +9,7 @@ import {externalSha} from '../src/utils/geoExternalBaseline.js'
 import {externalWriteUncertain} from '../src/utils/geoExternalFeedback.js'
 import * as checkpoints from '../src/utils/geoFeedbackSession.js'
 import {journeyDate} from '../src/utils/geoJourney.js'
+import {progressEvidenceLayout} from '../src/utils/geoOptimizationProgressExport.js'
 
 const clone=value=>JSON.parse(JSON.stringify(value))
 const project={id:7,name:'合成公开服务有限公司',website:'https://example.org/company',entity_type:'company',aliases:['合成服务','Synthetic Service'],official_urls:['https://example.org/about']}
@@ -38,6 +39,8 @@ const options=()=>[option(),option('after')]
 const raws=()=>({before:{probeId:'probe-before',sha256:beforeSha,raw:rawBefore},after:{probeId:'probe-after',sha256:afterSha,raw:rawAfter}})
 const form=(changes={})=>({...progress.emptyProgressForm(),direction:'  官网资料  ',actionSummary:'  核对并补充公开说明。  ',...changes})
 const comparisonForm=(changes={})=>form({status:'observed_improvement',beforeProbeId:'probe-before',afterProbeId:'probe-after',beforeQuote:rawBefore,afterQuote:rawAfter,...changes})
+const observationForm=(changes={})=>form({attachObservation:true,observationProbeId:'probe-after',observationQuote:rawAfter,...changes})
+const observationRaw=()=>({observation:{probeId:'probe-after',sha256:afterSha,raw:rawAfter}})
 const snapshot=(value,quote)=>{
   const {response_excerpt,response_truncated,response_chars,...metadata}=value
   return {...metadata,quote}
@@ -66,12 +69,12 @@ async function attempt(value=comparisonForm(),selected=options(),raw=raws()){
   return {...request,digest:await progress.progressRequestSha(project,request.body)}
 }
 function appendReply(request,changes={}){
-  const body=request.body,selected=options(),comparison=body.status!=='preparation'
+  const body=request.body,selected=options(),linked=Boolean(body.before_probe_id||body.after_probe_id)
   return {code:200,data:{record:record({request_id:body.request_id,status:body.status,direction:body.direction,action_summary:body.action_summary,
     project_identity:clone(body.expected_project_identity_sha256===oldIdentitySha?oldIdentity:identity),project_identity_sha256:body.expected_project_identity_sha256,
     current_entity_match:body.expected_project_identity_sha256===identitySha,
-    review_note:body.review_note||'',action_at:body.action_at||null,evidence_kind:comparison?'user_reported_included':'no_evidence',
-    before:comparison?snapshot(selected[0],body.before_quote):null,after:comparison?snapshot(selected[1],body.after_quote):null,...changes}),
+    review_note:body.review_note||'',action_at:body.action_at||null,evidence_kind:linked?'user_reported_included':'no_evidence',
+    before:body.before_probe_id?snapshot(selected.find(item=>item.probe_id===body.before_probe_id),body.before_quote):null,after:body.after_probe_id?snapshot(selected.find(item=>item.probe_id===body.after_probe_id),body.after_quote):null,...changes}),
     receipt:{request_id:body.request_id,request_sha256:request.digest,idempotent:false}}}
 }
 
@@ -346,6 +349,39 @@ test('preparation receipts cannot quietly attach unrequested evidence',async()=>
   assert.throws(()=>progress.progressReceipt(project,reply,request))
 })
 
+test('preparation links one explicitly enabled observation without borrowing comparison drafts or claiming an effect',async()=>{
+  assert.equal(progress.emptyProgressForm().attachObservation,false)
+  const value=observationForm({beforeProbeId:'probe-before',beforeQuote:rawBefore,afterProbeId:'probe-after',afterQuote:rawAfter})
+  const disabled=payload(project,{...value,attachObservation:false},options(),{...raws(),...observationRaw()})
+  assert.deepEqual(disabled.proof,{})
+  assert.equal(Object.hasOwn(disabled.body,'before_probe_id'),false);assert.equal(Object.hasOwn(disabled.body,'after_probe_id'),false)
+  const request=await attempt(value,options(),{...raws(),...observationRaw()})
+  assert.equal(request.body.status,'preparation');assert.equal(request.body.after_probe_id,'probe-after');assert.equal(request.body.after_quote,rawAfter)
+  assert.equal(Object.hasOwn(request.body,'before_probe_id'),false);assert.deepEqual(request.proof,{after:afterSha})
+  assert.doesNotMatch(JSON.stringify(request.body),/attachObservation|observationProbeId|observationQuote|native_verified|causal_effect/)
+  const saved=progress.progressReceipt(project,appendReply(request),request),page=progress.progressPage(project,pageReply([saved]))
+  assert.equal(saved.before,null);assert.equal(saved.after.quote,rawAfter);assert.equal(saved.evidence_kind,'user_reported_included')
+  assert.equal(page.countsCurrent.preparation,1);assert.equal(page.countsCurrent.observed_improvement,0);assert.equal(page.countsCurrent.independently_verified_effects,0)
+})
+
+test('single observation requires its exact original ID, SHA and quotation and never accepts a preview or comparison raw',()=>{
+  for(const change of [{observationProbeId:''},{observationProbeId:'foreign'},{observationQuote:''},{observationQuote:' '},
+    {observationQuote:'改写后的原文'},{observationQuote:'字'.repeat(2001)}])assert.throws(()=>payload(project,observationForm(change),options(),observationRaw()))
+  for(const observation of [null,{...observationRaw().observation,probeId:'probe-before'},{...observationRaw().observation,sha256:'a'.repeat(64)},
+    {...observationRaw().observation,raw:'只有列表预览'}])assert.throws(()=>payload(project,observationForm(),options(),{...raws(),observation}))
+  assert.throws(()=>payload(project,observationForm(),options(),raws()),'comparison RAM cannot stand in for the separate observation read')
+})
+
+test('single-observation receipts reject missing, additional, mismatched or rewritten evidence',async()=>{
+  const request=await attempt(observationForm(),options(),observationRaw()),reply=appendReply(request)
+  assert.equal(progress.progressReceipt(project,reply,request).after.probe_id,'probe-after')
+  for(const change of [value=>{value.data.record.after=null;value.data.record.evidence_kind='no_evidence'},
+    value=>{value.data.record.before=snapshot(option(),rawBefore)},value=>{value.data.record.after.probe_id='foreign'},
+    value=>{value.data.record.after.response_sha256='a'.repeat(64)},value=>{value.data.record.after.quote=rawAfter.trim()}]){
+    const bad=clone(reply);change(bad);assert.throws(()=>progress.progressReceipt(project,bad,request))
+  }
+})
+
 test('export view is an explicit HTML model whitelist, preserving evidence IDs and distinct recorded/collected times',()=>{
   const request=payload(project,comparisonForm(),options(),raws()),recorded=appendReply(request).data.record
   const secrets={raw:'PRIVATE_FULL_RESPONSE',response_excerpt:'PRIVATE_PREVIEW',token:'PRIVATE_TOKEN',account:'PRIVATE_ACCOUNT'}
@@ -408,7 +444,7 @@ function component(api={},session=checkpoints.createFeedbackSession(),settings={
     append:async(id,body)=>appendReply({body,proof:{before:beforeSha,after:afterSha},digest:await progress.progressRequestSha({id},body)}),
     raw:async id=>({data:id==='cycle-before'?cycle():cycle(option('after'),rawAfter)})}
   const deps={computed:Vue.computed,reactive:Vue.reactive,ref:Vue.ref,watch:Vue.watch,...progress,...checkpoints,
-    optimizationProgressSession:session,externalWriteUncertain,journeyDate,defineProps:()=>props,
+    optimizationProgressSession:session,externalWriteUncertain,journeyDate,progressEvidenceLayout,defineProps:()=>props,
     defineEmits:()=>((_name,event)=>{busyEvents.push(event);if(settings.echoBusy)props.busy=event.active}),
     onUnmounted:callback=>unmount.push(callback),ElMessage:{info:value=>messages.push(value)},
     exportFeedbackDraft:(...args)=>exports.push(clone(args)),downloadOptimizationProgress:(...args)=>downloads.push(clone(args)),
@@ -417,7 +453,7 @@ function component(api={},session=checkpoints.createFeedbackSession(),settings={
     geoContentApi:{get:async(...args)=>{calls.raw.push(clone(args));return (api.raw||defaults.raw)(...args)}}}
   const methods=effect.run(()=>Function(...Object.keys(deps),componentBody+`;return {${names.join(',')}}`)(...Object.values(deps)))
   let stopped=false
-  const page={...progress,journeyDate,...methods,props,calls,busyEvents,messages,exports,downloads,session,stop(){if(stopped)return;stopped=true;for(const close of unmount)close();effect.stop()}}
+  const page={...progress,journeyDate,progressEvidenceLayout,...methods,props,calls,busyEvents,messages,exports,downloads,session,stop(){if(stopped)return;stopped=true;for(const close of unmount)close();effect.stop()}}
   mounted.push(page);return page
 }
 const ready=async page=>{await until(()=>!page.loading.value);assert.ok(page.page.value,page.error.value);return page}
@@ -427,7 +463,7 @@ async function renderComponent(page){
   assert.deepEqual(template.errors,[])
   const code=template.code.replace(/import \{([^}]+)\} from "vue"/g,(_all,imports)=>`const {${imports.split(',').map(item=>{const [name,alias]=item.trim().split(/\s+as\s+/);return alias?`${name}:${alias}`:name}).join(',')}}=Vue;`).replace('export function render','return function render')
   const app=Vue.createSSRApp({props:['project','busy','blocked'],setup:()=>page,render:Function('Vue',code)(Vue)},page.props)
-  for(const [name,tag] of [['el-button','button'],['el-input','textarea'],['el-select','select'],['el-option','option'],['el-form','form'],['el-form-item','label'],['el-dialog','section']]){
+  for(const [name,tag] of [['el-button','button'],['el-input','textarea'],['el-checkbox','label'],['el-select','select'],['el-option','option'],['el-form','form'],['el-form-item','label'],['el-dialog','section']]){
     app.component(name,{props:['modelValue','disabled','loading','label'],setup:(props,{slots})=>()=>Vue.h(tag,{disabled:props.disabled,'aria-label':props.label},[slots.default?.()||props.modelValue,slots.footer?.()])})
   }
   return renderToString(app)
@@ -440,6 +476,66 @@ test('the component automatically GETs the current project only, defaults to pre
   assert.deepEqual(page.calls.append,[]);assert.equal(page.form.status,'preparation');assert.equal(page.form.actionAt,'')
   const html=await renderComponent(page)
   assert.match(html,/还没有进展记录/);assert.match(html,/基础准备单独记录，不计为回答改善/)
+})
+
+test('the editor saves one independently selected observation as preparation and renders a single evidence column',async()=>{
+  const page=await ready(component());page.open()
+  assert.equal(page.form.attachObservation,false);assert.equal(page.session.stats().entries,0)
+  Object.assign(page.form,observationForm());await page.readRaw('observation')
+  assert.equal(page.raws.observation.raw,rawAfter);assert.equal(page.pending.value,false)
+  await page.save();assert.equal(page.calls.append.length,1);assert.equal(page.error.value,'')
+  const body=page.calls.append[0][1];assert.equal(body.status,'preparation');assert.equal(body.after_probe_id,'probe-after')
+  assert.equal(Object.hasOwn(body,'before_probe_id'),false);assert.equal(page.records.value[0].before,null)
+  assert.equal(page.page.value.countsCurrent.preparation,1);assert.equal(page.page.value.countsCurrent.observed_improvement,0)
+  assert.equal(page.session.stats().entries,0);assert.equal(page.raws.observation,null)
+  const html=await renderComponent(page)
+  assert.match(html,/查看观察摘录/);assert.match(html,/本次观察摘录/);assert.match(html,/class="progress-observations"/)
+  assert.doesNotMatch(html,/查看前后精确摘录|未关联回答。|之前的回答摘录|之后的回答摘录/)
+})
+
+test('changing the record status disables observation attachment and never borrows either editor evidence',async()=>{
+  const page=await ready(component());Object.assign(page.form,observationForm());await page.readRaw('observation')
+  const prior={id:page.form.observationProbeId,quote:page.form.observationQuote}
+  Object.assign(page.form,{status:'observed_improvement',beforeProbeId:'probe-before',beforeQuote:rawBefore,afterProbeId:'probe-after',afterQuote:rawAfter});assert.equal(page.form.attachObservation,false);assert.equal(page.raws.observation,null)
+  page.form.status='preparation'
+  assert.equal(page.form.attachObservation,false);assert.equal(page.form.observationProbeId,prior.id);assert.equal(page.form.observationQuote,prior.quote)
+  await page.save();assert.equal(page.calls.append.length,1)
+  assert.equal(Object.hasOwn(page.calls.append[0][1],'before_probe_id'),false);assert.equal(Object.hasOwn(page.calls.append[0][1],'after_probe_id'),false)
+})
+
+test('an explicitly reenabled observation after changing status must reread its original answer',async()=>{
+  const page=await ready(component());Object.assign(page.form,observationForm());await page.readRaw('observation')
+  page.form.status='not_observed';page.form.status='preparation';page.form.attachObservation=true
+  await page.save();assert.equal(page.calls.append.length,0);assert.match(page.error.value,/读取所选完整回答/)
+  assert.equal(page.form.observationQuote,rawAfter);await page.readRaw('observation');await page.save()
+  assert.equal(page.calls.append.length,1);assert.equal(page.calls.append[0][1].after_quote,rawAfter)
+})
+
+test('switching from a comparison to preparation and back preserves quotations but requires fresh original reads',async()=>{
+  const page=await ready(component());Object.assign(page.form,comparisonForm());await page.readRaw('before');await page.readRaw('after')
+  page.form.status='preparation';page.form.status='observed_improvement'
+  assert.equal(page.form.beforeQuote,rawBefore);assert.equal(page.form.afterQuote,rawAfter)
+  assert.equal(page.raws.before,null);assert.equal(page.raws.after,null)
+  await page.save();assert.equal(page.calls.append.length,0);assert.match(page.error.value,/读取所选完整回答/)
+})
+
+test('a late observation read is discarded after its purpose changes and cannot keep the editor busy',async()=>{
+  const wait=deferred(),page=await ready(component({raw:()=>wait.promise}))
+  Object.assign(page.form,observationForm());const reading=page.readRaw('observation');await until(()=>page.calls.raw.length===1)
+  assert.equal(page.pending.value,true);page.form.status='not_observed';assert.equal(page.pending.value,false)
+  wait.resolve({data:cycle(option('after'),rawAfter)});await reading
+  assert.equal(page.raws.observation,null);assert.equal(page.reading.observation,false);assert.equal(page.calls.append.length,0)
+})
+
+test('an uncertain single observation retries the original body after remount without serializing full raw text',async()=>{
+  const session=checkpoints.createFeedbackSession(),first=await ready(component({append:async()=>{throw Error('lost acknowledgement')}},session))
+  Object.assign(first.form,observationForm());await first.readRaw('observation');await first.save()
+  assert.equal(first.uncertain.value,true);const original=clone(first.calls.append[0]),saved=session.read(progress.progressProjectKey(project))
+  assert.deepEqual(saved.value.frozen.proof,{after:afterSha});assert.doesNotMatch(JSON.stringify(saved),/"raw"|response_excerpt/)
+  first.stop();assert.equal(first.raws.observation,null)
+  const second=await ready(component({},session));assert.equal(second.raws.observation,null)
+  await second.save();assert.deepEqual(second.calls.append[0],original);assert.deepEqual(second.calls.raw,[])
+  assert.equal(second.uncertain.value,false);assert.equal(session.stats().entries,0)
 })
 
 test('busy parent initialization waits to read and the initial false event cannot lock a fresh project permanently',async()=>{

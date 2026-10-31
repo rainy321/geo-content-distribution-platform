@@ -13,7 +13,7 @@ const count=value=>Number.isSafeInteger(value)&&value>=0
 const date=value=>typeof value==='string'&&value.length<=64&&/(?:Z|[+-]\d\d:\d\d)$/.test(value)&&Number.isFinite(Date.parse(value))
 const canonical=value=>Array.isArray(value)?value.map(canonical):value&&typeof value==='object'?Object.fromEntries(Object.keys(value).sort().map(key=>[key,canonical(value[key])])):value
 export const progressProjectKey=project=>projectId(project?.id)?`optimization-progress:${JSON.stringify([project.id,project.name,project.website,project.entity_type,project.aliases,project.official_urls])}`:null
-export const emptyProgressForm=()=>({direction:'',actionSummary:'',status:'preparation',actionAt:'',beforeProbeId:'',afterProbeId:'',beforeQuote:'',afterQuote:'',reviewNote:''})
+export const emptyProgressForm=()=>({direction:'',actionSummary:'',status:'preparation',actionAt:'',beforeProbeId:'',afterProbeId:'',beforeQuote:'',afterQuote:'',attachObservation:false,observationProbeId:'',observationQuote:'',reviewNote:''})
 export const progressStatusLabel=value=>Object.hasOwn(progressStatuses,value)?progressStatuses[value]:'状态未知'
 export const progressSourceLabel=value=>value?.source==='user_reported_external'?'用户提供':value?.native_verified===true?'软件采集':'研究导入，未独立核验'
 export function progressContextNote(value){
@@ -123,15 +123,19 @@ export function progressPayload(project,form,options,raws,identitySha){
   if(form.reviewNote)body.review_note=form.reviewNote
   if(form.actionAt){const value=new Date(form.actionAt);if(!Number.isFinite(value.getTime()))throw new ProgressInputError('请核对实际操作时间；不知道时留空。');body.action_at=value.toISOString()}
   const proof={}
-  if(form.status!=='preparation'){
+  const attach=(side,option,quote,context)=>{
+    if(!option||!bounded(quote,2000,true)||context?.probeId!==option.probe_id||context.sha256!==option.response_sha256||typeof context.raw!=='string'||!context.raw.includes(quote))throw new ProgressInputError('请读取所选完整回答，并从原文复制不超过2000字的精确摘录。')
+    body[`${side}_probe_id`]=option.probe_id;body[`${side}_quote`]=quote;proof[side]=option.response_sha256
+  }
+  if(form.status==='preparation'&&form.attachObservation===true){
+    attach('after',options.find(item=>item.probe_id===form.observationProbeId),form.observationQuote,raws.observation)
+  }else if(form.status!=='preparation'){
     const before=options.find(item=>item.probe_id===form.beforeProbeId),after=options.find(item=>item.probe_id===form.afterProbeId)
     if(!comparableProgressEvidence(before,after))throw new ProgressInputError('请选择同一计划、同一道实际或固定原题的两条不同回答。')
     if(form.status==='observed_improvement'&&([before,after].some(item=>item.excluded_from_improvement||item.answer_evaluable===false||Boolean(item.answer_error))
       ||Date.parse(after.recorded_at)<Date.parse(before.recorded_at)||before.collection_time_known&&after.collection_time_known&&Date.parse(after.collected_at)<Date.parse(before.collected_at)))throw new ProgressInputError('所选回答不适合登记改善，请核对记录顺序和回答有效性。')
     for(const [side,option,quote] of [['before',before,form.beforeQuote],['after',after,form.afterQuote]]){
-      const context=raws[side]
-      if(!bounded(quote,2000,true)||context?.probeId!==option.probe_id||context.sha256!==option.response_sha256||typeof context.raw!=='string'||!context.raw.includes(quote))throw new ProgressInputError('请读取所选完整回答，并从原文复制不超过2000字的精确摘录。')
-      body[`${side}_probe_id`]=option.probe_id;body[`${side}_quote`]=quote;proof[side]=option.response_sha256
+      attach(side,option,quote,raws[side])
     }
   }
   return {body,proof}
@@ -145,7 +149,7 @@ export function progressReceipt(project,reply,attempt){
     ||(body.action_at?Date.parse(value.action_at)!==Date.parse(body.action_at):value.action_at!==null)||value.review_note!==(body.review_note||'')
     ||value.request_sha256!==undefined&&value.request_sha256!==attempt.digest)throw new ProgressInputError('进展回执与本次填写不一致，原请求保留。')
   for(const side of ['before','after']){
-    if(body.status==='preparation'){if(value[side]!==null)throw new ProgressInputError('准备记录出现非本次证据，原请求保留。')}
+    if(!body[`${side}_probe_id`]){if(value[side]!==null)throw new ProgressInputError('记录出现非本次证据，原请求保留。')}
     else if(value[side]?.probe_id!==body[`${side}_probe_id`]||value[side]?.quote!==body[`${side}_quote`]||value[side]?.response_sha256!==attempt.proof[side])throw new ProgressInputError('进展回执的原文摘录或摘要不一致，原请求保留。')
   }
   return value

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import fs from 'node:fs'
 import test from 'node:test'
-import {optimizationProgressHtml,downloadOptimizationProgress} from '../src/utils/geoOptimizationProgressExport.js'
+import {optimizationProgressHtml,downloadOptimizationProgress,progressEvidenceLayout} from '../src/utils/geoOptimizationProgressExport.js'
 
 const project={id:7,name:'合成公开服务有限公司',website:'https://example.org/company',entity_type:'company'}
 const generatedAt='2026-10-29T15:30:00+08:00'
@@ -206,6 +206,32 @@ test('preparation without linked answers omits empty evidence columns while reta
   assert.doesNotMatch(html,/<div class="evidence-pair">|未提供摘录|之前的回答摘录|之后的回答摘录|来源（用户声明）/)
   const compared=optimizationProgressHtml(project,view({records:[record({before:evidence(),after:evidence()})]}),generatedAt)
   assert.match(compared,/<div class="evidence-pair">/);assert.match(compared,/之前的回答摘录/);assert.match(compared,/之后的回答摘录/)
+})
+
+test('single preparation evidence is shown as one observation without a missing before column or an effect count',()=>{
+  for(const side of ['before','after']){
+    const value=record({status:'preparation',before:null,after:null,[side]:evidence({quote:'<script>合成单次原文</script> & 原文边界。'})})
+    const html=optimizationProgressHtml(project,view({summary:{observed_improvement:0,not_observed:0,preparation:1},records:[value]}),generatedAt)
+    assert.match(html,/本次观察摘录/);assert.match(html,/class="evidence-observations"/)
+    assert.match(html,/用户记录回答改善<strong>0<\/strong>/);assert.match(html,/基础准备<strong>1<\/strong>/)
+    assert.equal((html.match(/<section class="evidence">/g)||[]).length,1)
+    assert.doesNotMatch(html,/未提供摘录|之前的回答摘录|之后的回答摘录|class="evidence-pair"|<script>/)
+    assert.match(html,/&lt;script&gt;合成单次原文&lt;\/script&gt; &amp; 原文边界。/)
+    assert.equal(progressEvidenceLayout(value).paired,false)
+  }
+})
+
+test('preparation with two linked observations never implies a before-after comparison while actual comparisons keep their labels',()=>{
+  const preparation=record({status:'preparation'}),layout=progressEvidenceLayout(preparation)
+  assert.equal(layout.paired,false);assert.deepEqual(layout.entries.map(item=>item.label),['关联观察 1','关联观察 2'])
+  const html=optimizationProgressHtml(project,view({records:[preparation]}),generatedAt)
+  assert.match(html,/关联观察 1/);assert.match(html,/关联观察 2/)
+  assert.doesNotMatch(html,/之前的回答摘录|之后的回答摘录|class="evidence-pair"/)
+  for(const status of ['not_observed','observed_improvement']){
+    const compared=progressEvidenceLayout(record({status}));assert.equal(compared.paired,true)
+    assert.deepEqual(compared.entries.map(item=>item.label),['之前的回答摘录','之后的回答摘录'])
+  }
+  assert.deepEqual(progressEvidenceLayout({status:'preparation',before:null,after:null}).entries,[])
 })
 
 test('CSP forbids scripts and external resources and the document needs no storage, network or external stylesheet',()=>{
