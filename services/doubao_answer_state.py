@@ -36,4 +36,13 @@ def is_deferred_answer(response: str) -> bool:
         r"(?:调研|研究|任务).{0,12}(?:正在|在)后台(?:进行|执行|运行)|(?:完成|结束)后.{0,35}(?:我会|给你|整理|汇总)|稍后.{0,25}(?:给你|整理|汇总)",
         text,
     )
-    return bool(delegated and pending or started_research and future_document)
+    # Work mode may list its planned research scope before promising a later
+    # result. That scope is not the result, even when a copy button is visible.
+    # Keep the first-person delegation requirement: a generic description of
+    # research delivery must not make an otherwise final answer pending.
+    future_results = re.search(
+        r'(?:调研|研究|核验)(?:结果|结论|报告)(?:出来|产出|返回|生成)(?:之|以)?后'
+        r'.{0,20}(?:我会|我将).{0,35}(?:整理|汇总|交付|提供|发送|发给)',
+        text,
+    )
+    return bool(delegated and (pending or future_results) or started_research and future_document)
