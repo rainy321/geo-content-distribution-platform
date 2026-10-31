@@ -331,6 +331,7 @@ def run_smoke_check(window, data: Path, url: str) -> None:
                     steps: [...document.querySelectorAll('[data-testid="geo-journey"] .journey-steps > button')].map(e => e.textContent.trim()),
                     primary_action: !!document.querySelector('[data-testid="journey-primary"]'),
                     native_bridge: ['open_login','plan_with_doubao','start_run','generate_research','get_task','open_destination'].every(name => typeof window.pywebview?.api?.[name] === 'function'),
+                    automatic_web_bridge: ['plan_automatic','start_automatic_run'].every(name => typeof window.pywebview?.api?.[name] === 'function'),
                     destination_recheck_bridge: typeof window.pywebview?.api?.check_destination_session === 'function'
                 })""")
                 journey_observed = json.loads(journey_observed) if isinstance(journey_observed, str) else journey_observed
@@ -338,7 +339,7 @@ def run_smoke_check(window, data: Path, url: str) -> None:
                 if (str(journey_observed.get('heading') or '').strip() and len(steps) == 5
                         and all(label in actual for label, actual in zip(('品牌', '搜索基线', '内容', '发布', '反馈'), steps))
                         and journey_observed.get('primary_action') and journey_observed.get('native_bridge')
-                        and journey_observed.get('destination_recheck_bridge')):
+                        and journey_observed.get('destination_recheck_bridge') and journey_observed.get('automatic_web_bridge')):
                     status['journey'] = journey_observed
                     status['journey_verified'] = True
                     break
@@ -365,7 +366,7 @@ def run_smoke_check(window, data: Path, url: str) -> None:
                     heading: document.querySelector('h1')?.textContent,
                     report: [...document.querySelectorAll('h2')].find(e => e.textContent.includes('采集报告'))?.textContent,
                     rates: [...document.querySelectorAll('.cohorts strong')].map(e => e.textContent),
-                    native_bridge: typeof window.pywebview?.api?.start_run === 'function'
+                    native_bridge: ['start_run','plan_automatic','start_automatic_run'].every(name => typeof window.pywebview?.api?.[name] === 'function')
                     ,history_rows: document.querySelectorAll('[data-testid="desktop-history"] .el-table__row').length
                     ,history_total: (() => { const count = document.querySelector('[data-testid="desktop-history"]')?.getAttribute('data-history-count'); return count !== null && count !== undefined ? Number(count) : null })()
                     ,draft_company: document.querySelector('input[data-testid="company-input"], [data-testid="company-input"] input')?.value
