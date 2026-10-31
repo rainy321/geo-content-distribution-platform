@@ -6,12 +6,20 @@ import { parse,compileScript,compileTemplate,compileStyle } from '@vue/compiler-
 import * as identity from '../src/utils/geoJourney.js'
 import * as restore from '../src/utils/geoSearchRestore.js'
 import { doubaoTaskRecovery } from '../src/utils/geoTaskRecovery.js'
+import * as automaticCollection from '../src/utils/geoAutomaticCollection.js'
+import {externalSha} from '../src/utils/geoExternalBaseline.js'
 
 const profile=(suffix='a')=>({id:suffix==='a'?1:2,name:'同名软件',entity_type:'product',website:`https://tongyuye.com/products/${suffix}`})
 const plan=(owner=profile())=>({schema_version:'1.0',platform:'doubao_web',profile:owner,plan_sha256:'a'.repeat(64),cases:[{id:'q01',category:'discovery',question:'测试问题'}]})
 const report=(owner=profile(),run_id='run-a')=>({schema_version:'1.0',kind:'geo_search_test_report',profile:owner,run_id,status:'stopped',stop_reason:'session_redirected_to_logout',plan_sha256:'a'.repeat(64),execution:{client_mode:'work'},cohorts:{},cases:[{id:'q01',category:'discovery',question:'测试问题',status:'need_action',failure_reason:'session_redirected_to_logout',assessment:{},citations:[],displayed_sources:[]}]})
 const task=(owner=profile(),overrides={})=>({id:'task-a',kind:'run',status:'completed',result:{report:report(owner)},...overrides})
 const deferred=()=>{let resolve,reject;const promise=new Promise((done,fail)=>{resolve=done;reject=fail});return {promise,resolve,reject}}
+const externalSource=async()=>{
+  const owner=profile(),frozenProfile={name:owner.name,entity_type:owner.entity_type,website:owner.website}
+  const original={schema_version:'1.0',platform:'doubao_web',profile:frozenProfile,cases:['discovery','brand_identity','website_guided'].map((category,index)=>({id:`q0${index+1}`,category,question:`合成固定原题 ${index+1}`,intent:'合成目的'}))}
+  original.plan_sha256=await externalSha(original)
+  return {id:'external-source',project_id:owner.id,profile:frozenProfile,baseline:null,baseline_source:'user_reported_external',external_baseline:{kind:'geo_external_baseline_v1'},test_plan:original}
+}
 
 test('same-name and same-domain records still require exact entity type and complete website identity',()=>{
   const current=profile(),value=task()
@@ -55,17 +63,17 @@ const filename=new URL('../src/views/GeoSearchTests.vue',import.meta.url)
 const {descriptor,errors}=parse(fs.readFileSync(filename,'utf8'),{filename:filename.pathname})
 assert.deepEqual(errors,[]);compileScript(descriptor,{id:'geo-search-restore'})
 const body=descriptor.scriptSetup.content.replace(/^import .*$/gm,'')
-function harness({saved={project_id:1,plan:plan(),report:null},currentTask=task(),api={},reports=[{id:'saved-a',run_id:'run-a'}],reportApi={},confirm=async()=>{}}={}) {
+function harness({saved={project_id:1,plan:plan(),report:null},currentTask=task(),api={},reports=[{id:'saved-a',run_id:'run-a'}],reportApi={},contentApi={},query={desktop:'1'},confirm=async()=>{}}={}) {
   const messages=[],unmount=[],scope=effectScope()
   const native={get_workspace_state:async()=>saved,get_task:async()=>currentTask,list_tasks:async()=>[currentTask],save_workspace_state:async()=>({saved:true}),...api}
   const journeyImports=Object.fromEntries(['entityLabel','entityProfileFields','profileLines','reportEntityContext','restoreEntityDraftFields','sameBrand'].map(name=>[name,identity[name]]))
-  const dependencies={ref,computed,watch,nextTick,...journeyImports,...restore,doubaoTaskRecovery,
-    window:{pywebview:{api:native}},useRoute:()=>({query:{desktop:'1'}}),useRouter:()=>({push(){}}),
+  const dependencies={ref,computed,watch,nextTick,...journeyImports,...restore,...automaticCollection,doubaoTaskRecovery,
+    window:{pywebview:{api:native}},useRoute:()=>({query}),useRouter:()=>({push(){}}),
     ElMessage:{error:value=>messages.push(value),info:value=>messages.push(value),success:value=>messages.push(value)},ElMessageBox:{confirm},
     geoTestApi:{listReports:async()=>({data:reports}),getReport:async()=>({data:report()}),...reportApi},
-    projectApi:{updateProject:async(id,fields)=>({data:{...profile(),...fields,id}})},geoContentApi:{},
+    projectApi:{updateProject:async(id,fields)=>({data:{...profile(),...fields,id}})},geoContentApi:contentApi,
     onMounted(){},onUnmounted:callback=>unmount.push(callback)}
-  const actions=scope.run(()=>new Function(...Object.keys(dependencies),body+`;return {projects,projectId,project,report,plan,savedReports,selectedReportId,reportChoice,taskBinding,nativeTask,nativeHistory,nativeDetails,nativeStarting,nativeBusy,nativeMessage,taskRecovery,workspaceSaveError,restoreWorkspace,pollNative,startNative,showNativeTask,loadSavedReport,nativeStatusLabel,reportLoading};`)(...Object.values(dependencies)))
+  const actions=scope.run(()=>new Function(...Object.keys(dependencies),body+`;return {projects,projectId,project,report,plan,savedReports,selectedReportId,reportChoice,taskBinding,nativeTask,nativeHistory,nativeDetails,nativeStarting,nativeBusy,nativeMessage,taskRecovery,workspaceSaveError,restoreWorkspace,pollNative,startNative,showNativeTask,loadSavedReport,nativeStatusLabel,reportLoading,automaticReady,collectionPath,autoPlanConfirmed,sourcePreview,sourceConfirmed,sourceLoadError,sourceRequested,loadAutomaticSource,displayPlan};`)(...Object.values(dependencies)))
   actions.projects.value=[profile(),profile('b')]
   actions.savedReports.value=reports
   return {...actions,native,messages,stop:()=>{for(const close of unmount)close();scope.stop()}}
@@ -80,6 +88,57 @@ test('the actual restore function recovers a stopped report behind saved.report:
     assert.equal(page.taskRecovery.value.title,'豆包登录已失效');assert.equal(page.nativeMessage.value,'')
     assert.equal(page.nativeStatusLabel(task()),'已停止');assert.equal(page.nativeBusy.value,false)
     await page.pollNative();assert.equal(page.report.value.run_id,'run-a')
+  }finally{page.stop()}
+})
+
+test('automatic run requires confirmation and the new capability without falling back to old start_run',async()=>{
+  const calls=[],page=harness({currentTask:{status:'idle'},api:{start_run:async()=>{calls.push('legacy');return {id:'legacy',status:'running'}}}})
+  try{
+    page.projectId.value=1;page.plan.value=plan();page.autoPlanConfirmed.value=true
+    await page.startNative('run',true);assert.deepEqual(calls,[]);assert.ok(page.messages.some(value=>value.includes('请更新软件')))
+  }finally{page.stop()}
+  const current=harness({currentTask:{status:'idle'},api:{plan_automatic:async()=>({id:'auto-plan',status:'running'}),start_automatic_run:async(...args)=>{calls.push(args);return {id:'auto-run',status:'running'}}}})
+  try{
+    current.projectId.value=1;current.plan.value=plan();await current.startNative('run',true)
+    assert.equal(calls.length,0);assert.ok(current.messages.some(value=>value.includes('预览并确认')))
+    current.autoPlanConfirmed.value=true;await current.startNative('run',true)
+    assert.equal(calls.length,1);assert.equal(calls[0].length,2);assert.equal(calls[0][1].profile_mode,'consumer')
+    assert.equal(current.autoPlanConfirmed.value,false)
+  }finally{current.stop()}
+})
+
+test('automatic planning uses its own preflight bridge and leaves explicit planning available',async()=>{
+  const calls=[],page=harness({currentTask:{status:'idle'},api:{
+    plan_automatic:async(...args)=>{calls.push(['automatic',...args]);return {id:'automatic-plan',status:'running'}},
+    start_automatic_run:async()=>({id:'unused',status:'running'}),plan_with_doubao:async()=>{throw Error('must not fall back')}}})
+  try{
+    page.projectId.value=1;await page.startNative('plan',true)
+    assert.equal(calls.length,1);assert.equal(calls[0][0],'automatic');assert.equal(calls[0][3].profile_mode,'consumer')
+    assert.equal(Object.hasOwn(calls[0][3],'client_mode'),false)
+  }finally{page.stop()}
+})
+
+test('source-cycle handoff loads the exact frozen plan read-only then starts an independent run with no cycle argument',async()=>{
+  const source=await externalSource(),original=JSON.stringify(source),calls=[]
+  const page=harness({query:{desktop:'1',source_cycle:source.id,journey_project:'1'},currentTask:{status:'idle'},contentApi:{get:async id=>{calls.push(['read',id]);return {data:source}}},
+    api:{plan_automatic:async()=>assert.fail('must reuse the original questions'),start_automatic_run:async(...args)=>{calls.push(['start',...args]);return {id:'independent-run',status:'running'}},save_workspace_state:async()=>assert.fail('source preview must not replace saved workspace')}})
+  try{
+    await page.loadAutomaticSource();assert.equal(page.sourceLoadError.value,'');assert.equal(page.sourceConfirmed.value,false)
+    assert.deepEqual(page.displayPlan.value,source.test_plan);assert.equal(page.plan.value,null)
+    await page.startNative('run',true);assert.equal(calls.filter(item=>item[0]==='start').length,0)
+    page.sourceConfirmed.value=true;await page.startNative('run',true)
+    const started=calls.find(item=>item[0]==='start');assert.equal(started.length,3)
+    assert.deepEqual(started[1],source.test_plan);assert.deepEqual(started[2],{profile_mode:'consumer',model_label:''})
+    assert.equal(page.sourceConfirmed.value,false);assert.equal(JSON.stringify(source),original)
+  }finally{page.stop()}
+})
+
+test('source-cycle lookup failures never substitute a saved native plan or enable automatic sending',async()=>{
+  const source=await externalSource(),page=harness({query:{desktop:'1',source_cycle:source.id,journey_project:'2'},currentTask:{status:'idle'},contentApi:{get:async()=>({data:source})}})
+  try{
+    page.projectId.value=1;page.plan.value=plan();await page.loadAutomaticSource()
+    assert.match(page.sourceLoadError.value,/不一致/);assert.equal(page.displayPlan.value,null);assert.equal(page.sourcePreview.value,null)
+    assert.equal(page.plan.value.plan_sha256,'a'.repeat(64),'normal plan is retained, not used as source fallback')
   }finally{page.stop()}
 })
 

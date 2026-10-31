@@ -8,22 +8,24 @@
     <el-alert v-if="workspaceSaveError" type="error" :title="workspaceSaveError" :closable="false" />
 
     <el-card v-if="isDesktop" shadow="never">
-      <h2>桌面自动测试</h2>
+      <h2>软件自动采集</h2><p class="context">先检查专用会话，再采集回答和来源；需要登录或安全验证时在软件提示的窗口完成，原请求继续等待。实际工作网页与普通对话结果分开保留。</p>
+      <el-alert v-if="(collectionPath==='automatic' || sourceRequested) && !automaticReady" type="warning" :closable="false" :title="automaticCollectionUnavailable"/>
       <DoubaoPreparation/>
       <div class="form-grid">
-        <el-form-item label="测试模式"><el-select v-model="desktopClientMode" :disabled="nativeBusy">
-          <el-option label="豆包对话" value="consumer" /><el-option label="豆包工作" value="work" />
+        <el-form-item :label="collectionPath==='automatic' || sourceRequested ? '专用会话（实际界面由软件检查）' : '指定网页模式'"><el-select v-model="desktopClientMode" :disabled="nativeBusy">
+          <el-option label="普通对话专用会话" value="consumer" /><el-option label="工作专用会话" value="work" />
         </el-select></el-form-item>
         <el-form-item label="模型选项（可选）"><el-input v-model="desktopModel" :disabled="nativeBusy" placeholder="留空使用当前模型" /></el-form-item>
       </div>
       <el-button :disabled="nativeBusy" @click="startNative('login')">登录豆包</el-button>
-      <el-button :disabled="nativeBusy || (!project && !report)" @click="startNative('plan')">用豆包生成问题</el-button>
-      <el-button type="primary" :disabled="nativeBusy || !plan || !planMatchesProject" @click="startNative('run')">开始测试</el-button>
+      <el-button :disabled="nativeBusy || sourceRequested || (!project && !report) || collectionPath==='automatic' && !automaticReady" @click="startNative('plan',collectionPath==='automatic')">用豆包生成问题</el-button>
+      <el-button type="primary" :disabled="nativeBusy || !displayPlan || !displayPlanMatchesProject || (collectionPath==='automatic' || sourceRequested) && (!automaticReady || !(sourceRequested ? sourceConfirmed : autoPlanConfirmed))" @click="startNative('run',collectionPath==='automatic' || sourceRequested)">{{ collectionPath==='automatic' || sourceRequested ? '开始软件自动采集' : '按指定模式开始测试' }}</el-button>
       <el-button v-if="nativeBusy" type="warning" @click="stopNative">停止任务</el-button>
       <DoubaoTaskRecovery v-if="taskRecovery" :recovery="taskRecovery" :busy="nativeBusy" :native-available="nativeReady" @login="startNative('login')"/>
       <p v-if="nativeMessage" class="context">{{ nativeMessage }}</p>
       <p class="context">任务、计划和客户资料会自动保存，重开后恢复。采集中的验证完成后保持窗口打开，继续同一请求；请勿反复开始新任务。</p>
       <p v-if="!project && report" class="context">当前出题客户：{{ report.profile.name }}。也可在下方选择其他品牌项目。</p>
+      <details v-if="!sourceRequested" class="context"><summary>高级采集方式</summary><el-radio-group v-model="collectionPath" :disabled="nativeBusy" aria-label="网页采集方式"><el-radio-button value="automatic">软件自动采集（当前可用网页界面）</el-radio-button><el-radio-button value="explicit">指定网页模式</el-radio-button></el-radio-group></details>
     </el-card>
 
     <el-card v-if="isDesktop" shadow="never" data-testid="desktop-history" :data-history-count="nativeHistory.length">
@@ -76,23 +78,26 @@
 
     <el-alert class="notice" type="info" :closable="false" show-icon
       title="行业问题不带品牌，用于观察自然提及；点名品牌和提供官网的核验问题分别统计。提及可能是否定回答或资料不足。" />
-    <p v-if="project && externalProfilePending" class="context">手机首轮记录使用已保存的测试资料；请先点击“保存测试资料”。</p>
-    <GeoExternalBaseline v-if="project" :project="project" :plan="planMatchesProject ? plan : null" :busy="nativeBusy || generating" :blocked="externalProfilePending" @busy="setExternalBaselineBusy" @created="openExternalCycle"/>
+    <details v-if="!sourceRequested" class="context"><summary>补充验证（可选）</summary><p v-if="project && externalProfilePending" class="context">补充记录使用已保存的测试资料；请先点击“保存测试资料”。</p><GeoExternalBaseline v-if="project" :project="project" :plan="planMatchesProject ? plan : null" :busy="nativeBusy || generating" :blocked="externalProfilePending" @busy="setExternalBaselineBusy" @created="openExternalCycle"/></details>
+    <el-alert v-if="sourceLoading || sourceLoadError" :title="sourceLoadError || '正在只读核对原任务单的固定问题…'" :type="sourceLoadError ? 'error' : 'info'" :closable="false"/>
 
-    <el-card v-if="plan" shadow="never">
-      <div class="card-heading"><h2>{{ plan.profile.name }} · 测试计划</h2><el-button @click="download(plan, 'plan.json')">下载计划</el-button></div>
-      <p class="context">问题由 AI 生成，运行前请检查是否符合客户业务。复测使用同一份计划。</p>
-      <p class="context">测试对象：{{ entityLabel(plan.profile) }} · {{ plan.profile.website }}。</p><p v-if="!planMatchesProject" class="context">这份计划与当前选择的对象不一致，只供查看；请为当前对象重新生成问题。</p>
-      <p v-if="reportEntityContext(plan).legacy" class="context">{{ reportEntityContext(plan).note }}</p>
-      <el-table :data="plan.cases">
+    <el-card v-if="displayPlan" shadow="never">
+      <div class="card-heading"><h2>{{ displayPlan.profile.name }} · 测试计划</h2><el-button @click="download(displayPlan, 'plan.json')">下载计划</el-button></div>
+      <p class="context">{{ sourceRequested ? '原任务单的固定问题，只读沿用；另建独立网页基线，不附加到外部观察，也不直接计算同比。' : '运行前请检查问题是否符合客户业务。复测使用同一份计划。' }}</p>
+      <p v-if="sourcePreview" class="context">原任务单：{{ sourcePreview.cycleId }} · 原题摘要：{{ displayPlan.plan_sha256 }}</p>
+      <p class="context">测试对象：{{ entityLabel(displayPlan.profile) }} · {{ displayPlan.profile.website }}。</p><p v-if="!displayPlanMatchesProject" class="context">这份计划与当前选择的对象不一致，只供查看；请为当前对象重新生成问题。</p>
+      <p v-if="reportEntityContext(displayPlan).legacy" class="context">{{ reportEntityContext(displayPlan).note }}</p>
+      <el-table :data="displayPlan.cases">
         <el-table-column label="类别" width="130"><template #default="{ row }">{{ categoryNames[row.category] }}</template></el-table-column>
         <el-table-column prop="question" label="测试问题" min-width="260" />
         <el-table-column prop="intent" label="测试目的" min-width="180" />
       </el-table>
+      <el-checkbox v-if="sourceRequested" v-model="sourceConfirmed" :disabled="nativeBusy">已核对固定原题，另建独立软件自动测试</el-checkbox><el-checkbox v-else-if="collectionPath==='automatic'" v-model="autoPlanConfirmed" :disabled="nativeBusy">已核对这些问题，可以开始软件自动采集</el-checkbox>
     </el-card>
 
     <el-card v-if="report" ref="reportCard" shadow="never">
       <div class="card-heading"><h2>{{ report.profile.name }} · 采集报告</h2><el-tag>{{ statusNames[report.status] || report.status }}</el-tag><el-button type="primary" :disabled="nativeBusy" @click="useReport">用本报告制定内容任务</el-button></div>
+      <p class="context">{{ actualCollectionMode(report) }}；仅代表本报告实际采到的网页回答，不代表另一界面或独立账号效果。</p>
       <p class="context">历史采集记录 · {{ reportDate(report.cases[0]?.collected_at || report.updated_at) }}。回答原文来自豆包，尚未逐项核实事实；“提及”只说明名称出现在回答里。</p>
       <p class="context">测试对象：{{ reportContext.label }} · {{ report.profile.name }}{{ reportContext.legacy ? '（旧报告，混合统计口径）' : '' }}。</p><p class="context">{{ reportContext.note }}</p>
       <el-alert v-if="report.cases?.some(item=>item.assessment?.answer_error==='private_account_context')" type="warning" :closable="false" show-icon title="部分回答声称使用账号资料或历史对话记录，已排除公开统计；原文保留，请用空白新对话另测。"/>
@@ -160,6 +165,7 @@ import {updateFeedbackBusy} from '@/utils/geoFeedbackBusy'
 import { entityLabel, entityProfileFields, profileLines, reportEntityContext, restoreEntityDraftFields, sameBrand } from '@/utils/geoJourney'
 import { restoredSearchRecords, sameSearchProject, searchProjectSnapshot, searchTaskMatchesContext, searchTaskMatchesProject, searchTaskRecoverySource } from '@/utils/geoSearchRestore'
 import { doubaoTaskRecovery } from '@/utils/geoTaskRecovery'
+import {automaticBridgeReady,automaticCollectionOptions,automaticCollectionUnavailable,requireAutomaticBridge,automaticSourceRequest,automaticPlanFromExternalCycle,actualCollectionMode} from '@/utils/geoAutomaticCollection'
 
 const projects = ref([]), projectId = ref(null), company = ref(''), audience = ref(''), aliasesText=ref(''), officialUrlsText=ref(''), caseCount = ref(4)
 const loading = ref(false), generating = ref(false), plan = ref(null), report = ref(null), importInput = ref(null)
@@ -170,7 +176,10 @@ const useReport = async () => {
   const value = (await geoContentApi.create({ report: report.value,...(sameBrand(project.value,report.value?.profile)?{project_id:projectId.value}:{}) })).data
   router.push({path:'/geo-content',query:{cycle:value.id}})
 }
-const desktopClientMode = ref('consumer'), desktopModel = ref(''), nativeTask = ref({ status: 'idle' })
+const desktopClientMode = ref('consumer'), desktopModel = ref(''), nativeTask = ref({ status: 'idle' }), collectionPath=ref('automatic'), autoPlanConfirmed=ref(false)
+const sourcePreview=ref(null),sourceConfirmed=ref(false),sourceLoading=ref(false),sourceLoadError=ref('')
+const sourceRequested=computed(()=>route.query.source_cycle!==undefined)
+const automaticReady=computed(()=>nativeReady.value&&automaticBridgeReady(window.pywebview?.api))
 const nativeHistory = ref([]), nativeDetails = ref(null), restoringWorkspace = ref(false)
 const historyExpanded = ref(false), historyPage = ref(1), historyPageSize = 20
 const visibleNativeHistory = computed(() => {
@@ -211,9 +220,9 @@ const nativeStatusLabel=row=>row.kind==='run' && row.status==='completed'
   ? statusNames[row.id===nativeTask.value.id?nativeTask.value.result?.report?.status:''] || '已结束，查看报告'
   : statusNames[row.status] || row.status
 const recordIntent=ref(0)
-let nativeTimer = null, handledNativeTask = null,searchEpoch=0,nativeRequest=0,reportRequest=0,detailRequest=0,restoreRequest=0,destroyed=false
-const searchScope=()=>({epoch:searchEpoch,project:searchProjectSnapshot(project.value)})
-const sameSearchScope=scope=>!destroyed && scope.epoch===searchEpoch && (scope.project?sameSearchProject(scope.project,project.value):!project.value)
+let nativeTimer = null, handledNativeTask = null,searchEpoch=0,nativeRequest=0,reportRequest=0,detailRequest=0,restoreRequest=0,sourceRead=0,destroyed=false
+const searchScope=()=>({epoch:searchEpoch,project:searchProjectSnapshot(project.value),sourceCycle:route.query.source_cycle})
+const sameSearchScope=scope=>!destroyed && scope.epoch===searchEpoch && scope.sourceCycle===route.query.source_cycle && (scope.project?sameSearchProject(scope.project,project.value):!project.value)
 const taskMatchesCurrent=task=>searchTaskMatchesContext(task,project.value,taskBinding.value,recordIntent.value)
 const rememberRecovery=task=>{
   if(!taskMatchesCurrent(task))return
@@ -224,7 +233,7 @@ const nativeBridge = () => {
   if (!window.pywebview?.api) throw new Error('桌面采集服务尚未就绪，请稍后重试')
   return window.pywebview.api
 }
-const startNative = async kind => {
+const startNative = async (kind,automatic=false) => {
   if(nativeBusy.value || generating.value)return
   const scope=searchScope(),request=++nativeRequest,intent=recordIntent.value
   nativeStarting.value=true
@@ -234,20 +243,25 @@ const startNative = async kind => {
       if(!sameSearchScope(scope))return
     }
     rememberRecovery(nativeTask.value)
-    const options = { client_mode: desktopClientMode.value, model_label: desktopModel.value.trim() }
     const api = nativeBridge()
-    const source = kind==='plan' ? await persistProfile() : kind==='run'?plan.value?.profile:project.value || report.value?.profile || plan.value?.profile
+    const isAutomatic=kind!=='login'&&(automatic||sourceRequested.value)
+    if(isAutomatic)requireAutomaticBridge(api)
+    if(sourceRequested.value&&(kind==='plan'||kind==='run'&&(!sourceConfirmed.value||!sourcePreview.value)))throw new Error('请先核对原任务单固定问题，再确认另建独立自动测试。')
+    if(isAutomatic&&kind==='run'&&!sourceRequested.value&&!autoPlanConfirmed.value)throw new Error('请先预览并确认这份问题计划。')
+    const options=isAutomatic?automaticCollectionOptions(desktopClientMode.value,desktopModel.value):{ client_mode: desktopClientMode.value, model_label: desktopModel.value.trim() }
+    const runPlan=sourceRequested.value?sourcePreview.value?.plan:plan.value
+    const source = kind==='plan' ? await persistProfile() : kind==='run'?runPlan?.profile:project.value || report.value?.profile || runPlan?.profile
     if(!sameSearchScope(scope) || request!==nativeRequest || intent!==recordIntent.value)return
-    if(kind==='run'&&!planMatchesProject.value)throw new Error('测试计划与当前对象不一致，请重新生成问题')
+    if(kind==='run'&&!displayPlanMatchesProject.value)throw new Error('测试计划与当前对象不一致，请重新生成问题')
     const result = kind === 'login' ? await api.open_login(options)
-      : kind === 'plan' ? await api.plan_with_doubao({ ...source,...entityProfileFields(source) }, caseCount.value, options)
-        : await api.start_run(plan.value, options)
+      : kind === 'plan' ? isAutomatic?await api.plan_automatic({ ...source,...entityProfileFields(source) }, caseCount.value, options):await api.plan_with_doubao({ ...source,...entityProfileFields(source) }, caseCount.value, options)
+        : isAutomatic?await api.start_automatic_run(runPlan, options):await api.start_run(runPlan, options)
     if (result.error) throw new Error(result.error)
     if(!sameSearchScope(scope) || request!==nativeRequest || intent!==recordIntent.value)return
     nativeTask.value = { ...result, kind }
     if(kind!=='login'){recordIntent.value++;reportRequest++;detailRequest++;reportChoice.value='task';recoveryRecord.value=null}
     taskBinding.value={taskId:result.id,project:searchProjectSnapshot(project.value),profile:searchProjectSnapshot(source),intent:recordIntent.value};handledNativeTask=null
-    if (kind === 'run') {report.value = null;selectedReportId.value=''}
+    if (kind === 'run') {report.value = null;selectedReportId.value='';sourceConfirmed.value=false;autoPlanConfirmed.value=false}
     const history=await api.list_tasks()
     if(sameSearchScope(scope) && request===nativeRequest)nativeHistory.value=history
   } catch (error) { ElMessage.error(error.response?.data?.msg || error.message || '任务无法启动') }
@@ -301,6 +315,8 @@ const showNativeTask = async id => {
 }
 const project = computed(() => projects.value.find(item => item.id === projectId.value))
 const planMatchesProject=computed(()=>Boolean(plan.value&&(!project.value||sameBrand(plan.value.profile,project.value))))
+const displayPlan=computed(()=>sourceRequested.value?sourcePreview.value?.plan||null:plan.value)
+const displayPlanMatchesProject=computed(()=>Boolean(displayPlan.value&&(!project.value||sameBrand(displayPlan.value.profile,project.value))))
 const reportContext=computed(()=>reportEntityContext(report.value))
 const relatedCompanyMention=item=>Object.hasOwn(item.assessment,'related_company_mentioned')?item.assessment.related_company_mentioned:item.assessment.company_mentioned
 const editableProfile=()=>({...project.value,...entityProfileFields({...project.value,company:company.value,audience:audience.value,aliases:aliasesText.value,official_urls:officialUrlsText.value})})
@@ -323,6 +339,7 @@ watch([projectId,()=>project.value?.name,()=>project.value?.website,()=>project.
 },{flush:'sync'})
 watch([company, audience, aliasesText, officialUrlsText, caseCount], () => { if (!restoringWorkspace.value) plan.value = null })
 watch(desktopClientMode, () => { if (!restoringWorkspace.value) desktopModel.value = '' })
+watch([plan,collectionPath,desktopClientMode,desktopModel],()=>{autoPlanConfirmed.value=false;sourceConfirmed.value=false},{flush:'sync'})
 const rate = value => typeof value === 'number' && Number.isFinite(value) ? `${Math.round(value * 100)}%` : '未知'
 const booleanText = value => value === true ? '出现' : value === false ? '未出现' : '未知'
 const reportDate = value => {
@@ -334,9 +351,10 @@ const workspaceSnapshot = () => ({ project_id: projectId.value, company: company
   case_count: caseCount.value, client_mode: desktopClientMode.value, model_label: desktopModel.value,
   selected_report_id: selectedReportId.value, plan: plan.value, report: report.value })
 const saveWorkspace = () => {
-  if (!isDesktop.value || !workspaceReady || restoringWorkspace.value) return
+  if (!isDesktop.value || !workspaceReady || restoringWorkspace.value || sourceRequested.value) return
   clearTimeout(workspaceSaveTimer)
   workspaceSaveTimer = setTimeout(async () => {
+    if(sourceRequested.value)return
     try { await nativeBridge().save_workspace_state(workspaceSnapshot()); workspaceSaveError.value = '' }
     catch { workspaceSaveError.value = '自动保存未成功，请先保留当前计划或报告文件，再重试。' }
   }, 200)
@@ -446,6 +464,29 @@ const importRecord = async event => {
   } catch (error) { ElMessage.error(error.message || '导入失败') }
   finally { event.target.value = '' }
 }
+const loadAutomaticSource=async()=>{
+  const sequence=++sourceRead,source=route.query.source_cycle,projectQuery=route.query.journey_project
+  sourcePreview.value=null;sourceConfirmed.value=false;sourceLoadError.value='';sourceLoading.value=true;clearTimeout(workspaceSaveTimer)
+  const current=()=>!destroyed&&sequence===sourceRead&&source===route.query.source_cycle&&projectQuery===route.query.journey_project
+  try{
+    const request=automaticSourceRequest(route.query)
+    if(!request)return
+    const response=await geoContentApi.get(request.cycleId)
+    if(!current())return
+    const owner=projects.value.find(item=>item.id===request.projectId),cycle=response.data
+    if(!owner||cycle?.id!==request.cycleId)throw new Error('原任务单或对应品牌未找到，未载入其他记录。')
+    const originalPlan=await automaticPlanFromExternalCycle(cycle,owner)
+    if(!current())return
+    projectId.value=owner.id
+    sourcePreview.value={cycleId:request.cycleId,projectId:owner.id,plan:originalPlan}
+    collectionPath.value='automatic';desktopClientMode.value='consumer';desktopModel.value=''
+  }catch(error){if(current())sourceLoadError.value=error.message||'原任务单暂未读取到；不会使用其他计划替代。'}
+  finally{if(current())sourceLoading.value=false}
+}
+watch(()=>[route.query.source_cycle,route.query.journey_project],()=>{
+  if(sourceRequested.value)void loadAutomaticSource()
+  else{sourceRead++;sourcePreview.value=null;sourceConfirmed.value=false;sourceLoadError.value='';sourceLoading.value=false}
+},{flush:'sync'})
 onMounted(async () => {
   restoringWorkspace.value=isDesktop.value
   if (isDesktop.value) nativeTimer = setInterval(pollNative, 1000)
@@ -465,8 +506,9 @@ onMounted(async () => {
     }
   } catch { /* Request interceptor presents the error. */ }
   await restoreWorkspace()
+  if(sourceRequested.value)await loadAutomaticSource()
 })
-onUnmounted(() => {destroyed=true;searchEpoch++;nativeRequest++;restoreRequest++;reportRequest++;detailRequest++;if (nativeTimer) clearInterval(nativeTimer); if (workspaceSaveTimer) clearTimeout(workspaceSaveTimer) })
+onUnmounted(() => {destroyed=true;searchEpoch++;nativeRequest++;restoreRequest++;reportRequest++;detailRequest++;sourceRead++;if (nativeTimer) clearInterval(nativeTimer); if (workspaceSaveTimer) clearTimeout(workspaceSaveTimer) })
 </script>
 
 <style scoped>
