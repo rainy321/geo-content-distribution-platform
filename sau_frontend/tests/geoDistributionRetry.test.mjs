@@ -18,8 +18,8 @@ const overview=(params={},changes={})=>({reference_mode:params.publish_at?'sched
   platforms:[],accounts:[{id:3,platform_key:'zhihu',status:'connected',publish_policy:policy({reference_at:params.publish_at||'2026-10-25T08:00:00Z'})}],...changes})
 
 function harness({confirm=async()=>{},retry=async()=>({data:job({status:'queued'})}),execute=async()=>({data:job({status:'need_action',message:'请核对平台登录状态'})}),accounts=async params=>({data:overview(params)}),getJobs=async()=>({data:{items:[job()],pagination:{page:1,page_size:20,total:1,total_pages:1}}}),create=async payload=>({data:job({status:'queued',...payload})}),getArticle=async id=>({data:{id,project_id:1,status:'ready',tags:[],review_fingerprint:'b'.repeat(64)}}),images=async()=>({data:{items:[]}})}={}) {
-  const calls=[],confirms=[],messages=[],unmount=[],mount=[],timers=[],scope=effectScope(),route=reactive({query:{}})
-  const dependencies={computed,reactive,ref,watch,...state,useRoute:()=>route,useRouter:()=>({push(){},replace:async value=>{route.query=value.query||{}}}),
+  const calls=[],confirms=[],messages=[],routes=[],unmount=[],mount=[],timers=[],scope=effectScope(),route=reactive({query:{}})
+  const dependencies={computed,reactive,ref,watch,...state,useRoute:()=>route,useRouter:()=>({push:value=>routes.push(value),replace:async value=>{route.query=value.query||{}}}),
     onMounted:callback=>mount.push(callback),onBeforeUnmount:callback=>unmount.push(callback),
     window:{setTimeout:callback=>{timers.push(callback);return timers.length},clearTimeout(){}},
     publishApi:{getPlatforms:async()=>({data:[{key:'zhihu',name:'知乎',delivery_state:'verified',content_mode:'article',supports_auto_execute:true,safe_daily_new:1,min_interval_hours:6}]}),
@@ -36,12 +36,44 @@ function harness({confirm=async()=>{},retry=async()=>({data:job({status:'queued'
   const page=scope.run(()=>new Function(...Object.keys(dependencies),source+`;return {jobs,jobFilters,jobPagination,jobsLoading,jobsRefreshing,jobsLoadError,lastSyncedAt,
     selectedArticleId,articles,selectedPlatforms,accountSelections,accountOverview,accountsStatus,quotaScopeKey,accountsLoadedKey,quotaView,quotaBlock,hasExhaustedQuota,
     scheduleEnabled,publishAt,autoExecuteAtDue,riskAcknowledged,dispatching,dispatchError,canDispatch,dispatchButtonLabel,selectedImage,selectedVideo,busyJobIds,jobActionErrors,
-    fetchJobs,fetchAccounts,fetchArticles,dispatchArticle,executeRealJob,retryJob,checkPlatformResult,handleScheduleToggle,formatDate,selectAccount:setAccountSelection};`)(...Object.values(dependencies)))
+    fetchJobs,fetchAccounts,fetchArticles,dispatchArticle,executeRealJob,retryJob,checkPlatformResult,handleScheduleToggle,formatDate,localArticleId,openLocalArticle,selectAccount:setAccountSelection};`)(...Object.values(dependencies)))
   page.jobs.value=[job()]
-  return {...page,calls,confirms,messages,route,timers,mount:async()=>{for(const open of mount)await open();await settle()},
+  return {...page,calls,confirms,messages,routes,route,timers,mount:async()=>{for(const open of mount)await open();await settle()},
     ready:async()=>{for(const open of mount)await open();page.selectedArticleId.value=8;page.selectedPlatforms.value=['zhihu'];await settle();page.riskAcknowledged.value=true},
     stop:()=>{for(const close of unmount)close();scope.stop()}}
 }
+
+test('each publish task opens its own saved local article without retrying, publishing or changing the task',()=>{
+  const page=harness()
+  try{
+    page.jobs.value=[job({job_id:39,article_id:12,status:'need_action',message:'原稿核对未通过',url:''}),
+      job({job_id:40,article_id:18,status:'processing',message:'结果待核对',url:'https://example.invalid/unverified/edit'})]
+    const before=JSON.stringify(page.jobs.value)
+    for(const item of page.jobs.value)page.openLocalArticle(item)
+    assert.deepEqual(page.routes,[{path:'/content-create',query:{articleId:12}},{path:'/content-create',query:{articleId:18}}])
+    assert.deepEqual(page.calls,[]);assert.deepEqual(page.confirms,[])
+    assert.equal(JSON.stringify(page.jobs.value),before)
+  }finally{page.stop()}
+})
+
+test('missing or malformed article identities never create a local editor route',()=>{
+  const page=harness()
+  try{
+    for(const value of [null,undefined,{}, {article_id:null},{article_id:0},{article_id:-1},{article_id:1.2},
+      {article_id:NaN},{article_id:Infinity},{article_id:Number.MAX_SAFE_INTEGER+1},{article_id:'12'},{article_id:'12/edit'},
+      {article_id:true},{article_id:[]},{article_id:{}}]){
+      assert.equal(page.localArticleId(value),null);page.openLocalArticle(value)
+    }
+    assert.deepEqual(page.routes,[]);assert.deepEqual(page.calls,[])
+  }finally{page.stop()}
+})
+
+test('the task row binds a distinct local-original button ahead of retry and keeps platform links separate',()=>{
+  const template=descriptor.template.content
+  assert.match(template,/v-if="localArticleId\(job\)"[\s\S]*?@click="openLocalArticle\(job\)"[\s\S]*?>查看本地原稿<\/el-button>/)
+  assert.ok(template.indexOf('@click="openLocalArticle(job)"')<template.indexOf('@click="retryJob(job)"'))
+  assert.match(template,/v-if="job.url"[^>]*@click="openResult\(job.url\)"/)
+})
 
 test('actual full SFC real retry requeues only the original job and never implicitly executes it',async()=>{
   const page=harness();try{await page.retryJob(job());assert.deepEqual(page.calls.filter(value=>!['get-jobs'].includes(value[0])),[['retry',37]])

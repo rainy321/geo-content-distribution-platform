@@ -438,6 +438,12 @@
 
           <div class="job-actions">
             <el-button
+              v-if="localArticleId(job)"
+              plain
+              title="打开软件内已保存的原稿，不会访问平台或重新发布"
+              @click="openLocalArticle(job)"
+            >查看本地原稿</el-button>
+            <el-button
               v-if="['failed', 'need_action'].includes(job.status)"
               type="primary"
               plain
@@ -1229,6 +1235,12 @@ const formatDate = (value, assumeUtc = true) => {
     minute: '2-digit',
     hour12: false
   }).format(date)
+}
+
+const localArticleId = job => Number.isSafeInteger(job?.article_id) && job.article_id > 0 ? job.article_id : null
+const openLocalArticle = (job) => {
+  const articleId = localArticleId(job)
+  if (articleId) router.push({ path: '/content-create', query: { articleId } })
 }
 
 const openResult = (url) => {
@@ -2046,8 +2058,10 @@ onBeforeUnmount(() => {
   justify-content: flex-end;
   align-items: center;
   flex-wrap: wrap;
+  gap: 8px;
 
   :deep(.el-button) { border-radius: 3px; }
+  :deep(.el-button + .el-button) { margin-left: 0; }
   .no-action { color: #9aa8a6; font-size: 10px; }
 }
 
