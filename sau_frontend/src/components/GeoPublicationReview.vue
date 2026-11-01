@@ -1,10 +1,10 @@
 <template>
   <section class="publication-review" aria-label="平台结果核对" data-testid="publication-review">
-    <div class="review-heading"><h3>平台结果核对</h3><el-button :disabled="busy || saving || !available" @click="openReview">登记平台结果</el-button></div>
+    <div class="review-heading"><h3>平台结果核对</h3><el-button v-if="articles.length || !(builtinArticles.length || builtinRecords.length)" :disabled="busy || saving || !available" @click="openReview">登记平台结果</el-button></div>
     <p class="review-hint">记录你在平台实际看到的审核和公开状态。这是运营方观察，软件尚未独立核验；保存不会发布或重发文章。</p>
     <p v-if="blockedCount" class="review-warning" role="status">{{ blockedCount }} 条提交记录待审核或审核未通过，已暂时排除发布后效果统计，原记录保留。</p>
-    <p v-if="!articles.length" class="review-hint">生成目标平台稿件后，可在这里登记平台结果。</p>
-    <p v-else-if="!available" class="review-hint">当前版本尚未提供稿件核对信息，请升级软件后使用。</p>
+    <p v-if="!articles.length && !(builtinArticles.length || builtinRecords.length)" class="review-hint">生成目标平台稿件后，可在这里登记平台结果。</p>
+    <p v-else-if="articles.length && !available" class="review-hint">当前版本尚未提供稿件核对信息，请升级软件后使用。</p>
     <p v-if="observations.length" class="review-hint">观察按时间保留。“暂不确定”不会取消之前的待审核或拒绝记录；需要重新核对相应公开文章。</p>
     <ol v-if="observations.length" class="observation-list">
       <li v-for="item in observations" :key="item.id">
@@ -15,7 +15,8 @@
         <a v-if="item.url" :href="item.url" target="_blank" rel="noopener noreferrer">查看记录链接</a>
       </li>
     </ol>
-    <p v-else class="review-hint">还没有平台结果记录。提交后先查看平台审核状态，再返回登记。</p>
+    <p v-else-if="articles.length" class="review-hint">还没有平台结果记录。提交后先查看平台审核状态，再返回登记。</p>
+    <GeoBuiltinPublicationRegistration v-if="builtinArticles.length || builtinRecords.length" :cycle="cycle" :busy="busy || saving" @updated="emit('updated',$event)"/>
     <el-dialog v-model="visible" title="登记平台结果" width="min(620px, 92vw)" :close-on-click-modal="false" :close-on-press-escape="!saving" :show-close="!saving" @closed="dialogClosed">
       <p class="review-hint">先在平台核对这篇文章。提交成功回执、审核通过和公开可查看是不同的结果。</p>
       <el-form label-position="top" @submit.prevent="saveObservation">
@@ -37,6 +38,8 @@
 <script setup>
 import { computed, reactive, ref, watch } from 'vue'
 import { geoContentApi } from '@/api/geoContent'
+import GeoBuiltinPublicationRegistration from '@/components/GeoBuiltinPublicationRegistration.vue'
+import { builtinPublicationArticles, builtinPublicationRecords } from '@/utils/geoBuiltinPublication'
 import { buildPublicationReviewPayload, createPublicationReviewSnapshot, publicationObservationViews,
   publicationReviewArticles, publicationReviewAvailable, publicationReviewError, publicationReviewResultMatchesScope,
   publicationReviewSnapshotIssue, publicationReviewStates, savePublicationReviewAttempt } from '@/utils/geoPublicationReview'
@@ -47,6 +50,8 @@ const visible=ref(false),saving=ref(false),snapshot=ref(null),attemptPayload=ref
 const selectedArticleId=ref(null),form=reactive({state:'unknown',url:'',note:'',confirmed:false,contentConfirmed:false})
 let requestVersion=0
 const articles=computed(()=>publicationReviewArticles(props.cycle))
+const builtinArticles=computed(()=>builtinPublicationArticles(props.cycle))
+const builtinRecords=computed(()=>builtinPublicationRecords(props.cycle))
 const available=computed(()=>publicationReviewAvailable(props.cycle))
 const observations=computed(()=>publicationObservationViews(props.cycle))
 const blockedCount=computed(()=>(props.cycle?.blocked_publications || []).filter(item=>['pending','rejected'].includes(item.moderation_state)).length)
