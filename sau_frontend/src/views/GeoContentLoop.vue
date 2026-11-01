@@ -68,7 +68,7 @@
         <GeoExternalFeedback data-geo-section="feedback" :cycle="cycle" :busy="busy" @updated="applyCycle" @busy="setFeedbackBusy"/>
         <GeoPublicationReview data-geo-section="publication" v-if="cycle" :cycle="cycle" :busy="busy" @updated="applyCycle"/>
         <p>发布器确认成功：{{ cycle.publications.length }} 条；用户登记：{{ cycle.reported_publications?.length || 0 }} 条（尚未独立核验）。演示和失败任务不计成功。</p>
-        <p v-for="item in cycle.reported_publications" :key="item.id" class="hint"><el-tag type="info">用户登记，未核验</el-tag> {{ date(item.published_at) }} · <a :href="safeUrl(item.url)" target="_blank" rel="noopener noreferrer">查看登记链接</a></p>
+        <p v-for="item in (cycle.reported_publications || []).filter(record=>record.kind!=='builtin_job')" :key="item.id" class="hint"><el-tag type="info">用户登记，未核验</el-tag> {{ date(item.published_at) }} · <a :href="safeUrl(item.url)" target="_blank" rel="noopener noreferrer">查看登记链接</a></p>
         <p v-if="externalCycle" class="hint" data-testid="external-baseline-feedback-note">本轮基线来自用户提供的手机或外部观察，原生复测与原生指标比较不可用。请在上方“录入外部回答”中按原题追加后续观察，逐条保留原文与采样条件；写作选择不代表实际采样模式。</p>
         <template v-if="nativeRetestAllowed">
         <p class="hint">复测使用原计划、原界面和原模型选项，新开一轮采集。发布不代表已被索引；条件相同也只能观察变化，不能证明因果。</p>

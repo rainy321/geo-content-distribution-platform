@@ -168,6 +168,7 @@ import GeoOptimizationProgress from '@/components/GeoOptimizationProgress.vue'
 import GeoOptimizationPlan from '@/components/GeoOptimizationPlan.vue'
 import {optimizationPlanView} from '@/utils/geoOptimizationPlan'
 import { publicationReviewArticles } from '@/utils/geoPublicationReview'
+import { builtinPublicationArticles, builtinPublicationRecords } from '@/utils/geoBuiltinPublication'
 import DoubaoPreparation from '@/components/DoubaoPreparation.vue'
 import DoubaoSessionControls from '@/components/DoubaoSessionControls.vue'
 import DoubaoTaskRecovery from '@/components/DoubaoTaskRecovery.vue'
@@ -288,7 +289,7 @@ const evidenceReport=computed(()=>cycle.value?cycle.value.baseline||null:report.
 const evidenceSummary=computed(()=>baselineEvidenceSummary(evidenceReport.value))
 const unfinishedPublications=computed(()=>(cycle.value?.drafts||[]).flatMap(draft=>(draft.jobs||[]).filter(job=>!job.demo&&publicationStatus[job.status]).map(job=>({...job,article_id:draft.article_id,title:draft.title}))))
 const hasPublication=computed(()=>Boolean(cycle.value?.publications?.length||cycle.value?.reported_publications?.length))
-const hasPublicationReviewDrafts=computed(()=>publicationReviewArticles(cycle.value).length>0)
+const hasPublicationReviewDrafts=computed(()=>publicationReviewArticles(cycle.value).length>0||builtinPublicationArticles(cycle.value).length>0||builtinPublicationRecords(cycle.value).length>0)
 const feedbackTotals=computed(()=>feedbackCollectionTotals(cycle.value?.retests))
 const singleProbeAvailable=computed(()=>nativeAvailable.value&&cycle.value?.capabilities?.native_probe!==false&&cycle.value?.baseline_source!=='user_reported_external'&&Array.isArray(cycle.value?.probes)&&typeof window.pywebview?.api?.start_research_probe==='function')
 const usableReport=computed(()=>Boolean(report.value?.cases?.some(item=>item.assessment?.answer_evaluable===true)))
