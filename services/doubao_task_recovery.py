@@ -138,6 +138,11 @@ def recovery_message(reason, *, attempted=None, submitted=None, failure_stage=No
         return '电脑端豆包就绪检查未通过，本次没有发送问题。请核对页面的登录、验证及可用界面；原检查记录已保留。'
     if reason == 'submission_receipt_timeout':
         return '已尝试发送，但尚未取得可核对的提交回执。请先查看豆包原会话；这不代表问题未发送。原始证据已保留，不会自动重发。'
+    if reason == 'answer_timeout_or_selectors_changed':
+        state = ('问题已确认发送，请保留并先查看豆包原会话，不要当作未发送重新提问' if submitted is True else
+                 '已尝试发送，请保留并先核对豆包原会话与提交结果，不要直接重发' if attempted is True else
+                 '请保留并先核对豆包原会话及提交状态，不要仅凭本次等待结果重发')
+        return f'等待期限内未取得可确认的完整回答。{state}；部分回答不计入效果统计，原始证据已保留，不会自动重发。'
     if attempted is False and submitted is False:
         if reason in ('submission_send_button_not_unique_not_submitted', 'submission_send_button_not_ready_not_submitted'):
             return '豆包发送按钮暂不可用或无法唯一确认，本次问题尚未发送。请核对当前窗口后再手动开始；证据已保留，不会自动重试。'

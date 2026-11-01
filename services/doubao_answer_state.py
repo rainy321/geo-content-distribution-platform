@@ -40,9 +40,11 @@ def is_deferred_answer(response: str) -> bool:
     # result. That scope is not the result, even when a copy button is visible.
     # Keep the first-person delegation requirement: a generic description of
     # research delivery must not make an otherwise final answer pending.
+    # An unprefixed results promise must begin a sentence, not a quoted phrase
+    # embedded in an otherwise substantive answer.
     future_results = re.search(
-        r'(?:调研|研究|核验)(?:结果|结论|报告)(?:出来|产出|返回|生成)(?:之|以)?后'
-        r'.{0,20}(?:我会|我将).{0,35}(?:整理|汇总|交付|提供|发送|发给)',
+        r'(?:(?:调研|研究|核验)(?:结果|结论|报告)|(?:^|[。！？；])结果)(?:出来|产出|返回|生成)(?:之|以)?后'
+        r'.{0,20}(?:我会|我将).{0,35}(?:整理|汇总|交付|提供|发送|发给|给你|给您)',
         text,
     )
     return bool(delegated and (pending or future_results) or started_research and future_document)

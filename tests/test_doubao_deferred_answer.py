@@ -35,6 +35,17 @@ DELEGATED_RESEARCH_NOTICE = (
     '调研结果出来后我会整理成对比矩阵（含来源链接和证据状态）并配可视化图表交付给你。'
     '这期间你可以继续发其他任务。'
 )
+# Actual independent q01: a research plan and a future promise were saved as
+# success, although no comparison or selection result had been delivered.
+UNPREFIXED_RESULTS_NOTICE = (
+    '这是一个面向开发团队的选型调研，涉及多家独立服务商 / 开源项目、多个信息源（官网、文档、GitHub、第三方评测），'
+    '属于多平台并行调研，我先把它委托给组织者来做系统核实。\n\n'
+    '已把这项调研委托给组织者后台执行，你随时可以继续跟我说话。'
+    '组织者会并行核验托管式聚合服务（如 OpenRouter 类）、开源自托管网关（LiteLLM /one-api 类）、'
+    '云厂商 AI 网关和国内合规服务几类方案，每个方案都会附公开可核验的来源，'
+    '定价和合规资质没有公开信息的部分会明确标注 "未公开" 而不是猜测。'
+    '结果出来后我会直接给你一份结构化对比和选型建议。'
+)
 SYNTHETIC_PROFILE = {'name': '示例协作平台', 'company': '示例组织', 'industry': '协作工具',
                      'description': '提供协作界面', 'website': 'https://example.org/', 'aliases': []}
 
@@ -43,29 +54,38 @@ class DeferredAssessmentTests(unittest.TestCase):
     def test_delegated_scope_and_future_results_delivery_are_not_a_final_answer(self):
         for text in (
             DELEGATED_RESEARCH_NOTICE,
+            UNPREFIXED_RESULTS_NOTICE,
             '我已把研究委派给专门的研究代理。研究结论产出后我将汇总并提供给你。',
             '已委托专门的核验代理。核验报告生成之后我会发送给你。',
+            '已把这项调研委托给组织者。结果出来后我会直接给您一份对比。',
         ):
             with self.subTest(text=text):
                 self.assertTrue(is_deferred_answer(text))
-        tracker = CompletionTracker(0, .1)
-        notice = snapshot(challenge=False, answer=DELEGATED_RESEARCH_NOTICE,
-                          completion_marker=True, assistant_count=1)
-        for now in (1, 2, 10, 100):
-            self.assertFalse(tracker.observe(notice, now))
-        assessment = assess_answer(profile(), answer('测试问题', response=DELEGATED_RESEARCH_NOTICE), '测试问题')
-        self.assertEqual(assessment['answer_error'], 'background_task_not_final')
-        self.assertFalse(assessment['answer_evaluable'])
-        self.assertIsNone(assessment['brand_mentioned'])
+        for text in (DELEGATED_RESEARCH_NOTICE, UNPREFIXED_RESULTS_NOTICE):
+            with self.subTest(text=text):
+                tracker = CompletionTracker(0, .1)
+                notice = snapshot(challenge=False, answer=text,
+                                  completion_marker=True, assistant_count=1)
+                for now in (1, 2, 10, 100):
+                    self.assertFalse(tracker.observe(notice, now))
+                assessment = assess_answer(profile(), answer('测试问题', response=text), '测试问题')
+                self.assertEqual(assessment['answer_error'], 'background_task_not_final')
+                self.assertFalse(assessment['answer_evaluable'])
+                self.assertIsNone(assessment['brand_mentioned'])
 
     def test_results_delivery_in_completed_analysis_or_generic_explanation_stays_evaluable(self):
         for text in (
             DELEGATED_RESEARCH_NOTICE + '\n调研已经完成。以下是最终结果：方案甲的官方文档公开了统一模型接口。',
+            UNPREFIXED_RESULTS_NOTICE + '\n调研已经完成。以下是最终结果：方案甲提供统一接口，方案乙支持自托管。',
             '我已委派专门的调研代理。以下是核验结果：方案甲支持统一模型接口；'
             '原通知写的是“调研结果出来后我会整理成对比矩阵”，现已交付。',
             '调研结果出来后我会整理成对比矩阵。这是研究交付流程的一般说明，没有启动新调研。',
             '用户引用示例：“我已经把任务委派给了调研代理。调研结果出来后我会整理成对比矩阵。”'
             '这是等待提示的文案示例。',
+            '结果出来后我会直接给你一份结构化对比和选型建议。这只是通用交付说明，没有委托新任务。',
+            '用户引用示例：“已把这项调研委托给组织者后台执行，结果出来后我会直接给你选型建议。”这是占位文案示例。',
+            '我已把前期资料核验委托给组织者。方案甲的公开文档提供统一模型接口；方案乙支持自托管部署。'
+            '之前的通知写的是“结果出来后我会直接给你一份结构化对比”，现在比较依据如上。',
         ):
             with self.subTest(text=text):
                 self.assertFalse(is_deferred_answer(text))
@@ -92,6 +112,34 @@ class DeferredAssessmentTests(unittest.TestCase):
                          legacy['cohorts']['discovery']['answers_evaluable'] - 1)
         self.assertEqual(projected['cases'][1], legacy['cases'][1])
         self.assertIn(row['id'], projected['evaluation_projection']['changed_case_ids'])
+
+    def test_unprefixed_notice_is_readonly_excluded_without_upgrading_an_incomplete_answer(self):
+        test_plan = plan()
+        first, second = test_plan['cases'][:2]
+        state = {'run_id': 'synthetic-unprefixed-result', 'status': 'completed_with_gaps', 'cases': {
+            **{case['id']: {'status': 'pending'} for case in test_plan['cases']},
+            first['id']: {'status': 'success', 'result': answer(first['question'])},
+            second['id']: {'status': 'failed', 'result': answer(second['question'],
+                response='核查完成：这里仍只是未确认完整的部分比较内容。', answer_completed=False,
+                collection_status='failed', failure_reason='answer_timeout_or_selectors_changed')}}}
+        legacy = build_report(test_plan, state)
+        legacy['cases'][0]['response'] = UNPREFIXED_RESULTS_NOTICE
+        self.assertTrue(legacy['cases'][0]['assessment']['answer_evaluable'])
+        original = copy.deepcopy(legacy)
+        projected = project_report_evaluation(legacy)
+        self.assertEqual(legacy, original)
+        row = projected['cases'][0]
+        self.assertEqual(row['response'], UNPREFIXED_RESULTS_NOTICE)
+        self.assertEqual(row['status'], 'deferred_answer')
+        self.assertEqual(row['assessment']['answer_error'], 'background_task_not_final')
+        self.assertFalse(row['assessment']['answer_evaluable'])
+        self.assertIsNone(row['assessment']['brand_mentioned'])
+        self.assertEqual(projected['cohorts']['discovery']['answers_evaluable'], 0)
+        self.assertIsNone(projected['cohorts']['discovery']['brand_mention_rate'])
+        incomplete = projected['cases'][1]
+        self.assertEqual(incomplete['response'], original['cases'][1]['response'])
+        self.assertEqual(incomplete['status'], 'failed')
+        self.assertFalse(incomplete['assessment']['answer_evaluable'])
 
     def test_started_research_and_future_document_delivery_are_pending_together(self):
         for text in (
@@ -308,23 +356,27 @@ class DeferredCollectorTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('飞书文档', result['response'])
 
     async def test_delegated_scope_waits_without_resubmission_or_false_source_zero(self):
-        result, events, extractions = await self.collect_synthetic(final=False, notice=DELEGATED_RESEARCH_NOTICE)
-        self.assertEqual(result['response'], DELEGATED_RESEARCH_NOTICE)
-        self.assertFalse(result['answer_completed'])
-        self.assertEqual(result['collection_status'], 'need_action')
-        self.assertEqual(result['failure_reason'], 'background_task_timeout')
-        self.assertIsNone(result['visible_source_count'])
-        self.assertEqual(extractions, 0)
-        self.assertNotIn('answer_completed', [event['event'] for event in events])
+        for notice in (DELEGATED_RESEARCH_NOTICE, UNPREFIXED_RESULTS_NOTICE):
+            with self.subTest(notice=notice):
+                result, events, extractions = await self.collect_synthetic(final=False, notice=notice)
+                self.assertEqual(result['response'], notice)
+                self.assertFalse(result['answer_completed'])
+                self.assertEqual(result['collection_status'], 'need_action')
+                self.assertEqual(result['failure_reason'], 'background_task_timeout')
+                self.assertIsNone(result['visible_source_count'])
+                self.assertEqual(extractions, 0)
+                self.assertNotIn('answer_completed', [event['event'] for event in events])
 
     async def test_delegated_scope_accepts_final_reply_on_the_same_single_submission(self):
-        result, events, extractions = await self.collect_synthetic(final=True, notice=DELEGATED_RESEARCH_NOTICE)
-        self.assertTrue(result['answer_completed'])
-        self.assertEqual(result['collection_status'], 'success')
-        self.assertFalse(result['deferred_answer']['pending'])
-        self.assertEqual(extractions, 1)
-        self.assertIn('background_task_cleared', [event['event'] for event in events])
-        self.assertNotIn('调研结果出来后', result['response'])
+        for notice in (DELEGATED_RESEARCH_NOTICE, UNPREFIXED_RESULTS_NOTICE):
+            with self.subTest(notice=notice):
+                result, events, extractions = await self.collect_synthetic(final=True, notice=notice)
+                self.assertTrue(result['answer_completed'])
+                self.assertEqual(result['collection_status'], 'success')
+                self.assertFalse(result['deferred_answer']['pending'])
+                self.assertEqual(extractions, 1)
+                self.assertIn('background_task_cleared', [event['event'] for event in events])
+                self.assertNotIn('结果出来后', result['response'])
 
 
 if __name__ == '__main__':

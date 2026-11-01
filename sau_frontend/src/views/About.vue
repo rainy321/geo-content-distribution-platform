@@ -3,7 +3,7 @@
     <el-card class="about-card">
       <div class="about-header">
         <h1>GEO AI 搜索工作台</h1>
-        <p class="version">2026.11.01.5</p>
+        <p class="version">2026.11.02.1</p>
       </div>
 
       <el-divider />
@@ -35,6 +35,7 @@
         <ul class="feature-list">
           <li>软件自动检查豆包网页会话，再按实际界面出题、逐题采集回答与来源</li>
           <li>记录实际回答、可见引用和采集时间，按品牌隔离</li>
+          <li>等待后台调研的最终回答，未完成占位和超时片段不计入 GEO 效果</li>
           <li>明确的个人记录来源声明保留原文，排除公开 GEO 统计</li>
           <li>根据来源发现平台，按目标要求生成待审文章</li>
           <li>按原题区分自然需求发现、品牌业务识别与官网资料采用，明确改动、所需证据和复测观察点</li>
