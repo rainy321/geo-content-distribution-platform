@@ -6,8 +6,8 @@
     <template v-if="state.preview">
       <p class="draft-title">{{ state.preview.draft.title }}</p>
       <p class="hint">{{ channelLabel }} · 原选题：{{ briefLabel }}</p>
-      <details><summary>查看这份稿件</summary><p>{{ state.preview.draft.summary }}</p><pre>{{ state.preview.draft.content }}</pre><p v-if="state.preview.draft.tags.length" class="hint">标签：{{ state.preview.draft.tags.join('、') }}</p></details>
-      <p v-if="state.savedArticleId" class="hint" role="status">稿件已保存，请在下方继续审稿。原回答与失败记录保留。</p>
+      <details><summary>查看原请求返回的稿件</summary><p>{{ state.preview.draft.summary }}</p><pre>{{ state.preview.draft.content }}</pre><p v-if="state.preview.draft.tags.length" class="hint">标签：{{ state.preview.draft.tags.join('、') }}</p></details>
+      <p v-if="state.savedArticleId" class="hint" role="status">内容库已有对应草稿，现有编辑保留，请在下方继续审稿。原回答与失败记录保留。</p>
       <template v-else-if="!state.uncertain">
         <p v-if="!factsCurrent" class="warning" role="status">当前资料还有未保存的改动，请先保存并核对事实资料，再检查这份稿件。</p>
         <el-checkbox v-model="state.confirmed" :disabled="fieldsDisabled || !factsCurrent">已核对这份稿件</el-checkbox>
