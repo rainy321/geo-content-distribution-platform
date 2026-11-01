@@ -8,7 +8,7 @@
       <button v-for="(label,index) in steps" :key="label" type="button" :disabled="busy || !canVisit(index)" :aria-current="step === index ? 'step' : undefined" :class="{active:step===index,done:step!==index&&stepComplete(index)}" @click="step=index"><span>{{ index+1 }}</span>{{ label }}<el-icon v-if="step!==index&&stepComplete(index)"><Check /></el-icon></button>
     </nav>
     <GeoOptimizationProgress v-if="project" :project="project" :busy="busy" :blocked="profileDirty" @busy="setFeedbackBusy"/>
-    <GeoOptimizationPlan v-if="cycle && step===2" :cycle="cycle" :selected-brief-id="briefId" :busy="busy" @select="selectContent('brief',$event)"/>
+    <GeoOptimizationPlan v-if="cycle && step===2 && !directoryReady" :cycle="cycle" :selected-brief-id="briefId" :busy="busy" @select="selectContent('brief',$event)"/>
     <details v-if="cycle && step===2 && hasOptimizationPlan" class="journey-secondary-tools" data-testid="journey-other-actions"><summary>其他推进事项</summary><GeoNextActions :cycle="cycle" :busy="busy" @navigate="navigateDiagnostic"/></details>
     <GeoNextActions v-else-if="cycle && step>=2" :cycle="cycle" :busy="busy" @navigate="navigateDiagnostic"/>
     <el-alert v-if="error && !recoveredTaskError" type="error" :title="error" :closable="false" show-icon class="journey-alert"/>
@@ -16,7 +16,7 @@
     <div v-if="canResumeRetest" class="retest-resume" role="group" aria-label="继续当前复测未发送问题"><div><strong>继续当前复测</strong><p>继续未发送题，已发送题不会重发。</p></div><el-button :disabled="busy" :loading="working" data-testid="journey-resume-retest" @click="resumeUnsentRetest">继续未发送问题</el-button></div>
     <el-alert v-if="saveError" type="warning" :title="saveError" :closable="false" show-icon/>
     <div v-if="recoveryDraft || recoveryFacts" class="recovery-note"><p>其他页面更新过资料，已保留服务端版本。冲突的本机编辑可先导出核对。</p><el-button v-if="recoveryDraft" text @click="exportRecovery('draft')">导出本机未保存稿</el-button><el-button v-if="recoveryFacts" text @click="exportRecovery('facts')">导出本机未保存资料</el-button></div>
-    <div v-if="nativeBusy" class="task-progress" role="status" aria-live="polite"><el-icon class="is-loading"><Loading /></el-icon><div><strong>{{ task.kind==='source_maintenance' ? '企查查资料补正进行中' : isDestinationTask(task) ? '平台接入任务进行中' : task.message || '任务执行中' }}</strong><p>{{ task.kind==='source_maintenance' ? '请在企查查官方窗口完成当前登录、验证或待填写项，再检查当前窗口。最终提交由你本人完成；正常关闭窗口后可继续其他桌面任务，原记录保留。' : isDestinationTask(task) ? '请在平台专用窗口正常完成登录、验证或绑定，再在对应平台卡检查并继续。请保持窗口打开。' : '请在豆包专用窗口正常完成登录或安全验证。采集或写作时保持窗口打开，软件继续同一条请求，请勿重复点开始。单独登录任务按提示结束窗口。' }}</p></div><el-button @click="stopTask">停止</el-button></div>
+    <div v-if="nativeBusy" class="task-progress" role="status" aria-live="polite"><el-icon class="is-loading"><Loading /></el-icon><div><strong>{{ directoryTask ? directoryTask.title : task.kind==='source_maintenance' ? '企查查资料补正进行中' : isDestinationTask(task) ? '平台接入任务进行中' : task.message || '任务执行中' }}</strong><p>{{ directoryTask ? directoryTask.detail : task.kind==='source_maintenance' ? '请在企查查官方窗口完成当前登录、验证或待填写项，再检查当前窗口。最终提交由你本人完成；正常关闭窗口后可继续其他桌面任务，原记录保留。' : isDestinationTask(task) ? '请在平台专用窗口正常完成登录、验证或绑定，再在对应平台卡检查并继续。请保持窗口打开。' : '请在豆包专用窗口正常完成登录或安全验证。采集或写作时保持窗口打开，软件继续同一条请求，请勿重复点开始。单独登录任务按提示结束窗口。' }}</p><p v-if="directoryTask">请在原目录申请卡“结束当前窗口”，结果以原记录读回为准；直接关闭浏览器或中断连接不代表未提交。</p></div><el-button v-if="!directoryTask" @click="stopTask">停止</el-button></div>
     <aside v-if="loginObservation" class="login-observation" :class="{mismatch:loginObservation.mismatch}" role="status" aria-live="polite" aria-label="本次登录观察">
       <strong>{{ loginObservation.mismatch ? '所选 / 实际界面不一致' : '登录窗口已结束，状态待核验' }}</strong>
       <p class="login-state"><span>本次所选：{{ loginObservation.selected }}</span><span>最后实际：{{ loginObservation.actual }}</span><span>{{ loginObservation.login }}</span><span>{{ loginObservation.challenge }}</span></p>
@@ -56,6 +56,16 @@
         <details v-if="project && !externalCycle" class="journey-secondary-tools"><summary>补充验证（可选）</summary><GeoExternalBaseline v-if="project && !externalCycle" :project="project" :plan="externalBaselinePlan" :busy="busy" :blocked="profileDirty" @busy="setFeedbackBusy" @created="adoptExternalCycle"/></details>
         <el-collapse class="advanced"><el-collapse-item title="继续同一对象的历史采集" name="history"><p class="hint">只显示名称、测试对象类型和完整主网址匹配的报告；同域不同产品路径分别保留，不会当作新采集。未标对象类型的旧报告按产品档案兼容，旧统计口径另行提示。</p><el-select v-model="historyReportId" placeholder="选择带时间的历史报告" :disabled="busy" @change="useHistory"><el-option v-for="item in reports" :key="item.id" :value="item.id" :label="`${journeyDate(item.updated_at)} · ${item.case_count} 题 · ${item.status}`"/></el-select><p v-if="!reports.length" class="hint">这个对象尚无匹配的历史报告。</p></el-collapse-item><el-collapse-item title="采集方式、专用会话与模型" name="model"><el-radio-group v-model="collectionPath" :disabled="busy" aria-label="网页采集方式"><el-radio-button value="automatic">软件自动采集</el-radio-button><el-radio-button value="explicit">指定网页模式（高级）</el-radio-button></el-radio-group><ModelOptions/></el-collapse-item></el-collapse>
       </section>
+      <section v-else-if="[2,3].includes(step) && directoryReady" key="directory" class="geo-surface step-panel" data-geo-section="destinations" data-testid="journey-directory">
+        <div class="section-heading"><span class="step-kicker">{{ step===2 ? '03 / 目录资料' : '04 / 目录申请' }}</span><h2>本渠道使用目录资料，不需要文章</h2><p>逐项核对要公开的服务资料与对客售价，由你在平台最终确认。待审核或结果未知都不表示已收录。</p></div>
+        <el-form-item label="本次准备哪个渠道"><el-select :model-value="platform" :disabled="busy" aria-label="目标平台" @change="selectContent('platform', $event)"><el-option v-for="(label,key) in cycle.channels" :key="key" :value="key" :label="channelOptionLabel(key,label)" :disabled="!directoryTargetForChannel(cycle,key) && !writingChannelEnabled(cycle,key)"/></el-select></el-form-item>
+        <DestinationUseReview v-if="destinationEnabled(directoryTarget)" :cycle="cycle" :target="directoryTarget" :busy="busy" @updated="applyReviewCycle"/>
+        <template v-else><el-alert type="info" :closable="false" :title="inactiveDestinationMessage"/><el-button text :disabled="busy" @click="openDetails">编辑平台接入配置</el-button></template>
+        <p v-if="directoryDrafts.length" class="hint">本轮为此目标创建的 {{ directoryDrafts.length }} 篇旧文章及原任务仍保留。本目录分支只处理目录资料，不会改写或重新提交旧文章。</p>
+        <GeoDirectoryApplication ref="directoryPanel" :key="`${cycle.id}:${directoryTarget.id}`" :cycle="cycle" :target="directoryTarget" :task="task" :busy="busy" :native-available="nativeAvailable"/>
+        <el-button text :disabled="busy" @click="goFeedback">查看反馈与后续观察</el-button>
+      </section>
+      <section v-else-if="step===3 && directoryTarget" key="directory-preparation" class="geo-surface step-panel"><div class="section-heading"><span class="step-kicker">04 / 目录申请</span><h2>先完成本轮来源分析</h2><p>目录目标仍保留，请先回到内容步骤准备本轮资料，再打开目录申请。</p></div><el-button :disabled="busy" @click="step=2">返回内容步骤</el-button></section>
       <section v-else-if="step===2 && cycle" key="content" class="geo-surface step-panel" data-geo-section="drafts">
         <div class="section-heading"><span class="step-kicker">03 / 内容</span><h2>{{ activeDraft ? '核对这篇文章，再标记就绪' : '把来源发现变成一篇平台稿' }}</h2><p>来源决定调研方向，已经核对的事实才用于写作。</p></div>
         <DoubaoSessionControls v-if="nativeAvailable && provider==='doubao'" :client-mode="clientMode" :model="model" :busy="busy" @mode="selectSessionMode" @model="model=$event" @login="login"/>
@@ -70,7 +80,7 @@
         <GeoOtherSearchEntries :cycle="cycle" :busy="busy" @busy="setFeedbackBusy"/>
         </details>
         <template v-if="!needsAnalysis">
-          <div class="form-pair"><el-form-item label="这次写什么"><el-select :model-value="briefId" :disabled="busy" aria-label="内容选题" @change="selectContent('brief', $event)"><el-option v-for="brief in cycle.analysis.briefs" :key="brief.id" :value="brief.id" :label="brief.topic"/></el-select></el-form-item><el-form-item label="写给哪个平台"><el-select :model-value="platform" :disabled="busy" placeholder="选择渠道或已接入平台" aria-label="目标平台" @change="selectContent('platform', $event)"><el-option v-for="(label,key) in cycle.channels" :key="key" :value="key" :label="channelOptionLabel(key,label)" :disabled="!writingChannelEnabled(cycle,key)"/></el-select></el-form-item></div>
+          <div class="form-pair"><el-form-item label="这次写什么"><el-select :model-value="briefId" :disabled="busy" aria-label="内容选题" @change="selectContent('brief', $event)"><el-option v-for="brief in cycle.analysis.briefs" :key="brief.id" :value="brief.id" :label="brief.topic"/></el-select></el-form-item><el-form-item label="写给哪个平台"><el-select :model-value="platform" :disabled="busy" placeholder="选择渠道或已接入平台" aria-label="目标平台" @change="selectContent('platform', $event)"><el-option v-for="(label,key) in cycle.channels" :key="key" :value="key" :label="channelOptionLabel(key,label)" :disabled="!directoryTargetForChannel(cycle,key) && !writingChannelEnabled(cycle,key)"/></el-select></el-form-item></div>
           <p class="hint platform-basis">{{ platformBasis }}</p>
           <DestinationUseReview v-if="selectedTarget && destinationEnabled(selectedTarget)" :cycle="cycle" :target="selectedTarget" :busy="busy" @updated="applyReviewCycle"/>
           <template v-if="!activeDraft">
@@ -102,7 +112,7 @@
         <template v-else><p v-if="targetPublisher" class="hint publisher-bridge">使用{{ publisherName }}发布器，保留这篇目标稿和来源记录。进入发布中心后核对账号与素材，再逐篇确认真实发布。</p><div class="subheading"><h3>平台账号</h3><el-button text :disabled="busy" @click="refreshAccounts">刷新账号</el-button></div><article v-for="account in matchingAccounts" :key="account.id" class="account-row"><div><strong>{{ account.account_name || `账号 #${account.id}` }}</strong><p>{{ account.status==='connected' ? '已连接（仍需发布前检查）' : '登录状态待处理' }} · {{ account.check_message || '尚无最新检测说明' }}</p></div><el-button :disabled="busy" @click="checkAccount(account.id)">检测登录</el-button></article><p v-if="!matchingAccounts.length" class="hint">尚未连接{{ publisherName }}账号。发布中心会保留这篇稿件，先连接账号再继续。</p><p v-if="platformCapability?.requires_images" class="hint">该平台需要图片。请在发布中心选择并核对配图，再执行真实发布。</p><el-button text @click="router.push('/account-management')">管理账号与登录</el-button></template>
         <el-alert type="info" :closable="false" :title="ownedDraft ? '请由网站编辑发布后，接入官网目标并登记公开文章链接；未登记前只显示采集观察。' : '在平台完成单篇真实发布后，返回“开始优化”的反馈步骤刷新记录。'"/>
         <el-button text :disabled="busy" @click="goFeedback">已经提交，查看反馈与复测</el-button>
-        <GeoPublicationReview data-geo-section="publication" v-if="hasPublicationReviewDrafts" :cycle="cycle" :busy="busy" @updated="applyReviewCycle"/>
+        <GeoPublicationReview data-geo-section="publication" v-if="hasPublicationReviewDrafts && !directoryTarget" :cycle="cycle" :busy="busy" @updated="applyReviewCycle"/>
         <el-collapse v-if="selectedTarget" class="advanced"><el-collapse-item title="登记已在该平台提交的文章链接" name="publication"><p class="hint">记录为运营方自报，软件尚未独立核验。请填写公开文章网址和实际提交时间。</p><el-form label-position="top"><el-form-item label="公开文章链接"><el-input v-model="publication.url" placeholder="https://平台/具体文章"/></el-form-item><el-form-item label="实际提交时间"><el-date-picker v-model="publication.publishedAt" type="datetime" placeholder="选择时间"/></el-form-item></el-form><el-checkbox v-model="publication.confirmed">我确认这是这篇文章在对应平台提交后的链接</el-checkbox><el-button :disabled="busy || !publication.confirmed || !publication.url || !publication.publishedAt" @click="recordPublication">保存提交记录</el-button></el-collapse-item></el-collapse>
       </section>
       <section v-else-if="step===4 && cycle" key="feedback" class="geo-surface step-panel">
@@ -119,9 +129,9 @@
         <GeoOtherSearchEntries :cycle="cycle" :busy="busy" @busy="setFeedbackBusy"/>
         </details>
         <div data-geo-section="feedback"><GeoSingleCaseProbe :cycle="cycle" :busy="busy" :can-start="singleProbeAvailable" @probe="startSingleCaseProbe" @updated="applyReviewCycle" @busy="setFeedbackBusy"/></div>
-        <GeoPublicationReview data-geo-section="publication" v-if="hasPublicationReviewDrafts" :cycle="cycle" :busy="busy" @updated="applyReviewCycle"/>
+        <GeoPublicationReview data-geo-section="publication" v-if="hasPublicationReviewDrafts && !directoryTarget" :cycle="cycle" :busy="busy" @updated="applyReviewCycle"/>
         <p v-if="!hasPublication" class="hint">{{ externalCycle ? '当前没有可用于发布后分析的提交记录。追加外部回答只保存新的用户观察，不证明发布后的变化。' : unfinishedPublications.length ? '尚无公开成功记录，请先查看以下原发布任务。待确认不等于失败，现在复测只记录新的采集观察。' : '当前没有可用于发布后分析的提交记录。现在复测只会记录新的采集观察。' }}</p>
-        <div v-if="unfinishedPublications.length" class="publication-tasks" aria-label="原发布任务"><article v-for="job in unfinishedPublications" :key="job.id" class="feedback-card"><el-tag :type="job.status==='failed' ? 'danger' : job.status==='need_action' ? 'warning' : 'info'">{{ publicationStatus[job.status] }}</el-tag><h3>{{ job.title }} · {{ cycle.channels[job.platform] || job.platform }}</h3><p>{{ job.message || publicationMessages[job.status] }}</p><p v-if="job.status==='processing'" class="hint">最终提交结果仍在确认，请核对原任务与平台后台，不要另建重复发布。</p><el-button :disabled="busy" @click="continuePublication(job)">继续查看原发布任务</el-button></article></div>
+        <div v-if="unfinishedPublications.length" class="publication-tasks" aria-label="原发布任务"><article v-for="job in unfinishedPublications" :key="job.id" class="feedback-card"><el-tag :type="job.status==='failed' ? 'danger' : job.status==='need_action' ? 'warning' : 'info'">{{ publicationStatus[job.status] }}</el-tag><h3>{{ job.title }} · {{ cycle.channels[job.platform] || job.platform }}</h3><p>{{ job.message || publicationMessages[job.status] }}</p><p v-if="job.status==='processing'" class="hint">最终提交结果仍在确认，请核对原任务与平台后台，不要另建重复发布。</p><p v-if="directoryTargetForChannel(cycle,job.platform)" class="hint">旧文章任务保留为原记录；本渠道的目录申请使用独立资料与回执。</p><el-button v-else :disabled="busy" @click="continuePublication(job)">继续查看原发布任务</el-button></article></div>
         <div v-for="url in cycle.publications || []" :key="url" class="publication-link"><el-tag size="small" type="success">发布器回报</el-tag><a v-if="safeLink(url)" :href="safeLink(url)" target="_blank" rel="noopener noreferrer">{{ url }}</a></div><div v-for="item in cycle.reported_publications || []" :key="item.id" class="publication-link"><el-tag size="small" type="info">运营方自报</el-tag><a v-if="safeLink(item.url)" :href="safeLink(item.url)" target="_blank" rel="noopener noreferrer">{{ item.url }}</a></div>
         <article v-for="item in cycle.retests || []" :key="item.run_id" class="feedback-card">
           <h3>{{ retestCollection(item).title || feedbackLabels[item.comparison.feedback_stage] || '采集观察' }} · {{ journeyDate(item.updated_at) }}</h3>
@@ -146,10 +156,12 @@ import { projectApi } from '@/api/project'
 import { articleApi } from '@/api/article'
 import { geoTestApi } from '@/api/geoTest'
 import { geoContentApi } from '@/api/geoContent'
+import { directoryTaskView, directoryTargetForChannel } from '@/api/geoDirectoryApplications'
 import { accountApi } from '@/api/account'
 import { publishApi } from '@/api/publish'
 import DestinationSessionCard from '@/components/DestinationSessionCard.vue'
 import DestinationUseReview from '@/components/DestinationUseReview.vue'
+import GeoDirectoryApplication from '@/components/GeoDirectoryApplication.vue'
 import JourneySavedCycles from '@/components/JourneySavedCycles.vue'
 import { savedCycleContinuation, savedCycleFactEdits } from '@/utils/geoSavedCycles'
 import { baselineWritingOptions } from '@/utils/geoWritingOptions'
@@ -192,6 +204,7 @@ const form=reactive(emptyBrand()), clientMode=ref('consumer'), model=ref(''), co
 const automaticReady=computed(()=>nativeAvailable.value&&automaticBridgeReady(window.pywebview?.api))
 const plan=ref(null), planConfirmed=ref(false), report=ref(null), reportId=ref(''), reportOrigin=ref('history'), reports=ref([]), historyReportId=ref('')
 const cycle=ref(null), cycleId=ref(''), briefId=ref(''), platform=ref(''), articleId=ref(null), factRows=ref([]), reviewConfirmed=ref(false)
+const directoryPanel=ref(null)
 const hasOptimizationPlan=computed(()=>Boolean(optimizationPlanView(cycle.value,briefId.value)))
 const replacementSourceId=ref(null)
 const editor=reactive({title:'',content:'',summary:'',tags:[]}), publication=reactive({url:'',publishedAt:null,confirmed:false})
@@ -202,6 +215,7 @@ const sourceMaintenanceBusy=ref(false), webmasterBusy=ref(false), websiteAuditBu
 const feedbackBusyOwners=ref(new Set()),feedbackBusy=computed(()=>feedbackBusyOwners.value.size>0)
 const setFeedbackBusy=event=>{feedbackBusyOwners.value=updateFeedbackBusy(feedbackBusyOwners.value,event)}
 const accounts=ref([]), capabilities=ref([]), capabilitiesLoaded=ref(false), task=ref({status:'idle'}), taskId=ref(''), taskKind=ref(''), working=ref(false), finishingTask=ref(false), error=ref(''), saveError=ref('')
+const directoryTask=computed(()=>directoryTaskView(task.value))
 let timer, bridgeTimer, pollPending=false, handledTask='', restoring=false, destroyed=false, liveTaskId='', initialized=false, contextEpoch=0, retestResumeRead=0
 const nativeMethodsReady=()=>['get_task','plan_with_doubao','start_run','open_login','generate_research','start_research_retest','open_destination','stop_task'].every(name=>typeof window.pywebview?.api?.[name]==='function')
 const activateNative=()=>{if(destroyed||!nativeMethodsReady())return false;nativeAvailable.value=true;if(initialized&&!timer){void poll();timer=setInterval(poll,1000)}clearInterval(bridgeTimer);return true}
@@ -267,9 +281,12 @@ const profileDirty=computed(()=>{if(!project.value)return true;try{return !sameB
 const needsAnalysis=computed(()=>['rule_observations_not_ai','user_reported_external_editorial_clues'].includes(cycle.value?.analysis?.method))
 const diagnosisPreview=computed(()=>{const text=cycle.value?.analysis?.diagnosis||'';return text.length>180?`${text.slice(0,180).trim()}…`:text})
 const matchingDrafts=computed(()=>(cycle.value?.drafts||[]).filter(item=>item.platform===platform.value&&item.brief_id===briefId.value&&sameResearchBrief(item,cycle.value.analysis?.briefs?.find(brief=>brief.id===briefId.value))))
-const channelOptionLabel=(key,label)=>cycle.value?.destinations?.some(item=>item.key===key)?writingChannelLabel(cycle.value,key,`${label} · 已接入目标`):`${label} · 通用格式`
+const channelOptionLabel=(key,label)=>directoryTargetForChannel(cycle.value,key)?`${label} · 目录资料${writingChannelEnabled(cycle.value,key)?'':' · 用途待核对'}`:cycle.value?.destinations?.some(item=>item.key===key)?writingChannelLabel(cycle.value,key,`${label} · 已接入目标`):`${label} · 通用格式`
 const activeDraft=computed(()=>matchingDrafts.value.find(item=>item.article_id===articleId.value)||null)
-const selectedTarget=computed(()=>(cycle.value?.destinations||[]).find(item=>item.key===(activeDraft.value?.platform||platform.value)))
+const selectedTarget=computed(()=>(cycle.value?.destinations||[]).find(item=>item.key===(activeDraft.value?.platform||platform.value))||directoryTargetForChannel(cycle.value,platform.value))
+const directoryTarget=computed(()=>directoryTargetForChannel(cycle.value,platform.value))
+const directoryReady=computed(()=>Boolean(directoryTarget.value&&cycle.value?.id===cycleId.value&&cycle.value.project_id===projectId.value&&Array.isArray(cycle.value.analysis?.briefs)&&!needsAnalysis.value))
+const directoryDrafts=computed(()=>directoryTarget.value?(cycle.value?.drafts||[]).filter(item=>directoryTargetForChannel(cycle.value,item.platform)?.id===directoryTarget.value.id):[])
 const platformInactive=computed(()=>Boolean(selectedTarget.value && !destinationEnabled(selectedTarget.value)))
 const platformUnprepared=computed(()=>Boolean(selectedTarget.value && !destinationCanPrepare(selectedTarget.value)))
 const needsReplacement=computed(()=>targetDraftOutdated(activeDraft.value,selectedTarget.value))
@@ -307,18 +324,20 @@ const platformBasis=computed(()=>{
   if(target)return matched?`已接入 ${target.config.name}，来源网址与配置范围匹配；投稿资格仍需确认。`:`手动选择 ${target.config.name}；本轮尚无匹配的来源网址。`
   return '手动选择通用渠道稿；这不表示豆包已引用或推荐该平台。'
 })
-const canVisit=index=>index===0||Boolean(project.value&&!profileDirty.value&&(index===1||cycle.value&&(index===2||reviewedDraft.value&&index===3||index===4)))
-const stepComplete=index=>index===0?Boolean(project.value):index===1?externalCycle.value||usableReport.value:index===2?reviewedDraft.value||publishedDraft.value:index===3?hasPublication.value:feedbackTotals.value.withAnswers>0
-const primaryLabel=computed(()=>[2,3].includes(step.value)&&needsReplacement.value?'按当前目标另存新稿':step.value===0?'保存品牌并继续':step.value===1?(externalCycle.value?'继续核对资料和内容':report.value?'分析这份报告':plan.value?'开始真实搜索测试':'生成 3 个测试问题'):step.value===2?(needsAnalysis.value?'分析来源并制定选题':!activeDraft.value?(!factsSaved.value?'保存已核对的事实':'生成平台草稿'):publishedDraft.value?'查看发布反馈':!reviewedDraft.value?'保存审稿并标记就绪':'继续发布'):step.value===3?(publisherPaused.value?'发布器当前暂停':targetPublisher.value?`使用${publisherName.value}发布器`:selectedTarget.value?(destinationSupportsFill(selectedTarget.value)?'打开目标平台并填写':'配置平台编辑入口'):ownedDraft.value?'导出官网稿件':'打开发布中心'):externalCycle.value?'查看并追加外部回答':'开始同题复测')
+const canVisit=index=>index===0||Boolean(project.value&&!profileDirty.value&&(index===1||cycle.value&&(index===2||(directoryTarget.value?directoryReady.value:reviewedDraft.value)&&index===3||index===4)))
+const stepComplete=index=>directoryTarget.value&&[2,3].includes(index)?false:index===0?Boolean(project.value):index===1?externalCycle.value||usableReport.value:index===2?reviewedDraft.value||publishedDraft.value:index===3?hasPublication.value:feedbackTotals.value.withAnswers>0
+const primaryLabel=computed(()=>directoryReady.value&&[2,3].includes(step.value)?'打开目录申请':directoryTarget.value&&step.value===3?'先完成来源分析':[2,3].includes(step.value)&&needsReplacement.value?'按当前目标另存新稿':step.value===0?'保存品牌并继续':step.value===1?(externalCycle.value?'继续核对资料和内容':report.value?'分析这份报告':plan.value?'开始真实搜索测试':'生成 3 个测试问题'):step.value===2?(needsAnalysis.value?'分析来源并制定选题':!activeDraft.value?(!factsSaved.value?'保存已核对的事实':'生成平台草稿'):publishedDraft.value?'查看发布反馈':!reviewedDraft.value?'保存审稿并标记就绪':'继续发布'):step.value===3?(publisherPaused.value?'发布器当前暂停':targetPublisher.value?`使用${publisherName.value}发布器`:selectedTarget.value?(destinationSupportsFill(selectedTarget.value)?'打开目标平台并填写':'配置平台编辑入口'):ownedDraft.value?'导出官网稿件':'打开发布中心'):externalCycle.value?'查看并追加外部回答':'开始同题复测')
 const primaryDisabled=computed(()=>{
   if(step.value===1&&!externalCycle.value&&!report.value&&collectionPath.value==='automatic'&&!automaticReady.value)return true
   if(busy.value)return true
+  if(directoryReady.value&&[2,3].includes(step.value))return false
+  if(directoryTarget.value&&step.value===3)return true
   if(externalCycle.value&&[1,4].includes(step.value))return false
   if(platformUnprepared.value && (step.value===3 || step.value===2 && !needsAnalysis.value && (!activeDraft.value || needsReplacement.value)))return true
   if([2,3].includes(step.value)&&needsReplacement.value)return !factsSaved.value||provider.value==='doubao'&&!nativeAvailable.value
   return step.value===0&&(!form.name.trim()||!form.website.trim()||!form.description.trim())||step.value===1&&(report.value?!usableReport.value:Boolean(plan.value)&&(!planConfirmed.value||!nativeAvailable.value))||step.value===2&&!needsAnalysis.value&&(!activeDraft.value?(!factsSaved.value?!confirmedFacts().length:!platform.value||!briefId.value):!publishedDraft.value&&(lengthInvalid.value||!reviewedDraft.value&&(!reviewConfirmed.value||!editor.title.trim()||!editor.content.trim())))||step.value===3&&(!reviewedDraft.value||lengthInvalid.value||publisherPaused.value||Boolean(selectedTarget.value)&&(!capabilitiesLoaded.value||!targetPublisher.value&&destinationSupportsFill(selectedTarget.value)&&!nativeAvailable.value))||step.value===4&&!nativeAvailable.value
 })
-const actionHint=computed(()=>busy.value?'任务进行中，当前品牌和步骤已锁定':step.value===0?'品牌资料用于出题，不视为独立核验事实':step.value===1?externalCycle.value?'可沿用原题另建独立软件自动测试':report.value?'分析将使用上方标注时间的采集报告':plan.value?'检查问题并勾选确认后，由软件自动采集回答与来源':'软件先检查网页会话，再生成问题供你预览':step.value===2?'草稿需要审稿，不会自动发布':step.value===3?'一次处理一篇，最终提交以平台结果为准':externalCycle.value?'外部原文逐条保留，采样条件未知不算成立':'复测记录变化，不承诺被索引或被引用')
+const actionHint=computed(()=>busy.value?'任务进行中，当前品牌和步骤已锁定':directoryReady.value&&[2,3].includes(step.value)?platformUnprepared.value?destinationPublicationGate(directoryTarget.value).reason:'核对目录公开资料，由你在平台最终确认；待审核不计作已收录或 GEO 成功':directoryTarget.value&&step.value===3?'请先返回内容步骤完成本轮来源分析':step.value===0?'品牌资料用于出题，不视为独立核验事实':step.value===1?externalCycle.value?'可沿用原题另建独立软件自动测试':report.value?'分析将使用上方标注时间的采集报告':plan.value?'检查问题并勾选确认后，由软件自动采集回答与来源':'软件先检查网页会话，再生成问题供你预览':step.value===2?'草稿需要审稿，不会自动发布':step.value===3?'一次处理一篇，最终提交以平台结果为准':externalCycle.value?'外部原文逐条保留，采样条件未知不算成立':'复测记录变化，不承诺被索引或被引用')
 const rate=value=>typeof value==='number'&&Number.isFinite(value)?`${Math.round(value*100)}%`:'未知'
 const options=()=>{const execution=cycle.value?.baseline_source==='user_reported_external'?{}:cycle.value?.baseline?.execution||{};return {client_mode:clientMode.value,model_label:model.value.trim(),...(execution.client_mode===clientMode.value?storedSessionScope(execution):{})}}
 watch([collectionPath,clientMode,model],()=>{planConfirmed.value=false},{flush:'sync'})
@@ -355,6 +374,15 @@ const persist=()=>{if(restoring||!projectId.value||!sameBrand(project.value,form
 const exportRecovery=kind=>{const value=kind==='draft'?recoveryDraft.value:recoveryFacts.value,url=URL.createObjectURL(new Blob([JSON.stringify(value,null,2)],{type:'application/json;charset=utf-8'})),link=document.createElement('a');link.href=url;link.download=`journey-${projectId.value}-${kind}-recovery.json`;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}
 const loadEditor=()=>{const draft=activeDraft.value;if(draft)Object.assign(editor,{title:draft.title,content:draft.content,summary:draft.summary||'',tags:draft.tags||[]});reviewConfirmed.value=false}
 const selectContent=async(field,value)=>{if(busy.value)return;try{if(editorDirty.value)await ElMessageBox.confirm('当前文章有未保存的修改。切换后将打开另一份内容，未保存修改会被放弃。','切换内容',{confirmButtonText:'放弃修改并切换',cancelButtonText:'继续编辑'});if(field==='brief')briefId.value=value;else if(field==='article'){articleId.value=value;loadEditor()}else platform.value=value}catch{}}
+const openDirectoryPanel=async()=>{
+  if(busy.value||!directoryReady.value)return
+  const epoch=contextEpoch,selectedCycle=cycleId.value,selectedTarget=directoryTarget.value.id
+  await nextTick()
+  if(destroyed||epoch!==contextEpoch||busy.value||!directoryReady.value||cycleId.value!==selectedCycle||directoryTarget.value.id!==selectedTarget)return
+  if(typeof directoryPanel.value?.openPanel==='function')directoryPanel.value.openPanel()
+  else error.value='目录资料正在加载，请稍后打开原申请。'
+}
+const requireArticleChannel=()=>{if(directoryTargetForChannel(cycle.value,platform.value))throw new Error('本渠道使用目录资料，不需要文章；请打开目录申请。')}
 const applyCycle=(value,{keepEditor=false}={})=>{
   if(value.project_id!==projectId.value||!sameBrand(value.profile,project.value))throw new Error('内容任务与当前品牌或官网不一致，已阻止混用')
   const previous=activeDraft.value,hadEdits=Boolean(editorDirty.value)
@@ -368,7 +396,7 @@ const applyCycle=(value,{keepEditor=false}={})=>{
   cycle.value=value;cycleId.value=value.id
   if(value.baseline===null&&value.baseline_source==='user_reported_external'){report.value=null;reportId.value='';historyReportId.value='';reportOrigin.value='external'}
   if(!value.analysis.briefs.some(item=>item.id===briefId.value))briefId.value=value.analysis.briefs[0]?.id||''
-  if(!value.channels[platform.value])platform.value=''
+  if(!value.channels[platform.value])platform.value=directoryTargetForChannel(value,platform.value)?.key||''
   if(!matchingDrafts.value.some(item=>item.article_id===articleId.value))articleId.value=matchingDrafts.value[0]?.article_id||null
   if(!keepBoundEditor || !hadEdits)loadEditor()
   const facts=value.facts.length?value.facts:value.fact_candidates?.facts||[{text:project.value.description,source_url:'',confirmed:false}]
@@ -460,8 +488,9 @@ const chooseProject=async id=>{
       }catch(cause){error.value=cause.message||'上次内容任务无法恢复，可重新选择报告'}}
       recoveryTask.value=scopedRecoveryCheckpoint(saved.recoveryTask,cycleId.value)
       taskId.value=saved.taskId||'';taskKind.value=saved.taskKind||'';replacementSourceId.value=Number.isSafeInteger(saved.replacementSourceId)&&saved.replacementSourceId>0?saved.replacementSourceId:null;step.value=Number.isInteger(saved.step)&&canVisit(saved.step)?Math.max(0,Math.min(saved.step,4)):0
+      if(saved.step===3&&directoryTarget.value&&!directoryReady.value&&cycle.value)step.value=2
       await restoreTaskRecovery()
-      if(step.value===3)await loadAccounts()
+      if(step.value===3&&!directoryTarget.value)await loadAccounts()
     }finally{restoring=false}
   })
 }
@@ -544,7 +573,7 @@ const resetBaseline=async reuse=>{try{await ElMessageBox.confirm(reuse?'将用�
 const newBaseline=()=>resetBaseline(false)
 const repeatBaseline=()=>resetBaseline(true)
 const createCycle=async()=>{if(!sameBrand(report.value.profile,project.value))throw new Error('采集报告与当前品牌不一致');if(!usableReport.value)throw new Error('当前报告没有有效回答，请新建一轮基线');applyCycle((await geoContentApi.create({report_id:reportId.value,project_id:projectId.value})).data);step.value=2}
-const generateResearch=async kind=>{if(kind==='draft' && !writingChannelEnabled(cycle.value,platform.value))throw new Error(destinationPublicationGate(selectedTarget.value).reason);if(provider.value==='doubao')await startNative(kind,()=>window.pywebview.api.generate_research(cycleId.value,kind,briefId.value,platform.value,options()));else{const result=(await geoContentApi.generate(cycleId.value,{kind,brief_id:briefId.value,platform:platform.value})).data;applyCycle(result.cycle);if(result.article_id){articleId.value=result.article_id;loadEditor()}}}
+const generateResearch=async kind=>{if(kind==='draft'){requireArticleChannel();if(!writingChannelEnabled(cycle.value,platform.value))throw new Error(destinationPublicationGate(selectedTarget.value).reason)}if(provider.value==='doubao')await startNative(kind,()=>window.pywebview.api.generate_research(cycleId.value,kind,briefId.value,platform.value,options()));else{const result=(await geoContentApi.generate(cycleId.value,{kind,brief_id:briefId.value,platform:platform.value})).data;applyCycle(result.cycle);if(result.article_id){articleId.value=result.article_id;loadEditor()}}}
 const updateResearchFromFeedback=()=>run(async()=>{
   if(editorDirty.value)throw new Error('请先保存当前稿件编辑，再用后续反馈更新选题。')
   if(!factsSaved.value&&confirmedFacts().length)throw new Error('请先保存当前事实资料，再更新选题。')
@@ -552,6 +581,7 @@ const updateResearchFromFeedback=()=>run(async()=>{
   await generateResearch('analysis')
 })
 const replaceTargetDraft=async()=>{
+  requireArticleChannel()
   applyCycle((await geoContentApi.get(cycleId.value)).data,{keepEditor:true})
   if(!needsReplacement.value)throw new Error('目标配置与这份稿件没有版本差异，请继续核对当前稿件')
   if(!factsSaved.value)throw new Error('请先在完整资料页核对并保存当前写作事实，再另存新版')
@@ -562,14 +592,16 @@ const replaceTargetDraft=async()=>{
   try{await generateResearch('draft');if(provider.value==='api')replacementSourceId.value=null}catch(cause){replacementSourceId.value=null;throw cause}
 }
 const saveFacts=async()=>{applyCycle((await geoContentApi.facts(cycleId.value,{facts:confirmedFacts(),revision:cycle.value.revision})).data);ElMessage.success('核对后的事实已保存')}
-const reviewArticle=async()=>{if(needsReplacement.value)throw new Error('目标配置已变化，请先按当前目标另存新稿');if(lengthInvalid.value)throw new Error([lengthReview.value.titleIssue,lengthReview.value.bodyIssue].filter(Boolean).join(' '));await articleApi.updateArticle(activeDraft.value.article_id,{title:editor.title.trim(),content:editor.content.trim(),summary:editor.summary,tags:editor.tags,status:'ready'});applyCycle((await geoContentApi.get(cycleId.value)).data);reviewConfirmed.value=false;ElMessage.success('审稿已保存，可以进入发布')}
+const reviewArticle=async()=>{requireArticleChannel();if(needsReplacement.value)throw new Error('目标配置已变化，请先按当前目标另存新稿');if(lengthInvalid.value)throw new Error([lengthReview.value.titleIssue,lengthReview.value.bodyIssue].filter(Boolean).join(' '));await articleApi.updateArticle(activeDraft.value.article_id,{title:editor.title.trim(),content:editor.content.trim(),summary:editor.summary,tags:editor.tags,status:'ready'});applyCycle((await geoContentApi.get(cycleId.value)).data);reviewConfirmed.value=false;ElMessage.success('审稿已保存，可以进入发布')}
 const loadAccounts=async()=>{capabilitiesLoaded.value=false;const [overview,platforms]=await Promise.all([accountApi.getMediaAccounts(),publishApi.getPlatforms()]);accounts.value=overview.data?.accounts||[];capabilities.value=platforms.data||[];capabilitiesLoaded.value=true}
 const refreshAccounts=()=>run(loadAccounts)
 const checkAccount=id=>run(async()=>{await accountApi.checkMediaAccount(id);await loadAccounts()})
 const openDetails=()=>router.push({path:'/geo-content',query:{cycle:cycleId.value,journey_project:String(projectId.value)}})
-const openDestinationLogin=()=>run(()=>{if(!destinationCanPrepare(selectedTarget.value))throw new Error(destinationPublicationGate(selectedTarget.value).reason);return startNative('destination',()=>window.pywebview.api.open_destination(cycleId.value,selectedTarget.value.id,null))})
+const openDestinationLogin=()=>run(()=>{requireArticleChannel();if(!destinationCanPrepare(selectedTarget.value))throw new Error(destinationPublicationGate(selectedTarget.value).reason);return startNative('destination',()=>window.pywebview.api.open_destination(cycleId.value,selectedTarget.value.id,null))})
 const openPublisher=async()=>{
+  requireArticleChannel()
   applyCycle((await geoContentApi.get(cycleId.value)).data,{keepEditor:true})
+  requireArticleChannel()
   if(selectedTarget.value && !destinationCanPrepare(selectedTarget.value))throw new Error(destinationPublicationGate(selectedTarget.value).reason)
   if(needsReplacement.value)throw new Error('目标配置已变化，请先按当前目标另存新稿')
   if(!reviewedDraft.value)throw new Error('稿件尚未审稿就绪，或已有内容变更，请返回内容步骤重新核对')
@@ -585,12 +617,14 @@ const goFeedback=()=>run(async()=>{applyCycle((await geoContentApi.get(cycleId.v
 const continuePublication=job=>run(async()=>{
   applyCycle((await geoContentApi.get(cycleId.value)).data,{keepEditor:true})
   const draft=cycle.value.drafts.find(item=>item.article_id===job.article_id), current=draft?.jobs.find(item=>item.id===job.id&&!item.demo)
+  if(directoryTargetForChannel(cycle.value,draft?.platform))throw new Error('本渠道使用目录资料，旧文章与原任务仍保留；请查看原记录。')
   if(!current)throw new Error('原发布任务尚未读取到，请刷新记录后重试，未另建任务')
   await router.push({path:'/publish-center',query:{article_id:String(draft.article_id),platform:current.platform,journey_project:String(projectId.value)}})
 })
-const recordPublication=()=>run(async()=>{if(!geoContentApi.publication)throw new Error('提交结果登记服务尚未就绪，请在采集驱动内容页登记');applyCycle((await geoContentApi.publication(cycleId.value,{article_id:activeDraft.value.article_id,target_id:selectedTarget.value.id,url:publication.url,published_at:new Date(publication.publishedAt).toISOString(),confirmed:publication.confirmed})).data);publication.confirmed=false;step.value=4})
+const recordPublication=()=>run(async()=>{requireArticleChannel();if(!geoContentApi.publication)throw new Error('提交结果登记服务尚未就绪，请在采集驱动内容页登记');applyCycle((await geoContentApi.publication(cycleId.value,{article_id:activeDraft.value.article_id,target_id:selectedTarget.value.id,url:publication.url,published_at:new Date(publication.publishedAt).toISOString(),confirmed:publication.confirmed})).data);publication.confirmed=false;step.value=4})
 const primaryAction=async()=>{
   if(primaryDisabled.value)return
+  if(directoryReady.value&&[2,3].includes(step.value)){await openDirectoryPanel();return}
   if(externalCycle.value&&step.value===1){step.value=2;return}
   if(step.value===4&&!nativeCycleCapability(cycle.value,'native_retest')){await nextTick();focusDiagnosticSection('feedback');return}
   if(step.value===1&&!report.value&&!plan.value){await makePlan();return}

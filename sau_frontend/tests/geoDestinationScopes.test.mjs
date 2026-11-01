@@ -18,11 +18,13 @@ const source=path=>{
   }}
 }
 const destinations=source('../src/components/GeoDestinations.vue'),journey=source('../src/views/GeoJourney.vue')
+const directorySource=fs.readFileSync(new URL('../src/api/geoDirectoryApplications.js',import.meta.url),'utf8')
+const {isGrokCodeDirectory,directoryTargetForChannel}=new Function(directorySource.replace(/^import .*$/gm,'').replaceAll('export const ','const ')+';return {isGrokCodeDirectory,directoryTargetForChannel};')()
 const destinationHarness=api=>{
   const props=reactive({cycle:cycle(),busy:false}),events=[],scope=effectScope()
   const deps={reactive,ref,watch,defineProps:()=>props,defineEmits:()=>((...args)=>events.push(args)),geoContentApi:api,
-    ElMessage:{error(){},success(){}},ElMessageBox:{confirm:async()=>{}},...availability,...use}
-  const actions=scope.run(()=>new Function(...Object.keys(deps),destinations.body+';return {events,review,eventRows,showEvents};')(...Object.values(deps)))
+    ElMessage:{error(){},success(){}},ElMessageBox:{confirm:async()=>{}},isGrokCodeDirectory,...availability,...use}
+  const actions=scope.run(()=>new Function(...Object.keys(deps),destinations.body+';return {events,review,eventRows,showEvents,selectTarget,openTarget};')(...Object.values(deps)))
   return {props,emitted:events,stop:()=>scope.stop(),...actions,deps}
 }
 
@@ -73,6 +75,19 @@ test('a late restore mutation response does not request or emit another cycle',a
   }finally{page.stop()}
 })
 
+test('a known directory target cannot enter article selection, generic login, or reset flow',async()=>{
+  const calls=[],page=destinationHarness({reviewDestination:async(...args)=>calls.push(args)})
+  try {
+    const directory=page.props.cycle.destinations[0];directory.config.source_scope='https://grokcode.cn/api-transit'
+    page.props.cycle.channels={[directory.key]:'目录'}
+    page.selectTarget(directory.key);page.openTarget(directory);await page.review(directory)
+    assert.deepEqual(calls,[]);assert.deepEqual(page.emitted,[])
+    const article=page.props.cycle.destinations[1];page.props.cycle.channels[article.key]='文章'
+    page.selectTarget(article.key);page.openTarget(article)
+    assert.deepEqual(page.emitted,[['select',article.key],['open',{target_id:article.id}]])
+  }finally{page.stop()}
+})
+
 const draft=(id=5,brief='b01',title='原稿',content='原正文')=>({article_id:id,brief_id:brief,platform:'target_t1',title,content,summary:'',tags:[],provenance:{brief:{id:brief}}})
 const contentCycle=(drafts=[draft()],briefs=[{id:'b01'},{id:'b02'}])=>({id:'cycle-a',project_id:1,profile:{name:'示例软件',website:'https://software.example.org/',entity_type:'product'},analysis:{briefs},channels:{target_t1:'合成平台'},facts:[{id:'f1',text:'事实',source_url:'',confirmed:true}],drafts})
 const editorHarness=(edited=true)=>{
@@ -81,7 +96,7 @@ const editorHarness=(edited=true)=>{
   const activeDraft=computed(()=>matchingDrafts.value.find(item=>item.article_id===articleId.value)||null)
   const editor=reactive({title:edited?'本机未保存稿':value.drafts[0].title,content:edited?'本机修改正文':value.drafts[0].content,summary:'',tags:[]})
   const editorDirty=computed(()=>activeDraft.value && (editor.title!==activeDraft.value.title || editor.content!==activeDraft.value.content))
-  const deps={cycle,articleId,briefId,platform,matchingDrafts,activeDraft,editor,editorDirty,articleSnapshot,sameBrand,sameResearchBrief,
+  const deps={cycle,articleId,briefId,platform,matchingDrafts,activeDraft,editor,editorDirty,articleSnapshot,sameBrand,sameResearchBrief,directoryTargetForChannel,
     projectId:ref(1),project:ref(value.profile),cycleId:ref(value.id),recoveryDraft:ref(null),error:ref(''),factRows:ref([]),reviewConfirmed:ref(true)}
   const action=new Function(...Object.keys(deps),`const loadEditor=${journey.expression('loadEditor')};return (${journey.expression('applyCycle')});`)(...Object.values(deps))
   return {...deps,action}

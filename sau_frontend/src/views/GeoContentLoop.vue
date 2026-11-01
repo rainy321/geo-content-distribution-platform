@@ -9,6 +9,8 @@
       <el-select v-model="cycleId" placeholder="打开已保存的任务单" aria-label="已保存的内容任务单" @change="loadCycle"><el-option v-for="item in cycles" :key="item.id" :value="item.id" :label="`${item.entity_type==='company'?'公司':item.entity_type==='product'?'产品':'旧对象口径'} · ${item.name} · ${item.website || `项目 #${item.project_id}`} · ${item.draft_count} 份稿件 · ${date(item.updated_at)}`" /></el-select>
     </el-card>
     <el-card v-if="nativeAvailable" shadow="never">
+      <div v-if="nativeBusy && directoryTask" data-testid="content-directory-task"><strong>{{ directoryTask.title }}</strong><p class="hint">{{ directoryTask.detail }}</p><p class="hint">请在原目录申请卡“结束当前窗口”；结果以原记录读回为准，停止任务或直接关浏览器不能证明未提交。</p></div>
+      <template v-else>
       <DoubaoPreparation/>
       <div class="row"><strong>豆包写作会话</strong><el-select :model-value="clientMode" :disabled="busy || writingContextPending" aria-label="写作豆包界面" @update:model-value="selectWritingMode"><el-option label="豆包对话" value="consumer"/><el-option label="豆包工作" value="work"/></el-select><el-input :model-value="model" :disabled="busy || writingContextPending" placeholder="模型选项可留空" aria-label="写作模型选项" @update:model-value="selectWritingModel"/><el-button :disabled="busy || writingContextPending" @click="login">登录豆包</el-button><el-button v-if="nativeBusy" @click="stop">停止任务</el-button></div>
       <p class="hint">{{ writingContextPending ? '正在读取本轮写作选项，请稍候。' : externalCycle ? '本轮基线来自手机或外部观察。这里的界面和模型选择只用于后续写作，不代表实际采样模式；实际采样条件按各条外部记录保留。留空表示使用当前写作模型。' : '写作会话初始沿用本轮基线的界面和模型选项；你调整后的选择会按任务单保留。留空表示使用当前模型。' }}</p>
@@ -16,6 +18,7 @@
       <p v-else-if="!contentRecovery || (task.kind==='login' && loginScope?.taskId===task.id && loginScope?.cycleId===cycleId)" class="hint" aria-live="polite">{{ currentTaskMessage }}</p>
       <DoubaoTaskRecovery v-if="contentRecovery" :recovery="contentRecovery" :busy="busy" :native-available="nativeAvailable" @login="login"/>
       <p v-if="recoveryStorageError" class="hint" role="status">{{ recoveryStorageError }}</p>
+      </template>
     </el-card>
     <template v-if="cycle">
       <GeoOptimizationProgress v-if="progressProject" :project="progressProject" :busy="busy" @busy="setFeedbackBusy"/>
@@ -44,19 +47,23 @@
       </el-card>
       <el-card shadow="never" data-geo-section="drafts">
         <h2>4 · 生成文章或帖子，进入现有发布流程</h2>
-        <div class="row"><el-select v-model="briefId" aria-label="内容选题"><el-option v-for="brief in cycle.analysis.briefs" :key="brief.id" :value="brief.id" :label="brief.topic"/></el-select><el-select v-model="platform" aria-label="目标发布渠道"><el-option v-for="(label,key) in cycle.channels" :key="key" :value="key" :label="writingChannelLabel(cycle,key,label)" :disabled="!writingChannelEnabled(cycle,key)"/></el-select></div>
+        <div class="row"><el-select v-model="briefId" aria-label="内容选题"><el-option v-for="brief in cycle.analysis.briefs" :key="brief.id" :value="brief.id" :label="brief.topic"/></el-select><el-select v-model="platform" aria-label="目标发布渠道"><el-option v-for="(label,key) in cycle.channels" :key="key" :value="key" :label="directoryTargetForChannel(cycle,key) ? `${label} · 目录资料见上方` : writingChannelLabel(cycle,key,label)" :disabled="Boolean(directoryTargetForChannel(cycle,key)) || !writingChannelEnabled(cycle,key)"/></el-select></div>
+        <p v-if="selectedDirectoryTarget" class="hint" role="status">本渠道使用目录资料，不需要文章。请使用上方目录申请卡，旧稿保留供只读预览和导出。</p>
+        <template v-else>
         <p v-if="selectedDestination && !destinationCanPrepare(selectedDestination)" class="hint">{{ destinationPublicationGate(selectedDestination).reason }}</p>
         <p class="hint">{{ selectedDestination ? `已选择接入平台：${selectedDestination.config.name}；稿件将使用该平台的内容规范与长度限制。` : '当前为通用渠道稿。可在上方来源投放目标中接入并选择具体平台。' }}</p>
         <GeoDraftRecovery :cycle="cycle" :task="task" :busy="busy" :native-available="nativeAvailable"
           :facts-current="confirmed && factsText===factsStoredText(cycle.facts)" :selection-key="`${briefId}|${platform}`" @updated="applyCycle" @busy="setFeedbackBusy"/>
         <div class="row"><el-button v-if="nativeAvailable" type="primary" :disabled="busy || !canDraft" @click="generate('draft','doubao')">豆包生成并存入内容库</el-button><el-button :disabled="busy || !canDraft" @click="generate('draft','api')">AI API 生成并存入内容库</el-button></div>
         <p v-if="!canDraft && (!selectedDestination || destinationCanPrepare(selectedDestination))" class="hint">请先保存核对后的事实资料，并保持输入与已保存内容一致。</p>
+        </template>
         <article v-for="draft in cycle.drafts" :key="draft.article_id" class="draft" data-testid="research-draft">
           <h3>{{ draft.title }}</h3><p>{{ cycle.channels[draft.platform] }} · {{ status[draft.status] || draft.status }} · 原始问题 {{ draft.provenance.brief.case_ids.join('、') }}</p>
           <p>{{ draft.summary }}</p>
-          <div class="row"><el-button @click="edit(draft)">审稿 / 编辑</el-button><el-button v-if="destinationSupportsFill(draftDestination(draft))" :disabled="busy || !nativeAvailable || draft.status !== 'ready' || !destinationCanPrepare(draftDestination(draft))" @click="fillDestination(draft)">打开目标平台并填写</el-button><el-button v-if="draft.provenance.destination" :disabled="busy || !['ready','published'].includes(draft.status)" @click="openPublication(draft)">登记站内发布链接</el-button><el-button v-if="legacyChannel(draft) && legacyChannel(draft) !== 'owned_web'" :disabled="draft.status !== 'ready' || Boolean(draft.provenance.destination) && !destinationCanPrepare(draftDestination(draft))" @click="publish(draft)">进入现有发布中心</el-button><el-button @click="downloadArticle(draft)">导出稿件</el-button></div>
-          <p v-if="draft.provenance.destination && !destinationSupportsFill(draftDestination(draft))" class="hint">该目标当前支持登录与导出，辅助填写尚未接入。可导出稿件后在平台编辑。</p>
-          <p v-if="draft.provenance.destination" class="hint">来源匹配依据：{{ draft.provenance.distribution_basis?.source_ids.join('、') || '手动选择，当前选题未匹配来源网址' }}。填写可能触发网站自动保存；发布状态以实际结果为准。已有发布中心需另外绑定对应账号。</p>
+          <p v-if="directoryTargetForChannel(cycle,draft.platform)" class="hint">此目录渠道的旧文章与原任务仍保留，仅供只读预览和导出；目录申请使用上方独立资料与回执。</p>
+          <div class="row"><template v-if="!directoryTargetForChannel(cycle,draft.platform)"><el-button @click="edit(draft)">审稿 / 编辑</el-button><el-button v-if="destinationSupportsFill(draftDestination(draft))" :disabled="busy || !nativeAvailable || draft.status !== 'ready' || !destinationCanPrepare(draftDestination(draft))" @click="fillDestination(draft)">打开目标平台并填写</el-button><el-button v-if="draft.provenance.destination" :disabled="busy || !['ready','published'].includes(draft.status)" @click="openPublication(draft)">登记站内发布链接</el-button><el-button v-if="legacyChannel(draft) && legacyChannel(draft) !== 'owned_web'" :disabled="draft.status !== 'ready' || Boolean(draft.provenance.destination) && !destinationCanPrepare(draftDestination(draft))" @click="publish(draft)">进入现有发布中心</el-button></template><el-button @click="downloadArticle(draft)">导出稿件</el-button></div>
+          <p v-if="draft.provenance.destination && !directoryTargetForChannel(cycle,draft.platform) && !destinationSupportsFill(draftDestination(draft))" class="hint">该目标当前支持登录与导出，辅助填写尚未接入。可导出稿件后在平台编辑。</p>
+          <p v-if="draft.provenance.destination && !directoryTargetForChannel(cycle,draft.platform)" class="hint">来源匹配依据：{{ draft.provenance.distribution_basis?.source_ids.join('、') || '手动选择，当前选题未匹配来源网址' }}。填写可能触发网站自动保存；发布状态以实际结果为准。已有发布中心需另外绑定对应账号。</p>
           <p v-if="draft.platform === 'owned_web'" class="hint">官网稿可导出交给网站编辑发布。</p>
           <p v-for="job in draft.jobs" :key="job.id" class="hint">{{ job.demo ? '演示任务' : '发布任务' }} #{{ job.id }} · {{ job.platform }} · {{ jobStatus[job.status] || job.status }} <a v-if="safeUrl(job.result_url)" :href="safeUrl(job.result_url)" target="_blank" rel="noopener noreferrer">查看发布链接</a></p>
           <el-collapse><el-collapse-item title="预览草稿" :name="draft.article_id"><pre>{{ draft.content }}</pre><p class="hint">使用事实：{{ draft.provenance.used_fact_ids.join('、') }}；生成来源：{{ draft.provenance.method }}。文章内容和来源仍需人工核对。</p></el-collapse-item></el-collapse>
@@ -66,7 +73,7 @@
       <el-card shadow="never">
         <h2>5 · {{ externalCycle ? '发布记录与外部观察' : '发布记录与同题复测' }}</h2>
         <GeoExternalFeedback data-geo-section="feedback" :cycle="cycle" :busy="busy" @updated="applyCycle" @busy="setFeedbackBusy"/>
-        <GeoPublicationReview data-geo-section="publication" v-if="cycle" :cycle="cycle" :busy="busy" @updated="applyCycle"/>
+        <GeoPublicationReview data-geo-section="publication" v-if="articleCycle" :cycle="articleCycle" :busy="busy" @updated="applyCycle"/>
         <p>发布器确认成功：{{ cycle.publications.length }} 条；用户登记：{{ cycle.reported_publications?.length || 0 }} 条（尚未独立核验）。演示和失败任务不计成功。</p>
         <p v-for="item in (cycle.reported_publications || []).filter(record=>record.kind!=='builtin_job')" :key="item.id" class="hint"><el-tag type="info">用户登记，未核验</el-tag> {{ date(item.published_at) }} · <a :href="safeUrl(item.url)" target="_blank" rel="noopener noreferrer">查看登记链接</a></p>
         <p v-if="externalCycle" class="hint" data-testid="external-baseline-feedback-note">本轮基线来自用户提供的手机或外部观察，原生复测与原生指标比较不可用。请在上方“录入外部回答”中按原题追加后续观察，逐条保留原文与采样条件；写作选择不代表实际采样模式。</p>
@@ -103,6 +110,7 @@ import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { geoContentApi } from '@/api/geoContent'
+import { directoryTaskView, directoryTargetForChannel } from '@/api/geoDirectoryApplications'
 import { geoTestApi } from '@/api/geoTest'
 import GeoDestinations from '@/components/GeoDestinations.vue'
 import GeoSourceIdentity from '@/components/GeoSourceIdentity.vue'
@@ -130,6 +138,7 @@ import { destinationEnabled, destinationCanPrepare, destinationPublicationGate, 
 const route = useRoute(), router = useRouter()
 const reports = ref([]), cycles = ref([]), cycle = ref(null), cycleId = ref(''), reportId = ref(''), retestReportId = ref('')
 const loading = ref(false), working = ref(false), nativeAvailable = ref(false), task = ref({status:'idle'}), websiteAuditBusy=ref(false)
+const directoryTask = computed(() => directoryTaskView(task.value))
 const feedbackBusyOwners=ref(new Set()),feedbackBusy=computed(()=>feedbackBusyOwners.value.size>0)
 const setFeedbackBusy=event=>{feedbackBusyOwners.value=updateFeedbackBusy(feedbackBusyOwners.value,event)}
 const clientMode = ref('consumer'), model = ref(''), factsText = ref(''), confirmed = ref(false), briefId = ref(''), platform = ref('zhihu')
@@ -178,8 +187,10 @@ const factsValue = () => factsText.value.split('\n').filter(line => line.trim())
   return {text:text.trim(),source_url:url.join('|').trim(),confirmed:confirmed.value}
 })
 const factsStoredText = facts => facts.map(fact => `${fact.text} | ${fact.source_url || ''}`).join('\n')
-const canDraft = computed(() => Boolean(cycle.value?.facts.length && confirmed.value && factsStoredText(factsValue()) === factsStoredText(cycle.value.facts) && briefId.value && writingChannelEnabled(cycle.value,platform.value)))
+const canDraft = computed(() => Boolean(!directoryTargetForChannel(cycle.value,platform.value) && cycle.value?.facts.length && confirmed.value && factsStoredText(factsValue()) === factsStoredText(cycle.value.facts) && briefId.value && writingChannelEnabled(cycle.value,platform.value)))
 const selectedDestination = computed(() => cycle.value?.destinations.find(item => item.key === platform.value))
+const selectedDirectoryTarget = computed(() => directoryTargetForChannel(cycle.value,platform.value))
+const articleCycle = computed(() => cycle.value?{...cycle.value,drafts:cycle.value.drafts.filter(draft=>!directoryTargetForChannel(cycle.value,draft.platform))}:null)
 const journeyProjectId = computed(() => {const value=Number(route.query.journey_project);return Number.isSafeInteger(value)&&value>0?value:null})
 const returnToJourney = () => router.push({path:'/journey',query:{journey_project:String(journeyProjectId.value)}})
 const navigateDiagnostic=async action=>{
@@ -271,10 +282,13 @@ const saveFacts = async () => {
 }
 const reuseFacts = () => {factsText.value=factsStoredText(cycle.value.fact_candidates.facts);confirmed.value=false;ElMessage.info('已带入候选资料，请重新核对后勾选确认')}
 const openPublication = draft => {
+  if(directoryTargetForChannel(cycle.value,draft.platform)){ElMessage.info('目录申请使用独立回执，请使用上方目录申请卡；旧文章仍保留。');return}
   const now=new Date();const local=new Date(now.getTime()-now.getTimezoneOffset()*60000).toISOString().slice(0,16)
   publication.value={article_id:draft.article_id,target_id:draft.provenance.destination.id,url:'',published_at:local,confirmed:false,note:''};publicationVisible.value=true
 }
 const savePublication = async () => {
+  const draft=cycle.value?.drafts.find(item=>item.article_id===publication.value.article_id)
+  if(draft&&directoryTargetForChannel(cycle.value,draft.platform)){ElMessage.info('目录申请使用独立回执，请使用上方目录申请卡；旧文章仍保留。');return}
   const scope = cycleScope()
   working.value=true
   try {const timestamp=new Date(publication.value.published_at);if(!Number.isFinite(timestamp.getTime())) throw new Error('请填写平台实际发布时间');if(!applyCycle((await geoContentApi.publication(scope.id,{...publication.value,published_at:timestamp.toISOString()})).data,{scope}))return;publicationVisible.value=false;ElMessage.success('发布声明已保存，证据级别为用户登记')}
@@ -284,6 +298,7 @@ const savePublication = async () => {
 const options = () => {const execution=cycle.value?.baseline_source==='user_reported_external'?{}:cycle.value?.baseline?.execution||{};return {client_mode:clientMode.value,model_label:model.value.trim(),...(execution.client_mode===clientMode.value?storedSessionScope(execution):{})}}
 const generate = async (kind, provider) => {
   if(working.value||task.value.status==='running'||(cycleId.value&&cycle.value?.id!==cycleId.value))return
+  if(kind==='draft'&&directoryTargetForChannel(cycle.value,platform.value)){ElMessage.info('本渠道使用目录资料，不需要文章，请使用上方目录申请卡。');return}
   const scope = cycleScope()
   working.value = true
   try {
@@ -319,17 +334,19 @@ const login = async () => {
   } catch(error) { if(sameCycleScope(scope))ElMessage.error(error.message || '登录窗口未打开') }
   finally { working.value = false }
 }
-const stop = () => window.pywebview.api.stop_task()
-const selectDestination = key => {if(!writingChannelEnabled(cycle.value,key))return;platform.value=key;ElMessage.success('已选择目标平台，请在下方生成平台稿')}
+const stop = () => {if(directoryTaskView(task.value)){ElMessage.info('请在原目录申请卡结束当前窗口；不能用停止任务认定未提交。');return}return window.pywebview.api.stop_task()}
+const selectDestination = key => {if(directoryTargetForChannel(cycle.value,key)){ElMessage.info('本渠道使用目录资料，请使用上方目录申请卡。');return}if(!writingChannelEnabled(cycle.value,key))return;platform.value=key;ElMessage.success('已选择目标平台，请在下方生成平台稿')}
 const draftDestination = draft => cycle.value?.destinations.find(item=>item.id===draft.provenance.destination?.id)
 const openDestination = async ({target_id,article_id}) => {
   const candidate=cycle.value?.destinations.find(item=>item.id===target_id)
+  if(directoryTargetForChannel(cycle.value,candidate?.key)){ElMessage.info('请使用上方目录申请卡，不通过文章填写入口打开此目录。');return}
   if(!destinationCanPrepare(candidate)){ElMessage.info(destinationPublicationGate(candidate).reason);return}
   const scope = cycleScope()
   try {const result=await window.pywebview.api.open_destination(scope.id,target_id,article_id || null);if(result.error) throw new Error(result.error);if(sameCycleScope(scope))task.value=result}
   catch(error) {ElMessage.error(error.message || '平台窗口未打开')}
 }
 const fillDestination = async draft => {
+  if(directoryTargetForChannel(cycle.value,draft.platform)){ElMessage.info('请使用上方目录申请卡；旧文章仅供只读预览和导出。');return}
   const scope=cycleScope()
   const target=draftDestination(draft)
   if(!destinationCanPrepare(target)){ElMessage.info(destinationPublicationGate(target).reason);return}
@@ -355,9 +372,9 @@ const retest = async () => {
   finally {working.value=false}
 }
 const attachRetest = async () => { if(!nativeRetestAllowed.value)return;const scope=cycleScope();applyCycle((await geoContentApi.retest(scope.id,retestReportId.value)).data,{scope}) }
-const edit = draft => router.push({path:'/content-create',query:{articleId:draft.article_id}})
+const edit = draft => {if(directoryTargetForChannel(cycle.value,draft.platform)){ElMessage.info('此目录渠道的旧文章仅供只读预览和导出。');return}return router.push({path:'/content-create',query:{articleId:draft.article_id}})}
 const legacyChannel = draft => draft.provenance.destination ? draft.provenance.destination.channel : draft.platform
-const publish = draft => {if(draft.provenance.destination && !destinationCanPrepare(draftDestination(draft))){ElMessage.info(destinationPublicationGate(draftDestination(draft)).reason);return}router.push({path:'/publish-center',query:{article_id:draft.article_id,platform:legacyChannel(draft)}})}
+const publish = draft => {if(directoryTargetForChannel(cycle.value,draft.platform)){ElMessage.info('目录申请使用独立资料与回执，请使用上方目录申请卡。');return}if(draft.provenance.destination && !destinationCanPrepare(draftDestination(draft))){ElMessage.info(destinationPublicationGate(draftDestination(draft)).reason);return}router.push({path:'/publish-center',query:{article_id:draft.article_id,platform:legacyChannel(draft)}})}
 const downloadFile = (data,name,type) => { const url = URL.createObjectURL(new Blob([data],{type})); const a=document.createElement('a'); a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000) }
 const download = (data,name) => downloadFile(JSON.stringify(data,null,2),name,'application/json')
 const downloadArticle = draft => downloadFile(`# ${draft.title}\n\n${draft.content}`,`article-${draft.article_id}.md`,'text/markdown')

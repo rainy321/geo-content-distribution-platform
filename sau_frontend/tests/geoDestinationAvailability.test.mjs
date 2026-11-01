@@ -21,6 +21,8 @@ const source = path => {
 const destinations=source('../src/components/GeoDestinations.vue')
 const content=source('../src/views/GeoContentLoop.vue')
 const journey=source('../src/views/GeoJourney.vue')
+const directorySource=fs.readFileSync(new URL('../src/api/geoDirectoryApplications.js',import.meta.url),'utf8')
+const {isGrokCodeDirectory,directoryTargetForChannel}=new Function(directorySource.replace(/^import .*$/gm,'').replaceAll('export const ','const ')+';return {isGrokCodeDirectory,directoryTargetForChannel};')()
 
 test('availability handles legacy enabled defaults and rejects every stopped state or invalid enabled flag',()=>{
   assert.equal(destinationEnabled(target()),true)
@@ -42,12 +44,13 @@ test('writing choices resolve the actual target and never authorize a missing ta
 
 const destinationHarness = (value,confirm=async()=>{}) => {
   const props=reactive({cycle:cycle(value),busy:false}),emitted=[],form=reactive({}),editing=ref(null),show=ref(false),calls=[]
-  const functions=new Function('props','emit','form','editing','show','destinationEnabled','destinationCanPrepare','destinationUseValues','formPolicy','writingChannelEnabled','ElMessageBox','geoContentApi','ElMessage',`
+  const functions=new Function('props','emit','form','editing','show','destinationEnabled','destinationCanPrepare','destinationUseValues','formPolicy','writingChannelEnabled','ElMessageBox','geoContentApi','ElMessage','isGrokCodeDirectory',`
     let configEpoch=0;
     const defaults=${destinations.expression('defaults')};
+    const directoryTargetKey=${destinations.expression('directoryTargetKey')};
     return {configure:(${destinations.expression('configure')}),select:(${destinations.expression('selectTarget')}),open:(${destinations.expression('openTarget')}),review:(${destinations.expression('review')})}
   `)(props,(...args)=>emitted.push(args),form,editing,show,destinationEnabled,destinationCanPrepare,destinationUseValues,ref(null),writingChannelEnabled,{confirm},
-    {reviewDestination:async(...args)=>calls.push(args),get:async()=>({data:props.cycle})},{error(){}})
+    {reviewDestination:async(...args)=>calls.push(args),get:async()=>({data:props.cycle})},{error(){}},isGrokCodeDirectory)
   return {...functions,props,emitted,form,editing,show,calls}
 }
 
@@ -85,9 +88,9 @@ test('busy platform actions cannot open a login or select a writing target',()=>
 
 test('the content page blocks stale buttons before native calls or a fill confirmation',async()=>{
   const calls=[],value=target('configured',false)
-  const actions=new Function('cycle','destinationCanPrepare','destinationPublicationGate','ElMessage','draftDestination','cycleScope',`
+  const actions=new Function('cycle','destinationCanPrepare','destinationPublicationGate','ElMessage','draftDestination','cycleScope','directoryTargetForChannel',`
     return {open:(${content.expression('openDestination')}),fill:(${content.expression('fillDestination')})}
-  `)(ref(cycle(value)),destinationCanPrepare,destinationPublicationGate,{info:message=>calls.push(message)},()=>value,()=>({id:'cycle-a',epoch:0}))
+  `)(ref(cycle(value)),destinationCanPrepare,destinationPublicationGate,{info:message=>calls.push(message)},()=>value,()=>({id:'cycle-a',epoch:0}),directoryTargetForChannel)
   await actions.open({target_id:value.id})
   await actions.fill({article_id:1,provenance:{destination:{id:value.id}}})
   assert.deepEqual(calls,[inactiveDestinationMessage,inactiveDestinationMessage])
@@ -95,10 +98,11 @@ test('the content page blocks stale buttons before native calls or a fill confir
 
 test('the guided journey blocks writing, login and publishing for a preserved stopped draft',async()=>{
   const value=target('configured',false),selectedTarget=ref(value),calls=[]
-  const actions=new Function('cycle','platform','selectedTarget','writingChannelEnabled','destinationCanPrepare','destinationPublicationGate','run','geoContentApi','applyCycle','cycleId',`
+  const actions=new Function('cycle','platform','selectedTarget','writingChannelEnabled','destinationCanPrepare','destinationPublicationGate','run','geoContentApi','applyCycle','cycleId','directoryTargetForChannel',`
+    const requireArticleChannel=${journey.expression('requireArticleChannel')};
     return {generate:(${journey.expression('generateResearch')}),login:(${journey.expression('openDestinationLogin')}),publish:(${journey.expression('openPublisher')})}
   `)(ref(cycle(value)),ref(value.key),selectedTarget,writingChannelEnabled,destinationCanPrepare,destinationPublicationGate,action=>action(),
-    {get:async()=>{calls.push('read current cycle');return {data:cycle(value)}}},()=>{},ref('cycle-a'))
+    {get:async()=>{calls.push('read current cycle');return {data:cycle(value)}}},()=>{},ref('cycle-a'),directoryTargetForChannel)
   await assert.rejects(actions.generate('draft'),/已停用/)
   assert.throws(actions.login,/已停用/)
   await assert.rejects(actions.publish(),/已停用/)
@@ -107,8 +111,8 @@ test('the guided journey blocks writing, login and publishing for a preserved st
 
 test('stopped selections disable draft generation without removing prior content',()=>{
   const value=cycle(target('configured',false)),current=ref(value)
-  const canDraft=new Function('computed','cycle','confirmed','factsStoredText','factsValue','briefId','writingChannelEnabled','platform',`return (${content.expression('canDraft')})`)(
-    computed,current,ref(true),values=>values[0].text,()=>value.facts,ref('b01'),writingChannelEnabled,ref('target_t1'))
+  const canDraft=new Function('computed','cycle','confirmed','factsStoredText','factsValue','briefId','writingChannelEnabled','platform','directoryTargetForChannel',`return (${content.expression('canDraft')})`)(
+    computed,current,ref(true),values=>values[0].text,()=>value.facts,ref('b01'),writingChannelEnabled,ref('target_t1'),directoryTargetForChannel)
   assert.equal(canDraft.value,false)
   current.value.destinations[0].config.enabled=true
   assert.equal(canDraft.value,true)

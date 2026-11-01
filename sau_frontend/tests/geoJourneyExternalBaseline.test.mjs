@@ -19,7 +19,9 @@ const load=path=>{
   }}
 }
 const journey=load('../src/views/GeoJourney.vue'),search=load('../src/views/GeoSearchTests.vue'),content=load('../src/views/GeoContentLoop.vue')
-const run=(page,name,values)=>{const scope={storedSessionScope,...values};return Function(...Object.keys(scope),`return (${page.expression(name)})`)(...Object.values(scope))}
+const directorySource=fs.readFileSync(new URL('../src/api/geoDirectoryApplications.js',import.meta.url),'utf8')
+const {directoryTargetForChannel}=new Function(directorySource.replace(/^import .*$/gm,'').replaceAll('export const ','const ')+';return {directoryTargetForChannel};')()
+const run=(page,name,values)=>{const scope={storedSessionScope,directoryTargetForChannel,...values};return Function(...Object.keys(scope),`return (${page.expression(name)})`)(...Object.values(scope))}
 const profile={name:'合成公开服务有限公司',website:'https://example.org/company',entity_type:'company',description:'公开说明'}
 const external=(changes={})=>({id:'external-a',project_id:7,profile,baseline:null,baseline_source:'user_reported_external',
   external_baseline:{kind:'geo_external_baseline_v1'},capabilities:{native_probe:false,native_retest:false,native_metrics:false,editorial_research:true,work_drafting:true},
@@ -38,11 +40,11 @@ async function routedJourney({url='/journey?project=7&cycle=native-old&focus=fee
   const brief={id:'b01',topic:'合成原主题'},oldDraft={article_id:5,brief_id:'b01',platform:'owned_web',title:'旧稿标题',content:'旧稿正文',provenance:{brief}}
   const original={id:'native-old',project_id:7,report_ref:'native-report',profile,baseline:{profile,run_id:'native-run',cases:[{id:'q01',question:'原题'}]},analysis:{briefs:[brief]},drafts:[oldDraft],channels:{owned_web:'官网'},facts:[]}
   const persisted=[],reads=[]
-  const values={computed,watch,projectId:ref(7),project:ref({id:7,...profile}),sameBrand,sameResearchBrief,articleSnapshot,isExternalCycle,savedCycleContinuation,savedCycleFactEdits,baselineWritingOptions,
+  const values={computed,watch,projectId:ref(7),project:ref({id:7,...profile}),sameBrand,sameResearchBrief,articleSnapshot,isExternalCycle,savedCycleContinuation,savedCycleFactEdits,baselineWritingOptions,directoryTargetForChannel,
     route,router,cycle:ref(original),cycleId:ref(original.id),profileDirty:ref(false),editorDirty:ref(true),editor:reactive({title:'未保存合成标题',content:'未保存合成正文',tags:['合成标签']}),
     recoveryDraft:ref(null),recoveryFacts:ref(null),error:ref(''),briefId:ref('b01'),platform:ref('owned_web'),articleId:ref(5),factRows:ref([{text:'未保存的合成事实',source_url:'',confirmed:false}]),
     report:ref(original.baseline),reportId:ref(original.report_ref),historyReportId:ref(original.report_ref),reportOrigin:ref('history'),plan:ref({plan_sha256:'a'.repeat(64)}),planConfirmed:ref(true),replacementSourceId:ref(9),
-    clientMode:ref('work'),model:ref('合成模型'),step:ref(1),working:ref(false),reviewConfirmed:ref(false),sourceTaskFocus:ref('old-task')}
+    clientMode:ref('work'),model:ref('合成模型'),step:ref(1),working:ref(false),reviewConfirmed:ref(false),sourceTaskFocus:ref('old-task'),directoryTarget:ref(null),directoryReady:ref(false)}
   values.busy=computed(()=>values.working.value)
   values.matchingDrafts=computed(()=>values.cycle.value.drafts.filter(item=>item.brief_id===values.briefId.value&&item.platform===values.platform.value))
   values.activeDraft=computed(()=>values.matchingDrafts.value.find(item=>item.article_id===values.articleId.value)||null)
@@ -208,7 +210,7 @@ test('native single-question probes and full retests refuse typed cycles while n
 })
 
 test('external primary actions navigate to content or feedback without starting a new native request',async()=>{
-  const calls=[],step=ref(1),values={externalCycle:ref(true),cycle:ref(external()),step,primaryDisabled:ref(false),busy:ref(false),profileDirty:ref(false),
+  const calls=[],step=ref(1),values={externalCycle:ref(true),cycle:ref(external()),step,primaryDisabled:ref(false),busy:ref(false),profileDirty:ref(false),directoryReady:ref(false),
     nativeCycleCapability,nextTick:async()=>{},focusDiagnosticSection:section=>calls.push(section),run:()=>assert.fail('no native workflow'),
     report:ref(null),plan:ref(null),makePlan:()=>assert.fail('no new plan')}
   const action=run(journey,'primaryAction',values)

@@ -1109,6 +1109,54 @@ def geo_probe_business_reviews(identifier, probe_id):
         return jsonify(code=400, msg=str(error), data=None), 400
 
 
+@app.route('/api/geo-content/cycles/<identifier>/directory-applications', methods=['GET', 'POST'])
+@app.route('/api/geo-content/cycles/<identifier>/directory-applications/<application_id>', methods=['GET'])
+@app.route('/api/geo-content/cycles/<identifier>/directory-applications/<application_id>/<action>', methods=['POST'])
+def geo_directory_applications(identifier, application_id=None, action=None):
+    from services import geo_directory_service as directory
+    try:
+        database = app.config['DATABASE_PATH']
+        if request.method == 'GET':
+            rejected = _feedback_same_origin()
+            if rejected is not None:
+                return rejected
+            if request.content_length or request.stream.read(1):
+                raise ValueError('目录申请查询不接受正文')
+            if application_id is None:
+                if set(request.args) != {'target_id'} or len(request.args.getlist('target_id')) != 1:
+                    raise ValueError('请选择当前客户已保存的目录目标')
+                result = directory.get_overview(database, identifier, request.args['target_id'])
+            else:
+                if request.args:
+                    raise ValueError('申请详情不接受覆盖范围的参数')
+                result = directory.get_application(database, identifier, application_id)
+        else:
+            if request.args:
+                raise ValueError('目录申请写入不接受额外查询参数')
+            data, rejected = _external_feedback_json(maximum=16 * 1024)
+            if rejected is not None:
+                return rejected
+            if application_id is None and action is None:
+                result = directory.save_application(database, identifier, data)
+            elif action == 'review':
+                result = directory.review_application(database, identifier, application_id, data)
+            elif action == 'external-receipt':
+                result = directory.register_external_receipt(database, identifier, application_id, data)
+            elif action == 'refresh-context':
+                result = directory.refresh_context(database, identifier, application_id, data)
+            else:
+                raise ValueError('目录申请操作不存在；不能用接口模拟平台提交或清空未知状态')
+        response = jsonify(code=200, data=result)
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+    except RequestEntityTooLarge:
+        return jsonify(code=413, msg='目录申请JSON不能超过16KiB', data=None), 413
+    except geo_content_store.ResearchNotFoundError as error:
+        return jsonify(code=404, msg=str(error), data=None), 404
+    except (ValueError, TypeError, KeyError) as error:
+        return jsonify(code=400, msg=str(error), data=None), 400
+
+
 @app.route('/api/geo-content/cycles/<identifier>/source-maintenance', methods=['GET', 'POST'])
 def geo_source_maintenance(identifier):
     from services import source_maintenance_service as maintenance

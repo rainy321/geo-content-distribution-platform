@@ -61,6 +61,8 @@ const {descriptor,errors}=parse(fs.readFileSync(filename,'utf8'),{filename:filen
 assert.deepEqual(errors,[])
 const script=compileScript(descriptor,{id:'content-writing-options-test'})
 const source=descriptor.scriptSetup.content
+const directorySource=fs.readFileSync(new URL('../src/api/geoDirectoryApplications.js',import.meta.url),'utf8')
+const {directoryTargetForChannel}=new Function(directorySource.replace(/^import .*$/gm,'').replaceAll('export const ','const ')+';return {directoryTargetForChannel};')()
 const declaration=name=>script.scriptSetupAst.flatMap(node=>node.type==='VariableDeclaration'?node.declarations:[]).find(node=>node.id.name===name)
 const expression=name=>{const node=declaration(name);assert.ok(node,name);return source.slice(node.init.start,node.init.end)}
 const modeWatcher=script.scriptSetupAst.find(node=>node.type==='ExpressionStatement'&&node.expression?.callee?.name==='watch'&&
@@ -71,7 +73,7 @@ assert.ok(loginWatcher)
 
 const harness = (api,local=storage()) => {
   const names=['applyWritingOptions','rememberWritingOptions','selectWritingMode','selectWritingModel','cycleScope','sameCycleScope','recoveryStorageKey','loadContentRecovery','storeContentRecovery','rememberContentRecovery','contentRecovery','factsValue','canDraft','externalCycle','nativeRetestAllowed','matchingRetests','applyCycle','loadCycle','options','generate','login','poll','retest','attachRetest']
-  const make=new Function('ref','computed','watch','createWritingPreferences','geoContentApi','doubaoTaskRecovery','scopedRecoveryCheckpoint','isExternalCycle','nativeCycleCapability','writingChannelEnabled','local','storedSessionScope',`
+  const make=new Function('ref','computed','watch','createWritingPreferences','geoContentApi','doubaoTaskRecovery','scopedRecoveryCheckpoint','isExternalCycle','nativeCycleCapability','writingChannelEnabled','local','storedSessionScope','directoryTargetForChannel',`
     const cycleId=ref(''),cycle=ref(null),clientMode=ref('consumer'),model=ref(''),factsText=ref(''),confirmed=ref(false),factsConflict=ref(''),briefId=ref(''),platform=ref('zhihu'),publicationVisible=ref(false),working=ref(false),task=ref({status:'idle'}),loginScope=ref(null),cycles=ref([]),reports=ref([]),retestReportId=ref(''),nativeAvailable=ref(true);
     const recoveryTask=ref(null),recoveryStorageError=ref(''),recoveryUnreadable=ref(false),recoveryMemory=new Map();
     const busy=computed(()=>working.value||task.value.status==='running');
@@ -89,7 +91,7 @@ const harness = (api,local=storage()) => {
     return {cycleId,cycle,clientMode,model,task,loginScope,working,factsText,confirmed,factsConflict,recoveryTask,recoveryStorageError,recoveryUnreadable,contentRecovery,messages,ElMessageBox,cycleScope,sameCycleScope,applyCycle,loadCycle,selectWritingMode,selectWritingModel,generate,login,poll,retest,attachRetest,externalCycle,nativeRetestAllowed,matchingRetests,reports,retestReportId,canDraft,stop,
       native:value=>{window.pywebview.api=value}};
   `)
-  return make(ref,computed,watch,createWritingPreferences,api,doubaoTaskRecovery,scopedRecoveryCheckpoint,isExternalCycle,nativeCycleCapability,writingChannelEnabled,local,storedSessionScope)
+  return make(ref,computed,watch,createWritingPreferences,api,doubaoTaskRecovery,scopedRecoveryCheckpoint,isExternalCycle,nativeCycleCapability,writingChannelEnabled,local,storedSessionScope,directoryTargetForChannel)
 }
 
 test('native actual work mode retains consumer profile for both content login and writing until an explicit mode change',async()=>{

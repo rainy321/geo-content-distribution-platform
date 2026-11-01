@@ -57,6 +57,8 @@ class DesktopGeoJobs:
         self._destination_check_task_id = None
         self._destination_check_pending = False
         self._source_check = self._source_check_loop = self._source_check_task_id = None
+        self._directory_check = self._directory_check_loop = self._directory_check_task_id = None
+        self._directory_close = None
         for record in records:
             if record.get("status") == "running":
                 record.update(status="needs_review", updated_at=now(),
@@ -77,6 +79,12 @@ class DesktopGeoJobs:
                             message='软件上次关闭时来源维护未结束，原申请保留；只能检查，不会自动提交。', window_open=False)
                     except (ValueError, sqlite3.Error, geo_content_store.ResearchNotFoundError):
                         logging.warning('Interrupted source maintenance requires manual record review')
+                if record.get('kind') == 'directory_application' and record.get('directory_application_id'):
+                    from services import geo_directory_service as directory
+                    try:
+                        directory.recover_interrupted(data / 'database.db', record.get('cycle_id'), record['directory_application_id'])
+                    except (ValueError, sqlite3.Error, geo_content_store.ResearchNotFoundError):
+                        logging.warning('Interrupted directory application requires manual record review')
                 if record.get('target_id') and record.get('kind') == 'destination_fill':
                     geo_destination_service.record_event(data / 'database.db', record['target_id'], 'interrupted', 'need_action',
                         '上次填写时软件关闭，编辑器是否自动保存或提交未知；请检查页面，不会自动重试')
@@ -900,6 +908,147 @@ class DesktopGeoJobs:
             except RuntimeError:
                 return {'error': '来源维护窗口已结束，请查看原任务；不会自动重新打开或提交。'}
             return {'id': native_task_id, 'status': 'running', 'check_requested': True}
+
+    def open_directory_application(self, cycle_id, application_id, review_sha256, open_nonce):
+        """One normal human-confirmed form session, bound to frozen public fields."""
+        return self._open_directory_session(cycle_id, application_id, review_sha256, open_nonce, inspection_only=False)
+
+    def inspect_directory_application(self, cycle_id, application_id):
+        """Read-only original platform inspection; never resets a submission lock."""
+        return self._open_directory_session(cycle_id, application_id, None, None, inspection_only=True)
+
+    def _open_directory_session(self, cycle_id, application_id, review_sha256, open_nonce, *, inspection_only):
+        from services import geo_directory_service as directory
+        database = self.data / 'database.db'
+        try:
+            record = directory.get_application(database, cycle_id, application_id)
+            if not inspection_only and (not record['can_open'] or review_sha256 != record['review_sha256']
+                                        or not isinstance(open_nonce, str) or open_nonce != record.get('open_nonce')):
+                raise ValueError('请先核对并确认当前七字段预览；原授权不可重复使用。')
+        except (ValueError, TypeError, sqlite3.Error, geo_content_store.ResearchNotFoundError) as error:
+            return {'error': str(error)}
+
+        async def operate():
+            from services.geo_directory_browser import open_session
+            signal = asyncio.Event()
+            close_signal = asyncio.Event()
+            with self.lock:
+                native_id = self.job['id']
+                self.job['directory_application_id'] = application_id
+                self._directory_check, self._directory_check_loop, self._directory_check_task_id = signal, asyncio.get_running_loop(), native_id
+                self._directory_close = close_signal
+                self._persist()
+            latest = record
+            session_nonce = None
+            finished = False
+
+            def publish():
+                with self.lock:
+                    self.job.update(message=latest['message'], waiting_for_user=bool(latest.get('window_open')),
+                        progress={'directory_application': {'id': application_id, 'stage': latest['stage'],
+                            'window_open': latest.get('window_open', False), 'read_only': latest['read_only'],
+                            'inspection_only': inspection_only}})
+                    self._persist()
+
+            def progress(value):
+                nonlocal latest
+                if inspection_only:
+                    with self.lock:
+                        self.job.update(message='正在只读查看原平台；不会填写、提交或解除原申请锁。',
+                            waiting_for_user=bool(value.get('window_open')),
+                            progress={'directory_application': {'id': application_id, 'stage': value.get('stage'),
+                                'window_open': bool(value.get('window_open')), 'read_only': True, 'inspection_only': True}})
+                        self._persist()
+                    return
+                if value.get('stage') in directory.OPEN_STAGES:
+                    latest = directory.update_session(database, cycle_id, application_id, session_nonce,
+                        stage=value['stage'], window_open=bool(value.get('window_open')))
+                elif value.get('stage') == 'submission_unknown':
+                    latest = directory.mark_session_unknown(database, cycle_id, application_id, session_nonce,
+                                                            window_open=bool(value.get('window_open')))
+                publish()
+
+            def before_submit(transport):
+                nonlocal latest
+                latest = directory.begin_submit(database, cycle_id, application_id, session_nonce, transport)
+                publish()
+
+            def save_receipt(body, http_status):
+                nonlocal latest
+                latest = directory.record_receipt(database, cycle_id, application_id, session_nonce, body, http_status)
+                publish()
+
+            try:
+                browser_record = record
+                if not inspection_only:
+                    reserved = directory.reserve_session(database, cycle_id, application_id, review_sha256, open_nonce,
+                                                         native_task_id=native_id)
+                    session_nonce = reserved['session_nonce']
+                    latest = directory.get_application(database, cycle_id, application_id)
+                    browser_record = latest
+                    publish()
+                result = await open_session(browser_record,
+                    self.data / 'directory-profiles' / str(record['project_id']) / directory.ADAPTER / uuid.uuid4().hex,
+                    edge_executable(), fallback_executable_path=chrome_executable(), progress=progress,
+                    before_submit=None if inspection_only else before_submit,
+                    save_receipt=None if inspection_only else save_receipt,
+                    check_requested=signal, close_requested=close_signal, inspection_only=inspection_only)
+                if not inspection_only:
+                    names = ('normal_close_confirmed', 'route_guard_installed', 'allowed_posts', 'blocked_writes')
+                    evidence = {key: result.get(key) for key in names} if isinstance(result, dict) else None
+                    latest = directory.close_session(database, cycle_id, application_id, session_nonce,
+                                                     no_submission_evidence=evidence)
+                    finished = True
+                    publish()
+                return {'directory_application': latest, 'inspection_only': inspection_only,
+                        'message': '只读查看已结束，原申请状态保留。' if inspection_only else latest['message']}
+            finally:
+                if session_nonce and not finished:
+                    latest = directory.close_session(database, cycle_id, application_id, session_nonce)
+                    publish()
+                with self.lock:
+                    self._directory_check = self._directory_check_loop = self._directory_check_task_id = None
+                    self._directory_close = None
+        kind = 'directory_application_inspect' if inspection_only else 'directory_application'
+        ack = self._start(kind, operate, client_name=record['fields']['name'], cycle_id=cycle_id, target_id=record['target_id'])
+        if 'error' not in ack:
+            ack.update(kind=kind, cycle_id=cycle_id, directory_application_id=application_id)
+        return ack
+
+    def check_directory_application_session(self, native_task_id):
+        """Reinspect the current normal window; no navigation, filling or clicking."""
+        with self.lock:
+            if (not isinstance(native_task_id, str) or self.job.get('id') != native_task_id
+                    or self.job.get('kind') not in ('directory_application', 'directory_application_inspect')
+                    or self.job.get('status') != 'running' or self._directory_check_task_id != native_task_id
+                    or self._directory_check is None or self._directory_check_loop is None
+                    or self._directory_check_loop.is_closed()):
+                return {'error': '只能检查当前目录申请窗口；旧任务不会重新打开或发送。'}
+            try:
+                self._directory_check_loop.call_soon_threadsafe(self._directory_check.set)
+            except RuntimeError:
+                return {'error': '目录窗口已结束，请查看原申请记录。'}
+            return {'id': native_task_id, 'status': 'running', 'check_requested': True}
+
+    def close_directory_application_session(self, native_task_id):
+        """Ask the owned browser to close while its network fence is still alive.
+
+        This acknowledgement is not proof of non-submission. Only the browser's
+        completed controlled closure and the service's durable intent check can
+        produce closed_not_submitted. Generic cancellation never produces it.
+        """
+        with self.lock:
+            if (not isinstance(native_task_id, str) or self.job.get('id') != native_task_id
+                    or self.job.get('kind') not in ('directory_application', 'directory_application_inspect')
+                    or self.job.get('status') != 'running' or self._directory_check_task_id != native_task_id
+                    or self._directory_close is None or self._directory_check_loop is None
+                    or self._directory_check_loop.is_closed()):
+                return {'error': '只能结束当前软件持有的目录窗口；不能改变旧申请或未知状态。'}
+            try:
+                self._directory_check_loop.call_soon_threadsafe(self._directory_close.set)
+            except RuntimeError:
+                return {'error': '目录窗口已脱离控制，请检查原申请；不会以取消任务冒充未提交。'}
+            return {'id': native_task_id, 'status': 'running', 'close_requested': True}
 
     def stop_task(self):
         self.cancel_requested = True

@@ -330,7 +330,7 @@ def run_smoke_check(window, data: Path, url: str) -> None:
                     heading: document.querySelector('[data-testid="geo-journey"] h1')?.textContent,
                     steps: [...document.querySelectorAll('[data-testid="geo-journey"] .journey-steps > button')].map(e => e.textContent.trim()),
                     primary_action: !!document.querySelector('[data-testid="journey-primary"]'),
-                    native_bridge: ['open_login','plan_with_doubao','start_run','generate_research','get_task','open_destination'].every(name => typeof window.pywebview?.api?.[name] === 'function'),
+                    native_bridge: ['open_login','plan_with_doubao','start_run','generate_research','get_task','open_destination','open_directory_application','inspect_directory_application','check_directory_application_session','close_directory_application_session'].every(name => typeof window.pywebview?.api?.[name] === 'function'),
                     automatic_web_bridge: ['plan_automatic','start_automatic_run'].every(name => typeof window.pywebview?.api?.[name] === 'function'),
                     draft_recovery_bridge: ['preview_research_draft','recover_research_draft'].every(name => typeof window.pywebview?.api?.[name] === 'function'),
                     destination_recheck_bridge: typeof window.pywebview?.api?.check_destination_session === 'function'
@@ -368,7 +368,7 @@ def run_smoke_check(window, data: Path, url: str) -> None:
                     heading: document.querySelector('h1')?.textContent,
                     report: [...document.querySelectorAll('h2')].find(e => e.textContent.includes('采集报告'))?.textContent,
                     rates: [...document.querySelectorAll('.cohorts strong')].map(e => e.textContent),
-                    native_bridge: ['start_run','plan_automatic','start_automatic_run','preview_research_draft','recover_research_draft'].every(name => typeof window.pywebview?.api?.[name] === 'function')
+                    native_bridge: ['start_run','plan_automatic','start_automatic_run','preview_research_draft','recover_research_draft','open_directory_application','inspect_directory_application','check_directory_application_session','close_directory_application_session'].every(name => typeof window.pywebview?.api?.[name] === 'function')
                     ,history_rows: document.querySelectorAll('[data-testid="desktop-history"] .el-table__row').length
                     ,history_total: (() => { const count = document.querySelector('[data-testid="desktop-history"]')?.getAttribute('data-history-count'); return count !== null && count !== undefined ? Number(count) : null })()
                     ,draft_company: document.querySelector('input[data-testid="company-input"], [data-testid="company-input"] input')?.value

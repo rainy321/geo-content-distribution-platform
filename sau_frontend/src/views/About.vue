@@ -3,7 +3,7 @@
     <el-card class="about-card">
       <div class="about-header">
         <h1>GEO AI 搜索工作台</h1>
-        <p class="version">2026.11.02.1</p>
+        <p class="version">2026.11.02.2</p>
       </div>
 
       <el-divider />
@@ -42,6 +42,7 @@
           <li>将行动方案带入 AI 写作，围绕用户问题、主体关系、依据和适用边界组织内容</li>
           <li>区分来源中的目标公司、其他主体与待核对项</li>
           <li>已接入平台逐篇确认发布；其他平台可配置辅助填写</li>
+          <li>GrokCode API 目录七项公开资料审阅、辅助填报及独立回执记录，已提交或未知时防止重复申请</li>
           <li>沿用有效登录会话，按平台实际要求处理验证</li>
           <li>未指定浏览器时优先 Chrome，未找到再使用 Edge</li>
           <li>知乎常见 Markdown 结构原生导入，逐项核对后继续</li>
