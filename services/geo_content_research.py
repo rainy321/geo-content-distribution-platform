@@ -374,6 +374,25 @@ def draft_prompt(cycle, brief_id, platform):
             json.dumps(prompt_inputs, ensure_ascii=False))
 
 
+def _draft_url_key(value):
+    # Preserve exact host, path, query and fragment checks. Only the existing
+    # prose punctuation/trailing-slash tolerance is retained.
+    value = value.rstrip('.,，。;；/：:')
+    if '\\' in value or any(ord(char) < 32 for char in value) or not public_url(value):
+        return None
+    return value
+
+
+def _draft_urls(text):
+    return re.findall(r'https?://[^\s<>"\]\)）]+', text)
+
+
+def _fact_text_urls(text):
+    # Confirmed prose commonly joins a URL to the next Chinese clause without
+    # a space. Those clause marks are boundaries, not an authorized URL suffix.
+    return re.findall(r'https?://[^\s<>"\[\]\(\)（），。；：！？、“”‘’]+', text)
+
+
 def parse_draft(raw, inputs):
     value = _json_output(raw)
     result = {'title': _text(value.get('title'), '标题', 180),
@@ -385,9 +404,17 @@ def parse_draft(raw, inputs):
         raise ValueError('稿件过短或引用了未确认的事实编号')
     if inputs.get('destination') and (len(result['title']) > inputs['destination']['title_limit'] or len(result['content']) > inputs['destination']['body_limit']):
         raise ValueError('生成稿超出目标平台配置的长度限制；未自动截断或提交')
-    allowed = {fact['source_url'].rstrip('/') for fact in inputs['facts'] if fact['source_url']}
-    for url in re.findall(r'https?://[^\s<>"\]\)）]+', result['content'] + '\n' + result['summary']):
-        if url.rstrip('.,，。;；/：:') not in {item.rstrip('.,，。;；/：:') for item in allowed}:
+    # A confirmed fact can explicitly distinguish an introduction page from
+    # its service address. That literal service URL is also supplied evidence;
+    # it need not be repeated in the fact's one source_url slot.
+    allowed = set()
+    for fact in inputs['facts']:
+        if fact.get('confirmed') is not True:
+            continue
+        candidates = [fact.get('source_url') or '', *_fact_text_urls(fact.get('text') or '')]
+        allowed.update(key for candidate in candidates if (key := _draft_url_key(candidate)))
+    for url in _draft_urls(result['content'] + '\n' + result['summary']):
+        if _draft_url_key(url) not in allowed:
             raise ValueError('稿件出现事实库以外的网址，请补充核对资料后重试')
     return result
 

@@ -725,6 +725,28 @@ class DesktopGeoJobs:
         return self._start('research' if kind == 'analysis' else 'draft', generate, client_name=cycle['profile']['name'],
                            cycle_id=cycle_id, collector_config=config)
 
+    def preview_research_draft(self, task_id, cycle_id):
+        from services import geo_draft_recovery
+        with self.lock:
+            if self.job.get('status') == 'running':
+                return {'available': False, 'message': '请先等待当前桌面任务结束，再读取原生成稿。'}
+            try:
+                return geo_draft_recovery.preview(self.data, task_id, cycle_id)
+            except (ValueError, sqlite3.Error):
+                return {'available': False, 'message': '原生成记录暂时无法安全读取，请保留原任务。'}
+
+    def recover_research_draft(self, task_id, cycle_id, expected_preview_sha256):
+        from services import geo_draft_recovery
+        with self.lock:
+            if self.job.get('status') == 'running':
+                return {'error': '请先等待当前桌面任务结束，再保存原生成稿。'}
+            try:
+                return geo_draft_recovery.recover(self.data, task_id, cycle_id, expected_preview_sha256)
+            except (ValueError, geo_content_store.ResearchNotFoundError) as error:
+                return {'error': str(error)}
+            except (OSError, sqlite3.Error):
+                return {'error': '原生成稿暂时无法安全保存，请保留预览和原任务；不会重新提问。'}
+
     def open_destination(self, cycle_id, target_id, article_id=None):
         database = self.data / 'database.db'
         try:
