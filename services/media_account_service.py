@@ -12,6 +12,7 @@ from services.platform_capability_service import (
     list_planned_platforms,
 )
 from services.publish_policy_service import evaluate_publish_reservation, normalize_publish_reference
+from services.zhihu_access import ZhihuAccessRestrictedError
 
 
 PLATFORM_DEFINITIONS = tuple(
@@ -134,6 +135,12 @@ async def check_media_account(
         try:
             result = checker(row["type"], row["filePath"])
             connected = bool(await result) if inspect.isawaitable(result) else bool(result)
+        except ZhihuAccessRestrictedError as exc:
+            # A restricted page establishes neither a connected nor an expired
+            # session. Keep the saved status and last_checked_at unchanged.
+            raise MediaAccountCheckError(
+                "知乎暂时限制本次访问，登录状态尚未确认。请在日常浏览器正常查看账号状态，稍后再核对；不要反复登录或发布。"
+            ) from exc
         except Exception as exc:
             raise MediaAccountCheckError("平台登录状态检测失败，请稍后重试") from exc
         message = "登录状态正常" if connected else "登录已失效，需要重新登录"

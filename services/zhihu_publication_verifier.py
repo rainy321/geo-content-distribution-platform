@@ -9,6 +9,7 @@ from playwright.async_api import async_playwright
 
 from conf import LOCAL_CHROME_PATH
 from services.browser_executable import browser_executable_options
+from services.zhihu_access import assert_payload_access
 
 
 ZHIHU_ME_URL = "https://www.zhihu.com/api/v4/me"
@@ -71,14 +72,17 @@ async def find_public_zhihu_article(
                 ZHIHU_ME_URL,
                 stage="身份接口",
             )
+            me_data = await _safe_json(me_response, stage="身份接口")
             if not me_response.ok:
+                if me_response.status != 401:
+                    raise RuntimeError(f"知乎身份核验未完成：HTTP {me_response.status}")
                 raise RuntimeError(
                     f"知乎登录状态无效：身份接口 HTTP {me_response.status}"
                 )
-            me_data = await _safe_json(me_response, stage="身份接口")
+            _assert_query_result(me_data, stage='身份接口')
             url_token = str(me_data.get("url_token") or "").strip()
             if not url_token:
-                raise RuntimeError("知乎登录状态无效：身份接口缺少账号标识")
+                raise RuntimeError("知乎身份接口缺少账号标识，当前身份未确认，已停止核验")
 
             articles_url = ZHIHU_MEMBER_ARTICLES_URL.format(
                 url_token=quote(url_token, safe="")
@@ -89,11 +93,14 @@ async def find_public_zhihu_article(
                     articles_url,
                     stage="公开文章接口",
                 )
+                payload = await _safe_json(response, stage="公开文章接口")
                 if not response.ok:
                     raise RuntimeError(
                         f"知乎公开文章查询失败：HTTP {response.status}"
                     )
-                payload = await _safe_json(response, stage="公开文章接口")
+                _assert_query_result(payload, stage='公开文章接口')
+                if not isinstance(payload.get('data'), list):
+                    raise RuntimeError('知乎公开文章响应没有有效列表，查询结果未知，已停止核验')
                 matches = [
                     article
                     for article in (payload.get("data") or [])
@@ -132,7 +139,13 @@ async def _safe_json(response: Any, *, stage: str) -> dict[str, Any]:
         ) from None
     if not isinstance(payload, dict):
         raise RuntimeError(f"知乎{stage}响应格式异常")
+    assert_payload_access(payload)
     return payload
+
+
+def _assert_query_result(payload, *, stage):
+    if ('error' in payload and payload['error'] is not None) or payload.get('errors') or payload.get('success') is False:
+        raise RuntimeError(f'知乎{stage}返回业务错误，查询结果未知，已停止核验')
 
 
 def _normalize_article(article: dict[str, Any]) -> dict[str, Any]:

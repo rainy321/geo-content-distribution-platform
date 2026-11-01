@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -9,6 +10,7 @@ from services.media_account_service import (
     MediaAccountCheckError,
     MediaAccountNotFoundError,
 )
+from services.zhihu_access import ZhihuAccessRestrictedError
 
 
 class MediaAccountsApiTests(unittest.TestCase):
@@ -102,6 +104,28 @@ class MediaAccountsApiTests(unittest.TestCase):
 
         self.assertEqual(missing.status_code, 404)
         self.assertEqual(failed.status_code, 502)
+
+    def test_explicit_restriction_reaches_http_message_without_mutating_account(self):
+        (self.cookies_directory / 'synthetic.json').write_text('{}', encoding='utf-8')
+        with sqlite3.connect(self.db_path) as conn:
+            account_id = conn.execute('''INSERT INTO user_info
+                (type,filePath,userName,status,last_checked_at)
+                VALUES(9,'synthetic.json','synthetic account',1,'2026-10-31 01:00:00')''').lastrowid
+        with patch('myUtils.auth.check_cookie',
+                   new=AsyncMock(side_effect=ZhihuAccessRestrictedError('synthetic-private-trace'))) as checker:
+            response = self.client.post(f'/api/media-accounts/{account_id}/check')
+        self.assertEqual(response.status_code, 502)
+        payload = response.get_json()
+        self.assertEqual(payload['code'], 502)
+        self.assertIsNone(payload['data'])
+        for text in ('知乎暂时限制本次访问', '登录状态尚未确认', '日常浏览器', '不要反复登录或发布'):
+            self.assertIn(text, payload['msg'])
+        self.assertNotIn('synthetic-private-trace', payload['msg'])
+        self.assertNotIn('登录已失效', payload['msg'])
+        checker.assert_awaited_once()
+        with sqlite3.connect(self.db_path) as conn:
+            saved = conn.execute('SELECT status,last_checked_at FROM user_info WHERE id=?', (account_id,)).fetchone()
+        self.assertEqual(saved, (1, '2026-10-31 01:00:00'))
 
 
 if __name__ == "__main__":

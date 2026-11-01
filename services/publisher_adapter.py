@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from services.zhihu_publish_flow import ZhihuAIStatementNotConfirmedError, ZhihuEditorNotReadyError
+from services.zhihu_access import ZhihuAccessRestrictedError
 
 
 PUBLISH_RESULT_STATUSES = frozenset(
@@ -253,9 +254,9 @@ class ZhihuPublisherAdapter(PublisherAdapter):
                 self.account_file,
                 timeout_seconds=self.timeout_seconds,
             )
-        except (ZhihuAIStatementNotConfirmedError, ZhihuEditorNotReadyError) as exc:
-            # This typed boundary can only originate from the pre-publish
-            # declaration check. Do not run a post-submission probe or turn
+        except (ZhihuAIStatementNotConfirmedError, ZhihuEditorNotReadyError, ZhihuAccessRestrictedError) as exc:
+            # These typed preparation boundaries occur before the publish
+            # click. Do not run a post-submission probe or turn
             # it into a misleading login/unknown-submission message.
             return self._exception_result(exc, prefix="知乎发布失败")
         except (TimeoutError, asyncio.TimeoutError):
@@ -271,6 +272,11 @@ class ZhihuPublisherAdapter(PublisherAdapter):
             return result
         try:
             verified = self._find_publication(content.title, attempts=3)
+        except ZhihuAccessRestrictedError:
+            return PublishResult(
+                success=False, platform=self.platform, status='need_action',
+                message='知乎暂时限制本次访问，发布后的核对未完成，提交结果仍未知，原稿和任务记录已保留。请在日常浏览器正常查看账号状态，稍后恢复；不要重复发布。',
+            )
         except Exception as exc:
             logging.warning("Zhihu publication check failed stage=after_publish exception_type=%s",
                             type(exc).__name__)
@@ -391,6 +397,12 @@ class ZhihuPublisherAdapter(PublisherAdapter):
         )
 
     def _exception_result(self, exc: Exception, *, prefix: str) -> PublishResult:
+        if isinstance(exc, ZhihuAccessRestrictedError):
+            logging.warning('Zhihu publisher paused stage=before_publish code=platform_access_restricted')
+            return PublishResult(
+                success=False, platform=self.platform, status='need_action',
+                message='知乎暂时限制本次访问，请在日常浏览器正常查看账号状态，稍后恢复；不要反复登录或重复发布。本次未点击发布，原稿和任务记录已保留。',
+            )
         if isinstance(exc, ZhihuEditorNotReadyError):
             code = exc.reason_code
             logging.warning("Zhihu publisher paused stage=before_publish code=%s", code)
@@ -1390,7 +1402,7 @@ def _normalize_guarded_public_result(
 def classify_publisher_error(error: Exception | str) -> str:
     """Map platform safety/login failures to the shared task status."""
 
-    if isinstance(error, (ZhihuAIStatementNotConfirmedError, ZhihuEditorNotReadyError)):
+    if isinstance(error, (ZhihuAIStatementNotConfirmedError, ZhihuEditorNotReadyError, ZhihuAccessRestrictedError)):
         return "need_action"
     normalized = str(error).lower()
     return (

@@ -15,6 +15,7 @@ from utils.log import zhihu_logger
 from services.browser_executable import browser_executable_options
 from services.login_runtime import LoginCancelled
 from services.zhihu_publish_flow import ZhihuAIStatementNotConfirmedError, ZhihuEditorNotReadyError
+from services.zhihu_access import ZhihuAccessRestrictedError, assert_page_access
 
 ZHIHU_LOGIN_URL = "https://www.zhihu.com/signin"
 ZHIHU_WRITE_URL = "https://zhuanlan.zhihu.com/write"
@@ -94,7 +95,9 @@ async def cookie_auth(account_file) -> bool:
             context = await browser.new_context(storage_state=account_file)
             page = await context.new_page()
             await page.goto(ZHIHU_WRITE_URL, timeout=60000)
+            await assert_page_access(page)
             await page.wait_for_timeout(3000)
+            await assert_page_access(page)
             if _is_login_url(page.url):
                 zhihu_logger.error("[+] 知乎 cookie 失效")
                 return False
@@ -117,6 +120,8 @@ async def cookie_auth(account_file) -> bool:
                 return True
             zhihu_logger.error("[+] 知乎 cookie 失效")
             return False
+        except ZhihuAccessRestrictedError:
+            raise
         except Exception:
             zhihu_logger.warning("[+] cookie 校验未完成，保存后仍需重新验证")
             return False
@@ -250,6 +255,7 @@ class ZhiHuArticle(object):
         page = await context.new_page()
         try:
             await page.goto(ZHIHU_WRITE_URL, timeout=90000, wait_until="domcontentloaded")
+            await assert_page_access(page)
             if _is_login_url(page.url):
                 raise RuntimeError("知乎 cookie 已失效，请重新登录")
             try:
@@ -258,7 +264,7 @@ class ZhiHuArticle(object):
                 await self.fill_title(page)
                 await self.fill_body(page)
                 await self._verify_content(page)
-            except ZhihuEditorNotReadyError:
+            except (ZhihuEditorNotReadyError, ZhihuAccessRestrictedError):
                 raise
             except Exception as exc:
                 zhihu_logger.warning("知乎编辑准备未完成 code=editor_preparation_failed")
@@ -312,6 +318,7 @@ class ZhiHuArticle(object):
         body_selectors = ('.public-DraftEditor-content', '[contenteditable="true"]',
                           '.ProseMirror', 'div[role="textbox"]', '.ql-editor')
         while True:
+            await assert_page_access(page)
             if await ready(title_selectors) and await ready(body_selectors):
                 return
             if asyncio.get_running_loop().time() >= deadline:
@@ -546,6 +553,7 @@ class ZhiHuArticle(object):
         zhihu_logger.info(f"知乎正文已通过回读核对，字符数={len(observed)}")
 
     async def _verify_content(self, page: Page) -> None:
+        await assert_page_access(page)
         title = await self._title_field(page)
         editor = await self._body_editor(page)
         for observation in range(2):

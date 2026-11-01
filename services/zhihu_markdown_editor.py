@@ -6,6 +6,7 @@ import re
 from urllib.parse import urlsplit
 
 from services.zhihu_publish_flow import ZhihuEditorNotReadyError
+from services.zhihu_access import ZhihuAccessRestrictedError, assert_page_access
 
 
 IMPORT_ACCEPT = '.docx,.markdown,.mdown,.mkdn,.md'
@@ -199,6 +200,7 @@ async def import_markdown_body(page, editor, *, markdown, expected_title, manife
                                wait_seconds=20.0) -> None:
     """One ordinary native file import into the caller's confirmed empty writer."""
     async def assert_source():
+        await assert_page_access(page)
         title = await _unique_visible(page.locator('textarea[placeholder*="标题"], input[placeholder*="标题"]'))
         if not _writer_url(page.url) or _normalize(await title.input_value()) != expected_title:
             raise _error('markdown_import_unconfirmed', '知乎标题或编辑页面发生变化，已停止导入；本次未点击发布')
@@ -229,12 +231,13 @@ async def import_markdown_body(page, editor, *, markdown, expected_title, manife
         await assert_source()
         await chooser.set_files({'name': 'geo-article-body.md', 'mimeType': 'text/markdown',
                                  'buffer': markdown.encode('utf-8')}, timeout=10000)
-    except ZhihuEditorNotReadyError:
+    except (ZhihuEditorNotReadyError, ZhihuAccessRestrictedError):
         raise
     except Exception as exc:
         raise _error('markdown_import_unconfirmed', '知乎文档导入尚未确认，已保留原稿，请先人工核对；本次未点击发布') from exc
     deadline = asyncio.get_running_loop().time() + wait_seconds
     while True:
+        await assert_page_access(page)
         if not _writer_url(page.url):
             raise _error('markdown_import_unconfirmed', '知乎导入后页面发生异常变化；本次未点击发布')
         try:
