@@ -178,6 +178,7 @@
         >
           打开登录流程
         </el-button>
+        <el-button v-else-if="loginStage === 'failed' && loginFailureCode === 'platform_access_restricted'" type="primary" @click="closeLoginDialog">关闭</el-button>
         <el-button v-else-if="loginStage === 'failed'" type="primary" @click="retryLogin">重新尝试</el-button>
         <el-button v-else-if="loginStage === 'success'" type="primary" @click="closeLoginDialog">完成</el-button>
         <el-button v-else @click="closeLoginDialog">关闭等待</el-button>
@@ -314,6 +315,7 @@ const loginErrorCopy={
   login_failed:'登录流程未完成，账号是否已登录尚未确认。请核对原浏览器中的提示后重试。',
   component_missing:'缺少此平台的登录组件，请联系软件维护者补齐组件后重试。',
   login_cancelled:'登录流程已结束，尚未确认会话保存。原浏览器如仍在运行，请先核对原窗口。',
+  platform_access_restricted:'平台当前限制了访问，登录状态尚未确认。请先在日常浏览器核对该平台，恢复前不要反复登录或发布。',
 }
 
 const primaryPlatforms = computed(() => overview.platforms.filter(item => ['P0', 'P1'].includes(item.priority)))
@@ -324,7 +326,7 @@ const syncLabel = computed(() => lastSyncedAt.value
 const selectedPlatform = computed(() => overview.platforms.find(item => item.type === loginForm.platformType))
 const loginDialogTitle = computed(() => `${loginForm.existingAccountId ? '重新登录' : '连接'}${selectedPlatform.value ? ` · ${selectedPlatform.value.name}` : '媒体账号'}`)
 const loginStageTitle = computed(() => ({
-  connecting: '正在连接本机登录服务', opening:'正在打开登录浏览器', manual: '等待你完成平台登录', success: '会话已保存', failed: '登录没有完成'
+  connecting: '正在连接本机登录服务', opening:'正在打开登录浏览器', manual: '等待你完成平台登录', success: '会话已保存', failed: loginFailureCode.value === 'platform_access_restricted' ? '平台暂时限制访问' : '登录没有完成'
 }[loginStage.value] || '准备登录'))
 const loginStageMessage = computed(() => {
   if (loginStage.value === 'success') return '本地账号记录已刷新，可以返回媒体账号页继续检测。'
@@ -366,7 +368,9 @@ const checkAccount = async account => {
     ElMessage.success(response.data?.check_message || '登录状态检测完成')
     await fetchOverview()
   } catch (error) {
-    if(!destroyed)ElMessage.error(error?.message || '平台状态检测失败，请稍后重试')
+    // HTTP failures already show the backend explanation in request.js.
+    // A second Axios status-code toast would hide that actionable message.
+    if(!destroyed && !error?.response)ElMessage.error(error?.message || '平台状态检测失败，请稍后重试')
   } finally {
     if(!destroyed){const next = new Set(checkingIds.value);next.delete(account.id);checkingIds.value = next}
   }
@@ -445,7 +449,7 @@ const startLogin = () => {
 }
 
 const retryLogin = () => {
-  if(loginStage.value==='failed')startLogin()
+  if(loginStage.value==='failed' && loginFailureCode.value!=='platform_access_restricted')startLogin()
 }
 
 const closeEventSource = () => {

@@ -11,7 +11,7 @@ const script=compileScript(descriptor,{id:'account-login-test'})
 const source=descriptor.scriptSetup.content.replace(/^import .*$/gm,'')
 const deferred=()=>{let resolve,reject;const promise=new Promise((done,fail)=>{resolve=done;reject=fail});return {promise,resolve,reject}}
 
-function harness({overview=async()=>({data:{platforms:[],planned_platforms:[],accounts:[],summary:{}}}),constructorError=false}={}) {
+function harness({overview=async()=>({data:{platforms:[],planned_platforms:[],accounts:[],summary:{}}}),check=async()=>({data:{}}),constructorError=false}={}) {
   const sources=[],unmount=[],messages=[],reads=[]
   class FakeEventSource {
     constructor(url,options){if(constructorError)throw Error('unavailable');this.url=url;this.options=options;this.closed=false;sources.push(this)}
@@ -21,7 +21,7 @@ function harness({overview=async()=>({data:{platforms:[],planned_platforms:[],ac
   }
   const dependencies={computed,defineComponent,h,reactive,ref,onMounted(){},onBeforeUnmount:callback=>unmount.push(callback),
     ElButton:{},ElIcon:{},ElMessage:{success:value=>messages.push(value),error:value=>messages.push(value)},
-    accountApi:{getMediaAccounts:()=>{reads.push('read');return overview()},checkMediaAccount:async()=>({data:{}})},
+    accountApi:{getMediaAccounts:()=>{reads.push('read');return overview()},checkMediaAccount:check},
     apiUrl:path=>`/backend${path}`,EventSource:FakeEventSource}
   const page=new Function(...Object.keys(dependencies),source+`;return {PlatformCard,openLogin,startLogin,retryLogin,closeLoginDialog,requestLoginDialogClose,resetLoginDialog,fetchOverview,checkAccount,overview,loading,loaded,loginStage,loginDialogVisible,loginForm,loginFailureReason,loginFailureCode,loginStageTitle,loginStageMessage,pendingLogin,qrCodeData};`)(...Object.values(dependencies))
   const open=(type=9,name='知乎测试账号',accountId=null)=>{page.openLogin({type,name:type===9?'知乎':'其他平台'},accountId?{id:accountId,account_name:name}:null);page.loginForm.accountName=name;page.startLogin();return sources.at(-1)}
@@ -53,6 +53,32 @@ test('an unverified stored account is presented for review rather than conclusiv
   page.stop()
 })
 
+test('account HTTP failures retain the backend access/login explanation instead of a second generic Axios toast',async()=>{
+  for(const [status,message] of [[502,'知乎当前访问受限，请先用普通浏览器核对。'],[401,'登录已失效，需要重新登录']]){
+    let page
+    page=harness({check:async()=>{
+      // The shared HTTP interceptor displays this backend message before it
+      // rejects the same HTTP error to the account page.
+      page.messages.push(message)
+      throw {response:{status,data:{msg:message}},message:`Request failed with status code ${status}`}
+    }})
+    page.overview.accounts=[{id:13,status:'connected'}]
+    await page.checkAccount({id:13})
+    assert.deepEqual(page.messages,[message])
+    assert.equal(page.overview.accounts[0].status,'connected')
+    assert.equal(page.reads.length,0);page.stop()
+  }
+})
+
+test('an account network failure still reports an error without inventing platform restriction or changing login state',async()=>{
+  const page=harness({check:async()=>{throw Error('网络连接失败')}})
+  page.overview.accounts=[{id:13,status:'connected'}]
+  await page.checkAccount({id:13})
+  assert.deepEqual(page.messages,['网络连接失败'])
+  assert.doesNotMatch(page.messages[0],/限制访问|登录没有完成/)
+  assert.equal(page.overview.accounts[0].status,'connected');assert.equal(page.sources.length,0);page.stop()
+})
+
 test('fixed backend failure codes give Chinese causes, including uppercase compatibility, without pretending a browser opened',()=>{
   const expected={browser_not_found:/未找到.*浏览器.*尚未打开/,browser_launch_failed:/浏览器未能启动/,
     browser_closed:/浏览器已关闭/,navigation_failed:/未能打开平台登录页/,login_timeout:/超时/,
@@ -63,6 +89,31 @@ test('fixed backend failure codes give Chinese causes, including uppercase compa
     assert.equal(page.loginStage.value,'failed');assert.equal(page.loginFailureCode.value,code)
     assert.match(page.loginStageMessage.value,copy);assert.equal(page.qrCodeData.value,'');assert.equal(stream.closed,true)
     late({data:'500'});assert.match(page.loginStageMessage.value,copy);page.stop()
+  }
+})
+
+test('only the explicit access-restricted code gets a platform restriction title and does not offer repeated login',()=>{
+  for(const code of ['platform_access_restricted','PLATFORM_ACCESS_RESTRICTED']){
+    const page=harness(),stream=page.open()
+    stream.emit(`LOGIN_ERROR:${code}`)
+    assert.equal(page.loginFailureCode.value,'platform_access_restricted')
+    assert.equal(page.loginStageTitle.value,'平台暂时限制访问')
+    assert.match(page.loginStageMessage.value,/日常浏览器核对.*不要反复登录或发布/)
+    assert.doesNotMatch(page.loginStageMessage.value,/登录已失效|请重新登录/)
+    page.retryLogin();assert.equal(page.sources.length,1)
+    page.closeLoginDialog();page.open()
+    assert.equal(page.sources.length,2);assert.equal(page.loginStage.value,'connecting');page.stop()
+  }
+  assert.match(descriptor.template.content,/loginStage === 'failed' && loginFailureCode === 'platform_access_restricted'"[^>]*@click="closeLoginDialog">关闭/)
+})
+
+test('ordinary login failures and unclassified codes never become a platform restriction',()=>{
+  for(const code of ['login_failed','login_timeout','40362','platform_access_restricted_extra','network_error']){
+    const page=harness(),stream=page.open()
+    stream.emit(`LOGIN_ERROR:${code}`)
+    assert.equal(page.loginStageTitle.value,'登录没有完成')
+    assert.doesNotMatch(page.loginStageMessage.value,/平台当前限制了访问/)
+    page.retryLogin();assert.equal(page.sources.length,2);page.stop()
   }
 })
 
