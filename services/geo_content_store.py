@@ -256,8 +256,12 @@ def _filter_publication_records(connection, records, drafts):
     for item in records:
         draft = contexts[item['article_id']]
         target_id = item.get('target_id') or (draft['platform'][7:] if draft['platform'].startswith('target_') else None)
-        observation = _publication_moderation(connection, item['article_id'], target_id,
-                                               draft['article_sha256'], item['url'])
+        if item.get('kind') == 'builtin_job':
+            from services.geo_builtin_publication import moderation_hold
+            observation = moderation_hold(connection, item['article_id'])
+        else:
+            observation = _publication_moderation(connection, item['article_id'], target_id,
+                                                   draft['article_sha256'], item['url'])
         if observation and observation['state'] in ('pending', 'rejected'):
             blocked.append({**item, 'moderation_state': observation['state'],
                             'moderation_observation_id': observation['id']})
@@ -274,6 +278,8 @@ def get_cycle(database, identifier):
             SELECT id,article_id,target_id,target_revision,url,published_at,evidence_level,note,
                    baseline_run_id,report_digest,plan_sha256,article_sha256,created_at
             FROM geo_content_publications WHERE cycle_id=? ORDER BY created_at DESC,id DESC''', (identifier,))]
+        from services.geo_builtin_publication import records as builtin_publication_records
+        reported += builtin_publication_records(connection, identifier)
         publication_records = []
         for draft in result['drafts']:
             for job in draft['jobs']:
@@ -476,7 +482,8 @@ def save_moderation_observation(database, identifier, value):
                 raise ValueError('请填写该平台范围内的具体公开文章链接，不能使用首页、登录页或编辑器入口')
             prior_url = connection.execute('''SELECT article_id,target_id FROM geo_content_publications
                 WHERE url=? AND (article_id!=? OR target_id!=?) LIMIT 1''', (url, article_id, target_id)).fetchone()
-            if prior_url:
+            builtin_url = connection.execute('SELECT 1 FROM geo_builtin_publications WHERE url=? LIMIT 1', (url,)).fetchone()
+            if prior_url or builtin_url:
                 raise ValueError('该链接已经关联其他文章或目标，不能用作本篇文章的公开观察')
         prior = connection.execute('SELECT * FROM geo_distribution_events WHERE id=?', (observation_id,)).fetchone()
         if prior:
@@ -496,6 +503,11 @@ def save_moderation_observation(database, identifier, value):
 
 def save_reported_publication(database, identifier, value):
     """Record an account owner's statement, never forge an adapter success job."""
+    if isinstance(value, dict) and value.get('kind') == 'builtin_job':
+        from services.geo_builtin_publication import save_reported_publication as save_builtin
+        return save_builtin(database, identifier, value)
+    if isinstance(value, dict) and 'kind' in value:
+        raise ValueError('发布登记类型无效，请重新选择文章与平台')
     if not isinstance(value, dict) or value.get('confirmed') is not True:
         raise ValueError('请确认这是你在对应平台已提交的文章链接；软件尚未独立核验')
     article_id, target_id = value.get('article_id'), value.get('target_id')
@@ -534,6 +546,8 @@ def save_reported_publication(database, identifier, value):
             raise ValueError('发布链接不在该平台配置的公开网址范围内，请核对链接或平台配置')
         if url in [destinations.public_https(config[field]) for field in ('home_url', 'login_url', 'editor_url')]:
             raise ValueError('请填写具体的公开文章链接，不能使用平台首页、登录页或编辑器入口')
+        if connection.execute('SELECT 1 FROM geo_builtin_publications WHERE url=? LIMIT 1', (url,)).fetchone():
+            raise ValueError('该链接已经关联内置渠道的另一条登记，请保留原记录，不能重复认作不同内容')
         observation = _publication_moderation(connection, article_id, target_id,
             fingerprint({'title': row['title'], 'content': row['content']}), url)
         if observation and observation['state'] in ('pending', 'rejected'):

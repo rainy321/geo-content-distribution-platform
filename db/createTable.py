@@ -380,6 +380,27 @@ def initialize_database(db_file=DEFAULT_DB_FILE):
                     FOREIGN KEY(target_id) REFERENCES geo_distribution_targets(id) ON DELETE RESTRICT
                 )
             ''')
+            # Builtin channels have no distribution target. Keep their operator
+            # statements separate from both target records and adapter receipts.
+            cursor.execute('''
+                CREATE TABLE IF NOT EXISTS geo_builtin_publications (
+                    id TEXT PRIMARY KEY, cycle_id TEXT NOT NULL,
+                    article_id INTEGER NOT NULL, job_id INTEGER NOT NULL UNIQUE,
+                    platform TEXT NOT NULL, account_id INTEGER NOT NULL,
+                    review_fingerprint TEXT NOT NULL, job_confirmation_snapshot TEXT NOT NULL,
+                    source_input_sha256 TEXT NOT NULL,
+                    url TEXT NOT NULL UNIQUE, published_at TEXT NOT NULL,
+                    published_at_precision TEXT NOT NULL CHECK(published_at_precision = 'minute'),
+                    evidence_level TEXT NOT NULL CHECK(evidence_level = 'owner_reported'),
+                    note TEXT NOT NULL DEFAULT '', baseline_run_id TEXT NOT NULL,
+                    report_digest TEXT NOT NULL, plan_sha256 TEXT NOT NULL,
+                    article_sha256 TEXT NOT NULL, created_at TEXT NOT NULL,
+                    FOREIGN KEY(cycle_id) REFERENCES geo_content_cycles(id) ON DELETE CASCADE,
+                    FOREIGN KEY(article_id) REFERENCES articles(id) ON DELETE CASCADE,
+                    FOREIGN KEY(job_id) REFERENCES publish_jobs(id) ON DELETE RESTRICT,
+                    FOREIGN KEY(account_id) REFERENCES user_info(id) ON DELETE RESTRICT
+                )
+            ''')
 
     return db_path
 
