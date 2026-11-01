@@ -12,7 +12,8 @@
       <DoubaoPreparation/>
       <div class="row"><strong>豆包写作会话</strong><el-select :model-value="clientMode" :disabled="busy || writingContextPending" aria-label="写作豆包界面" @update:model-value="selectWritingMode"><el-option label="豆包对话" value="consumer"/><el-option label="豆包工作" value="work"/></el-select><el-input :model-value="model" :disabled="busy || writingContextPending" placeholder="模型选项可留空" aria-label="写作模型选项" @update:model-value="selectWritingModel"/><el-button :disabled="busy || writingContextPending" @click="login">登录豆包</el-button><el-button v-if="nativeBusy" @click="stop">停止任务</el-button></div>
       <p class="hint">{{ writingContextPending ? '正在读取本轮写作选项，请稍候。' : externalCycle ? '本轮基线来自手机或外部观察。这里的界面和模型选择只用于后续写作，不代表实际采样模式；实际采样条件按各条外部记录保留。留空表示使用当前写作模型。' : '写作会话初始沿用本轮基线的界面和模型选项；你调整后的选择会按任务单保留。留空表示使用当前模型。' }}</p>
-      <p v-if="!contentRecovery || (task.kind==='login' && loginScope?.taskId===task.id && loginScope?.cycleId===cycleId)" class="hint" aria-live="polite">{{ currentTaskMessage }}</p>
+      <p v-if="recoveredDraftArticle(cycle,task)" class="hint" role="status">原请求的稿件已保存到本轮内容库；此前的失败记录保留，没有重新提问。</p>
+      <p v-else-if="!contentRecovery || (task.kind==='login' && loginScope?.taskId===task.id && loginScope?.cycleId===cycleId)" class="hint" aria-live="polite">{{ currentTaskMessage }}</p>
       <DoubaoTaskRecovery v-if="contentRecovery" :recovery="contentRecovery" :busy="busy" :native-available="nativeAvailable" @login="login"/>
       <p v-if="recoveryStorageError" class="hint" role="status">{{ recoveryStorageError }}</p>
     </el-card>
@@ -46,6 +47,8 @@
         <div class="row"><el-select v-model="briefId" aria-label="内容选题"><el-option v-for="brief in cycle.analysis.briefs" :key="brief.id" :value="brief.id" :label="brief.topic"/></el-select><el-select v-model="platform" aria-label="目标发布渠道"><el-option v-for="(label,key) in cycle.channels" :key="key" :value="key" :label="writingChannelLabel(cycle,key,label)" :disabled="!writingChannelEnabled(cycle,key)"/></el-select></div>
         <p v-if="selectedDestination && !destinationCanPrepare(selectedDestination)" class="hint">{{ destinationPublicationGate(selectedDestination).reason }}</p>
         <p class="hint">{{ selectedDestination ? `已选择接入平台：${selectedDestination.config.name}；稿件将使用该平台的内容规范与长度限制。` : '当前为通用渠道稿。可在上方来源投放目标中接入并选择具体平台。' }}</p>
+        <GeoDraftRecovery :cycle="cycle" :task="task" :busy="busy" :native-available="nativeAvailable"
+          :facts-current="confirmed && factsText===factsStoredText(cycle.facts)" :selection-key="`${briefId}|${platform}`" @updated="applyCycle" @busy="setFeedbackBusy"/>
         <div class="row"><el-button v-if="nativeAvailable" type="primary" :disabled="busy || !canDraft" @click="generate('draft','doubao')">豆包生成并存入内容库</el-button><el-button :disabled="busy || !canDraft" @click="generate('draft','api')">AI API 生成并存入内容库</el-button></div>
         <p v-if="!canDraft && (!selectedDestination || destinationCanPrepare(selectedDestination))" class="hint">请先保存核对后的事实资料，并保持输入与已保存内容一致。</p>
         <article v-for="draft in cycle.drafts" :key="draft.article_id" class="draft" data-testid="research-draft">
@@ -105,6 +108,8 @@ import GeoDestinations from '@/components/GeoDestinations.vue'
 import GeoSourceIdentity from '@/components/GeoSourceIdentity.vue'
 import DoubaoPreparation from '@/components/DoubaoPreparation.vue'
 import DoubaoTaskRecovery from '@/components/DoubaoTaskRecovery.vue'
+import GeoDraftRecovery from '@/components/GeoDraftRecovery.vue'
+import {recoveredDraftArticle} from '@/utils/geoDraftRecovery'
 import { doubaoTaskRecovery, scopedRecoveryCheckpoint } from '@/utils/geoTaskRecovery'
 import GeoPublicationReview from '@/components/GeoPublicationReview.vue'
 import GeoExternalFeedback from '@/components/GeoExternalFeedback.vue'
