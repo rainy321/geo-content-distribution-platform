@@ -31,7 +31,7 @@ const setup = (props, api, emit = () => {}) => {
     URL: { createObjectURL: blob => { blobs.push(blob); return 'blob:original-xml' }, revokeObjectURL: url => revoked.push(url) },
     document: dom, setTimeout: fn => fn() }
   const instance = new Function(...Object.keys(deps), body + `;return {${names.join(',')}};`)(...Object.values(deps))
-  return { ...helpers, ...instance, lifecycle, clipboard, downloads, blobs, revoked, GeoIndexNow: { render: () => Vue.h('section', { 'data-testid': 'indexnow-stub' }) } }
+  return { ...helpers, ...instance, lifecycle, clipboard, downloads, blobs, revoked, GeoIndexNow: { render: () => Vue.h('section', { 'data-testid': 'indexnow-stub' }) }, GeoBingInspection: { render: () => Vue.h('section', { 'data-testid': 'bing-window-stub' }) } }
 }
 const harness = (value = cycle(), overrides = {}) => {
   const props = Vue.reactive({ cycle: value, busy: false }), calls = { list: [], update: [], emit: [] }
@@ -56,6 +56,19 @@ test('website scope supports company and product URLs but never trusts a foreign
   for (const website of ['http://example.org/', 'https://user:secret@example.org/', 'https://example.org:8443/', 'javascript:alert(1)']) assert.equal(helpers.webmasterOrigin(cycle({ baseline: { profile: { website } } })), '')
   for (const change of [{ site_origin: 'https://other.org' }, { context_sha256: 'unknown' }, { supported: false }]) assert.equal(helpers.webmasterOverview(cycle(), overview(change)).supported, false)
   assert.equal(helpers.webmasterOverview(cycle(), overview({ entry_url: 'https://evil.test/' })).entry_url, helpers.bingWebmasterEntry)
+})
+
+test('native browser observations preserve the separate manual inspection draft and participate in the parent busy lock', async () => {
+  const page = harness(cycle({ project_id: 5 }))
+  page.inspectionUrl.value = 'https://example.org/about/'
+  page.inspectionStatus.value = 'unknown'; page.inspectionStatusEdited.value = true; page.inspectionNote.value = '人工说明尚未保存'
+  page.apply(overview({ native_inspections: [{ source: 'native_browser_ui', index_status: 'indexed', url: page.inspectionUrl.value }] }))
+  assert.equal(page.inspectionStatus.value, 'unknown'); assert.equal(page.inspectionNote.value, '人工说明尚未保存')
+  assert.equal(page.record.value.inspections, undefined)
+  page.bingBusy.value = true
+  assert.equal(page.locked.value, true); await page.perform('check_public'); assert.equal(page.calls.update.length, 0)
+  assert.deepEqual(page.calls.emit.at(-1), ['busy', true]); assert.equal(page.props.busy, false)
+  page.bingBusy.value = false; assert.equal(page.locked.value, false)
 })
 
 test('reading XML preserves original byte order and mixed line endings without converting to text', async () => {

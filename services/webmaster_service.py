@@ -110,9 +110,11 @@ def _stored(connection, cycle_id):
 
 
 def overview(connection, cycle):
+    from services.bing_inspection_reader import native_inspections
     result = {'supported': False, 'reason': '', 'site_origin': None, 'site_key': None,
               'entry_url': ENTRY_URL, 'verification_url': None, 'sitemap_url': None,
-              'target_urls': [], 'record': None, 'context_sha256': None}
+              'target_urls': [], 'record': None, 'context_sha256': None,
+              'native_inspections': native_inspections(connection, cycle['id'])}
     try:
         origin = _origin(cycle['profile'].get('website'))
     except ValueError as error:

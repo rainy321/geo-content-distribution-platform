@@ -18,6 +18,7 @@ export function webmasterOverview(cycle, source = cycle?.webmaster) {
     supported, site_origin: origin, entry_url: bingWebmasterEntry,
     verification_url: origin ? `${origin}/BingSiteAuth.xml` : '', sitemap_url: origin ? `${origin}/sitemap.xml` : '',
     context_sha256: supported ? source.context_sha256 : null, record: supported ? source.record || null : null,
+    native_inspections: supported && Array.isArray(source.native_inspections) ? source.native_inspections : [],
     target_urls: supported && Array.isArray(source.target_urls) ? [...new Set(source.target_urls.filter(url => webmasterSiteUrl(url, origin)))] : [],
     reason: !origin ? '请先保存这个公司或产品的 HTTPS 官网地址。' : !supported ? source?.reason || '尚未读取站长流程，点击刷新读取进度。' : ''
   }

@@ -161,7 +161,7 @@ test('panel compiles, escapes remote text and labels 200/202/unknown separately 
 
 test('webmaster aggregates child busy but never reflects that same busy into the child external lock', () => {
   const parent = fs.readFileSync(new URL('../src/components/GeoWebmaster.vue', import.meta.url), 'utf8')
-  assert.match(parent, /GeoIndexNow :cycle="cycle" :busy="busy \|\| localBusy \|\| loading"/)
-  assert.match(parent, /watch\(\(\) => localBusy.value \|\| indexNowBusy.value/)
+  assert.match(parent, /GeoIndexNow :cycle="cycle" :busy="busy \|\| localBusy \|\| loading \|\| bingBusy"/)
+  assert.match(parent, /watch\(\(\) => localBusy.value \|\| indexNowBusy.value \|\| bingBusy.value/)
   assert.doesNotMatch(parent, /GeoIndexNow[^>]+:busy="locked/)
 })

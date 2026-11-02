@@ -45,7 +45,8 @@
               <p class="webmaster-hint" data-testid="webmaster-indexed-preview-hint">View Indexed page 的 HTML / HTTP 页签空白，只表示本次未取得可查看的快照或明细，不据此把已收录改为未索引。无需反复打开空白页签，也不要因此重复提交。</p>
               <p class="webmaster-hint" data-testid="webmaster-live-preview-hint">Live URL / Tested page 显示新版内容，只证明本次实时检测可读取，不证明新版已入索引或被豆包采用。Request indexing 提示提交成功，仅表示更新请求已收到；可记入本页备注，不要记成站点地图处理结果。</p>
               <label :for="`webmaster-url-${cycle.id}`">检查的完整页面网址</label><input :id="`webmaster-url-${cycle.id}`" v-model="inspectionUrl" type="url" :list="`webmaster-urls-${cycle.id}`" :disabled="locked" :placeholder="`${view.site_origin}/`" data-testid="webmaster-inspection-url"/><datalist :id="`webmaster-urls-${cycle.id}`"><option v-for="url in view.target_urls" :key="url" :value="url"/></datalist>
-              <label :for="`webmaster-index-${cycle.id}`">索引状态</label><select :id="`webmaster-index-${cycle.id}`" v-model="inspectionStatus" :disabled="locked" @change="markInspectionStatusEdited"><option value="unknown">未知 / 尚未确认</option><option value="indexed">Bing 明确显示已索引</option><option value="not_indexed">Bing 明确显示未索引</option></select>
+              <GeoBingInspection :cycle="cycle" :view="view" :url="inspectionUrl" :busy="busy || localBusy || loading || indexNowBusy" @busy="bingBusy=$event" @overview="apply"/>
+              <label :for="`webmaster-index-${cycle.id}`">索引状态（用户确认）</label><select :id="`webmaster-index-${cycle.id}`" v-model="inspectionStatus" :disabled="locked" @change="markInspectionStatusEdited"><option value="unknown">未知 / 尚未确认</option><option value="indexed">Bing 明确显示已索引</option><option value="not_indexed">Bing 明确显示未索引</option></select>
               <label :for="`webmaster-note-${cycle.id}`">页面提示与抓取时间（可选）</label><textarea :id="`webmaster-note-${cycle.id}`" v-model="inspectionNote" maxlength="500" rows="2" :disabled="locked" placeholder="可分别记录索引结论、快照/实时检测和更新请求回执；平台时间未知时注明，不用记录时间代替"/>
               <el-button :disabled="locked || !validInspection" :loading="saving==='record_inspection'" data-testid="webmaster-save-inspection" @click="saveInspection">保存页面检查结果</el-button>
               <article v-for="item in inspections" :key="item.url" class="webmaster-inspection-row"><strong>{{ indexLabel(item.status) }}（用户确认）</strong><p>{{ item.url }}</p><p v-if="item.note">{{ item.note }}</p><small>记录时间 {{ date(item.observed_at) }}</small></article>
@@ -57,7 +58,7 @@
     </template>
     <p v-if="notice" class="webmaster-hint" role="status" aria-live="polite">{{ notice }}</p>
     <p v-if="writeUncertain" class="webmaster-error">保存结果未确认，请先刷新进度核对；软件不会自动重复写入。</p>
-    <GeoIndexNow :cycle="cycle" :busy="busy || localBusy || loading" @busy="indexNowBusy=$event"/>
+    <GeoIndexNow :cycle="cycle" :busy="busy || localBusy || loading || bingBusy" @busy="indexNowBusy=$event"/>
   </section>
 </template>
 
@@ -65,6 +66,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { geoWebmasterApi } from '@/api/geoWebmaster'
 import GeoIndexNow from './GeoIndexNow.vue'
+import GeoBingInspection from './GeoBingInspection.vue'
 import { journeyDate } from '@/utils/geoJourney'
 import { bingWebmasterEntry, webmasterOverview, webmasterOrigin, webmasterPayload, webmasterReadFile, webmasterDecodeFile,
   webmasterDeploymentText, webmasterStage, webmasterPublicLabel, webmasterSitemapLabel, webmasterSiteUrl, webmasterInspectionKey, webmasterSavedInspection, webmasterIndexLabel, webmasterError } from '@/utils/geoWebmaster'
@@ -73,6 +75,7 @@ const props = defineProps({ cycle: { type: Object, required: true }, busy: Boole
 const emit = defineEmits(['busy'])
 const overview = ref(props.cycle.webmaster || null), loading = ref(false), saving = ref(''), readingFile = ref(false)
 const indexNowBusy = ref(false)
+const bingBusy = ref(false)
 const error = ref(''), notice = ref(''), writeUncertain = ref(false), ownershipConfirmed = ref(false)
 const step = ref(webmasterStage(props.cycle.webmaster?.record)), sitemapStatus = ref(''), discoveredUrls = ref(''), sitemapNote = ref(''), inspectionUrl = ref(''), inspectionStatus = ref('unknown'), inspectionNote = ref('')
 const inspectionStatusEdited = ref(false)
@@ -82,7 +85,7 @@ const currentScope = () => `${props.cycle.id}:${webmasterOrigin(props.cycle)}`
 const view = computed(() => webmasterOverview(props.cycle, overview.value))
 const record = computed(() => view.value.record || {})
 const localBusy = computed(() => Boolean(saving.value) || readingFile.value)
-const locked = computed(() => props.busy || localBusy.value || loading.value || indexNowBusy.value)
+const locked = computed(() => props.busy || localBusy.value || loading.value || indexNowBusy.value || bingBusy.value)
 const publicLabel = computed(() => webmasterPublicLabel(record.value)), sitemapLabel = computed(() => webmasterSitemapLabel(record.value))
 const inspections = computed(() => (Array.isArray(record.value.inspections) ? record.value.inspections : []).filter(item => webmasterSiteUrl(item?.url, view.value.site_origin)))
 const deploymentText = computed(() => webmasterDeploymentText(view.value))
@@ -126,7 +129,7 @@ const refresh = async () => {
   finally { if (version === scopeVersion && !disposed) loading.value = false }
 }
 const perform = async (action, fields = {}, options = {}) => {
-  if (disposed || props.busy || indexNowBusy.value || saving.value || loading.value || writeUncertain.value || readingFile.value && !options.duringUpload || !view.value.supported) return false
+  if (disposed || props.busy || indexNowBusy.value || bingBusy.value || saving.value || loading.value || writeUncertain.value || readingFile.value && !options.duringUpload || !view.value.supported) return false
   const scope = currentScope(), version = scopeVersion, cycleId = props.cycle.id, context = options.context || view.value.context_sha256
   saving.value = action; error.value = ''; notice.value = ''
   let wrote = false
@@ -176,7 +179,7 @@ const saveVerificationFile = () => {
     setTimeout(() => URL.revokeObjectURL(url), 1000)
   } catch (cause) { error.value = webmasterError(cause) }
 }
-watch(() => localBusy.value || indexNowBusy.value, value => emit('busy', value), { immediate: true, flush: 'sync' })
+watch(() => localBusy.value || indexNowBusy.value || bingBusy.value, value => emit('busy', value), { immediate: true, flush: 'sync' })
 watch(() => props.cycle.webmaster, value => { if (!localBusy.value) apply(value || null) }, { flush: 'sync' })
 watch(currentScope, () => {
   scopeVersion++; readVersion++; overview.value = props.cycle.webmaster || null; loading.value = false; saving.value = ''; readingFile.value = false

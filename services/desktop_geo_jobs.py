@@ -131,6 +131,11 @@ class DesktopGeoJobs:
         from services.desktop_external_links import open_search_portal
         return open_search_portal(provider, purpose)
 
+    def read_bing_inspection(self, cycle_id, url, context_sha256, request_id):
+        """Explicit read of the existing browser only; no navigation or clicks."""
+        from services.bing_inspection_reader import read_for_cycle
+        return read_for_cycle(self.data / 'database.db', cycle_id, url, context_sha256, request_id)
+
     def save_workspace_state(self, state):
         with self.lock:
             self.store.save_workspace(state)

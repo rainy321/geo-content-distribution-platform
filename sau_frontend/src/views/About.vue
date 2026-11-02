@@ -3,7 +3,7 @@
     <el-card class="about-card">
       <div class="about-header">
         <h1>GEO AI 搜索工作台</h1>
-        <p class="version">2026.11.03.2</p>
+        <p class="version">2026.11.03.3</p>
       </div>
 
       <el-divider />
@@ -56,6 +56,7 @@
           <li>检测已登记官网的公开内容，分别保留页面、索引和AI采用状态</li>
           <li>企查查公司官网与简介准备、人工处理及只读跟进</li>
           <li>Bing 验证文件指引、公网核对与站长结果分别记录</li>
+          <li>读取日常 Chrome / Edge 已打开的 Bing 检查页，单独保存索引状态与抓取原文，不改写人工确认或计作 GEO 效果</li>
           <li>在当前项目内预检公开页面与 IndexNow 密钥文件，通知内容更新并保存回执；相同内容或未知送达结果不重复通知</li>
           <li>百度实名与换号准备、官网地址复制及逐行网址提交指引</li>
           <li>发布前核对正文与 AI 声明，未就绪时提示具体步骤</li>
