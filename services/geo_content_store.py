@@ -337,6 +337,8 @@ def get_cycle(database, identifier):
         result['website_audit'] = website_audit_overview(connection, result)
         from services.geo_feedback_diagnostics import diagnose_cycle
         result['feedback_diagnostics'] = diagnose_cycle(result)
+        from services.geo_discovery_funnel import discovery_funnel
+        result['discovery_funnel'] = result['feedback_diagnostics'].get('discovery_funnel') or discovery_funnel(result)
         from services.geo_optimization_strategy import optimization_plan
         result['optimization_plan'] = optimization_plan(result)
     return result

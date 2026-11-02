@@ -8,6 +8,7 @@
       <button v-for="(label,index) in steps" :key="label" type="button" :disabled="busy || !canVisit(index)" :aria-current="step === index ? 'step' : undefined" :class="{active:step===index,done:step!==index&&stepComplete(index)}" @click="step=index"><span>{{ index+1 }}</span>{{ label }}<el-icon v-if="step!==index&&stepComplete(index)"><Check /></el-icon></button>
     </nav>
     <GeoOptimizationProgress v-if="project" :project="project" :busy="busy" :blocked="profileDirty" @busy="setFeedbackBusy"/>
+    <GeoDiscoveryFunnel v-if="cycle && step>=2" :cycle="cycle" :busy="busy" @navigate="navigateDiagnostic"/>
     <GeoOptimizationPlan v-if="cycle && step===2 && !directoryReady" :cycle="cycle" :selected-brief-id="briefId" :busy="busy" @select="selectContent('brief',$event)"/>
     <details v-if="cycle && step===2 && hasOptimizationPlan" class="journey-secondary-tools" data-testid="journey-other-actions"><summary>其他推进事项</summary><GeoNextActions :cycle="cycle" :busy="busy" @navigate="navigateDiagnostic"/></details>
     <GeoNextActions v-else-if="cycle && step>=2" :cycle="cycle" :busy="busy" @navigate="navigateDiagnostic"/>
@@ -170,6 +171,7 @@ import { sourceIdentitySummary } from '@/utils/geoSourceIdentity'
 import GeoPublicationReview from '@/components/GeoPublicationReview.vue'
 import GeoSingleCaseProbe from '@/components/GeoSingleCaseProbe.vue'
 import GeoNextActions from '@/components/GeoNextActions.vue'
+import GeoDiscoveryFunnel from '@/components/GeoDiscoveryFunnel.vue'
 import {diagnosticSection,focusDiagnosticSection} from '@/utils/geoNextActions'
 import {updateFeedbackBusy} from '@/utils/geoFeedbackBusy'
 import GeoSourceMaintenance from '@/components/GeoSourceMaintenance.vue'

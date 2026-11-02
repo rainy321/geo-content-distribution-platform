@@ -15,6 +15,7 @@ from services.geo_destination_service import CATALOG, scope_matches
 from services.geo_source_identity import classify_source_identity, unconfirmed_source_url_status
 from services.geo_source_url import trusted_source_url
 from services.geo_planning_feedback import planning_feedback
+from services.geo_discovery_funnel import discovery_funnel
 
 
 ACTION_KEYS = frozenset(('review_baseline', 'review_external_feedback', 'review_facts', 'review_sources',
@@ -333,7 +334,16 @@ def diagnose_cycle(value):
     if needs_update:
         refs=[view.reference('probe',item['probe_id'],'后来收到的单题或外部反馈',case_id=item['case_id']) for item in feedback[:3]]
         view.action('review_drafts','用后续反馈更新选题','原选题尚未使用当前后续反馈；可重新策划，既有稿件与发布记录保留，不会自动重发。',refs,priority=25)
+    funnel = discovery_funnel(cycle)
+    for priority in funnel['priorities']:
+        refs = [view.reference('baseline', identifier, '发现路径对应原题 ' + identifier, case_id=identifier)
+                for identifier in priority['case_ids']]
+        view.issue('discovery_' + priority['key'], priority['reason'], refs)
+        view.action(priority['action_key'], priority['label'], priority['reason'], refs,
+                    priority={'identity_evidence': 18, 'retrieval_discovery': 28, 'scenario_coverage': 48}[priority['key']],
+                    case_id=priority['case_ids'][0])
     result=view.result(has_baseline=bool(valid))
+    result['discovery_funnel'] = funnel
     result['planning_feedback']={'available_count':len(feedback),'context_sha256':feedback_digest,'needs_update':needs_update,
                                  'role':'editorial_signal_only_not_writing_fact_or_public_metric'}
     return result

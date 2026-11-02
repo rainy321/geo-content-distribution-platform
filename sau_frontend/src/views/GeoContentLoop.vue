@@ -22,6 +22,7 @@
     </el-card>
     <template v-if="cycle">
       <GeoOptimizationProgress v-if="progressProject" :project="progressProject" :busy="busy" @busy="setFeedbackBusy"/>
+      <GeoDiscoveryFunnel :cycle="cycle" :busy="busy" @navigate="navigateDiagnostic"/>
       <GeoNextActions :cycle="cycle" :busy="busy" @navigate="navigateDiagnostic"/>
       <GeoWebsiteAudit :cycle="cycle" :busy="working || nativeBusy || feedbackBusy" @busy="websiteAuditBusy=$event"/>
       <GeoOtherSearchEntries :cycle="cycle" :busy="busy" @busy="setFeedbackBusy"/>
@@ -126,6 +127,7 @@ import GeoOtherSearchEntries from '@/components/GeoOtherSearchEntries.vue'
 import GeoOptimizationProgress from '@/components/GeoOptimizationProgress.vue'
 import GeoOptimizationPlan from '@/components/GeoOptimizationPlan.vue'
 import GeoNextActions from '@/components/GeoNextActions.vue'
+import GeoDiscoveryFunnel from '@/components/GeoDiscoveryFunnel.vue'
 import {diagnosticSection,focusDiagnosticSection} from '@/utils/geoNextActions'
 import {updateFeedbackBusy} from '@/utils/geoFeedbackBusy'
 import { destinationContinuationText, destinationPreparationText, destinationSupportsFill, isDestinationTask } from '@/utils/geoDestinationSession'
