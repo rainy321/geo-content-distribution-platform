@@ -1,0 +1,283 @@
+{
+  "synthetic_only": true,
+  "network": "all public HTTP and send functions mocked; DNS prohibited",
+  "overview_before": {
+    "supported": true,
+    "reason": "",
+    "cycle_id": "36c5a9233f094352b5fed2225c7d8fe4",
+    "project_id": 1,
+    "site_origin": "https://synthetic.example.org",
+    "page_scope": "https://synthetic.example.org/",
+    "context_sha256": "818a4df1dc973b2031f4d99135d2e8f85fe3a814b2202c8e10c9673e73f81c46",
+    "endpoint": "https://api.indexnow.org/indexnow",
+    "limits": {
+      "max_urls": 3,
+      "preview_seconds": 600,
+      "max_page_bytes": 524288,
+      "total_seconds": 42
+    },
+    "previews": [],
+    "notifications": [],
+    "limitations": [
+      "只在本次点击后通知已登记官网范围内的公开HTML页面；不自动后台提交，不操作搜索平台登录。",
+      "HTTP 200只代表通知已收到；202代表密钥仍待核验，不表示已经抓取、更新索引或豆包采用。",
+      "本次记录不计入GEO效果；索引版本、自然搜索及普通豆包同题结果仍需各自取得证据。",
+      "没有公开密钥文件时需网站维护者先部署；不读取Cookie、API Key、密码或客户内部文件。",
+      "相同页面内容已收到、待核验或发送结果未知时不重复通知；明确拒绝后只能显式重试。"
+    ]
+  },
+  "preview_input": {
+    "action": "preview",
+    "context_sha256": "818a4df1dc973b2031f4d99135d2e8f85fe3a814b2202c8e10c9673e73f81c46",
+    "key_location": "https://synthetic.example.org/a1234567890b1234567890c1234567890d.txt",
+    "urls": [
+      "https://synthetic.example.org/z-page/",
+      "https://synthetic.example.org/a-page/"
+    ]
+  },
+  "preview_result": {
+    "overview": {
+      "supported": true,
+      "reason": "",
+      "cycle_id": "36c5a9233f094352b5fed2225c7d8fe4",
+      "project_id": 1,
+      "site_origin": "https://synthetic.example.org",
+      "page_scope": "https://synthetic.example.org/",
+      "context_sha256": "818a4df1dc973b2031f4d99135d2e8f85fe3a814b2202c8e10c9673e73f81c46",
+      "endpoint": "https://api.indexnow.org/indexnow",
+      "limits": {
+        "max_urls": 3,
+        "preview_seconds": 600,
+        "max_page_bytes": 524288,
+        "total_seconds": 42
+      },
+      "previews": [
+        {
+          "blocked_urls": [],
+          "changed_urls": [
+            "https://synthetic.example.org/a-page/",
+            "https://synthetic.example.org/z-page/"
+          ],
+          "context_sha256": "818a4df1dc973b2031f4d99135d2e8f85fe3a814b2202c8e10c9673e73f81c46",
+          "created_at": "2026-11-02T18:56:03.090941+00:00",
+          "cycle_id": "36c5a9233f094352b5fed2225c7d8fe4",
+          "expires_at": "2026-11-02T19:06:03.090941+00:00",
+          "geo_effect_verified": false,
+          "id": "b794da92aab64121a0ca5dd231cb1c91",
+          "indexing_verified": false,
+          "key_location": "https://synthetic.example.org/a1234567890b1234567890c1234567890d.txt",
+          "pages": [
+            {
+              "bytes": 135,
+              "sha256": "47c4b3e3c7e2b00cab53f75e793eeabfb556e0305b83a1b90851fdf55d25a84d",
+              "url": "https://synthetic.example.org/a-page/"
+            },
+            {
+              "bytes": 135,
+              "sha256": "47c4b3e3c7e2b00cab53f75e793eeabfb556e0305b83a1b90851fdf55d25a84d",
+              "url": "https://synthetic.example.org/z-page/"
+            }
+          ],
+          "project_id": 1,
+          "ready": true,
+          "retry_receipt_id": null,
+          "urls": [
+            "https://synthetic.example.org/a-page/",
+            "https://synthetic.example.org/z-page/"
+          ]
+        }
+      ],
+      "notifications": [],
+      "limitations": [
+        "只在本次点击后通知已登记官网范围内的公开HTML页面；不自动后台提交，不操作搜索平台登录。",
+        "HTTP 200只代表通知已收到；202代表密钥仍待核验，不表示已经抓取、更新索引或豆包采用。",
+        "本次记录不计入GEO效果；索引版本、自然搜索及普通豆包同题结果仍需各自取得证据。",
+        "没有公开密钥文件时需网站维护者先部署；不读取Cookie、API Key、密码或客户内部文件。",
+        "相同页面内容已收到、待核验或发送结果未知时不重复通知；明确拒绝后只能显式重试。"
+      ]
+    },
+    "preview": {
+      "id": "b794da92aab64121a0ca5dd231cb1c91",
+      "cycle_id": "36c5a9233f094352b5fed2225c7d8fe4",
+      "project_id": 1,
+      "context_sha256": "818a4df1dc973b2031f4d99135d2e8f85fe3a814b2202c8e10c9673e73f81c46",
+      "created_at": "2026-11-02T18:56:03.090941+00:00",
+      "expires_at": "2026-11-02T19:06:03.090941+00:00",
+      "key_location": "https://synthetic.example.org/a1234567890b1234567890c1234567890d.txt",
+      "urls": [
+        "https://synthetic.example.org/a-page/",
+        "https://synthetic.example.org/z-page/"
+      ],
+      "pages": [
+        {
+          "url": "https://synthetic.example.org/a-page/",
+          "sha256": "47c4b3e3c7e2b00cab53f75e793eeabfb556e0305b83a1b90851fdf55d25a84d",
+          "bytes": 135
+        },
+        {
+          "url": "https://synthetic.example.org/z-page/",
+          "sha256": "47c4b3e3c7e2b00cab53f75e793eeabfb556e0305b83a1b90851fdf55d25a84d",
+          "bytes": 135
+        }
+      ],
+      "changed_urls": [
+        "https://synthetic.example.org/a-page/",
+        "https://synthetic.example.org/z-page/"
+      ],
+      "blocked_urls": [],
+      "ready": true,
+      "retry_receipt_id": null,
+      "indexing_verified": false,
+      "geo_effect_verified": false
+    }
+  },
+  "submit_input": {
+    "action": "submit",
+    "context_sha256": "818a4df1dc973b2031f4d99135d2e8f85fe3a814b2202c8e10c9673e73f81c46",
+    "preview_id": "b794da92aab64121a0ca5dd231cb1c91",
+    "request_id": "3ab0353a-c470-4f4a-b5a1-19a9340f5a1e"
+  },
+  "submit_result": {
+    "overview": {
+      "supported": true,
+      "reason": "",
+      "cycle_id": "36c5a9233f094352b5fed2225c7d8fe4",
+      "project_id": 1,
+      "site_origin": "https://synthetic.example.org",
+      "page_scope": "https://synthetic.example.org/",
+      "context_sha256": "818a4df1dc973b2031f4d99135d2e8f85fe3a814b2202c8e10c9673e73f81c46",
+      "endpoint": "https://api.indexnow.org/indexnow",
+      "limits": {
+        "max_urls": 3,
+        "preview_seconds": 600,
+        "max_page_bytes": 524288,
+        "total_seconds": 42
+      },
+      "previews": [
+        {
+          "blocked_urls": [],
+          "changed_urls": [
+            "https://synthetic.example.org/a-page/",
+            "https://synthetic.example.org/z-page/"
+          ],
+          "context_sha256": "818a4df1dc973b2031f4d99135d2e8f85fe3a814b2202c8e10c9673e73f81c46",
+          "created_at": "2026-11-02T18:56:03.090941+00:00",
+          "cycle_id": "36c5a9233f094352b5fed2225c7d8fe4",
+          "expires_at": "2026-11-02T19:06:03.090941+00:00",
+          "geo_effect_verified": false,
+          "id": "b794da92aab64121a0ca5dd231cb1c91",
+          "indexing_verified": false,
+          "key_location": "https://synthetic.example.org/a1234567890b1234567890c1234567890d.txt",
+          "pages": [
+            {
+              "bytes": 135,
+              "sha256": "47c4b3e3c7e2b00cab53f75e793eeabfb556e0305b83a1b90851fdf55d25a84d",
+              "url": "https://synthetic.example.org/a-page/"
+            },
+            {
+              "bytes": 135,
+              "sha256": "47c4b3e3c7e2b00cab53f75e793eeabfb556e0305b83a1b90851fdf55d25a84d",
+              "url": "https://synthetic.example.org/z-page/"
+            }
+          ],
+          "project_id": 1,
+          "ready": true,
+          "retry_receipt_id": null,
+          "urls": [
+            "https://synthetic.example.org/a-page/",
+            "https://synthetic.example.org/z-page/"
+          ]
+        }
+      ],
+      "notifications": [
+        {
+          "body_sha256": "4be75840b5f99c85fe3352a0ec9ce688c85179e1869cca6e1cb2f83844d7eb37",
+          "completed_at": "2026-11-02T18:56:03.101429+00:00",
+          "content_sha256": "2c3fb91d4f61d5a9fc12ecf43cf0990864681c32bd2caf01f638719ff9efd861",
+          "context_sha256": "818a4df1dc973b2031f4d99135d2e8f85fe3a814b2202c8e10c9673e73f81c46",
+          "created_at": "2026-11-02T18:56:03.098981+00:00",
+          "cycle_id": "36c5a9233f094352b5fed2225c7d8fe4",
+          "endpoint": "https://api.indexnow.org/indexnow",
+          "geo_effect_verified": false,
+          "http_status": 200,
+          "id": "3241b8e1d9844034be95c5340ddf7b59",
+          "indexing_verified": false,
+          "key_location": "https://synthetic.example.org/a1234567890b1234567890c1234567890d.txt",
+          "pages": [
+            {
+              "bytes": 135,
+              "sha256": "47c4b3e3c7e2b00cab53f75e793eeabfb556e0305b83a1b90851fdf55d25a84d",
+              "url": "https://synthetic.example.org/a-page/"
+            },
+            {
+              "bytes": 135,
+              "sha256": "47c4b3e3c7e2b00cab53f75e793eeabfb556e0305b83a1b90851fdf55d25a84d",
+              "url": "https://synthetic.example.org/z-page/"
+            }
+          ],
+          "preview_id": "b794da92aab64121a0ca5dd231cb1c91",
+          "project_id": 1,
+          "reason": "IndexNow已收到通知；抓取、索引更新和GEO效果均未知",
+          "request_id": "3ab0353a-c470-4f4a-b5a1-19a9340f5a1e",
+          "retry_receipt_id": null,
+          "status": "received",
+          "urls": [
+            "https://synthetic.example.org/a-page/",
+            "https://synthetic.example.org/z-page/"
+          ],
+          "idempotent": false,
+          "received": true,
+          "key_validation_pending": false,
+          "delivery_unknown": false
+        }
+      ],
+      "limitations": [
+        "只在本次点击后通知已登记官网范围内的公开HTML页面；不自动后台提交，不操作搜索平台登录。",
+        "HTTP 200只代表通知已收到；202代表密钥仍待核验，不表示已经抓取、更新索引或豆包采用。",
+        "本次记录不计入GEO效果；索引版本、自然搜索及普通豆包同题结果仍需各自取得证据。",
+        "没有公开密钥文件时需网站维护者先部署；不读取Cookie、API Key、密码或客户内部文件。",
+        "相同页面内容已收到、待核验或发送结果未知时不重复通知；明确拒绝后只能显式重试。"
+      ]
+    },
+    "receipt": {
+      "id": "3241b8e1d9844034be95c5340ddf7b59",
+      "cycle_id": "36c5a9233f094352b5fed2225c7d8fe4",
+      "project_id": 1,
+      "preview_id": "b794da92aab64121a0ca5dd231cb1c91",
+      "request_id": "3ab0353a-c470-4f4a-b5a1-19a9340f5a1e",
+      "context_sha256": "818a4df1dc973b2031f4d99135d2e8f85fe3a814b2202c8e10c9673e73f81c46",
+      "key_location": "https://synthetic.example.org/a1234567890b1234567890c1234567890d.txt",
+      "urls": [
+        "https://synthetic.example.org/a-page/",
+        "https://synthetic.example.org/z-page/"
+      ],
+      "pages": [
+        {
+          "url": "https://synthetic.example.org/a-page/",
+          "sha256": "47c4b3e3c7e2b00cab53f75e793eeabfb556e0305b83a1b90851fdf55d25a84d",
+          "bytes": 135
+        },
+        {
+          "url": "https://synthetic.example.org/z-page/",
+          "sha256": "47c4b3e3c7e2b00cab53f75e793eeabfb556e0305b83a1b90851fdf55d25a84d",
+          "bytes": 135
+        }
+      ],
+      "body_sha256": "4be75840b5f99c85fe3352a0ec9ce688c85179e1869cca6e1cb2f83844d7eb37",
+      "content_sha256": "2c3fb91d4f61d5a9fc12ecf43cf0990864681c32bd2caf01f638719ff9efd861",
+      "endpoint": "https://api.indexnow.org/indexnow",
+      "created_at": "2026-11-02T18:56:03.098981+00:00",
+      "completed_at": "2026-11-02T18:56:03.101429+00:00",
+      "status": "received",
+      "http_status": 200,
+      "reason": "IndexNow已收到通知；抓取、索引更新和GEO效果均未知",
+      "retry_receipt_id": null,
+      "indexing_verified": false,
+      "geo_effect_verified": false,
+      "idempotent": false,
+      "received": true,
+      "key_validation_pending": false,
+      "delivery_unknown": false
+    }
+  }
+}

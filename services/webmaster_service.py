@@ -47,7 +47,9 @@ def _digest(value):
 def _global_ip(value):
     address = ipaddress.ip_address(value)
     if (not address.is_global or address.is_reserved or address.is_multicast or address.is_unspecified
-            or getattr(address, 'ipv4_mapped', None) is not None):
+            or getattr(address, 'ipv4_mapped', None) is not None
+            or getattr(address, 'sixtofour', None) is not None
+            or getattr(address, 'teredo', None) is not None):
         raise ValueError('官网检查只允许公网地址')
     return address
 

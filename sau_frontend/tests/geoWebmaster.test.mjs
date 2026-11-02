@@ -31,7 +31,7 @@ const setup = (props, api, emit = () => {}) => {
     URL: { createObjectURL: blob => { blobs.push(blob); return 'blob:original-xml' }, revokeObjectURL: url => revoked.push(url) },
     document: dom, setTimeout: fn => fn() }
   const instance = new Function(...Object.keys(deps), body + `;return {${names.join(',')}};`)(...Object.values(deps))
-  return { ...helpers, ...instance, lifecycle, clipboard, downloads, blobs, revoked }
+  return { ...helpers, ...instance, lifecycle, clipboard, downloads, blobs, revoked, GeoIndexNow: { render: () => Vue.h('section', { 'data-testid': 'indexnow-stub' }) } }
 }
 const harness = (value = cycle(), overrides = {}) => {
   const props = Vue.reactive({ cycle: value, busy: false }), calls = { list: [], update: [], emit: [] }

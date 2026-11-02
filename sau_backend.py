@@ -1193,6 +1193,39 @@ def geo_webmaster(identifier):
     return jsonify(code=200, data=result)
 
 
+@app.route('/api/geo-content/cycles/<identifier>/indexnow', methods=['GET', 'POST'])
+def geo_indexnow(identifier):
+    from services import geo_indexnow_service as indexnow
+
+    def private_response(value):
+        response = app.make_response(value)
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+
+    try:
+        if request.method == 'GET':
+            rejected = _feedback_same_origin()
+            if rejected is not None:
+                return private_response(rejected)
+            if request.args or request.content_length or request.stream.read(1):
+                raise ValueError('官网通知范围只从本轮资料读取，查询不接受覆盖参数或正文')
+            result = indexnow.get_overview(app.config['DATABASE_PATH'], identifier)
+        else:
+            data, rejected = _external_feedback_json(maximum=16 * 1024)
+            if rejected is not None:
+                return private_response(rejected)
+            result = indexnow.perform_action(app.config['DATABASE_PATH'], identifier, data)
+    except RequestEntityTooLarge:
+        return private_response((jsonify(code=413, msg='官网更新通知JSON不能超过16KiB', data=None), 413))
+    except geo_content_store.ResearchNotFoundError as error:
+        return private_response((jsonify(code=404, msg=str(error), data=None), 404))
+    except (ValueError, TypeError, KeyError) as error:
+        return private_response((jsonify(code=400, msg=str(error), data=None), 400))
+    except sqlite3.Error:
+        return private_response((jsonify(code=503, msg='通知记录暂时无法安全保存，请查看原回执，不要自动重新发送', data=None), 503))
+    return private_response(jsonify(code=200, data=result))
+
+
 @app.route('/api/geo-content/cycles/<identifier>/search-onboarding', methods=['GET', 'POST'])
 def geo_search_onboarding(identifier):
     from services import geo_search_onboarding as onboarding

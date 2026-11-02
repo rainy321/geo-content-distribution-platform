@@ -209,6 +209,16 @@ class WebmasterServiceTests(WebmasterFixture, unittest.TestCase):
 
 
 class PublicFetchSafetyTests(unittest.TestCase):
+    def test_ipv6_transition_addresses_cannot_hide_a_private_endpoint(self):
+        for address in ('2002:7f00:1::', '2002:a00:1::', '2002:808:808::',
+                        '2001:0000:4136:e378:8000:63bf:3fff:fdd2'):
+            with self.subTest(address=address), self.assertRaises(ValueError):
+                service._global_ip(address)
+            answers = [(socket.AF_INET6, socket.SOCK_STREAM, 6, '', (address, 443, 0, 0))]
+            with patch.object(socket, 'getaddrinfo', return_value=answers), self.assertRaises(ValueError):
+                service._resolve_public('synthetic-public.example.org')
+        self.assertEqual(str(service._global_ip('2606:4700:4700::1111')), '2606:4700:4700::1111')
+
     def test_private_origin_credentials_port_and_ambiguous_hosts_are_rejected(self):
         for url in ('http://example.com', 'https://127.0.0.1', 'https://[::1]', 'https://10.0.0.1',
                     'https://169.254.169.254/', 'https://localhost/', 'https://host.local/',

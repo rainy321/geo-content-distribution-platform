@@ -57,12 +57,14 @@
     </template>
     <p v-if="notice" class="webmaster-hint" role="status" aria-live="polite">{{ notice }}</p>
     <p v-if="writeUncertain" class="webmaster-error">保存结果未确认，请先刷新进度核对；软件不会自动重复写入。</p>
+    <GeoIndexNow :cycle="cycle" :busy="busy || localBusy || loading" @busy="indexNowBusy=$event"/>
   </section>
 </template>
 
 <script setup>
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { geoWebmasterApi } from '@/api/geoWebmaster'
+import GeoIndexNow from './GeoIndexNow.vue'
 import { journeyDate } from '@/utils/geoJourney'
 import { bingWebmasterEntry, webmasterOverview, webmasterOrigin, webmasterPayload, webmasterReadFile, webmasterDecodeFile,
   webmasterDeploymentText, webmasterStage, webmasterPublicLabel, webmasterSitemapLabel, webmasterSiteUrl, webmasterInspectionKey, webmasterSavedInspection, webmasterIndexLabel, webmasterError } from '@/utils/geoWebmaster'
@@ -70,6 +72,7 @@ import { bingWebmasterEntry, webmasterOverview, webmasterOrigin, webmasterPayloa
 const props = defineProps({ cycle: { type: Object, required: true }, busy: Boolean })
 const emit = defineEmits(['busy'])
 const overview = ref(props.cycle.webmaster || null), loading = ref(false), saving = ref(''), readingFile = ref(false)
+const indexNowBusy = ref(false)
 const error = ref(''), notice = ref(''), writeUncertain = ref(false), ownershipConfirmed = ref(false)
 const step = ref(webmasterStage(props.cycle.webmaster?.record)), sitemapStatus = ref(''), discoveredUrls = ref(''), sitemapNote = ref(''), inspectionUrl = ref(''), inspectionStatus = ref('unknown'), inspectionNote = ref('')
 const inspectionStatusEdited = ref(false)
@@ -79,7 +82,7 @@ const currentScope = () => `${props.cycle.id}:${webmasterOrigin(props.cycle)}`
 const view = computed(() => webmasterOverview(props.cycle, overview.value))
 const record = computed(() => view.value.record || {})
 const localBusy = computed(() => Boolean(saving.value) || readingFile.value)
-const locked = computed(() => props.busy || localBusy.value || loading.value)
+const locked = computed(() => props.busy || localBusy.value || loading.value || indexNowBusy.value)
 const publicLabel = computed(() => webmasterPublicLabel(record.value)), sitemapLabel = computed(() => webmasterSitemapLabel(record.value))
 const inspections = computed(() => (Array.isArray(record.value.inspections) ? record.value.inspections : []).filter(item => webmasterSiteUrl(item?.url, view.value.site_origin)))
 const deploymentText = computed(() => webmasterDeploymentText(view.value))
@@ -116,14 +119,14 @@ const refreshOverview = async () => {
   return true
 }
 const refresh = async () => {
-  if (locked.value || disposed) return
+  if (props.busy || localBusy.value || loading.value || disposed) return
   const version = scopeVersion; loading.value = true; error.value = ''
   try { if (await refreshOverview()) writeUncertain.value = false }
   catch (cause) { if (version === scopeVersion && !disposed) error.value = webmasterError(cause) }
   finally { if (version === scopeVersion && !disposed) loading.value = false }
 }
 const perform = async (action, fields = {}, options = {}) => {
-  if (disposed || props.busy || saving.value || loading.value || writeUncertain.value || readingFile.value && !options.duringUpload || !view.value.supported) return false
+  if (disposed || props.busy || indexNowBusy.value || saving.value || loading.value || writeUncertain.value || readingFile.value && !options.duringUpload || !view.value.supported) return false
   const scope = currentScope(), version = scopeVersion, cycleId = props.cycle.id, context = options.context || view.value.context_sha256
   saving.value = action; error.value = ''; notice.value = ''
   let wrote = false
@@ -173,7 +176,7 @@ const saveVerificationFile = () => {
     setTimeout(() => URL.revokeObjectURL(url), 1000)
   } catch (cause) { error.value = webmasterError(cause) }
 }
-watch(localBusy, value => emit('busy', value), { immediate: true, flush: 'sync' })
+watch(() => localBusy.value || indexNowBusy.value, value => emit('busy', value), { immediate: true, flush: 'sync' })
 watch(() => props.cycle.webmaster, value => { if (!localBusy.value) apply(value || null) }, { flush: 'sync' })
 watch(currentScope, () => {
   scopeVersion++; readVersion++; overview.value = props.cycle.webmaster || null; loading.value = false; saving.value = ''; readingFile.value = false
