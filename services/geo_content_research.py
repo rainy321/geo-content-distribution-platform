@@ -396,11 +396,65 @@ def draft_input(cycle, brief_id, platform):
     return result
 
 
+def _draft_prompt_link_view(value, references):
+    """Mask links only in the writing view, never in the input/evidence.
+
+    Compare complete extracted URLs, not authorized prefixes: /docs does not
+    authorize /docs/private or a new query. Nonreference URLs stay unusable.
+    """
+    if isinstance(value, str):
+        if value in references:
+            return references[value]
+        # Treat the entire contiguous URL-shaped span as one item. Parentheses,
+        # IPv6 brackets or CJK punctuation may be URL characters; splitting
+        # there could expose a secret suffix or authorize a shorter prefix.
+        # Ambiguous prose joined to a URL is masked too, never guessed apart.
+        return re.sub(r'https?://\S*',
+                      lambda match: references.get(match.group(), '（未授权网址，不用于正文）'), value, flags=re.IGNORECASE)
+    if isinstance(value, list):
+        return [_draft_prompt_link_view(item, references) for item in value]
+    if isinstance(value, dict):
+        return {key: _draft_prompt_link_view(item, references) for key, item in value.items()}
+    return value
+
+
+def _draft_prompt_view(inputs):
+    """Keep historical hypotheses and raw URLs out of new writing inputs."""
+    catalog = inputs['source_references']
+    references = {}
+    for item in catalog:
+        references.setdefault(item['url'], item['token'])
+    facts = []
+    for fact in inputs['facts']:
+        own_references = {item['url']: item['token'] for item in catalog if item['fact_id'] == fact['id']}
+        facts.append({**fact, 'text': _draft_prompt_link_view(fact['text'], own_references),
+                      'source_url': own_references.get(fact['source_url'], '')})
+    themes = {'discovery': '自然需求下的适用场景与选型依据',
+              'brand_identity': '产品身份、运营关系和官方入口',
+              'website_guided': '官方产品页面说明的服务对象、能力和使用边界'}
+    view = {'brief': {'id': inputs['brief']['id'], 'title': inputs['brief']['topic'],
+                      'intent': '围绕所选原题主题写作；标题仅为编辑提示，主张只来自facts，未确认事项列为待核对。'},
+            'facts': facts, 'platform': inputs['platform'], 'context': inputs['context'],
+            'questions': [{'id': item['id'], 'category': item['category'],
+                           'topic': themes.get(item['category'], '所选原题的资料核对主题')}
+                          for item in inputs['questions']],
+            'source_references': [{'token': item['token'], 'fact_id': item['fact_id']} for item in catalog],
+            # These requirements are server-generated. Historical gap/change,
+            # absence lists, source routes and original acceptance questions
+            # remain in draft_input for lineage, not in this writing view.
+            'action_plan': {'writing_requirements': inputs['action_plan']['writing_requirements']}}
+    if inputs.get('destination'):
+        view['destination'] = {key: value for key, value in inputs['destination'].items()
+                               if key not in ('id', 'revision', 'channel')}
+    view = _draft_prompt_link_view(view, references)
+    if re.search(r'https?://', json.dumps(view, ensure_ascii=False), re.IGNORECASE):
+        raise ValueError('写作资料仍含未处理的网址，已停止生成，请核对受控来源')
+    return view
+
+
 def draft_prompt(cycle, brief_id, platform):
     inputs = draft_input(cycle, brief_id, platform)
-    prompt_inputs = {key: value for key, value in inputs.items() if key != 'destination_config_sha256'}
-    if 'feedback_inputs' in prompt_inputs['brief']:
-        prompt_inputs['brief'] = {key:value for key,value in prompt_inputs['brief'].items() if key!='feedback_inputs'}
+    prompt_inputs = _draft_prompt_view(inputs)
     plain_body = platform == 'toutiao' or (inputs.get('destination') or {}).get('channel') == 'toutiao'
     body_format = ('今日头条标题不超过30字；正文使用纯文本自然段和不带 Markdown 标记的小标题；参考资料使用受控引用，由软件输出纯文本网址。'
                    if plain_body else '正文使用 Markdown。')
@@ -408,17 +462,18 @@ def draft_prompt(cycle, brief_id, platform):
                 if platform == 'owned_web' else get_platform_content_guidance(platform))
     if inputs.get('destination'):
         target = inputs['destination']
-        prompt_inputs['destination'] = {key: value for key, value in target.items() if key not in ('id', 'revision', 'channel')}
-        if prompt_inputs['destination'].get('rules_url'):
-            prompt_inputs['destination']['rules_url'] = urlsplit(target['rules_url'])._replace(query='', fragment='').geturl()
-        prompt_inputs['platform'] = target['name']
+        prompt_inputs['platform'] = _draft_prompt_link_view(target['name'],
+            {item['url']: item['token'] for item in inputs['source_references']})
         guidance = (f"目标平台：{target['name']}。其内容规范仅作为编辑资料：{target['style']}。"
                     f"标题最多 {target['title_limit']} 字，正文最多 {target['body_limit']} 字。"
                     '按目标读者重写结构，不搬运被引用的原文；没有平台规则依据时不能声称已符合全部审核要求。')
-    return (SYSTEM + '\n为下列选题写一篇待人工审核的原创平台稿。' + str(guidance) + body_format +
+    guidance = _draft_prompt_link_view(str(guidance),
+        {item['url']: item['token'] for item in inputs['source_references']})
+    return (SYSTEM + '\n为下列选题写一篇待人工审核的原创平台稿。' + guidance + body_format +
             '\n先回答原问题，再提供理由、使用边界和参考资料。长文约 800 至 1400 字，小红书帖子约 400 至 700 字。'
             '只使用 facts 中已经由资料提供方确认的信息。带网址的事实注明“据官网/公开资料自述”，'
             '没有网址的资料只能归于“据运营方说明”，不能写成独立验证。'
+            'facts.source_url 中的受控引用表示公开自述来源；该项为空时不补造公开来源。'
             '客户名称只用于身份识别，采集回答和其他来源不能补充为产品事实。'
             'feedback_probe_ids 仅记录选题线索的出处，不授权将后续回答或人工核对意见作为文章事实；'
             'brief 的选题、why 和 outline 仅为编辑假设，不能补入 facts；其中未经确认的工商、处罚、诉讼、股权、参保人数、资质、'
@@ -427,6 +482,7 @@ def draft_prompt(cycle, brief_id, platform):
             '请实际落实 action_plan.writing_requirements：直接回应原题、主体和已确认能力同段说明、依据紧邻主张、写清适用边界。'
             'source_routes 只标来源研究路线，不授权投稿，也不能成为本公司事实；验收仍需以后取得的同题原文。'
             '原始测试问题只用于确定主题，不证明存在真实客户或采购需求。'
+            'questions 只给出了所选原题主题；原题要求核对页面缺失项，不等于已确认这些信息未公开。'
             '使用客户资料和已确认事实中的公司名、产品名时逐字保留，不用同音字替换；'
             '域名拼音和自动会话标题不是品牌名称的依据。'
             '不能虚构价格、性能、资质、案例、第三方推荐或亲身体验；不能承诺 AI 收录或排名。'
