@@ -62,7 +62,10 @@ const reconcile = source => {
   return view
 }
 const waitFor = async (promise, milliseconds) => {
-  const waiter = bingAwait(promise, { setTimeout, clearTimeout }, milliseconds)
+  const waiter = bingAwait(promise, {
+    setTimeout: (callback, delay) => setTimeout(callback, delay),
+    clearTimeout: timer => clearTimeout(timer)
+  }, milliseconds)
   activeWait = waiter
   try { return await waiter.promise }
   finally { if (activeWait === waiter) activeWait = null }

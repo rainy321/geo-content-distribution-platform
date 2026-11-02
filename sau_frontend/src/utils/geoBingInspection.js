@@ -68,7 +68,10 @@ export function bingRestore(storage, cycle) {
   } catch { return null }
 }
 
-export function bingAwait(promise, timers = { setTimeout, clearTimeout }, milliseconds = 45000) {
+export function bingAwait(promise, timers = {
+  setTimeout: (callback, milliseconds) => setTimeout(callback, milliseconds),
+  clearTimeout: timer => clearTimeout(timer)
+}, milliseconds = 45000) {
   let timer, rejectWait, finished = false
   const waiting = new Promise((resolve, reject) => {
     rejectWait = reject
