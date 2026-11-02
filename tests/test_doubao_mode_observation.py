@@ -1,12 +1,14 @@
 """Execute both real JS readers against a synthetic DOM in Node, without a browser."""
 import json
+import asyncio
 import shutil
 import subprocess
 import unittest
+from unittest.mock import AsyncMock, patch
 
 from services.doubao_source_collector import (
     CollectorConfig, _LOGIN_OBSERVATION_JS, _VISIBLE_CLIENT_MODE_JS, read_snapshot,
-    _read_login_observation,
+    _read_login_observation, _settle_pre_submission_mode,
 )
 
 
@@ -182,6 +184,78 @@ class ConservativeModeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(_VISIBLE_CLIENT_MODE_JS, SNAPSHOT_JS)
         self.assertIn(_VISIBLE_CLIENT_MODE_JS, _LOGIN_OBSERVATION_JS)
         self.assertNotIn('__VISIBLE_CLIENT_MODE__', SNAPSHOT_JS + _LOGIN_OBSERVATION_JS)
+
+
+@unittest.skipUnless(NODE, 'Node is required to execute the actual JS readers offline')
+class HydratingModeTests(unittest.IsolatedAsyncioTestCase):
+    async def states(self, labels, *, requested='consumer'):
+        """Derive each state from the real DOM reader, not invented mode flags."""
+        config = CollectorConfig(client_mode=requested, strict_client_mode=True)
+        snapshots = []
+        for label in labels:
+            page = NodePage(chips=[{'label': '豆包', 'aria_disabled': 'true'}],
+                            composer=[] if label is None else [{'label': label}])
+            snapshots.append(await read_snapshot(page, config))
+        return config, snapshots
+
+    async def test_editor_before_composer_hydration_waits_for_two_explicit_consumer_observations(self):
+        config, snapshots = await self.states([None, '对话', '对话'])
+        self.assertIsNone(snapshots[0]['client_mode'])
+        with patch('services.doubao_source_collector.read_snapshot', new_callable=AsyncMock,
+                   side_effect=snapshots[1:]) as read, \
+             patch('services.doubao_source_collector.asyncio.sleep', new_callable=AsyncMock):
+            actual = await _settle_pre_submission_mode(object(), config, snapshots[0])
+        self.assertEqual(actual['client_mode'], 'consumer')
+        self.assertEqual(read.await_count, 2)
+        self.assertIsNone(actual['model_label'])  # do not invent a default model
+        self.assertFalse(actual['question_verified'])
+        self.assertEqual(actual['assistant_count'], 0)
+
+    async def test_brief_known_mode_interrupted_by_unknown_needs_two_new_stable_reads(self):
+        config, snapshots = await self.states(['对话', None, '对话', '对话'])
+        with patch('services.doubao_source_collector.read_snapshot', new_callable=AsyncMock,
+                   side_effect=snapshots[1:]) as read, \
+             patch('services.doubao_source_collector.asyncio.sleep', new_callable=AsyncMock):
+            actual = await _settle_pre_submission_mode(object(), config, snapshots[0])
+        self.assertEqual(actual['client_mode'], 'consumer')
+        self.assertEqual(read.await_count, 3)
+
+    async def test_feishu_work_mode_is_not_waited_out_or_reclassified_consumer(self):
+        config, snapshots = await self.states(['工作', '对话', '对话'])
+        with patch('services.doubao_source_collector.read_snapshot', new_callable=AsyncMock) as read, \
+             patch('services.doubao_source_collector.asyncio.sleep', new_callable=AsyncMock) as wait:
+            actual = await _settle_pre_submission_mode(object(), config, snapshots[0])
+        self.assertEqual(actual['client_mode'], 'work')
+        read.assert_not_awaited()
+        wait.assert_not_awaited()
+
+    async def test_unknown_until_poll_limit_is_unknown_not_a_consumer_default(self):
+        config, snapshots = await self.states([None])
+        with patch('services.doubao_source_collector.read_snapshot', new_callable=AsyncMock,
+                   return_value=snapshots[0]) as read, \
+             patch('services.doubao_source_collector.asyncio.sleep', new_callable=AsyncMock):
+            actual = await _settle_pre_submission_mode(object(), config, snapshots[0])
+        self.assertIsNone(actual['client_mode'])
+        self.assertEqual(read.await_count, 12)
+
+    async def test_auth_barrier_during_hydration_returns_for_manual_flow_without_more_reads(self):
+        config, snapshots = await self.states([None, '对话'])
+        for field in ('challenge', 'login_required'):
+            with self.subTest(field=field), \
+                 patch('services.doubao_source_collector.read_snapshot', new_callable=AsyncMock,
+                       return_value={**snapshots[1], field: True}) as read, \
+                 patch('services.doubao_source_collector.asyncio.sleep', new_callable=AsyncMock):
+                actual = await _settle_pre_submission_mode(object(), config, snapshots[0])
+                self.assertTrue(actual[field])
+                self.assertEqual(read.await_count, 1)
+
+    async def test_bounded_read_timeout_does_not_promote_one_late_consumer_observation(self):
+        config, snapshots = await self.states(['对话'])
+        with patch('services.doubao_source_collector.read_snapshot', new_callable=AsyncMock,
+                   side_effect=asyncio.TimeoutError), \
+             patch('services.doubao_source_collector.asyncio.sleep', new_callable=AsyncMock):
+            actual = await _settle_pre_submission_mode(object(), config, snapshots[0])
+        self.assertIsNone(actual['client_mode'])
 
 
 if __name__ == '__main__':

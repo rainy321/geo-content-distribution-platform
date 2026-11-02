@@ -63,7 +63,9 @@ class PreSubmissionTests(unittest.IsolatedAsyncioTestCase):
                  patch('services.doubao_source_collector._navigate_to_doubao', new_callable=AsyncMock), \
                  patch('services.doubao_source_collector._first_visible', new_callable=AsyncMock, return_value=None), \
                  patch('services.doubao_source_collector.read_snapshot', new_callable=AsyncMock,
-                       side_effect=[initial, initial, changed]), \
+                       # Navigation, baseline, stable-mode confirmation, then
+                       # the independent model-label recheck must see mutation.
+                       side_effect=[initial, initial, initial, changed]), \
                  patch('services.doubao_source_collector._save_checkpoint', new_callable=AsyncMock):
                 config = CollectorConfig(question='Synthetic task', requested_model_label='豆包2.1 Lite',
                     output_root=Path(directory)/'evidence', profile_dir=Path(directory)/'profile')

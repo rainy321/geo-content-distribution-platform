@@ -470,6 +470,39 @@ async def read_snapshot(page: Any, config: CollectorConfig, *, allow_external_pa
     raise RuntimeError("snapshot_unavailable")
 
 
+async def _settle_pre_submission_mode(page: Any, config: CollectorConfig, initial: dict[str, Any]) -> dict[str, Any]:
+    """Wait briefly for existing mode controls to hydrate, without clicking.
+
+    The current homepage renders its editor before its composer mode control.
+    A missing control is unknown, not the wrong account. Require two consecutive
+    explicit observations of the requested mode; a known other mode or an auth
+    barrier stops immediately. This helper runs only before filling/sending.
+    """
+    deadline = asyncio.get_running_loop().time() + 3
+    snapshot, consecutive = initial, 0
+    for attempt in range(13):
+        observed = snapshot.get('client_mode')
+        if _blocked_reason(snapshot) or observed in ('consumer', 'work') and observed != config.client_mode:
+            return snapshot
+        consecutive = consecutive + 1 if observed == config.client_mode else 0
+        if consecutive >= 2:
+            return snapshot
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0 or attempt == 12:
+            break
+        await asyncio.sleep(min(.25, remaining))
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            break
+        try:
+            snapshot = await asyncio.wait_for(read_snapshot(page, config), timeout=remaining)
+        except asyncio.TimeoutError:
+            break
+    # A single late observation or continuously absent/conflicting controls do
+    # not establish readiness. Preserve the latest diagnostics, but never send.
+    return {**snapshot, 'client_mode': None}
+
+
 async def _first_visible(locator: Any) -> Any:
     for index in range(await locator.count()):
         item = locator.nth(index)
@@ -1189,6 +1222,7 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                 await page.locator(config.selectors.editor).first.wait_for(state="visible", timeout=15000)
                 baseline = await read_snapshot(page, config)
                 baseline = await _wait_for_manual_verification(page, config, run_dir, result, baseline, progress=progress)
+                baseline = await _settle_pre_submission_mode(page, config, baseline)
                 if baseline["assistant_count"]:
                     result["failure_reason"] = "fresh_conversation_not_available"
                     await _save_checkpoint(page, config, run_dir, result, "before")
