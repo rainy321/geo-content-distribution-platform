@@ -203,6 +203,33 @@ def cycle_observations(cycle):
     return public_research_observations(cycle['baseline'], cycle['observations'])
 
 
+def planning_public_facts(cycle):
+    """Separate provider-confirmed public statements from observed AI answers.
+
+    Do not expand candidate facts, private/ambiguous URLs or owner-only notes
+    into a new planning request. These statements are still not independent
+    evidence of capabilities, customers, delivery or GEO effects.
+    """
+    from services.geo_source_url import trusted_source_url
+    rows = cycle.get('facts')
+    if not isinstance(rows, list):
+        return []
+    result, seen = [], set()
+    for item in rows[:30]:
+        if not isinstance(item, dict):
+            continue
+        identifier, text, url = item.get('id'), item.get('text'), item.get('source_url')
+        if (item.get('confirmed') is not True or not isinstance(identifier, str)
+                or not re.fullmatch(r'f[0-9]{2}', identifier) or identifier in seen
+                or not isinstance(text, str) or not 3 <= len(text.strip()) <= 1500
+                or not isinstance(url, str) or len(url) > 1500 or not trusted_source_url(url)):
+            continue
+        seen.add(identifier)
+        result.append({'id': identifier, 'text': text.strip(), 'source_url': url,
+                       'basis': 'provider_confirmed_public_statement_not_independent_verification'})
+    return result
+
+
 def research_prompt(cycle):
     observed = cycle_observations(cycle)
     external = cycle.get('baseline_source') == 'user_reported_external'
@@ -210,7 +237,14 @@ def research_prompt(cycle):
                           for case in project_report_evaluation(cycle['baseline'])['cases'])
     notice = ('\n本轮没有原生采集报告，用户提供的外部原文仅作编辑线索；usable不代表采样、完整性或内容已独立核验。'
               '回答中的工商、处罚、诉讼、业务或主体断言均不能自动视作客户事实。' if external else '')
-    return (SYSTEM + notice + '\n为客户制定 1 到 6 个可执行的原创内容选题。只处理有效回答；'
+    from services.geo_discovery_funnel import discovery_funnel
+    directions = discovery_funnel(cycle)['priorities']
+    return (SYSTEM + notice + '\n为当前客户的 GEO 优化制定 1 到 6 个可执行的原创内容选题。只处理有效回答；'
+            '优先解决当前对象在原题中的身份、品牌检索与适用场景缺口，不把任务改成仅罗列竞争对手或泛泛行业风险。'
+            'public_confirmed_facts 是资料提供方核对过的公开自述，须与采集回答分开，仍不等于独立验证。'
+            '若回答称未找到产品，但这些资料给出了名称、运营关系或入口，应把冲突识别为待改善的发现路径，'
+            '安排以这些已确认公开资料为依据的内容；不能把“未检索到”沿用为“产品不存在”或继续要求重复补已有资料。'
+            '缺少这些公开自述时仍需补依据，不从回答、客户简介或品牌提及自动生成事实。'
             '区分自然需求未提及、身份核验、官网信息和来源不可判断，不能把未知当作零命中。'
             'diagnosis、topic、why 和 outline 中涉及采集回答的说法，须注明“本次 AI 回答声称”或“本次 AI 回答称未查到”，'
             '不能写成已核实结论，也不能将未经核验的断言写进选题标题。'
@@ -239,6 +273,8 @@ def research_prompt(cycle):
                 'profile': cycle['profile'], 'cases': observed['cases'], 'sources': observed['sources'],
                 'baseline_basis': 'user_reported_external_not_independently_verified' if external else 'native_report',
                 'followup_feedback': planning_feedback(cycle),
+                'public_confirmed_facts': planning_public_facts(cycle),
+                'optimization_priorities': directions,
                 'distribution_opportunities': [] if private_context else cycle.get('opportunities', [])}, ensure_ascii=False))
 
 
