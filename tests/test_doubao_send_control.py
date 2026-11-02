@@ -130,7 +130,10 @@ class FencedAttemptCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.editor = SimpleNamespace(fill=AsyncMock(), press=AsyncMock(), evaluate=AsyncMock(return_value={
             'readback': self.sent, 'method': 'contenteditable_inner_text_exact', 'editor_dom': '<div></div>',
             'inner_text': self.sent, 'text_content': self.sent}))
-        self.control = SimpleNamespace(click=AsyncMock(side_effect=RuntimeError('synthetic stop after click attempt')))
+        async def click(*_args, **kwargs):
+            if not kwargs.get('trial'):
+                raise RuntimeError('synthetic stop after click attempt')
+        self.control = SimpleNamespace(click=AsyncMock(side_effect=click))
 
     async def collect(self, *, progress=None, writer=None, control_error=None):
         context = SimpleNamespace(new_page=AsyncMock(return_value=self.page), browser=None, close=AsyncMock())
@@ -163,7 +166,8 @@ class FencedAttemptCheckpointTests(unittest.IsolatedAsyncioTestCase):
         persisted = []
         def progress(event):
             if event['event'] == 'question_submission_started':
-                self.control.click.assert_not_awaited()
+                self.assertEqual(self.control.click.await_args_list[0].kwargs, {'trial': True, 'timeout': 1500})
+                self.assertFalse(any(not call.kwargs.get('trial') for call in self.control.click.await_args_list))
                 result = json.loads(Path(event['evidence_path']).read_text(encoding='utf-8'))
                 proof = json.loads((Path(event['evidence_path']).parent/'editor-readback.json').read_text(encoding='utf-8'))
                 self.assertTrue(proof['verified'])
@@ -172,12 +176,16 @@ class FencedAttemptCheckpointTests(unittest.IsolatedAsyncioTestCase):
                 jobs._collector_progress(event)
                 self.assertTrue(jobs.store.read(jobs.job['id'])['submission_state']['question_submission_attempted'])
                 persisted.append(True)
-        async def click(*_args, **_kwargs):
+        async def click(*_args, **kwargs):
+            if kwargs.get('trial'):
+                self.assertEqual(persisted, [])
+                return
             self.assertEqual(persisted, [True])
             raise RuntimeError('synthetic click result unknown')
         self.control.click.side_effect = click
         result, _ = await self.collect(progress=progress)
-        self.control.click.assert_awaited_once_with(timeout=5000)
+        self.assertEqual([call.kwargs for call in self.control.click.await_args_list],
+                         [{'trial': True, 'timeout': 1500}, {'timeout': 5000}])
         self.editor.press.assert_not_awaited()
         self.assertTrue(result['question_submission_attempted'])
         self.assertFalse(result['question_submitted'])
@@ -202,7 +210,7 @@ class FencedAttemptCheckpointTests(unittest.IsolatedAsyncioTestCase):
                 raise OSError('synthetic checkpoint disk failure')
             return original(path, result)
         result, _ = await self.collect(writer=writer)
-        self.control.click.assert_not_awaited()
+        self.assertTrue(all(call.kwargs.get('trial') for call in self.control.click.await_args_list))
         self.editor.press.assert_not_awaited()
         self.assertEqual(result['failure_stage'], 'submission_checkpoint')
 
@@ -211,7 +219,7 @@ class FencedAttemptCheckpointTests(unittest.IsolatedAsyncioTestCase):
             if event['event'] == 'question_submission_started':
                 raise OSError('synthetic native checkpoint disk failure')
         result, _ = await self.collect(progress=progress)
-        self.control.click.assert_not_awaited()
+        self.assertTrue(all(call.kwargs.get('trial') for call in self.control.click.await_args_list))
         self.editor.press.assert_not_awaited()
         self.assertEqual(result['failure_stage'], 'submission_checkpoint')
 

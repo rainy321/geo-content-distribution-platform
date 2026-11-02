@@ -1,0 +1,43 @@
+<!doctype html>
+<!-- Synthetic DOM for the observed promotion screenshot. Not captured live DOM. -->
+<html lang="zh-CN"><meta charset="utf-8"><title>合成豆包推广遮挡测试</title>
+<style>
+body{margin:0;font-family:sans-serif}textarea{position:fixed;left:20px;bottom:20px;width:600px;height:160px}
+#flow-end-msg-send{position:fixed;right:25px;bottom:25px;width:44px;height:44px}
+.promotion-modal-layer{position:fixed;inset:0;background:#0005;z-index:100}
+.promotion-modal{position:absolute;left:25%;top:20%;width:50%;padding:30px;background:white}
+.promotion-close{position:absolute;right:10px;top:10px}
+[hidden]{display:none!important}
+</style>
+<button data-testid="workspace-switch-chip">豆包对话</button>
+<button data-testid="chat_input_action_model">快速</button>
+<textarea aria-label="合成任务输入"></textarea>
+<button data-testid="chat_input_send_button" id="flow-end-msg-send" aria-disabled="false" data-disabled="false" data-loading="false">↑</button>
+<section class="promotion-modal-layer" id="promotion-layer">
+  <div role="dialog" aria-modal="true" class="promotion-modal">
+    <button class="promotion-close" aria-label="关闭" data-testid="promotion-close">×</button>
+    <h2>每日签到，免费用<br>豆包工作</h2>
+    <p>每天签到领 200 额度，周一额度翻倍；</p><p>签到 30 天可得 8800 额度；</p>
+    <p>额度可以解锁更多豆包工作能力。</p>
+    <button id="download">立即下载电脑版</button>
+  </div>
+</section>
+<script>
+window.sendClicks=0;window.closeClicks=0;window.downloadClicks=0;window.enterPresses=0;
+document.querySelector('textarea').addEventListener('keydown',event=>{if(event.key==='Enter')window.enterPresses++});
+document.querySelector('#flow-end-msg-send').addEventListener('click',()=>{window.sendClicks++});
+document.querySelector('#download').addEventListener('click',()=>{window.downloadClicks++});
+document.querySelector('[data-testid="promotion-close"]').addEventListener('click',()=>{
+  window.closeClicks++;
+  if(window.closeMutation==='editor')document.querySelector('textarea').value='外部改变的原文';
+  if(window.closeMutation==='mode')document.querySelector('[data-testid="workspace-switch-chip"]').textContent='豆包工作';
+  if(window.closeMutation==='captcha'){
+    const challenge=document.createElement('div');challenge.id='captcha-after-close';challenge.textContent='请完成安全验证';document.body.append(challenge);
+  }
+  if(window.closeMutation==='another-overlay'){
+    const block=document.createElement('div');block.className='promotion-modal-layer';block.textContent='未知二次弹窗';document.body.append(block);
+  }
+  if(window.closeMutation!=='no-effect')document.querySelector('#promotion-layer').remove();
+});
+</script>
+</html>

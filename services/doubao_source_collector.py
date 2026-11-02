@@ -23,7 +23,7 @@ from urllib.parse import urlsplit
 from services.browser_runtime import launch_context
 from services.doubao_answer_state import is_deferred_answer
 from services.doubao_answer_identity import prove_progress_body_elision
-from services.doubao_submission_transport import EDITOR_READBACK_JS, LITERAL_PREAMBLE, submission_fence, submission_text
+from services.doubao_submission_transport import EDITOR_READBACK_JS, KNOWN_DOWNLOAD_PROMOTION_JS, LITERAL_PREAMBLE, submission_fence, submission_text
 
 
 DOUBAO_URL = "https://www.doubao.com/chat/"
@@ -534,6 +534,83 @@ async def _fenced_send_control(page: Any, config: CollectorConfig, run_dir: Path
     # ElementHandle keeps this exact node bound. Replacement or detachment
     # after checkpoint must fail conservatively, never retarget another button.
     return handles[0]
+
+
+async def _fenced_send_ready(page: Any, config: CollectorConfig, run_dir: Path, control: Any,
+                             sent_text: str, baseline: dict[str, Any]) -> Any:
+    """Prove actionability before the send checkpoint; dismiss at most one known ad.
+
+    Trial clicks do not send. The eventual real click remains single-attempt,
+    including when a new overlay appears after this check. Unknown overlays,
+    authentication and changed input never cause a force click or Enter fallback.
+    """
+    proof = {'trial_checks': [], 'promotion_close_attempted': False, 'promotion_close_clicked': False, 'ready': False}
+    path = run_dir / 'submission-actionability.json'
+
+    def persist():
+        path.write_text(json.dumps(proof, ensure_ascii=False, indent=2), encoding='utf-8')
+
+    async def trial(handle):
+        try:
+            await handle.click(trial=True, timeout=1500)
+        except Exception as error:
+            proof['trial_checks'].append({'passed': False, 'error_type': type(error).__name__})
+            persist()
+            return False
+        proof['trial_checks'].append({'passed': True})
+        persist()
+        return True
+
+    if await trial(control):
+        proof['ready'] = True
+        persist()
+        return control
+    if proof['trial_checks'][-1]['error_type'] != 'TimeoutError':
+        raise ValueError('submission_send_button_blocked_not_submitted')
+    inspection = await page.evaluate_handle(KNOWN_DOWNLOAD_PROMOTION_JS, asdict(config.selectors))
+    try:
+        observed = await inspection.evaluate('value => ({...value, close_element:undefined})')
+        proof['promotion'] = observed
+        persist()
+        if observed.get('can_close') is not True:
+            raise ValueError('submission_send_button_blocked_not_submitted')
+        close = (await inspection.get_property('close_element')).as_element()
+        if close is None:
+            raise ValueError('submission_send_button_blocked_not_submitted')
+        proof['promotion_close_attempted'] = True
+        persist()
+        # The bound visible close node is clicked normally, once. Never retarget
+        # another close control or retry it when its result is uncertain.
+        try:
+            await close.click(timeout=2000)
+        except Exception as error:
+            proof['promotion_close_error_type'] = type(error).__name__
+            persist()
+            raise ValueError('submission_promotion_close_unconfirmed_not_submitted') from error
+        proof['promotion_close_clicked'] = True
+        persist()
+    finally:
+        await inspection.dispose()
+    current = await read_snapshot(page, config)
+    if (_blocked_reason(current) or current.get('client_mode') != config.client_mode
+            or current.get('user_message_count') != baseline.get('user_message_count')
+            or current.get('assistant_count') != baseline.get('assistant_count')
+            or current.get('model_label') != baseline.get('model_label')):
+        raise ValueError('submission_context_changed_not_submitted')
+    editor = await _first_visible(page.locator(config.selectors.editor))
+    readback = await editor.evaluate(EDITOR_READBACK_JS, sent_text) if editor is not None else {}
+    text = readback.get('readback')
+    proof['editor_rechecked'] = text == sent_text
+    proof['editor_readback_sha256'] = hashlib.sha256(text.encode('utf-8')).hexdigest() if isinstance(text, str) else None
+    persist()
+    if text != sent_text:
+        raise ValueError('editor_readback_mismatch_not_submitted')
+    control = await _fenced_send_control(page, config, run_dir)
+    if not await trial(control):
+        raise ValueError('submission_send_button_blocked_not_submitted')
+    proof['ready'] = True
+    persist()
+    return control
 
 
 async def _navigate_to_doubao(page: Any, timeout_seconds: float) -> None:
@@ -1189,6 +1266,7 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                 if config.submission_format == 'verbatim_fenced':
                     stage = 'submission_control'
                     send_control = await _fenced_send_control(page, config, run_dir)
+                    send_control = await _fenced_send_ready(page, config, run_dir, send_control, sent_text, baseline)
                 result['submission_transport']['method'] = 'visible_send_button' if send_control is not None else 'editor_enter'
                 result["question_submission_attempted"] = True
                 submission = SubmissionReceipt(page, config.question, baseline['assistant_count'],

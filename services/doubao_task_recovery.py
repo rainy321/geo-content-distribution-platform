@@ -144,6 +144,12 @@ def recovery_message(reason, *, attempted=None, submitted=None, failure_stage=No
                  '请保留并先核对豆包原会话及提交状态，不要仅凭本次等待结果重发')
         return f'等待期限内未取得可确认的完整回答。{state}；部分回答不计入效果统计，原始证据已保留，不会自动重发。'
     if attempted is False and submitted is False:
+        if reason == 'submission_send_button_blocked_not_submitted':
+            return '豆包发送前的点击检查被弹窗、遮罩或未就绪按钮阻挡，尚未尝试发送问题。请正常处理当前页面提示后再手动开始；证据已保留，不会自动重试。'
+        if reason == 'submission_promotion_close_unconfirmed_not_submitted':
+            return '推广提示关闭结果尚未确认，尚未尝试发送问题。请先核对当前页面；证据已保留，不会重复关闭或自动重试。'
+        if reason == 'submission_context_changed_not_submitted':
+            return '关闭推广提示后，界面、模型或会话发生变化，发送前核对未通过，尚未尝试发送问题。请先核对当前页面；原文和证据已保留，不会自动重试。'
         if reason in ('submission_send_button_not_unique_not_submitted', 'submission_send_button_not_ready_not_submitted'):
             return '豆包发送按钮暂不可用或无法唯一确认，本次问题尚未发送。请核对当前窗口后再手动开始；证据已保留，不会自动重试。'
         if reason == 'website_temporarily_unavailable':

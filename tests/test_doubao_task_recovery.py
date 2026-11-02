@@ -12,6 +12,35 @@ from tests.test_geo_tests import plan
 
 
 class TaskRecoveryTests(unittest.TestCase):
+    def test_pre_send_blockers_only_claim_no_attempt_when_both_flags_are_confirmed_false(self):
+        for reason in ('submission_send_button_blocked_not_submitted',
+                       'submission_promotion_close_unconfirmed_not_submitted',
+                       'submission_context_changed_not_submitted'):
+            with self.subTest(reason=reason):
+                message = recovery_message(reason, attempted=False, submitted=False, failure_stage='submission_control')
+                self.assertIn('尚未尝试发送问题', message)
+                self.assertIn('证据已保留', message)
+                self.assertNotIn('登录已失效', message)
+                for attempted in (None, True):
+                    self.assertNotIn('尚未尝试发送问题', recovery_message(reason, attempted=attempted, submitted=False))
+
+    def test_native_research_pre_send_blocker_keeps_false_flags_and_explicit_recovery_message(self):
+        reason = 'submission_send_button_blocked_not_submitted'
+        _, path = self.evidence(failure_reason=reason)
+        async def blocked():
+            self.jobs._collector_progress({'event': 'collector_finished', 'collection_status': 'need_action',
+                'failure_reason': reason, 'failure_stage': 'submission_control', 'evidence_path': str(path),
+                'question_submission_attempted': False, 'question_submitted': False})
+            raise ValueError('wrapper cannot replace the typed submission state')
+        self.jobs._start('research', blocked)
+        self.jobs.worker.join(5)
+        value = self.jobs.get_task()
+        self.assertEqual(value['status'], 'need_action')
+        self.assertIn('尚未尝试发送问题', value['message'])
+        self.assertEqual(value['recovery']['stage'], 'before_submission')
+        self.assertFalse(value['submission_state']['question_submission_attempted'])
+        self.assertFalse(value['submission_state']['question_submitted'])
+
     def test_unacknowledged_send_requests_review_without_claiming_login_or_no_send(self):
         self.assertTrue(action_required('submission_receipt_timeout'))
         message = recovery_message('submission_receipt_timeout', attempted=True, submitted=False)

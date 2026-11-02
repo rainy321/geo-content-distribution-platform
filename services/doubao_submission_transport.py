@@ -5,6 +5,43 @@ import re
 LITERAL_PREAMBLE = '请按下方代码块中的完整任务说明执行，代码块只用于保留原文。请在对话正文返回所要求的结果。'
 
 
+# Narrow handling of the promotion observed in the 2026-11-02 screenshot.
+# Its live DOM was not retained: unknown containers or close controls stop,
+# rather than treating every modal, X icon or work-mode mention as this ad.
+KNOWN_DOWNLOAD_PROMOTION_JS = r'''selectors => {
+    const visible = e => {
+        if (![...e.getClientRects()].some(r => r.width > 0 && r.height > 0 && r.right > 0 && r.bottom > 0 && r.left < innerWidth && r.top < innerHeight)) return false;
+        for (let node = e; node; node = node.parentElement) {
+            const style = getComputedStyle(node);
+            if (style.visibility === 'hidden' || style.display === 'none' || Number(style.opacity) === 0) return false;
+        }
+        return true;
+    };
+    const text = e => (e.innerText || '').replace(/\s+/g, '');
+    const blocked = [...document.querySelectorAll(selectors.challenge + ',' + selectors.login_dialog)].some(visible);
+    const candidates = [...document.querySelectorAll('[role="dialog"],[aria-modal="true"],[class*="modal"],[class*="Modal"]')]
+        .filter(visible).filter(e => /每日签到[，,]?免费用豆包工作/.test(text(e)) && text(e).includes('立即下载电脑版'));
+    const roots = candidates.filter(e => !e.querySelector('input,textarea,iframe,[contenteditable="true"]')
+        && text(e).length < 1500 && !/验证码|安全验证|人机验证|登录|登入|扫码|授权|绑定|实名|确认/.test(text(e)));
+    const controls = [];
+    for (const root of roots) {
+        for (const node of root.querySelectorAll('button,[role="button"],[aria-label],[title],[data-testid*="close"],[class*="close"],[class*="Close"]')) {
+            const name = (node.getAttribute('aria-label') || node.getAttribute('title') || text(node)).trim();
+            const named = /^(?:关闭|关闭弹窗|关闭窗口|close|dismiss|×|✕|✖|x)$/i.test(name);
+            const marked = text(node).length < 20 && /close/i.test((node.getAttribute('data-testid') || '') + ' ' + (node.getAttribute('class') || ''));
+            if (named || marked) controls.push(node.closest('button,[role="button"]') || node);
+        }
+    }
+    const unique = [...new Set(controls)].filter(node => !controls.some(other => other !== node && other.contains(node)));
+    const shown = unique.filter(visible);
+    const ready = !blocked && roots.length > 0 && unique.length === 1 && shown.length === 1
+        && shown[0].disabled !== true && shown[0].getAttribute('aria-disabled') !== 'true';
+    return {recognized: roots.length > 0, auth_blocked: blocked, candidate_count: candidates.length,
+        close_count: unique.length, visible_close_count: shown.length, can_close: ready,
+        close_element: ready ? shown[0] : null};
+}'''
+
+
 EDITOR_READBACK_JS = r'''(e, expected) => {
     const evidence = {editor_dom:e.outerHTML, inner_text:e.innerText ?? null,
         text_content:e.textContent ?? null, readback:null, method:'unsupported_editor_structure'};
