@@ -438,9 +438,13 @@ class BrowserExtractionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(_blocked_reason(snapshot), "login_required")
 
     async def test_workspace_mode_is_recorded_separately(self):
+        await self.page.locator('[data-testid="workspace-switch-chip"]').evaluate('e => e.remove()')
+        snapshot = await read_snapshot(self.page, self.config)
+        self.assertIsNone(snapshot["client_mode"])
+        await self.page.evaluate("document.body.insertAdjacentHTML('beforeend', '<button data-testid=\"workspace-switch-chip\">豆包</button>')")
         snapshot = await read_snapshot(self.page, self.config)
         self.assertEqual(snapshot["client_mode"], "consumer")
-        await self.page.evaluate("document.body.insertAdjacentHTML('beforeend', '<button data-testid=\"workspace-switch-chip\">豆包 工作</button>')")
+        await self.page.locator('[data-testid="workspace-switch-chip"]').evaluate("e => e.textContent = '豆包 工作'")
         snapshot = await read_snapshot(self.page, self.config)
         self.assertEqual(snapshot["client_mode"], "work")
 

@@ -8,7 +8,7 @@ import {articleSnapshot,sameBrand,sameResearchBrief} from '../src/utils/geoJourn
 import {isExternalCycle,nativeCycleCapability} from '../src/utils/geoExternalBaseline.js'
 import {savedCycleContinuation,savedCycleFactEdits} from '../src/utils/geoSavedCycles.js'
 import {baselineWritingOptions} from '../src/utils/geoWritingOptions.js'
-import {storedSessionScope} from '../src/utils/geoAutomaticCollection.js'
+import {storedSessionScope,automaticProfileForRecord,restoreAutomaticProfileChoice} from '../src/utils/geoAutomaticCollection.js'
 const load=path=>{
   const filename=new URL(path,import.meta.url),{descriptor,errors}=parse(fs.readFileSync(filename,'utf8'),{filename:filename.pathname})
   assert.deepEqual(errors,[])
@@ -21,7 +21,7 @@ const load=path=>{
 const journey=load('../src/views/GeoJourney.vue'),search=load('../src/views/GeoSearchTests.vue'),content=load('../src/views/GeoContentLoop.vue')
 const directorySource=fs.readFileSync(new URL('../src/api/geoDirectoryApplications.js',import.meta.url),'utf8')
 const {directoryTargetForChannel}=new Function(directorySource.replace(/^import .*$/gm,'').replaceAll('export const ','const ')+';return {directoryTargetForChannel};')()
-const run=(page,name,values)=>{const scope={storedSessionScope,directoryTargetForChannel,...values};return Function(...Object.keys(scope),`return (${page.expression(name)})`)(...Object.values(scope))}
+const run=(page,name,values)=>{const scope={storedSessionScope,automaticProfileForRecord,restoreAutomaticProfileChoice,directoryTargetForChannel,...values};return Function(...Object.keys(scope),`return (${page.expression(name)})`)(...Object.values(scope))}
 const profile={name:'合成公开服务有限公司',website:'https://example.org/company',entity_type:'company',description:'公开说明'}
 const external=(changes={})=>({id:'external-a',project_id:7,profile,baseline:null,baseline_source:'user_reported_external',
   external_baseline:{kind:'geo_external_baseline_v1'},capabilities:{native_probe:false,native_retest:false,native_metrics:false,editorial_research:true,work_drafting:true},
@@ -40,7 +40,7 @@ async function routedJourney({url='/journey?project=7&cycle=native-old&focus=fee
   const brief={id:'b01',topic:'合成原主题'},oldDraft={article_id:5,brief_id:'b01',platform:'owned_web',title:'旧稿标题',content:'旧稿正文',provenance:{brief}}
   const original={id:'native-old',project_id:7,report_ref:'native-report',profile,baseline:{profile,run_id:'native-run',cases:[{id:'q01',question:'原题'}]},analysis:{briefs:[brief]},drafts:[oldDraft],channels:{owned_web:'官网'},facts:[]}
   const persisted=[],reads=[]
-  const values={computed,watch,projectId:ref(7),project:ref({id:7,...profile}),sameBrand,sameResearchBrief,articleSnapshot,isExternalCycle,savedCycleContinuation,savedCycleFactEdits,baselineWritingOptions,directoryTargetForChannel,
+  const values={computed,watch,projectId:ref(7),project:ref({id:7,...profile}),sameBrand,sameResearchBrief,articleSnapshot,isExternalCycle,savedCycleContinuation,savedCycleFactEdits,baselineWritingOptions,automaticProfileForRecord,restoreAutomaticProfileChoice,automaticProfileMode:ref('consumer'),automaticProfileModeExplicit:ref(false),directoryTargetForChannel,
     route,router,cycle:ref(original),cycleId:ref(original.id),profileDirty:ref(false),editorDirty:ref(true),editor:reactive({title:'未保存合成标题',content:'未保存合成正文',tags:['合成标签']}),
     recoveryDraft:ref(null),recoveryFacts:ref(null),error:ref(''),briefId:ref('b01'),platform:ref('owned_web'),articleId:ref(5),factRows:ref([{text:'未保存的合成事实',source_url:'',confirmed:false}]),
     report:ref(original.baseline),reportId:ref(original.report_ref),historyReportId:ref(original.report_ref),reportOrigin:ref('history'),plan:ref({plan_sha256:'a'.repeat(64)}),planConfirmed:ref(true),replacementSourceId:ref(9),

@@ -108,6 +108,20 @@ test('automatic run requires confirmation and the new capability without falling
   }finally{current.stop()}
 })
 
+test('Search restoration keeps its consumer session selection when the restored report actually observed work',async()=>{
+  const calls=[],actual={...report(),status:'completed',stop_reason:undefined,execution:{client_mode:'work',profile_mode:'consumer',mode_policy:'available_web'},cases:report().cases.map(item=>({...item,client_mode:'work'}))}
+  const original=JSON.stringify(actual)
+  const page=harness({saved:{project_id:1,client_mode:'consumer',plan:plan(),report:actual},currentTask:{status:'idle'},
+    api:{plan_automatic:async()=>({id:'unused',status:'running'}),start_automatic_run:async(...args)=>{calls.push(args);return {id:'new-auto',status:'running'}}}})
+  try{
+    await page.restoreWorkspace()
+    assert.equal(page.report.value.execution.client_mode,'work')
+    page.autoPlanConfirmed.value=true;await page.startNative('run',true)
+    assert.equal(calls.length,1);assert.deepEqual(calls[0][1],{profile_mode:'consumer',model_label:''})
+    assert.equal(JSON.stringify(actual),original)
+  }finally{page.stop()}
+})
+
 test('automatic planning uses its own preflight bridge and leaves explicit planning available',async()=>{
   const calls=[],page=harness({currentTask:{status:'idle'},api:{
     plan_automatic:async(...args)=>{calls.push(['automatic',...args]);return {id:'automatic-plan',status:'running'}},

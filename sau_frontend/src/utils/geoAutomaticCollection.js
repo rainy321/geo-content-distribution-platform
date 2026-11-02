@@ -7,6 +7,22 @@ export function automaticCollectionOptions(profileMode,model=''){
   if(!['consumer','work'].includes(profileMode)||typeof model!=='string'||model.length>100)throw Error('请核对专用会话与模型选项。')
   return {profile_mode:profileMode,model_label:model.trim()}
 }
+const profileModeKnown=value=>['consumer','work'].includes(value)
+const nativeExecution=record=>isExternalCycle(record)||record?.baseline_source==='user_reported_external'?{}:record?.baseline?.execution||record?.execution||{}
+export function automaticProfileForRecord(record,fallback='consumer'){
+  const execution=nativeExecution(record)
+  // Older explicit runs used their requested mode as the profile. Automatic
+  // runs record the profile separately; their observed mode cannot replace it.
+  const recorded=execution.profile_mode??(execution.mode_policy===undefined?execution.client_mode:null)
+  return profileModeKnown(recorded)?recorded:profileModeKnown(fallback)?fallback:'consumer'
+}
+export function restoreAutomaticProfileChoice(saved={},record=null){
+  if(profileModeKnown(saved.automaticProfileMode))return {mode:saved.automaticProfileMode,explicit:saved.automaticProfileModeExplicit===true}
+  const profile=nativeExecution(record).profile_mode
+  if(profileModeKnown(profile))return {mode:profile,explicit:false}
+  if(profileModeKnown(saved.clientMode))return {mode:saved.clientMode,explicit:false}
+  return {mode:automaticProfileForRecord(record),explicit:false}
+}
 export function requireAutomaticBridge(api){
   if(!automaticBridgeReady(api))throw Error(automaticCollectionUnavailable)
   return api

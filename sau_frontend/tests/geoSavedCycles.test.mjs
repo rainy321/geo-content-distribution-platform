@@ -5,6 +5,7 @@ import { reactive, ref } from 'vue'
 import { parse,compileScript,compileTemplate,compileStyle } from '@vue/compiler-sfc'
 import { createSavedCyclesReader, savedCycleLabel, savedCycleMatches, savedCycleRows, savedCycleContinuation, savedCycleFactEdits } from '../src/utils/geoSavedCycles.js'
 import { baselineWritingOptions } from '../src/utils/geoWritingOptions.js'
+import {automaticProfileForRecord} from '../src/utils/geoAutomaticCollection.js'
 
 const project=(id=1,website='https://tongyuye.com/products/software')=>({id,name:'同于野软件',entity_type:'product',website})
 const row=(id='cycle-a',project_id=1,report_ref='report-a',draft_count=3)=>({id,project_id,report_ref,draft_count,updated_at:'2026-10-21T09:00:00+08:00'})
@@ -48,7 +49,7 @@ const continuationHarness=()=>{
   const filename=new URL('../src/views/GeoJourney.vue',import.meta.url),{descriptor}=parse(fs.readFileSync(filename,'utf8'))
   const compiled=compileScript(descriptor,{id:'journey-continuation'}),declaration=compiled.scriptSetupAst.flatMap(node=>node.type==='VariableDeclaration'?node.declarations:[]).find(node=>node.id.name==='continueSavedCycle')
   const expression=descriptor.scriptSetup.content.slice(declaration.init.start,declaration.init.end)
-  const values={run:async action=>action(),persist:()=>{},syncCycleRoute:async()=>{},savedCycleContinuation,savedCycleFactEdits,baselineWritingOptions,
+  const values={run:async action=>action(),persist:()=>{},syncCycleRoute:async()=>{},savedCycleContinuation,savedCycleFactEdits,baselineWritingOptions,automaticProfileForRecord,automaticProfileMode:ref('consumer'),automaticProfileModeExplicit:ref(false),
     project:ref(project()),profileDirty:ref(false),cycleId:ref('cycle-a'),cycle:ref(continuationValue()),editorDirty:ref(true),
     editor:reactive({title:'本机未保存修改',content:'本机正文',summary:'',tags:['本机标签']}),
     recoveryDraft:ref(null),recoveryFacts:ref(null),articleId:ref(5),activeDraft:ref({article_id:5}),

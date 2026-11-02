@@ -187,7 +187,7 @@ import DoubaoTaskRecovery from '@/components/DoubaoTaskRecovery.vue'
 import GeoExternalBaseline from '@/components/GeoExternalBaseline.vue'
 import {isExternalCycle,nativeCycleCapability,externalBaselineSummary} from '@/utils/geoExternalBaseline'
 import { doubaoTaskRecovery, recoveryCheckpoint, scopedRecoveryCheckpoint } from '@/utils/geoTaskRecovery'
-import {automaticBridgeReady,automaticCollectionOptions,automaticCollectionUnavailable,requireAutomaticBridge,externalAutomaticRoute,actualCollectionMode,storedSessionScope} from '@/utils/geoAutomaticCollection'
+import {automaticBridgeReady,automaticCollectionOptions,automaticCollectionUnavailable,requireAutomaticBridge,externalAutomaticRoute,actualCollectionMode,storedSessionScope,automaticProfileForRecord,restoreAutomaticProfileChoice} from '@/utils/geoAutomaticCollection'
 import { destinationContinuationText, destinationPreparationText, destinationSupportsFill, isDestinationTask } from '@/utils/geoDestinationSession'
 import { destinationEnabled, destinationCanPrepare, destinationPublicationGate, writingChannelEnabled, writingChannelLabel, inactiveDestinationMessage } from '@/utils/geoDestinationAvailability'
 import { articleSnapshot, baselineEvidenceSummary, canRestoreArticleEdits, canRestoreFactEdits, entityLabel, entityProfileFields, entityType, journeyDate, journeyDraftLimits, journeyLengthReview, lastJourneyProject, normalizeWebsite, profileLines, readJourney, reportEntityContext, restoreEntityDraftFields, safeLink, sameBrand, sameResearchBrief, targetDraftOutdated, writeJourney } from '@/utils/geoJourney'
@@ -201,6 +201,7 @@ const publicationMessages={queued:'任务已保存，尚未确认真实执行。
 const projects=ref([]), projectId=ref(null), projectChoice=ref(null), step=ref(0), provider=ref('doubao'), nativeAvailable=ref(false)
 const emptyBrand=()=>({name:'',website:'',description:'',entity_type:'product',company:'',audience:'',aliasesText:'',officialUrlsText:''})
 const form=reactive(emptyBrand()), clientMode=ref('consumer'), model=ref(''), collectionPath=ref('automatic')
+const automaticProfileMode=ref('consumer'), automaticProfileModeExplicit=ref(false)
 const automaticReady=computed(()=>nativeAvailable.value&&automaticBridgeReady(window.pywebview?.api))
 const plan=ref(null), planConfirmed=ref(false), report=ref(null), reportId=ref(''), reportOrigin=ref('history'), reports=ref([]), historyReportId=ref('')
 const cycle=ref(null), cycleId=ref(''), briefId=ref(''), platform=ref(''), articleId=ref(null), factRows=ref([]), reviewConfirmed=ref(false)
@@ -265,6 +266,7 @@ const refreshRetestResume=async()=>{
 }
 const recoveredTaskError=computed(()=>Boolean(currentRecovery.value&&error.value===task.value.message))
 const selectSessionMode=value=>{if(busy.value||!['consumer','work'].includes(value))return;if(clientMode.value!==value)model.value='';clientMode.value=value}
+const selectCollectionMode=value=>{if(busy.value||!['consumer','work'].includes(value))return;if(collectionPath.value!=='automatic'){selectSessionMode(value);return}if(automaticProfileMode.value!==value)model.value='';automaticProfileMode.value=value;automaticProfileModeExplicit.value=true}
 const restoreTaskRecovery=async()=>{
   const id=taskId.value,epoch=contextEpoch
   if(!nativeAvailable.value||typeof id!=='string'||!(/^[\w-]{1,100}$/).test(id))return
@@ -340,7 +342,7 @@ const primaryDisabled=computed(()=>{
 const actionHint=computed(()=>busy.value?'任务进行中，当前品牌和步骤已锁定':directoryReady.value&&[2,3].includes(step.value)?platformUnprepared.value?destinationPublicationGate(directoryTarget.value).reason:'核对目录公开资料，由你在平台最终确认；待审核不计作已收录或 GEO 成功':directoryTarget.value&&step.value===3?'请先返回内容步骤完成本轮来源分析':step.value===0?'品牌资料用于出题，不视为独立核验事实':step.value===1?externalCycle.value?'可沿用原题另建独立软件自动测试':report.value?'分析将使用上方标注时间的采集报告':plan.value?'检查问题并勾选确认后，由软件自动采集回答与来源':'软件先检查网页会话，再生成问题供你预览':step.value===2?'草稿需要审稿，不会自动发布':step.value===3?'一次处理一篇，最终提交以平台结果为准':externalCycle.value?'外部原文逐条保留，采样条件未知不算成立':'复测记录变化，不承诺被索引或被引用')
 const rate=value=>typeof value==='number'&&Number.isFinite(value)?`${Math.round(value*100)}%`:'未知'
 const options=()=>{const execution=cycle.value?.baseline_source==='user_reported_external'?{}:cycle.value?.baseline?.execution||{};return {client_mode:clientMode.value,model_label:model.value.trim(),...(execution.client_mode===clientMode.value?storedSessionScope(execution):{})}}
-watch([collectionPath,clientMode,model],()=>{planConfirmed.value=false},{flush:'sync'})
+watch([collectionPath,clientMode,automaticProfileMode,model],()=>{planConfirmed.value=false},{flush:'sync'})
 const resetStageScroll=()=>{const element=document.querySelector('.workspace-main');if(element)element.scrollTop=0}
 let pendingDiagnosticSection=null
 const focusPendingDiagnostic=()=>{if(pendingDiagnosticSection&&focusDiagnosticSection(pendingDiagnosticSection))pendingDiagnosticSection=null}
@@ -368,9 +370,9 @@ const BaselineContext=defineComponent({setup:()=>()=>{
     ...summary.inspections.map(item=>h('p',{key:item.caseId},`来源只读复查 ${item.caseId} · ${journeyDate(item.inspectedAt)}${item.originalAt?`（原回答 ${journeyDate(item.originalAt)}）`:''}；${item.partial?'来源仍有缺项，':''}不是新回答或同题复测。`))])
 }})
 const ProviderChoice=defineComponent({setup:()=>()=>h('div',{class:'provider-choice'},[h('span',{class:'small-label'},'使用'),h(ElRadioGroup,{modelValue:provider.value,'onUpdate:modelValue':value=>provider.value=value,disabled:busy.value,'aria-label':'AI 生成方式'},()=>[nativeAvailable.value?h(ElRadioButton,{value:'doubao'},()=>'豆包网页'):null,h(ElRadioButton,{value:'api'},()=>'AI API')])])})
-const ModelOptions=defineComponent({setup:()=>()=>h('div',{class:'form-pair'},[h('div',[h('label',{class:'small-label'},collectionPath.value==='automatic'?'专用会话（实际界面由软件检查）':'指定豆包界面'),h(ElSelect,{modelValue:clientMode.value,'onUpdate:modelValue':value=>{clientMode.value=value;model.value=''},disabled:busy.value,'aria-label':'豆包界面'},()=>[h(ElOption,{value:'consumer',label:'普通对话专用会话'}),h(ElOption,{value:'work',label:'工作专用会话'})])]),h('div',[h('label',{class:'small-label'},'模型选项（可选）'),h(ElInput,{modelValue:model.value,'onUpdate:modelValue':value=>model.value=value,disabled:busy.value,placeholder:'留空使用当前模型','aria-label':'模型选项'})])])})
+const ModelOptions=defineComponent({setup:()=>()=>h('div',{class:'form-pair'},[h('div',[h('label',{class:'small-label'},collectionPath.value==='automatic'?'专用会话（实际界面由软件检查）':'指定豆包界面'),h(ElSelect,{modelValue:collectionPath.value==='automatic'?automaticProfileMode.value:clientMode.value,'onUpdate:modelValue':selectCollectionMode,disabled:busy.value,'aria-label':'豆包界面'},()=>[h(ElOption,{value:'consumer',label:'普通对话专用会话'}),h(ElOption,{value:'work',label:'工作专用会话'})])]),h('div',[h('label',{class:'small-label'},'模型选项（可选）'),h(ElInput,{modelValue:model.value,'onUpdate:modelValue':value=>model.value=value,disabled:busy.value,placeholder:'留空使用当前模型','aria-label':'模型选项'})])])})
 const run=async action=>{if(busy.value)return;working.value=true;error.value='';try{await action()}catch(cause){if(cause?.name!=='AbortError'&&!destroyed)error.value=cause?.response?.data?.msg||cause?.message||'操作未完成，当前资料已保留，请检查后重试'}finally{working.value=false;if(!destroyed)persist()}}
-const persist=()=>{if(restoring||!projectId.value||!sameBrand(project.value,form))return;try{writeJourney(projectId.value,{project_id:projectId.value,step:step.value,company:form.company,audience:form.audience,aliases:profileLines(form.aliasesText),official_urls:profileLines(form.officialUrlsText),clientMode:clientMode.value,model:model.value,provider:provider.value,plan:plan.value,reportId:reportId.value,cycleId:cycleId.value,briefId:briefId.value,platform:platform.value,articleId:articleId.value,taskId:taskId.value,taskKind:taskKind.value,replacementSourceId:replacementSourceId.value,editor:{...editor},editorDirty:Boolean(editorDirty.value),editorBase:articleSnapshot(activeDraft.value),factRows:factRows.value,factsBase:cycle.value?.facts||[],recoveryDraft:recoveryDraft.value,recoveryFacts:recoveryFacts.value,recoveryTask:scopedRecoveryCheckpoint(recoveryTask.value,cycleId.value)});saveError.value=''}catch{saveError.value='本机进度保存未成功，请先保留稿件；服务器上已保存的品牌、报告与文章不受影响。'}}
+const persist=()=>{if(restoring||!projectId.value||!sameBrand(project.value,form))return;try{writeJourney(projectId.value,{project_id:projectId.value,step:step.value,company:form.company,audience:form.audience,aliases:profileLines(form.aliasesText),official_urls:profileLines(form.officialUrlsText),clientMode:clientMode.value,automaticProfileMode:automaticProfileMode.value,automaticProfileModeExplicit:automaticProfileModeExplicit.value,model:model.value,provider:provider.value,plan:plan.value,reportId:reportId.value,cycleId:cycleId.value,briefId:briefId.value,platform:platform.value,articleId:articleId.value,taskId:taskId.value,taskKind:taskKind.value,replacementSourceId:replacementSourceId.value,editor:{...editor},editorDirty:Boolean(editorDirty.value),editorBase:articleSnapshot(activeDraft.value),factRows:factRows.value,factsBase:cycle.value?.facts||[],recoveryDraft:recoveryDraft.value,recoveryFacts:recoveryFacts.value,recoveryTask:scopedRecoveryCheckpoint(recoveryTask.value,cycleId.value)});saveError.value=''}catch{saveError.value='本机进度保存未成功，请先保留稿件；服务器上已保存的品牌、报告与文章不受影响。'}}
 const exportRecovery=kind=>{const value=kind==='draft'?recoveryDraft.value:recoveryFacts.value,url=URL.createObjectURL(new Blob([JSON.stringify(value,null,2)],{type:'application/json;charset=utf-8'})),link=document.createElement('a');link.href=url;link.download=`journey-${projectId.value}-${kind}-recovery.json`;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000)}
 const loadEditor=()=>{const draft=activeDraft.value;if(draft)Object.assign(editor,{title:draft.title,content:draft.content,summary:draft.summary||'',tags:draft.tags||[]});reviewConfirmed.value=false}
 const selectContent=async(field,value)=>{if(busy.value)return;try{if(editorDirty.value)await ElMessageBox.confirm('当前文章有未保存的修改。切换后将打开另一份内容，未保存修改会被放弃。','切换内容',{confirmButtonText:'放弃修改并切换',cancelButtonText:'继续编辑'});if(field==='brief')briefId.value=value;else if(field==='article'){articleId.value=value;loadEditor()}else platform.value=value}catch{}}
@@ -441,7 +443,7 @@ const continueSavedCycle=value=>run(async()=>{
     plan.value=null;planConfirmed.value=false;replacementSourceId.value=null
     if(!sameCycle){briefId.value=selection.briefId;platform.value=selection.platform;articleId.value=selection.articleId}
     applyCycle(selection.cycle,{keepEditor:sameCycle})
-    if(!sameCycle){const options=baselineWritingOptions(selection.cycle);clientMode.value=options.client_mode;model.value=options.model_label}
+    if(!sameCycle){const options=baselineWritingOptions(selection.cycle);clientMode.value=options.client_mode;model.value=options.model_label;if(!automaticProfileModeExplicit.value)automaticProfileMode.value=automaticProfileForRecord(selection.cycle,automaticProfileMode.value)}
     step.value=2
   } finally {restoring=false}
   persist();await syncCycleRoute(value)
@@ -486,6 +488,8 @@ const chooseProject=async id=>{
         if(canRestoreFactEdits(saved,cycle.value))factRows.value=saved.factRows.filter(item=>typeof item?.text==='string'&&typeof item?.source_url==='string').map(item=>({...item,confirmed:cycle.value.facts.some(fact=>fact.text===item.text&&fact.source_url===item.source_url)&&item.confirmed===true}))
         else if(Array.isArray(saved.factRows)&&saved.factRows.length&&JSON.stringify(saved.factRows.map(({text,source_url,confirmed})=>({text,source_url,confirmed})))!==JSON.stringify((saved.factsBase||[]).map(({text,source_url,confirmed})=>({text,source_url,confirmed}))))recoveryFacts.value=saved.factRows
       }catch(cause){error.value=cause.message||'上次内容任务无法恢复，可重新选择报告'}}
+      const automaticChoice=restoreAutomaticProfileChoice(saved,cycle.value||report.value)
+      automaticProfileMode.value=automaticChoice.mode;automaticProfileModeExplicit.value=automaticChoice.explicit
       recoveryTask.value=scopedRecoveryCheckpoint(saved.recoveryTask,cycleId.value)
       taskId.value=saved.taskId||'';taskKind.value=saved.taskKind||'';replacementSourceId.value=Number.isSafeInteger(saved.replacementSourceId)&&saved.replacementSourceId>0?saved.replacementSourceId:null;step.value=Number.isInteger(saved.step)&&canVisit(saved.step)?Math.max(0,Math.min(saved.step,4)):0
       if(saved.step===3&&directoryTarget.value&&!directoryReady.value&&cycle.value)step.value=2
@@ -494,7 +498,7 @@ const chooseProject=async id=>{
     }finally{restoring=false}
   })
 }
-const resetRecords=()=>{plan.value=null;planConfirmed.value=false;report.value=null;reportId.value='';historyReportId.value='';reportOrigin.value='history';cycle.value=null;cycleId.value='';briefId.value='';platform.value='';articleId.value=null;factRows.value=[];recoveryDraft.value=null;recoveryFacts.value=null;recoveryTask.value=null;replacementSourceId.value=null;taskId.value='';taskKind.value='';step.value=0}
+const resetRecords=()=>{automaticProfileMode.value='consumer';automaticProfileModeExplicit.value=false;plan.value=null;planConfirmed.value=false;report.value=null;reportId.value='';historyReportId.value='';reportOrigin.value='history';cycle.value=null;cycleId.value='';briefId.value='';platform.value='';articleId.value=null;factRows.value=[];recoveryDraft.value=null;recoveryFacts.value=null;recoveryTask.value=null;replacementSourceId.value=null;taskId.value='';taskKind.value='';step.value=0}
 const saveBrand=async()=>{
   const website=normalizeWebsite(form.website), name=form.name.trim(), description=form.description.trim(), fields=formProfile(), existing=projects.value.find(item=>sameBrand(item,{name,website,...fields}))
   const payload={name,website,description,...fields}
@@ -563,11 +567,11 @@ const startSingleCaseProbe=selection=>run(async()=>{
   persist()
 })
 const retestSessionOptions=()=>{if(cycle.value?.capabilities?.native_retest===false||cycle.value?.baseline_source==='user_reported_external')throw new Error('外部起始观察不提供原生复测会话，请在反馈中追加实际原文');const baseline=cycle.value?.baseline||{},execution=baseline.execution||{},mode=execution.client_mode||baseline.cases?.find(item=>item.client_mode)?.client_mode||'consumer';if(!['consumer','work'].includes(mode))throw new Error('原采集界面未核对，未打开其他会话');return {client_mode:mode,model_label:typeof execution.requested_model_label==='string'?execution.requested_model_label:'',...storedSessionScope(execution)}}
-const login=()=>run(()=>startNative('login',()=>window.pywebview.api.open_login(step.value===4?retestSessionOptions():options())))
-const makePlan=()=>run(async()=>{if(profileDirty.value)throw new Error('测试对象资料已变更，请先保存，再为该对象生成新问题');planConfirmed.value=false;const profile={...project.value,...formProfile()};if(provider.value==='doubao'){if(!nativeAvailable.value)throw new Error('桌面豆包采集服务尚未就绪');await startNative('plan',()=>collectionPath.value==='automatic'?requireAutomaticBridge(window.pywebview.api).plan_automatic(profile,3,automaticCollectionOptions(clientMode.value,model.value)):window.pywebview.api.plan_with_doubao(profile,3,options()))}else plan.value=(await geoTestApi.generatePlan({project_id:projectId.value,case_count:3,...entityProfileFields(profile)})).data})
-const collectBaseline=()=>collectionPath.value==='automatic'?requireAutomaticBridge(window.pywebview?.api).start_automatic_run(plan.value,automaticCollectionOptions(clientMode.value,model.value)):window.pywebview.api.start_run(plan.value,options())
+const login=()=>run(()=>startNative('login',()=>window.pywebview.api.open_login(step.value===4?retestSessionOptions():step.value===1&&collectionPath.value==='automatic'?{client_mode:automaticProfileMode.value,model_label:model.value.trim()}:options())))
+const makePlan=()=>run(async()=>{if(profileDirty.value)throw new Error('测试对象资料已变更，请先保存，再为该对象生成新问题');planConfirmed.value=false;const profile={...project.value,...formProfile()};if(provider.value==='doubao'){if(!nativeAvailable.value)throw new Error('桌面豆包采集服务尚未就绪');await startNative('plan',()=>collectionPath.value==='automatic'?requireAutomaticBridge(window.pywebview.api).plan_automatic(profile,3,automaticCollectionOptions(automaticProfileMode.value,model.value)):window.pywebview.api.plan_with_doubao(profile,3,options()))}else plan.value=(await geoTestApi.generatePlan({project_id:projectId.value,case_count:3,...entityProfileFields(profile)})).data})
+const collectBaseline=()=>collectionPath.value==='automatic'?requireAutomaticBridge(window.pywebview?.api).start_automatic_run(plan.value,automaticCollectionOptions(automaticProfileMode.value,model.value)):window.pywebview.api.start_run(plan.value,options())
 const openAutomaticBaseline=()=>run(async()=>{const target=externalAutomaticRoute(cycle.value,project.value);persist();if(saveError.value)throw new Error('当前编辑尚未保存到本机，请先导出未保存稿件或资料，再打开自动测试。');await router.push(target)})
-const useHistory=()=>run(async()=>{const record=reports.value.find(item=>item.id===historyReportId.value);if(!record)throw new Error('报告不存在');report.value=record.report;reportId.value=record.id;reportOrigin.value='history';cycle.value=null;cycleId.value='';articleId.value=null;plan.value=null;planConfirmed.value=false})
+const useHistory=()=>run(async()=>{const record=reports.value.find(item=>item.id===historyReportId.value);if(!record)throw new Error('报告不存在');report.value=record.report;reportId.value=record.id;reportOrigin.value='history';cycle.value=null;cycleId.value='';articleId.value=null;plan.value=null;planConfirmed.value=false;if(!automaticProfileModeExplicit.value)automaticProfileMode.value=automaticProfileForRecord(record.report,automaticProfileMode.value)})
 const reusablePlan=computed(()=>Boolean(plan.value&&report.value&&plan.value.plan_sha256===report.value.plan_sha256&&sameBrand(plan.value.profile,project.value)))
 const resetBaseline=async reuse=>{try{await ElMessageBox.confirm(reuse?'将用原来的问题开启独立新一轮，包括再次提问已完成的题目。原记录会保留；请检查模型与界面设置，再预览确认。':'将重新生成问题，原报告、文章和任务单仍会保留。新问题仍需你预览确认。',reuse?'沿用问题新测一轮':'重新出题',{confirmButtonText:'继续',cancelButtonText:'取消'});report.value=null;reportId.value='';historyReportId.value='';cycle.value=null;cycleId.value='';articleId.value=null;if(!reuse)plan.value=null;planConfirmed.value=false;briefId.value='';platform.value='';taskId.value='';taskKind.value=''}catch{}}
 const newBaseline=()=>resetBaseline(false)
@@ -666,7 +670,7 @@ const poll=async()=>{
 }
 watch([projectId,cycleId],()=>{contextEpoch++},{flush:'sync'})
 watch([step,cycleId,()=>visibleRecoveryInfo.value?.taskId,nativeAvailable,nativeBusy],()=>{void refreshRetestResume()},{flush:'sync'})
-watch([step,form,clientMode,model,provider,plan,reportId,cycleId,briefId,platform,articleId,editor,factRows,replacementSourceId,recoveryTask],persist,{deep:true})
+watch([step,form,clientMode,automaticProfileMode,automaticProfileModeExplicit,model,provider,plan,reportId,cycleId,briefId,platform,articleId,editor,factRows,replacementSourceId,recoveryTask],persist,{deep:true})
 watch(step,value=>{if(value===3&&!capabilitiesLoaded.value&&!busy.value)void refreshAccounts()})
 watch(()=>[form.name,form.website,form.entity_type,form.company,form.audience,form.description,form.aliasesText,form.officialUrlsText],()=>{if(!restoring){plan.value=null;planConfirmed.value=false}},{flush:'sync'})
 watch(()=>[editor.title,editor.content],()=>{reviewConfirmed.value=false},{flush:'sync'})

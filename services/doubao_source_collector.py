@@ -314,6 +314,39 @@ def normalize_ui_sources(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sources
 
 
+_VISIBLE_CLIENT_MODE_JS = r"""() => {
+    const visible = e => !!e && e.getClientRects().length > 0
+        && getComputedStyle(e).visibility !== 'hidden' && getComputedStyle(e).display !== 'none';
+    const controls = selector => [...document.querySelectorAll(selector)].filter(visible);
+    const label = e => (e.textContent || '').replace(/\s+/g, '');
+    const chipModes = controls('[data-testid="workspace-switch-chip"]').map(chip => {
+        const value = label(chip);
+        if (/^(?:豆包)?工作$/.test(value)) return 'work';
+        if (value === '豆包对话') return 'consumer';
+        const disabled = chip.disabled === true
+            || (chip.getAttribute('aria-disabled') || '').trim().toLowerCase() === 'true';
+        // The disabled plain brand appears in both new chat and work shells.
+        return value === '豆包' && !disabled ? 'consumer' : null;
+    }).filter(Boolean);
+    const knownChipModes = [...new Set(chipModes)];
+    if (knownChipModes.length > 1) return null;
+    const chipMode = knownChipModes[0] || null;
+    const composer = controls('[data-testid="chat_input_action_mode"]');
+    if (composer.length) {
+        const labels = composer.map(label);
+        // Observed work UI uses this same testid for its cloud-computer tool.
+        // That tool is not mode evidence without an explicit work chip.
+        if (labels.every(value => value === '云电脑')) return chipMode === 'work' ? 'work' : null;
+        const modes = labels.map(value => value === '对话' ? 'consumer' : value === '工作' ? 'work' : null);
+        // A visible unknown/empty composer label cannot fall back to a chip.
+        if (modes.some(mode => !mode) || new Set(modes).size !== 1) return null;
+        return chipMode && chipMode !== modes[0] ? null : modes[0];
+    }
+    // Legacy explicit chips remain compatible; titles/body/sidebar styles do not identify a mode.
+    return chipMode;
+}"""
+
+
 SNAPSHOT_JS = r"""({s, question, allowExternalPanels, submissionFormat, literalPreamble, literalFence}) => {
     const visible = e => !!e && e.getClientRects().length > 0 &&
         getComputedStyle(e).visibility !== 'hidden' && getComputedStyle(e).display !== 'none';
@@ -410,14 +443,14 @@ SNAPSHOT_JS = r"""({s, question, allowExternalPanels, submissionFormat, literalP
         service_unavailable: /^算力紧张，办公能力得晚点才能用了/.test(answer.trim()),
         website_temporarily_unavailable: websiteUnavailable,
         login_state: all(document, '[data-testid="to_login_button"]').length ? 'guest' : 'unknown',
-        client_mode: /工作/.test(text(all(document, '[data-testid="workspace-switch-chip"]')[0])) || /^豆包工作/.test(document.title) ? 'work' : 'consumer',
+        client_mode: (__VISIBLE_CLIENT_MODE__)(),
         model_label: text(all(document, s.model_label)[0]) || null,
         source_trigger_count: triggerCount, source_panel_count: panels.length,
         source_ui_summaries: answerRoot ? all(answerRoot, '[data-plugin-identifier*="search_query_result_block"] [data-copy-ignore]').map(text) : [],
         sources, answer_dom: bodies.length ? bodies.map(e => e.outerHTML).join('\n') : null,
         source_panel_dom: panels.map(e => e.outerHTML)
     };
-}"""
+}""".replace('__VISIBLE_CLIENT_MODE__', _VISIBLE_CLIENT_MODE_JS)
 
 
 async def read_snapshot(page: Any, config: CollectorConfig, *, allow_external_panels: bool = False) -> dict[str, Any]:
@@ -1410,16 +1443,14 @@ _LOGIN_OBSERVATION_JS = r"""s => {
     const visible = e => !!e && e.getClientRects().length > 0
         && getComputedStyle(e).visibility !== 'hidden' && getComputedStyle(e).display !== 'none';
     const any = selector => [...document.querySelectorAll(selector)].some(visible);
-    const chip = [...document.querySelectorAll('[data-testid="workspace-switch-chip"]')].find(visible);
     // Read only this UI label. Account names, conversation text and DOM never leave the page.
-    const label = chip ? (chip.textContent || '').replace(/\s+/g, '') : '';
-    const mode = /工作/.test(label) ? 'work' : /^豆包(?:对话)?$/.test(label) ? 'consumer' : null;
+    const mode = (__VISIBLE_CLIENT_MODE__)();
     const login = any(s.login_dialog) || any('[data-testid="to_login_button"]');
     const challenge = any(s.challenge);
     const recognized = !!mode || login || challenge || any(s.editor);
     return {client_mode: mode, login_required: recognized ? login : null,
         challenge: recognized ? challenge : null};
-}"""
+}""".replace('__VISIBLE_CLIENT_MODE__', _VISIBLE_CLIENT_MODE_JS)
 
 
 async def _read_login_observation(page: Any, config: CollectorConfig) -> dict[str, Any]:

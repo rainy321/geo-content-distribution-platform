@@ -56,7 +56,7 @@ const action=(name,values)=>Function(...Object.keys(values),`return (${expressio
 test('Journey automatic collection uses exactly the new two-argument run and explicit mode remains a deliberate choice',async()=>{
   const calls=[],plan=ref((await frozen()).test_plan),collectionPath=ref('automatic')
   const api={plan_automatic(){},start_automatic_run:(...args)=>calls.push(['automatic',...args]),start_run:(...args)=>calls.push(['explicit',...args])}
-  const values={...automatic,window:{pywebview:{api}},plan,collectionPath,clientMode:ref('consumer'),model:ref('快速'),options:()=>({client_mode:'work',model_label:'指定'})}
+  const values={...automatic,window:{pywebview:{api}},plan,collectionPath,clientMode:ref('work'),automaticProfileMode:ref('consumer'),model:ref('快速'),options:()=>({client_mode:'work',model_label:'指定'})}
   const run=action('collectBaseline',values);await run();assert.equal(calls[0].length,3)
   assert.deepEqual(calls[0],['automatic',plan.value,{profile_mode:'consumer',model_label:'快速'}])
   collectionPath.value='explicit';await run();assert.deepEqual(calls[1],['explicit',plan.value,{client_mode:'work',model_label:'指定'}])
