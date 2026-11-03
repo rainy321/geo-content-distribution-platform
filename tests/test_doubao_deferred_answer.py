@@ -279,7 +279,8 @@ class DeferredCollectorTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             page = FakePage()
-            page.locator = Mock(return_value=SimpleNamespace(first=SimpleNamespace(wait_for=AsyncMock())))
+            page.locator = Mock(return_value=SimpleNamespace(first=SimpleNamespace(wait_for=AsyncMock()),
+                                                            count=AsyncMock(return_value=0)))
             page.get_by_role = Mock()
             page.evaluate = AsyncMock(return_value='Synthetic browser')
             editor = SimpleNamespace(fill=AsyncMock(), press=AsyncMock(), evaluate=AsyncMock(return_value={
@@ -292,10 +293,10 @@ class DeferredCollectorTests(unittest.IsolatedAsyncioTestCase):
                 yield SimpleNamespace()
             calls, clock, events = [0], [0], []
             async def read(*_args, **_kwargs):
-                calls[0] += 1
-                if calls[0] <= 2:
+                if not editor.press.await_count:
                     return snapshot(challenge=False, question_verified=False, user_message_count=0)
-                text = '公开核验的最终回答：可比较接口兼容性、价格依据与可查来源。' if final and calls[0] >= 5 else notice
+                calls[0] += 1
+                text = '公开核验的最终回答：可比较接口兼容性、价格依据与可查来源。' if final and calls[0] >= 3 else notice
                 return snapshot(challenge=False, assistant_count=2 if text != notice else 1,
                                 answer=text, completion_marker=True)
             async def sleep(_):

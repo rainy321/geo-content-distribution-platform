@@ -88,7 +88,8 @@ class SingleSubmissionDiagnosticTests(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             page = FakePage()
-            page.locator = Mock(return_value=SimpleNamespace(first=SimpleNamespace(wait_for=AsyncMock())))
+            page.locator = Mock(return_value=SimpleNamespace(first=SimpleNamespace(wait_for=AsyncMock()),
+                                                            count=AsyncMock(return_value=0)))
             page.get_by_role = Mock()
             page.evaluate = AsyncMock(return_value='Synthetic browser')
             sent, polls, clock = [False], [0], [0]

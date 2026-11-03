@@ -18,7 +18,8 @@ class SubmissionCheckpointTests(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
         self.page = FakePage()
-        self.page.locator = Mock(return_value=SimpleNamespace(first=SimpleNamespace(wait_for=AsyncMock())))
+        self.page.locator = Mock(return_value=SimpleNamespace(first=SimpleNamespace(wait_for=AsyncMock()),
+                                                             count=AsyncMock(return_value=0)))
         self.page.get_by_role = Mock()
         self.page.evaluate = AsyncMock(return_value='synthetic browser')
         self.editor = SimpleNamespace(fill=AsyncMock(), press=AsyncMock(side_effect=RuntimeError('synthetic stop after press')),

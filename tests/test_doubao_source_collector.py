@@ -757,6 +757,47 @@ class BrowserExtractionTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(result['submission_receipt']['invalid_reason'])
             self.assertEqual(result['submission_receipt']['submission_attempts'], 1)
 
+    async def test_consumer_plain_question_uses_one_official_click_when_enter_is_ignored(self):
+        question = '合成普通对话问题'
+        html = self.fixture_html.replace('<div data-message-role="assistant">', '<div data-message-role="assistant" hidden>')
+        html += '''<button data-testid="chat_input_send_button" type="button">↑</button>
+        <script>
+            const editor = document.querySelector('[contenteditable]');
+            const user = document.querySelector('[data-message-role=user]');
+            const assistant = document.querySelector('[data-message-role=assistant]');
+            user.hidden = true;
+            user.textContent = '';
+            let enterCount = 0;
+            let clickCount = 0;
+            editor.addEventListener('keydown', event => {
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+                    enterCount++;
+                }
+            });
+            document.querySelector('[data-testid=chat_input_send_button]').addEventListener('click', () => {
+                user.textContent = editor.innerText;
+                user.hidden = false;
+                assistant.querySelector('[data-testid=message_text_content]').textContent = `click=${++clickCount};enter=${enterCount}`;
+                assistant.hidden = false;
+            });
+        </script>'''
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            config = CollectorConfig(question=question, client_mode='consumer', output_root=root/'evidence',
+                                     profile_dir=root/'profile', stable_seconds=.1, timeout_seconds=5)
+            result, path = await collect_doubao_sources(config, playwright_factory=self.local_browser_factory(html))
+            self.assertTrue(result['answer_completed'], result)
+            self.assertTrue(result['question_submitted'])
+            self.assertEqual(result['response'], 'click=1;enter=0')
+            self.assertEqual(result['submission_transport']['method'], 'visible_send_button')
+            self.assertEqual(result['question_verification_method'], 'literal_user_dom')
+            self.assertEqual(result['submission_receipt']['submission_attempts'], 1)
+            self.assertTrue(result['submission_receipt']['editor_readback_verified'])
+            proof = json.loads((path.parent/'editor-readback.json').read_text(encoding='utf-8'))
+            self.assertTrue(proof['verified'])
+            self.assertEqual(proof['editor_readback'], question)
+
     async def test_internal_fenced_prompt_waits_for_delayed_handler_before_one_button_click(self):
         question = '任务：只输出 JSON。\n资料：{"quoted":"\\\"literal\\\"","path":"C:\\\\data"}\n```json\n{}\n```'
         html = self.fixture_html.replace('<div data-message-role="assistant">','<div data-message-role="assistant" hidden>')

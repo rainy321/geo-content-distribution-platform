@@ -538,7 +538,7 @@ async def _fenced_editor_settle(editor: Any, sent_text: str, run_dir: Path) -> d
     return proof
 
 
-async def _fenced_send_control(page: Any, config: CollectorConfig, run_dir: Path) -> Any:
+async def _fenced_send_control(page: Any, config: CollectorConfig, run_dir: Path, *, allow_missing: bool = False) -> Any:
     """Bind one visible, ready send button before recording any send attempt."""
     locator = page.locator(config.selectors.send_button)
     matched = await locator.count()
@@ -557,7 +557,9 @@ async def _fenced_send_control(page: Any, config: CollectorConfig, run_dir: Path
     proof = {'selector': config.selectors.send_button, 'matched_count': matched,
              'visible_count': len(handles), 'controls': observations}
     (run_dir / 'submission-control.json').write_text(json.dumps(proof, ensure_ascii=False, indent=2), encoding='utf-8')
-    if len(handles) != 1:
+    if allow_missing and matched == 0:
+        return None
+    if len(handles) != 1 or (allow_missing and matched != 1):
         raise ValueError('submission_send_button_not_unique_not_submitted')
     control = observations[0]
     if (control.get('disabled') is True or control.get('enabled') is not True
@@ -570,7 +572,7 @@ async def _fenced_send_control(page: Any, config: CollectorConfig, run_dir: Path
 
 
 async def _fenced_send_ready(page: Any, config: CollectorConfig, run_dir: Path, control: Any,
-                             sent_text: str, baseline: dict[str, Any]) -> Any:
+                             sent_text: str, baseline: dict[str, Any], *, dismiss_promotion: bool = True) -> Any:
     """Prove actionability before the send checkpoint; dismiss at most one known ad.
 
     Trial clicks do not send. The eventual real click remains single-attempt,
@@ -598,7 +600,7 @@ async def _fenced_send_ready(page: Any, config: CollectorConfig, run_dir: Path, 
         proof['ready'] = True
         persist()
         return control
-    if proof['trial_checks'][-1]['error_type'] != 'TimeoutError':
+    if not dismiss_promotion or proof['trial_checks'][-1]['error_type'] != 'TimeoutError':
         raise ValueError('submission_send_button_blocked_not_submitted')
     inspection = await page.evaluate_handle(KNOWN_DOWNLOAD_PROMOTION_JS, asdict(config.selectors))
     try:
@@ -1301,6 +1303,12 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                     stage = 'submission_control'
                     send_control = await _fenced_send_control(page, config, run_dir)
                     send_control = await _fenced_send_ready(page, config, run_dir, send_control, sent_text, baseline)
+                elif baseline.get('client_mode') == 'consumer':
+                    stage = 'submission_control'
+                    send_control = await _fenced_send_control(page, config, run_dir, allow_missing=True)
+                    if send_control is not None:
+                        send_control = await _fenced_send_ready(page, config, run_dir, send_control, sent_text, baseline,
+                                                               dismiss_promotion=False)
                 result['submission_transport']['method'] = 'visible_send_button' if send_control is not None else 'editor_enter'
                 result["question_submission_attempted"] = True
                 submission = SubmissionReceipt(page, config.question, baseline['assistant_count'],
@@ -1321,7 +1329,7 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                 if send_control is not None:
                     await send_control.click(timeout=5000)  # one operation; no Enter fallback or retry
                 else:
-                    await editor.press("Enter")  # plain GEO questions retain their observed transport
+                    await editor.press("Enter")  # legacy transport when no consumer send button was found
                 if progress:
                     progress({'event': 'question_sent', 'state': 'waiting_for_answer',
                               'question_submission_attempted': True, 'question_submitted': False})

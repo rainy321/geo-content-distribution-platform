@@ -190,7 +190,8 @@ class ManualWaitingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_receipt_is_saved_before_verification_can_remove_user_dom(self):
         page = self.page
-        page.locator = Mock(return_value=SimpleNamespace(first=SimpleNamespace(wait_for=AsyncMock())))
+        page.locator = Mock(return_value=SimpleNamespace(first=SimpleNamespace(wait_for=AsyncMock()),
+                                                        count=AsyncMock(return_value=0)))
         page.get_by_role = Mock()
         page.evaluate = AsyncMock(return_value='Synthetic browser')
         editor = SimpleNamespace(fill=AsyncMock(), press=AsyncMock(), evaluate=AsyncMock(return_value={
