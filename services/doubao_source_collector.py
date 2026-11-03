@@ -572,7 +572,7 @@ async def _fenced_send_control(page: Any, config: CollectorConfig, run_dir: Path
 
 
 async def _fenced_send_ready(page: Any, config: CollectorConfig, run_dir: Path, control: Any,
-                             sent_text: str, baseline: dict[str, Any], *, dismiss_promotion: bool = True) -> Any:
+                             sent_text: str, baseline: dict[str, Any]) -> Any:
     """Prove actionability before the send checkpoint; dismiss at most one known ad.
 
     Trial clicks do not send. The eventual real click remains single-attempt,
@@ -600,7 +600,7 @@ async def _fenced_send_ready(page: Any, config: CollectorConfig, run_dir: Path, 
         proof['ready'] = True
         persist()
         return control
-    if not dismiss_promotion or proof['trial_checks'][-1]['error_type'] != 'TimeoutError':
+    if proof['trial_checks'][-1]['error_type'] != 'TimeoutError':
         raise ValueError('submission_send_button_blocked_not_submitted')
     inspection = await page.evaluate_handle(KNOWN_DOWNLOAD_PROMOTION_JS, asdict(config.selectors))
     try:
@@ -640,8 +640,11 @@ async def _fenced_send_ready(page: Any, config: CollectorConfig, run_dir: Path, 
     persist()
     if text != sent_text:
         raise ValueError('editor_readback_mismatch_not_submitted')
-    control = await _fenced_send_control(page, config, run_dir)
-    if not await trial(control):
+    if config.submission_format == 'plain':
+        control = await _fenced_send_control(page, config, run_dir, allow_missing=True)
+    else:
+        control = await _fenced_send_control(page, config, run_dir)
+    if control is None or not await trial(control):
         raise ValueError('submission_send_button_blocked_not_submitted')
     proof['ready'] = True
     persist()
@@ -1307,8 +1310,7 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                     stage = 'submission_control'
                     send_control = await _fenced_send_control(page, config, run_dir, allow_missing=True)
                     if send_control is not None:
-                        send_control = await _fenced_send_ready(page, config, run_dir, send_control, sent_text, baseline,
-                                                               dismiss_promotion=False)
+                        send_control = await _fenced_send_ready(page, config, run_dir, send_control, sent_text, baseline)
                 result['submission_transport']['method'] = 'visible_send_button' if send_control is not None else 'editor_enter'
                 result["question_submission_attempted"] = True
                 submission = SubmissionReceipt(page, config.question, baseline['assistant_count'],

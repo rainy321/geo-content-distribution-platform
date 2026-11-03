@@ -5,9 +5,7 @@ import re
 LITERAL_PREAMBLE = '请按下方代码块中的完整任务说明执行，代码块只用于保留原文。请在对话正文返回所要求的结果。'
 
 
-# Narrow handling of the promotion observed in the 2026-11-02 screenshot.
-# Its live DOM was not retained: unknown containers or close controls stop,
-# rather than treating every modal, X icon or work-mode mention as this ad.
+# Match the observed download promotions by their identifying text and close control.
 KNOWN_DOWNLOAD_PROMOTION_JS = r'''selectors => {
     const visible = e => {
         if (![...e.getClientRects()].some(r => r.width > 0 && r.height > 0 && r.right > 0 && r.bottom > 0 && r.left < innerWidth && r.top < innerHeight)) return false;
@@ -19,8 +17,18 @@ KNOWN_DOWNLOAD_PROMOTION_JS = r'''selectors => {
     };
     const text = e => (e.innerText || '').replace(/\s+/g, '');
     const blocked = [...document.querySelectorAll(selectors.challenge + ',' + selectors.login_dialog)].some(visible);
+    const isDownloadPromotion = e => {
+        const content = text(e);
+        if (/每日签到[，,]?免费用豆包工作/.test(content) && content.includes('立即下载电脑版')) return true;
+        if (!e.matches('[role="dialog"]') || !content.includes('下载电脑版使用完整功能')) return false;
+        const downloads = [...e.querySelectorAll('button[data-testid="desktop_download_guide_popup_btn"]')];
+        const reminders = [...e.querySelectorAll('button')].filter(node => text(node) === '下次提醒我');
+        const close = [...e.querySelectorAll('button[aria-label="关闭"]')];
+        return downloads.length === 1 && visible(downloads[0]) && text(downloads[0]) === '下载电脑版'
+            && reminders.length === 1 && visible(reminders[0]) && close.length === 1 && visible(close[0]);
+    };
     const candidates = [...document.querySelectorAll('[role="dialog"],[aria-modal="true"],[class*="modal"],[class*="Modal"]')]
-        .filter(visible).filter(e => /每日签到[，,]?免费用豆包工作/.test(text(e)) && text(e).includes('立即下载电脑版'));
+        .filter(visible).filter(isDownloadPromotion);
     const roots = candidates.filter(e => !e.querySelector('input,textarea,iframe,[contenteditable="true"]')
         && text(e).length < 1500 && !/验证码|安全验证|人机验证|登录|登入|扫码|授权|绑定|实名|确认/.test(text(e)));
     const controls = [];

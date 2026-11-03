@@ -137,6 +137,53 @@ class PromotionGuardDOMTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((path.parent / 'submission-actionability.json').is_file())
         self.assertTrue((path.parent / 'failure.png').is_file())
 
+    async def test_plain_consumer_closes_observed_download_variant_once_and_stops_for_unknown_variant(self):
+        for reminder, recognized in (('下次提醒我', True), ('另一个活动提示', False)):
+            with self.subTest(recognized=recognized):
+                await self.page.set_content(FIXTURE.read_text(encoding='utf-8'))
+                await self.page.evaluate('''reminder => {
+                    const dialog = document.querySelector('[role=dialog]');
+                    dialog.querySelector('h2').innerHTML = '下载电脑版<br>使用完整功能';
+                    dialog.querySelectorAll('p').forEach(node => node.remove());
+                    const download = dialog.querySelector('#download');
+                    download.textContent = '下载电脑版';
+                    download.dataset.testid = 'desktop_download_guide_popup_btn';
+                    const caption = document.createElement('button');
+                    caption.textContent = reminder;
+                    download.after(caption);
+                    document.querySelector('#flow-end-msg-send').addEventListener('click', () => {
+                        const user = document.createElement('div');
+                        user.dataset.messageRole = 'user';
+                        user.textContent = document.querySelector('textarea').value;
+                        const assistant = document.createElement('div');
+                        assistant.dataset.messageRole = 'assistant';
+                        assistant.innerHTML = '<div data-testid="message_text_content">合成测试的完整答复。</div><button data-testid="message_action_copy">复制</button>';
+                        document.body.append(user, assistant);
+                    });
+                }''', reminder)
+                context = SimpleNamespace(new_page=AsyncMock(return_value=self.page), browser=None, close=AsyncMock())
+                @asynccontextmanager
+                async def factory():
+                    yield SimpleNamespace()
+                config = collector.CollectorConfig(question='合成普通对话原题', client_mode='consumer',
+                    profile_dir=self.root / 'profile', output_root=self.root / 'evidence',
+                    stable_seconds=.1, timeout_seconds=4)
+                with patch.object(collector, 'launch_context', AsyncMock(return_value=context)), \
+                     patch.object(collector, '_navigate_to_doubao', AsyncMock()):
+                    result, path = await collector.collect_doubao_sources(config, playwright_factory=factory)
+                self.assertEqual(await self.counts(), {'send': int(recognized), 'close': int(recognized),
+                                                      'download': 0, 'enter': 0})
+                self.assertEqual(result['question_submission_attempted'], recognized, result)
+                self.assertEqual(result['question_submitted'], recognized, result)
+                proof = json.loads((path.parent / 'submission-actionability.json').read_text(encoding='utf-8'))
+                self.assertEqual(proof['promotion_close_clicked'], recognized)
+                if recognized:
+                    self.assertTrue(proof['editor_rechecked'])
+                    self.assertTrue(result['answer_completed'])
+                    self.assertEqual(result['submission_receipt']['submission_attempts'], 1)
+                else:
+                    self.assertEqual(result['failure_reason'], 'submission_send_button_blocked_not_submitted')
+
 
 if __name__ == '__main__':
     unittest.main()
