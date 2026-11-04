@@ -327,7 +327,7 @@ def get_cycle(database, identifier):
             comparison.update(publication_feedback(comparison, report, publication_records))
             result['retests'].append({'run_id': report['run_id'], 'updated_at': report.get('updated_at'),
                                       'comparison': comparison, 'collection': collection_summary(report)})
-        from services.geo_research_probe_service import list_probes
+        from services.geo_research_probe_service import list_probes, project_probe_address_evidence
         result['probes'] = list_probes(connection, identifier)
         from services.source_maintenance_service import overview
         result['source_maintenance'] = overview(connection, result)
@@ -341,6 +341,7 @@ def get_cycle(database, identifier):
         result['discovery_funnel'] = result['feedback_diagnostics'].get('discovery_funnel') or discovery_funnel(result)
         from services.geo_optimization_strategy import optimization_plan
         result['optimization_plan'] = optimization_plan(result)
+        result['probes'] = project_probe_address_evidence(result['test_plan'].get('profile'), result['probes'])
     return result
 
 

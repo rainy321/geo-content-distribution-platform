@@ -106,7 +106,7 @@ class OperatorBusinessReviewTests(ProbeFixture, unittest.TestCase):
         self.assertEqual({key: value for key, value in record.items() if key not in excluded},
                          {key: value for key, value in self.record.items() if key not in excluded})
         self.assertEqual(self.other_tables(), before)
-        self.assertEqual(data['cycle']['probes'], [record])
+        self.assert_probe_views(data['cycle']['probes'], [record])
         self.assert_original_unchanged()
 
     def test_acknowledged_negative_and_unknown_are_append_only_separate_opinions(self):

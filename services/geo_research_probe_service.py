@@ -9,7 +9,10 @@ import re
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
-from services.geo_test_service import assess_answer, answer_evaluation_error
+from services.geo_source_identity import unconfirmed_source_url_status
+from services.geo_test_service import (
+    _scoped_url_identity, assess_answer, answer_evaluation_error, canonical_entity_url,
+)
 
 
 PROBE_SCHEMA = 'geo_research_single_probe_v1'
@@ -181,6 +184,98 @@ def list_probes(connection, cycle_id):
         return []
     return [json.loads(row[0]) for row in connection.execute(
         'SELECT record FROM geo_research_probes WHERE cycle_id=? ORDER BY created_at DESC,id DESC', (cycle_id,))]
+
+
+_ANSWER_ADDRESS_TOKEN = re.compile(r'\[[^\]\r\n]{0,300}\]\(([^()\s]+)\)[，。；！？、]*(?=\s|$)|\S+')
+_ANSWER_ADDRESS_LABEL = re.compile(r'^[\u3400-\u9fff]{1,24}[：:]')
+_ANSWER_ADDRESS_WRAPPERS = {'(': ')', '[': ']', '<': '>', '（': '）', '「': '」', '『': '』',
+                            '“': '”', '‘': '’', '"': '"', "'": "'", '`': '`'}
+
+
+def _literal_address_hits(response, configured):
+    """Consume whole tokens so URL-like text inside a query is never a second link."""
+    hits = set()
+    schemes = {identity[0] for identity in configured}
+    for match in _ANSWER_ADDRESS_TOKEN.finditer(response):
+        token = match[1] or _ANSWER_ADDRESS_LABEL.sub('', match[0], count=1).rstrip('.,;!?，。；！？、')
+        closer = _ANSWER_ADDRESS_WRAPPERS.get(token[:1])
+        if closer and token.endswith(closer):
+            token = token[1:-1]
+        if '.' not in token:
+            continue
+        if '://' in token:
+            identity = _scoped_url_identity(token)
+            if identity in configured:
+                hits.add(identity)
+            continue
+        bare_matches = {_scoped_url_identity(f'{scheme}://{token}') for scheme in schemes} & configured
+        if len(bare_matches) == 1:
+            hits.update(bare_matches)
+    return hits
+
+
+def _source_address_hits(side, rows_key, aggregate_key):
+    hits = set()
+    absent = False if side.get(aggregate_key) is False else None
+    rows = side.get(rows_key)
+    for row in rows if isinstance(rows, list) else ():
+        # Old captures may only have the exposed `url`. Explicitly unconfirmed
+        # values, popup candidates and href fallbacks cannot count here.
+        if (not isinstance(row, dict) or unconfirmed_source_url_status(row) is not None
+                or row.get('url_status') not in (None, 'navigation_observed', 'displayed_not_opened')):
+            absent = None
+            continue
+        identity = _scoped_url_identity(row.get('url'))
+        if identity is None:
+            absent = None
+        else:
+            hits.add(identity)
+    return hits, absent
+
+
+def _address_evidence_side(side, addresses, *, external=False):
+    response = side.get('response') if isinstance(side, dict) else None
+    if (not isinstance(response, str) or not response.strip()
+            or side.get('answer_evaluable') is not True or side.get('answer_error')):
+        return [dict(address, in_answer=None, in_sources=None, in_citations=None)
+                for address in addresses.values()]
+    answer_hits = _literal_address_hits(response, addresses.keys())
+    source_hits, source_absent = (set(), None) if external else _source_address_hits(
+        side, 'displayed_sources', 'official_source_present')
+    citation_hits, citation_absent = (set(), None) if external else _source_address_hits(
+        side, 'citations', 'official_citation_present')
+    return [dict(address, in_answer=identity in answer_hits,
+                 in_sources=True if identity in source_hits else source_absent,
+                 in_citations=True if identity in citation_hits else citation_absent)
+            for identity, address in addresses.items()]
+
+
+def project_probe_address_evidence(profile, records):
+    """Show exact address evidence per frozen scope without changing probe storage."""
+    if not isinstance(profile, dict):
+        return records
+    urls = profile.get('official_urls')
+    configured = [('website', profile.get('website'))]
+    if isinstance(urls, list):
+        configured.extend(('official_url', url) for url in urls)
+    addresses = {}
+    for role, url in configured:
+        identity = canonical_entity_url(url)
+        if identity is not None:
+            addresses.setdefault(identity, {'url': url, 'role': role})
+    if not addresses:
+        return records
+    projected = []
+    for record in records:
+        if record.get('category') != 'brand_identity':
+            projected.append(record)
+            continue
+        external = record.get('source') == 'user_reported_external'
+        evidence = {'after': _address_evidence_side(record.get('after'), addresses, external=external)}
+        if not external:
+            evidence['before'] = _address_evidence_side(record.get('before'), addresses)
+        projected.append({**record, 'address_evidence': evidence})
+    return projected
 
 
 def attach_probe(database, cycle_id, value, *, source, native_task_id=None, evidence=None):

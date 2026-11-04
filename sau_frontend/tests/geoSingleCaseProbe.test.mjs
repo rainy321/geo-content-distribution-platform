@@ -120,6 +120,24 @@ test('source rows preserve actual unknown URLs and do not turn answer-domain pre
   assert.deepEqual(page.sourceRows(side({website_presence:true})),[])
 })
 
+test('brand review renders exact product and supplementary addresses with separate evidence states',async()=>{
+  const product='https://example.org/products/demo/', entry='https://api.example.org/'
+  const item=probe({address_evidence:{
+    before:[{url:product,role:'website',in_answer:false,in_sources:null,in_citations:null}],
+    after:[
+      {url:product,role:'website',in_answer:false,in_sources:true,in_citations:null},
+      {url:entry,role:'official_url',in_answer:true,in_sources:false,in_citations:false},
+    ],
+  }})
+  const html=await renderComponent(cycle({probes:[item]}))
+  assert.equal((html.match(/data-testid="probe-address-evidence"/g)||[]).length,2)
+  assert.match(html,/主官网<\/strong><span>https:\/\/example\.org\/products\/demo\/<\/span>/)
+  assert.match(html,/补充官方地址<\/strong><span>https:\/\/api\.example\.org\/<\/span>/)
+  assert.match(html,/正文地址<\/dt><dd>未观察到<\/dd>.*来源面板<\/dt><dd>已观察到<\/dd>.*正文引用<\/dt><dd>未知<\/dd>/)
+  const other=await renderComponent(cycle({probes:[{...item,category:'website_guided'}]}))
+  assert.doesNotMatch(other,/data-testid="probe-address-evidence"/)
+})
+
 test('external reports keep their unknown actual question and collection conditions distinct from a cycle anchor',()=>{
   const page=componentHarness(cycle({facts:[fact],probes:[externalProbe()]})),value=externalProbe({native_verified:true})
   assert.equal(page.observations.value.length,1)

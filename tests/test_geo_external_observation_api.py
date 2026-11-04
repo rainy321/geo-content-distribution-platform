@@ -83,7 +83,7 @@ class ExternalObservationAPITests(ProbeFixture, unittest.TestCase):
             'project_id': self.cycle['project_id'], 'cycle_revision': self.cycle['revision'],
             'plan_sha256': self.cycle['test_plan']['plan_sha256'], 'independent_verification': False})
         self.assertEqual(record['external_source_links'], [])
-        self.assertEqual(cycle['probes'], [record])
+        self.assert_probe_views(cycle['probes'], [record])
         self.assertEqual({key: value for key, value in before.items() if key not in ('probes', 'feedback_diagnostics')},
                          {key: value for key, value in cycle.items() if key not in ('probes', 'feedback_diagnostics')})
         self.assertEqual(self.other_tables(), before_tables)
@@ -302,7 +302,7 @@ class ExternalObservationAPITests(ProbeFixture, unittest.TestCase):
         corrected = response.get_json()['data']['probe']
         self.assertEqual(len(corrected['context_attestations']), 2)
         self.assertEqual(self.client.post(endpoint, json=initial).status_code, 400)
-        self.assertEqual(store.get_cycle(self.database, self.cycle['id'])['probes'], [corrected])
+        self.assert_probe_views(store.get_cycle(self.database, self.cycle['id'])['probes'], [corrected])
 
     def test_context_rejects_foreign_record_stale_scope_hash_and_fabricated_fields(self):
         first = self.save()['probe']
@@ -324,7 +324,7 @@ class ExternalObservationAPITests(ProbeFixture, unittest.TestCase):
         native_payload = {**base, 'expected_response_sha256': hashlib.sha256(native['after']['response'].encode()).hexdigest()}
         self.assertEqual(self.client.post(self.context_endpoint(native), json=native_payload).status_code, 400)
         saved = store.get_cycle(self.database, self.cycle['id'])['probes']
-        self.assertEqual(next(row for row in saved if row['id'] == first['id']), first)
+        self.assert_probe_views([next(row for row in saved if row['id'] == first['id'])], [first])
 
     def test_context_endpoint_inherits_auth_json_origin_and_body_limits(self):
         record = self.save()['probe']
@@ -334,7 +334,7 @@ class ExternalObservationAPITests(ProbeFixture, unittest.TestCase):
         self.assertEqual(self.client.post(endpoint, data='{}', content_type='text/plain').status_code, 415)
         self.assertEqual(self.client.post(endpoint, json=payload, headers={'Origin': 'https://foreign.example.org'}).status_code, 403)
         self.assertEqual(self.client.post(endpoint, data=b' ' * (1100 * 1024 + 1), content_type='application/json').status_code, 413)
-        self.assertEqual(store.get_cycle(self.database, self.cycle['id'])['probes'], [record])
+        self.assert_probe_views(store.get_cycle(self.database, self.cycle['id'])['probes'], [record])
 
     def test_simultaneous_identical_domain_submissions_create_only_one_external_record(self):
         payload = self.payload(metadata={'question': self.question})
@@ -342,7 +342,7 @@ class ExternalObservationAPITests(ProbeFixture, unittest.TestCase):
             records = list(workers.map(lambda _: probes.submit_external_observation(
                 self.database, self.cycle['id'], copy.deepcopy(payload)), range(4)))
         self.assertTrue(all(record == records[0] for record in records))
-        self.assertEqual(store.get_cycle(self.database, self.cycle['id'])['probes'], [records[0]])
+        self.assert_probe_views(store.get_cycle(self.database, self.cycle['id'])['probes'], [records[0]])
         self.assert_original_unchanged()
 
     def test_simultaneous_context_retries_create_one_statement_and_conflicting_edits_do_not_overwrite(self):

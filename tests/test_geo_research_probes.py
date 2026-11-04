@@ -71,6 +71,10 @@ class ProbeFixture:
             self.assertEqual(conn.execute('SELECT baseline FROM geo_content_cycles').fetchone()[0], self.original_baseline)
             self.assertEqual(conn.execute('SELECT count(*) FROM geo_content_retests').fetchone()[0], 0)
 
+    def assert_probe_views(self, views, records):
+        self.assertEqual([{key: value for key, value in view.items() if key != 'address_evidence'}
+                          for view in views], records)
+
 
 class ProbeServiceTests(ProbeFixture, unittest.TestCase):
     def test_single_selected_answer_has_three_state_address_observation_without_rate(self):
@@ -84,8 +88,49 @@ class ProbeServiceTests(ProbeFixture, unittest.TestCase):
         self.assertNotIn('cohorts', saved)
         self.assertNotIn('brand_mention_rate', saved)
         self.assertIsNone(saved['causal_effect'])
-        self.assertEqual(store.get_cycle(self.database, self.cycle['id'])['probes'], [saved])
+        before_read = self.database.read_bytes()
+        views = store.get_cycle(self.database, self.cycle['id'])['probes']
+        self.assert_probe_views(views, [saved])
+        self.assertEqual(views[0]['address_evidence']['after'], [
+            {'url': self.plan['profile']['website'], 'role': 'website',
+             'in_answer': True, 'in_sources': None, 'in_citations': None}])
+        self.assertEqual(self.database.read_bytes(), before_read)
         self.assert_original_unchanged()
+
+    def test_brand_identity_address_evidence_separates_exact_urls_and_source_channels(self):
+        product = 'https://synthetic.example.org/products/tree/'
+        service = 'https://api.synthetic.example.org/'
+        docs = 'https://api.synthetic.example.org/docs/'
+        profile = {'website': product, 'official_urls': [product.rstrip('/'), service, docs]}
+        before = {'response': 'https://synthetic.example.org/products/tree-other '
+                              'https://fake.example.org/?next=<https://api.synthetic.example.org/> '
+                              'https://bad@api.synthetic.example.org/ https://api.synthetic.example.org:8443/',
+                  'answer_evaluable': True, 'official_source_present': False,
+                  'citations': [{'url': docs, 'url_status': 'unconfirmed'}, {'ui_href': service}]}
+        after = {'response': '官网：https://synthetic.example.org/products/tree。 入口：api.synthetic.example.org, '
+                             '[接入 文档](https://api.synthetic.example.org/docs)；',
+                 'answer_evaluable': True, 'official_source_present': True,
+                 'displayed_sources': [{'url': product, 'url_status': 'displayed_not_opened'},
+                                       {'url': docs + 'child', 'url_status': 'navigation_observed'}],
+                 'citations': [{'url': service, 'url_status': 'navigation_observed'}]}
+        raw = {'case_id': 'q05', 'category': 'brand_identity', 'source': 'native_collector',
+               'before': before, 'after': after}
+        [view] = probes.project_probe_address_evidence(profile, [raw])
+        self.assertNotIn('address_evidence', raw)
+        self.assertEqual(view['address_evidence']['before'], [
+            {'url': url, 'role': role, 'in_answer': False, 'in_sources': False, 'in_citations': None}
+            for url, role in [(product, 'website'), (service, 'official_url'), (docs, 'official_url')]])
+        self.assertEqual(view['address_evidence']['after'], [
+            {'url': product, 'role': 'website', 'in_answer': True, 'in_sources': True, 'in_citations': None},
+            {'url': service, 'role': 'official_url', 'in_answer': True, 'in_sources': None, 'in_citations': True},
+            {'url': docs, 'role': 'official_url', 'in_answer': True, 'in_sources': None, 'in_citations': None}])
+        [external] = probes.project_probe_address_evidence(profile, [
+            {**raw, 'source': 'user_reported_external', 'after': {**after, 'answer_evaluable': None}}])
+        self.assertEqual(set(external['address_evidence']), {'after'})
+        for row in external['address_evidence']['after']:
+            self.assertTrue(all(row[key] is None for key in ('in_answer', 'in_sources', 'in_citations')))
+        [guided] = probes.project_probe_address_evidence(profile, [{**raw, 'category': 'website_guided'}])
+        self.assertNotIn('address_evidence', guided)
 
     def test_incomplete_capacity_and_account_private_are_unknown_never_zero(self):
         for changes in (
@@ -403,7 +448,7 @@ class ExternalObservationTests(ProbeFixture, unittest.TestCase):
         self.assertEqual(snapshot(), before)
         saved = store.get_cycle(self.database, self.cycle['id'])['probes']
         self.assertEqual(len(saved), 2)
-        self.assertEqual(next(row for row in saved if row['id'] == other['id']), other)
+        self.assert_probe_views([next(row for row in saved if row['id'] == other['id'])], [other])
 
     def test_context_attestation_keeps_append_only_history_and_identical_retry_is_idempotent(self):
         first = self.external()
@@ -461,7 +506,7 @@ class ExternalObservationTests(ProbeFixture, unittest.TestCase):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 probes.attest_external_observation_context(self.database, self.cycle['id'], first['id'],
                     first['response_sha256'], value)
-        self.assertEqual(store.get_cycle(self.database, self.cycle['id'])['probes'], [first])
+        self.assert_probe_views(store.get_cycle(self.database, self.cycle['id'])['probes'], [first])
 
     def test_context_attestation_rejects_wrong_cycle_source_probe_and_response_hash(self):
         external = self.external()
@@ -476,8 +521,8 @@ class ExternalObservationTests(ProbeFixture, unittest.TestCase):
             with self.subTest(scope=scope), self.assertRaises(ValueError):
                 self.attest(external, **scope)
         saved = store.get_cycle(self.database, self.cycle['id'])['probes']
-        self.assertEqual(next(row for row in saved if row['id'] == external['id']), external)
-        self.assertEqual(next(row for row in saved if row['id'] == native['id']), native)
+        self.assert_probe_views([next(row for row in saved if row['id'] == external['id'])], [external])
+        self.assert_probe_views([next(row for row in saved if row['id'] == native['id'])], [native])
 
     def test_context_attestation_does_not_promote_explicit_incomplete_or_private_answer(self):
         for metadata, raw in (({'answer_complete': False}, self.raw),
@@ -499,7 +544,7 @@ class ExternalObservationTests(ProbeFixture, unittest.TestCase):
                 (json.dumps(changed, ensure_ascii=False), first['id']))
         with self.assertRaisesRegex(ValueError, 'SHA256'):
             self.attest(first)
-        self.assertEqual(store.get_cycle(self.database, self.cycle['id'])['probes'], [changed])
+        self.assert_probe_views(store.get_cycle(self.database, self.cycle['id'])['probes'], [changed])
 
 
 if __name__ == '__main__':

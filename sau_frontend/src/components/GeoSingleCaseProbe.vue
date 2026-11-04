@@ -15,7 +15,7 @@
       <p v-else class="probe-record-question">{{ item.question }}</p>
       <p class="probe-hint">{{ questionScope(item) }} · {{ isExternal(item) ? '用户提供的外部观察，采集条件未由软件核验' : '仅这一题的独立观察' }}</p>
       <div v-if="contextAttestation(item)" class="probe-hint" data-testid="probe-context-attestation"><strong>用户确认：{{ contextAttestation(item).new_conversation ? '新建对话' : '已有对话' }} · {{ contextAttestation(item).first_message ? '首条提问' : '非首条提问' }}</strong><span v-if="contextAttestation(item).recorded_at"> · {{ date(contextAttestation(item).recorded_at) }}</span><p>这是用户对提问条件的声明，非软件采集核验；回答完整性、界面和模型仍按原记录展示。</p></div>
-      <div class="probe-change"><span>回答出现官网地址</span><strong>{{ isExternal(item) ? presence(item.after,item) : `${presence(item.before)} → ${presence(item.after)}` }}</strong><small>只检查所提供文字中的官网域名，不等于核实引用链接。</small></div>
+      <div class="probe-change"><span>回答出现已登记域名</span><strong>{{ isExternal(item) ? presence(item.after,item) : `${presence(item.before)} → ${presence(item.after)}` }}</strong><small>这里只核对域名文字。</small></div>
       <p class="probe-business-stage" :class="{'not-acknowledged':businessReview(item)?.status==='not_acknowledged'}" data-testid="probe-business-stage">{{ businessStage(item) }}</p><p class="probe-hint">交付能力与案例：未知，仍需独立核验。</p>
       <GeoBusinessReview :cycle="cycle" :probe="item" :busy="busy" @updated="emit('updated',$event)" @busy="emit('busy',$event)"/>
       <details v-if="businessReview(item)"><summary>查看业务资料核对依据</summary><blockquote>{{ businessReview(item).quote }}</blockquote><p class="probe-hint">{{ reviewer(businessReview(item)) }}对照了 {{ businessReview(item).reference_fact_ids.length }} 条已确认资料；这是对原文的核对。</p></details>
@@ -28,6 +28,18 @@
           <p v-else class="probe-hint">尚无可展示的回答原文。</p>
           <details v-if="side.value?.response && side.value.response.length>280"><summary>查看完整回答</summary><p class="probe-full-answer">{{ side.value.response }}</p></details>
           <div class="probe-source-state"><span>官网来源：{{ observed(side.value,'official_source_present') }}</span><span>官网引用：{{ observed(side.value,'official_citation_present') }}</span></div>
+          <section v-if="addressRows(item,side.key).length" class="probe-addresses" aria-label="逐个官方地址核对" data-testid="probe-address-evidence">
+            <h5>逐个官方地址核对</h5>
+            <p class="probe-hint">正文只看地址文字。运营关系以业务资料核对为准。</p>
+            <div v-for="entry in addressRows(item,side.key)" :key="entry.url" class="probe-address">
+              <p class="probe-address-label"><strong>{{ entry.role === 'website' ? '主官网' : '补充官方地址' }}</strong><span>{{ entry.url }}</span></p>
+              <dl>
+                <div><dt>正文地址</dt><dd>{{ addressStatus(entry.in_answer) }}</dd></div>
+                <div><dt>来源面板</dt><dd>{{ addressStatus(entry.in_sources) }}</dd></div>
+                <div><dt>正文引用</dt><dd>{{ addressStatus(entry.in_citations) }}</dd></div>
+              </dl>
+            </div>
+          </section>
           <ul v-if="sourceRows(side.value).length" class="probe-sources"><li v-for="(source,index) in sourceRows(side.value)" :key="`${source.kind}-${index}`"><span>{{ source.kind }} · </span><a v-if="source.url" :href="source.url" target="_blank" rel="noopener noreferrer">{{ source.title }}</a><span v-else>{{ source.title }} · 网址未知或不可公开核验</span></li></ul>
           <p v-else class="probe-hint">来源明细未提供，不能据此判断没有来源。</p>
         </section>
@@ -85,6 +97,12 @@ const sides=item=>isExternal(item)?[{key:'after',label:'用户提供原文',valu
 const valueFor=(side,key,item)=>((isExternal(item)&&side===item.after&&key==='website_presence')||side?.answer_evaluable===true)&&typeof side?.[key]==='boolean'?side[key]:null
 const presence=(side,item)=>valueFor(side,'website_presence',item)===true?'出现':valueFor(side,'website_presence',item)===false?'未出现':'未知'
 const observed=(side,key)=>valueFor(side,key)===true?'已观察到':valueFor(side,key)===false?'未观察到':'未知'
+const addressRows=(item,side)=>{
+  const rows=item?.address_evidence?.[side]
+  if(item?.category!=='brand_identity'||!Array.isArray(rows))return []
+  return rows.filter(row=>row&&['website','official_url'].includes(row.role)&&typeof row.url==='string'&&row.url.trim())
+}
+const addressStatus=value=>value===true?'已观察到':value===false?'未观察到':'未知'
 const unavailable=side=>({service_capacity_unavailable:'本次办公能力不可用，未取得有效答案。',background_task_not_final:'仍是等待调研的提示，尚未取得最终答案。',private_account_context:'回答声称使用账号资料或历史对话记录，已排除公开统计；原文保留，请用空白新对话另测。',human_verification_required:'验证尚未完成，未取得有效答案。',login_required:'登录尚未完成，未取得有效答案。'}[side?.answer_error]||'尚未确认完整有效回答，不能按“未搜到”统计。')
 const questionScope=item=>{
   if(isExternal(item))return !item.observed_question?'实际提问的网址条件未知':item.website_in_question===true?'实际提问提供了官网地址':item.website_in_question===false&&item.website_test_without_url===true?'实际提问未提供官网地址':'实际提问的网址条件未知'
@@ -121,6 +139,9 @@ watch(()=>props.cycle?.id,()=>{selectedCaseId.value='';recordLimit.value=3})
 </script>
 
 <style scoped>
+.probe-addresses{margin-top:14px}.probe-addresses h5{margin:0;font-size:12px;color:var(--geo-ink,#173e3b)}
+.probe-address{margin:8px 0 0;padding:9px 11px;border:1px solid var(--geo-border,#dce6e2);border-radius:7px;font-size:11px}
+.probe-address-label{display:flex;flex-wrap:wrap;gap:2px 9px;margin:0;overflow-wrap:anywhere}.probe-address dl{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px 10px;margin:6px 0 0}.probe-address dd{margin:0;color:var(--geo-ink,#173e3b)}.probe-address dt{color:var(--geo-muted,#63736f)}
 .probe-business-stage{padding:10px 13px;border-left:3px solid var(--geo-border,#dce6e2);background:#f3f7f5;font-size:13px;line-height:1.8}.probe-business-stage.not-acknowledged{border-color:#b78a46;background:#fff7ec;color:#825c2b}.probe-columns.external-only{grid-template-columns:1fr}.single-probe blockquote{margin:10px 0;padding:10px 14px;border-left:2px solid var(--geo-border,#dce6e2);white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}
 .single-probe{margin:24px 0;padding:22px 24px;border:1px solid var(--geo-border,#dce6e2);border-radius:12px;background:#fff;font-size:13px;line-height:1.8}.single-probe h3{font-size:16px;color:var(--geo-ink,#173e3b)}.single-probe header p,.probe-hint{margin:7px 0;color:var(--geo-muted,#63736f);font-size:12px}.probe-controls{display:flex;gap:12px;margin:18px 0 12px}.probe-controls .el-select{flex:1;min-width:0}.probe-question,.probe-record-question{white-space:pre-wrap;overflow-wrap:anywhere}.probe-question{padding:12px 14px;background:#f4f8f6;border-radius:8px}.probe-record{margin-top:24px;padding-top:20px;border-top:1px solid var(--geo-border,#dce6e2)}.probe-heading{display:flex;gap:10px;align-items:center;flex-wrap:wrap}.probe-heading>span:last-child{font-size:11px;color:var(--geo-muted,#63736f)}.probe-record-question{margin-top:12px}.probe-change{display:flex;align-items:center;gap:14px;flex-wrap:wrap;padding:12px 0}.probe-change strong{font-size:17px;color:var(--geo-primary,#0a756e)}.probe-change small{font-size:11px;color:var(--geo-muted,#63736f)}.probe-columns{display:grid;grid-template-columns:1fr 1fr;gap:14px}.probe-answer{min-width:0;padding:16px;border:1px solid var(--geo-border,#dce6e2);border-radius:10px;background:#fafcfc}.answer-heading{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}.answer-heading h4{font-size:13px}.answer-heading>span{font-size:11px;color:var(--geo-primary,#0a756e)}.answer-heading .unavailable{color:#936632}.probe-excerpt,.probe-full-answer{white-space:pre-wrap;overflow-wrap:anywhere;line-height:1.9}.probe-excerpt{margin:12px 0}.probe-full-answer{margin-top:12px}.single-probe details{margin:10px 0}.single-probe summary{width:fit-content;cursor:pointer;color:var(--geo-primary,#0a756e);font-size:12px}.single-probe summary:focus-visible{outline:2px solid var(--geo-primary,#0a756e);outline-offset:3px}.probe-unavailable{padding:9px 12px;background:#fff7ec;color:#825c2b;border-radius:7px;font-size:12px}.probe-source-state{display:flex;gap:5px 16px;flex-wrap:wrap;margin-top:14px;font-size:11px;color:var(--geo-muted,#63736f)}.probe-sources{margin:10px 0 0;padding-left:17px;font-size:12px;overflow-wrap:anywhere}.probe-sources a{color:var(--geo-primary,#0a756e)}.probe-conditions{padding-top:7px}@media(max-width:800px){.single-probe{padding:18px 16px}.probe-columns{grid-template-columns:1fr}.probe-controls{flex-direction:column;align-items:stretch}}
 </style>
