@@ -1,6 +1,6 @@
 <template>
   <el-card shadow="never" data-testid="source-destinations">
-    <div class="row"><h2>来源与平台用途</h2><el-button :disabled="busy" @click="configure()">添加其他平台</el-button></div>
+    <div class="row"><h2>来源与平台用途</h2><el-button :disabled="busy" @click="configure()">添加其他平台</el-button><el-button v-if="!cycle.destinations.some(isApiznzDirectory)" :disabled="busy" @click="configure(apiznzPreset)">接入 API指南针回执</el-button></div>
     <p class="hint">先看 AI 引用了哪个栏目，再判断适合资料参考、原创投稿还是商业投放。用途核对后才准备账号；被引用不代表允许推广。</p>
     <el-table :data="cycle.opportunities" data-testid="source-opportunities">
       <el-table-column label="观察来源" min-width="190"><template #default="{row}"><strong>{{ row.domain || '网址未确认' }}</strong><p>{{ surfaces[row.surface] || '待调研网站' }}</p><p class="hint">{{ row.case_ids.join('、') }} · {{ row.observed_pairs }} 条去重线索</p></template></el-table-column>
@@ -15,14 +15,15 @@
     </el-table>
     <p class="hint">注册、实名、验证码及投稿申请需由账号持有人正常完成。首次入口和风格为接入起点，需要按平台现行规则核对。</p>
     <article v-for="target in cycle.destinations" :key="target.id" class="target" data-testid="distribution-target">
-      <div class="row"><strong>{{ target.config.name }}</strong><el-tag>{{ !destinationEnabled(target) ? '已停用' : states[target.state] || target.state }}</el-tag><el-tag type="info">{{ isGrokCodeDirectory(target) ? '目录辅助申请，待平台确认' : target.capability === 'platform_assisted_fill' ? '平台辅助填写' : target.capability === 'configured_fill' ? '已配置填写，待实站验证' : '登录与导出' }}</el-tag></div>
-      <p v-if="!isGrokCodeDirectory(target)" class="hint">{{ target.config.editor_url }}<br/>内部阈值：每 24 小时 {{ target.config.daily_limit }} 次填写，至少间隔 {{ target.config.interval_hours }} 小时。该阈值不是平台官方额度，也不保证免封号。</p>
+      <div class="row"><strong>{{ target.config.name }}</strong><el-tag>{{ !destinationEnabled(target) ? '已停用' : states[target.state] || target.state }}</el-tag><el-tag type="info">{{ isApiznzDirectory(target) ? '登记外部目录回执' : isGrokCodeDirectory(target) ? '目录辅助申请，待平台确认' : target.capability === 'platform_assisted_fill' ? '平台辅助填写' : target.capability === 'configured_fill' ? '已配置填写，待实站验证' : '登录与导出' }}</el-tag></div>
+      <p v-if="!directoryAdapterForTarget(target)" class="hint">{{ target.config.editor_url }}<br/>内部阈值：每 24 小时 {{ target.config.daily_limit }} 次填写，至少间隔 {{ target.config.interval_hours }} 小时。该阈值不是平台官方额度，也不保证免封号。</p>
       <p v-if="target.blocked_reason" class="blocked">{{ target.blocked_reason }}</p>
       <p v-if="!destinationEnabled(target)" class="hint" role="status">{{ inactiveDestinationMessage }}</p>
-      <DestinationUseReview v-if="!isGrokCodeDirectory(target) || !destinationCanPrepare(target)" :cycle="cycle" :target="target" :busy="busy" @updated="$emit('updated',$event)"/>
+      <DestinationUseReview v-if="!directoryAdapterForTarget(target) || !destinationCanPrepare(target)" :cycle="cycle" :target="target" :busy="busy" @updated="$emit('updated',$event)"/>
       <GeoDirectoryApplication v-if="isGrokCodeDirectory(target)" :cycle="cycle" :target="target" :task="task" :busy="busy" :native-available="nativeAvailable"/>
-      <DestinationSessionCard v-if="!isGrokCodeDirectory(target) && destinationCanPrepare(target)" :cycle-id="cycle.id" :target="target" :task="task" :busy="busy" :native-available="nativeAvailable" @open="openTarget(target)" @checked="$emit('checked')"/>
-      <div v-if="!isGrokCodeDirectory(target)" class="row"><el-button :disabled="busy || !destinationCanPrepare(target)" @click="selectTarget(target.key)">选择此平台写稿</el-button><el-button :disabled="busy" @click="configure(target.config, target)">编辑接入配置</el-button><el-button @click="events(target)">尝试记录</el-button><el-button v-if="destinationEnabled(target) && (target.blocked_reason || ['preparing','filled'].includes(target.state))" :disabled="busy" @click="review(target)">检查后恢复</el-button></div>
+      <GeoExternalDirectoryReceipt v-else-if="isApiznzDirectory(target)" :cycle="cycle" :target="target" :busy="busy"/>
+      <DestinationSessionCard v-if="!directoryAdapterForTarget(target) && destinationCanPrepare(target)" :cycle-id="cycle.id" :target="target" :task="task" :busy="busy" :native-available="nativeAvailable" @open="openTarget(target)" @checked="$emit('checked')"/>
+      <div v-if="!directoryAdapterForTarget(target)" class="row"><el-button :disabled="busy || !destinationCanPrepare(target)" @click="selectTarget(target.key)">选择此平台写稿</el-button><el-button :disabled="busy" @click="configure(target.config, target)">编辑接入配置</el-button><el-button @click="events(target)">尝试记录</el-button><el-button v-if="destinationEnabled(target) && (target.blocked_reason || ['preparing','filled'].includes(target.state))" :disabled="busy" @click="review(target)">检查后恢复</el-button></div>
       <details v-else class="directory-advanced"><summary>平台配置与旧连接记录</summary><div class="row"><el-button :disabled="busy" @click="configure(target.config, target)">编辑接入配置</el-button><el-button @click="events(target)">查看旧连接记录</el-button></div></details>
     </article>
     <p v-if="!nativeAvailable" class="hint">保存配置和写稿可在网页中操作；专用平台浏览器需使用桌面软件。</p>
@@ -53,7 +54,8 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import { geoContentApi } from '@/api/geoContent'
 import DestinationSessionCard from '@/components/DestinationSessionCard.vue'
 import GeoDirectoryApplication from '@/components/GeoDirectoryApplication.vue'
-import { isGrokCodeDirectory } from '@/api/geoDirectoryApplications'
+import GeoExternalDirectoryReceipt from '@/components/GeoExternalDirectoryReceipt.vue'
+import { apiznzEntry, apiznzHome, directoryAdapterForTarget, isApiznzDirectory, isGrokCodeDirectory } from '@/api/geoDirectoryApplications'
 import DestinationUseFields from '@/components/DestinationUseFields.vue'
 import DestinationUseReview from '@/components/DestinationUseReview.vue'
 import { destinationUseValues, safeResearchLink } from '@/utils/geoDestinationUse'
@@ -63,15 +65,18 @@ const props = defineProps({cycle:{type:Object,required:true},task:{type:Object,d
 const emit = defineEmits(['updated','select','open','checked'])
 const show=ref(false), saving=ref(false), editing=ref(null), showEvents=ref(false), eventRows=ref([]), formPolicy=ref(null)
 const defaults = () => ({...destinationUseValues(),enabled:true,name:'',home_url:'',source_scope:'',publication_scope:'',login_url:'',editor_url:'',style:'先回答读者的问题，再说明依据、适用条件和局限。不要复制来源文章或编造体验；按平台现行规范核对商业内容。',channel:'',title_limit:100,body_limit:15000,daily_limit:1,interval_hours:6,title_selector:'',body_selector:''})
+const apiznzPreset={name:'API指南针',home_url:apiznzHome,source_scope:apiznzHome,publication_scope:apiznzHome,
+  login_url:apiznzEntry,editor_url:apiznzEntry,rules_url:apiznzEntry,publication_use:'commercial',
+  style:'服务目录，只登记实际公开的名称、官网域名、产品介绍及公开 API 基址。'}
 const form = reactive(defaults())
 const resetUseReview=()=>{form.rule_review={...form.rule_review,state:'unknown',operator_confirmed:false};formPolicy.value=null}
 const surfaces = {community_candidate:'开放内容平台候选，权限待核对',vendor_documentation:'厂商文档 / 自有资料',url_unknown:'仅有标题',owned_site:'客户官网',unknown:'未知网站，需调研'}
 const states = {configured:'已配置',session_saved:'会话已保存，权限未验证',login_open:'等待平台操作',editor_ready:'编辑器已检查',preparing:'尝试未结束',filled:'已填写，发布未确认',need_action:'待检查',reviewed:'已人工检查'}
 let configEpoch=0
 const configure = (config, target) => { configEpoch++;editing.value=target || null; formPolicy.value=target?.publication_policy || config?.publication_policy || null; Object.assign(form,defaults(),config || {},destinationUseValues(config)); if (target && !destinationEnabled(target)) form.enabled=false; if (!form.publication_scope && form.channel === 'zhihu') form.publication_scope='https://zhuanlan.zhihu.com/'; show.value=true }
-const directoryTargetKey=key=>props.cycle.destinations.some(item=>item.key===key && isGrokCodeDirectory(item))
+const directoryTargetKey=key=>props.cycle.destinations.some(item=>item.key===key && directoryAdapterForTarget(item))
 const selectTarget = key => {if(!props.busy && !directoryTargetKey(key) && writingChannelEnabled(props.cycle,key))emit('select',key)}
-const openTarget = target => {const current=props.cycle.destinations.find(item=>item.id===target.id);if(!props.busy && !isGrokCodeDirectory(current) && destinationCanPrepare(current))emit('open',{target_id:current.id})}
+const openTarget = target => {const current=props.cycle.destinations.find(item=>item.id===target.id);if(!props.busy && !directoryAdapterForTarget(current) && destinationCanPrepare(current))emit('open',{target_id:current.id})}
 const unknownCandidate = row => {const home=`https://${row.domain}/`;return {name:row.domain,home_url:home,source_scope:home,login_url:home,editor_url:home}}
 const save = async () => {
   if(props.busy || saving.value)return
@@ -88,7 +93,7 @@ const events = async target => {
   eventRows.value=result.target.events;showEvents.value=true
 }
 const review = async target => {
-  if(props.busy || isGrokCodeDirectory(target) || !destinationEnabled(props.cycle.destinations.find(item=>item.id===target.id)))return
+  if(props.busy || directoryAdapterForTarget(target) || !destinationEnabled(props.cycle.destinations.find(item=>item.id===target.id)))return
   const cycleId=props.cycle.id,epoch=configEpoch,revision=target.revision,previousState=target.state,previousReason=target.blocked_reason
   const current=()=>cycleId===props.cycle.id && epoch===configEpoch && props.cycle.destinations.some(item=>item.id===target.id && item.revision===revision)
   try {

@@ -22,7 +22,7 @@ const destinations=source('../src/components/GeoDestinations.vue')
 const content=source('../src/views/GeoContentLoop.vue')
 const journey=source('../src/views/GeoJourney.vue')
 const directorySource=fs.readFileSync(new URL('../src/api/geoDirectoryApplications.js',import.meta.url),'utf8')
-const {isGrokCodeDirectory,directoryTargetForChannel}=new Function(directorySource.replace(/^import .*$/gm,'').replaceAll('export const ','const ')+';return {isGrokCodeDirectory,directoryTargetForChannel};')()
+const {directoryAdapterForTarget,directoryTargetForChannel}=new Function(directorySource.replace(/^import .*$/gm,'').replaceAll('export const ','const ')+';return {directoryAdapterForTarget,directoryTargetForChannel};')()
 
 test('availability handles legacy enabled defaults and rejects every stopped state or invalid enabled flag',()=>{
   assert.equal(destinationEnabled(target()),true)
@@ -44,13 +44,13 @@ test('writing choices resolve the actual target and never authorize a missing ta
 
 const destinationHarness = (value,confirm=async()=>{}) => {
   const props=reactive({cycle:cycle(value),busy:false}),emitted=[],form=reactive({}),editing=ref(null),show=ref(false),calls=[]
-  const functions=new Function('props','emit','form','editing','show','destinationEnabled','destinationCanPrepare','destinationUseValues','formPolicy','writingChannelEnabled','ElMessageBox','geoContentApi','ElMessage','isGrokCodeDirectory',`
+  const functions=new Function('props','emit','form','editing','show','destinationEnabled','destinationCanPrepare','destinationUseValues','formPolicy','writingChannelEnabled','ElMessageBox','geoContentApi','ElMessage','directoryAdapterForTarget',`
     let configEpoch=0;
     const defaults=${destinations.expression('defaults')};
     const directoryTargetKey=${destinations.expression('directoryTargetKey')};
     return {configure:(${destinations.expression('configure')}),select:(${destinations.expression('selectTarget')}),open:(${destinations.expression('openTarget')}),review:(${destinations.expression('review')})}
   `)(props,(...args)=>emitted.push(args),form,editing,show,destinationEnabled,destinationCanPrepare,destinationUseValues,ref(null),writingChannelEnabled,{confirm},
-    {reviewDestination:async(...args)=>calls.push(args),get:async()=>({data:props.cycle})},{error(){}},isGrokCodeDirectory)
+    {reviewDestination:async(...args)=>calls.push(args),get:async()=>({data:props.cycle})},{error(){}},directoryAdapterForTarget)
   return {...functions,props,emitted,form,editing,show,calls}
 }
 

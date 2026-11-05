@@ -153,7 +153,7 @@ test('Journey renders the shared directory card before article content and leave
   const component={render:Vue.compile(node.loc.source.replace('v-else-if=','v-if=')),setup:()=>({...page,...helpers,...destinationAvailability,task:{},nativeAvailable:true,selectContent:()=>{},applyReviewCycle:()=>{},openDetails:()=>{},goFeedback:()=>{}})}
   const app=Vue.createSSRApp(component)
   for(const name of ['el-form-item','el-select','el-option','el-button','el-alert'])app.component(name,{setup:(_,{slots})=>()=>Vue.h('div',slots.default?.())})
-  for(const name of ['GeoDirectoryApplication','DestinationUseReview'])app.component(name,{setup:()=>()=>Vue.h('div',{'data-component':name},name)})
+  for(const name of ['GeoDirectoryApplication','GeoExternalDirectoryReceipt','DestinationUseReview'])app.component(name,{setup:()=>()=>Vue.h('div',{'data-component':name},name)})
   const html=await renderToString(app)
   assert.match(html,/本渠道使用目录资料，不需要文章/);assert.match(html,/data-component="GeoDirectoryApplication"/);assert.match(html,/data-component="DestinationUseReview"/)
   assert.match(html,/旧文章及原任务仍保留/)
@@ -623,21 +623,24 @@ test('directory native task guidance does not reuse destination or Doubao instru
 test('the target card retains first-time purpose review and separates directory actions from article controls',async()=>{
   const parent=fs.readFileSync(new URL('../src/components/GeoDestinations.vue',import.meta.url),'utf8'),parentDescriptor=parse(parent).descriptor
   const render=Vue.compile(parentDescriptor.template.content)
-  const output=async(directory,allowed)=>{
-    const configured=target({config:{...target().config,source_scope:directory?'https://grokcode.cn/api-transit':'https://article.example.org/'},state:'preparing',blocked_reason:''})
+  const output=async(sourceScope,allowed)=>{
+    const configured=target({config:{...target().config,source_scope:sourceScope},state:'preparing',blocked_reason:''})
     const context={cycle:cycle({opportunities:[],destinations:[configured]}),task:{},busy:false,nativeAvailable:true,show:false,showEvents:false,form:{},editing:null,eventRows:[],
-      states:{},surfaces:{},isGrokCodeDirectory:helpers.isGrokCodeDirectory,destinationEnabled:()=>true,destinationCanPrepare:()=>allowed,inactiveDestinationMessage:'',configure:()=>{},selectTarget:()=>{},events:()=>{},review:()=>{}}
+      ...helpers,states:{},surfaces:{},destinationEnabled:()=>true,destinationCanPrepare:()=>allowed,inactiveDestinationMessage:'',configure:()=>{},selectTarget:()=>{},events:()=>{},review:()=>{}}
     const app=Vue.createSSRApp({setup:()=>context,render})
     for(const name of [...new Set(parent.match(/el-[a-z-]+/g))])app.component(name,{props:['modelValue','disabled'],setup:(props,{slots})=>()=>name==='el-dialog'||name==='el-table'?null:Vue.h(name==='el-button'?'button':'div',{disabled:props.disabled},slots.default?.())})
-    for(const name of ['GeoDirectoryApplication','DestinationUseReview','DestinationSessionCard','DestinationUseFields'])app.component(name,{setup:()=>()=>Vue.h('div',{'data-component':name},name)})
+    for(const name of ['GeoDirectoryApplication','GeoExternalDirectoryReceipt','DestinationUseReview','DestinationSessionCard','DestinationUseFields'])app.component(name,{setup:()=>()=>Vue.h('div',{'data-component':name},name)})
     return renderToString(app)
   }
-  const initial=await output(true,false)
+  const initial=await output('https://grokcode.cn/api-transit',false)
   assert.match(initial,/data-component="DestinationUseReview"/);assert.match(initial,/data-component="GeoDirectoryApplication"/)
-  for(const html of [initial,await output(true,true)]){
+  for(const html of [initial,await output('https://grokcode.cn/api-transit',true)]){
     assert.doesNotMatch(html,/data-component="DestinationSessionCard"|选择此平台写稿|检查后恢复/);assert.match(html,/查看旧连接记录/)
   }
-  const article=await output(false,true)
+  const external=await output(helpers.apiznzHome,true)
+  assert.match(external,/data-component="GeoExternalDirectoryReceipt"/)
+  assert.doesNotMatch(external,/data-component="GeoDirectoryApplication"|data-component="DestinationSessionCard"|选择此平台写稿|检查后恢复/)
+  const article=await output('https://article.example.org/',true)
   assert.match(article,/data-component="DestinationSessionCard"/);assert.match(article,/选择此平台写稿/);assert.match(article,/检查后恢复/)
   assert.doesNotMatch(article,/data-component="GeoDirectoryApplication"/)
 })
@@ -659,4 +662,66 @@ test('new and existing target components compile with readable narrow layouts an
   const parent=fs.readFileSync(new URL('../src/components/GeoDestinations.vue',import.meta.url),'utf8')
   assert.match(parent,/<GeoDirectoryApplication v-if="isGrokCodeDirectory\(target\)"/)
   assert.match(parent,/<DestinationSessionCard/);assert.match(parent,/@click="review\(target\)"/)
+})
+
+test('API指南针 target routing and external receipt workflow stay local and scoped',async()=>{
+  const apiznz=target({id:'target-external',key:'target_target-external',config:{name:'API指南针',source_scope:helpers.apiznzHome}})
+  const current=cycle({destinations:[target(),apiznz]})
+  assert.equal(helpers.directoryTargetForChannel(current,apiznz.key),apiznz)
+  assert.equal(helpers.directoryTargetForChannel(current,'GrokCode'),current.destinations[0])
+  assert.equal(helpers.isApiznzDirectory({...apiznz,config:{source_scope:'https://www.apiznz.com.evil.example/'}}),false)
+  assert.equal(helpers.isApiznzDirectory({...apiznz,config:{source_scope:'https://www.apiznz.com/site/lists?kw=example'}}),false)
+  const {descriptor}=parse(fs.readFileSync(new URL('../src/components/GeoExternalDirectoryReceipt.vue',import.meta.url),'utf8'))
+  const script=compileScript(descriptor,{id:'directory-receipt-only'})
+  assert.deepEqual(compileTemplate({source:descriptor.template.content,filename:'GeoExternalDirectoryReceipt.vue',id:'directory-receipt-only'}).errors,[])
+  let source=descriptor.scriptSetup.content
+  for(const node of script.scriptSetupAst.filter(node=>node.type==='ImportDeclaration').reverse())source=source.slice(0,node.start)+source.slice(node.end)
+  const props=Vue.reactive({cycle:current,target:apiznz,busy:false}),calls=[]
+  let stored=null
+  const api={
+    list:async (...args)=>{calls.push(['list',...args]);return {data:overview(stored?[stored]:[],{adapter:helpers.apiznzAdapter,entry_url:helpers.apiznzEntry})}},
+    save:async(cycleId,payload)=>{calls.push(['save',cycleId,payload]);stored=record({adapter:helpers.apiznzAdapter,target_id:apiznz.id,fields:payload.fields});return {data:stored}},
+    review:async(cycleId,id,payload)=>{calls.push(['review',cycleId,id,payload]);stored={...stored,revision:2,stage:'reviewed',reviewed:true};return {data:stored}},
+    externalReceipt:async(cycleId,id,payload)=>{
+      calls.push(['receipt',cycleId,id,payload])
+      const {observed_at,observed_at_precision,note,evidence_sha256}=payload
+      stored={...stored,stage:payload.status,can_record_external_receipt:false,evidence_level:'owner_reported',geo_effect_evidence:false,
+        receipt:{intake_uid:null,owner_reported:true,public_listing_verified:false,observed_at,observed_at_precision,note,evidence_sha256}}
+      return {data:stored}
+    }
+  }
+  const scope=Vue.effectScope(),deps={...helpers,computed:Vue.computed,reactive:Vue.reactive,ref:Vue.ref,watch:Vue.watch,
+    onUnmounted:()=>{},defineProps:()=>props,defineExpose:()=>{},geoDirectoryApplicationsApi:api}
+  const page=scope.run(()=>new Function(...Object.keys(deps),source+';return {form,receipt,fieldsConfirmed,canReview,canSaveReceipt,reviewFields,readEvidence,saveReceipt,refresh,record};')(...Object.values(deps)))
+  try{
+    await settle()
+    Object.assign(page.form,{intro:'统一接入与用量管理',api_base:'https://example.org/v1?token=secret'})
+    page.fieldsConfirmed.value=true
+    assert.equal(page.canReview.value,false)
+    page.form.api_base='https://example.org/v1'
+    assert.equal(page.fieldsConfirmed.value,false)
+    page.fieldsConfirmed.value=true
+    await page.reviewFields()
+    assert.equal(page.record.value.stage,'reviewed')
+    Object.assign(page.receipt,{observedAt:'2026-11-04T15:57',note:'提交成功',confirmed:true})
+    assert.equal(page.canSaveReceipt.value,false)
+    const file=new Blob(['abc'])
+    await page.readEvidence({target:{files:[file],value:'local-file'}})
+    assert.equal(page.receipt.digest,'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad')
+    assert.equal(page.receipt.confirmed,false)
+    page.receipt.confirmed=true
+    await Promise.all([page.saveReceipt(),page.saveReceipt()])
+    assert.equal(page.record.value.stage,'submitted_pending_review')
+    const receipts=calls.filter(call=>call[0]==='receipt')
+    assert.equal(receipts.length,1)
+    assert.deepEqual(receipts[0].slice(1),['cycle-a','application-a',{expected_revision:2,expected_review_sha256:reviewHash,confirmed:true,
+      status:'submitted_pending_review',observed_at:'2026-11-04T15:57+08:00',observed_at_precision:'minute',note:'提交成功',
+      evidence_sha256:'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'}])
+    await page.refresh()
+    assert.equal(page.record.value.receipt.public_listing_verified,false)
+    assert.equal(page.record.value.geo_effect_evidence,false)
+    props.cycle=cycle({id:'other-cycle',project_id:6,destinations:[apiznz]})
+    await settle()
+    assert.equal(page.record.value,null)
+  }finally{scope.stop()}
 })

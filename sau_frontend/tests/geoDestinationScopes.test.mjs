@@ -19,11 +19,11 @@ const source=path=>{
 }
 const destinations=source('../src/components/GeoDestinations.vue'),journey=source('../src/views/GeoJourney.vue')
 const directorySource=fs.readFileSync(new URL('../src/api/geoDirectoryApplications.js',import.meta.url),'utf8')
-const {isGrokCodeDirectory,directoryTargetForChannel}=new Function(directorySource.replace(/^import .*$/gm,'').replaceAll('export const ','const ')+';return {isGrokCodeDirectory,directoryTargetForChannel};')()
+const {apiznzEntry,apiznzHome,directoryAdapterForTarget,directoryTargetForChannel}=new Function(directorySource.replace(/^import .*$/gm,'').replaceAll('export const ','const ')+';return {apiznzEntry,apiznzHome,directoryAdapterForTarget,directoryTargetForChannel};')()
 const destinationHarness=api=>{
   const props=reactive({cycle:cycle(),busy:false}),events=[],scope=effectScope()
   const deps={reactive,ref,watch,defineProps:()=>props,defineEmits:()=>((...args)=>events.push(args)),geoContentApi:api,
-    ElMessage:{error(){},success(){}},ElMessageBox:{confirm:async()=>{}},isGrokCodeDirectory,...availability,...use}
+    ElMessage:{error(){},success(){}},ElMessageBox:{confirm:async()=>{}},apiznzEntry,apiznzHome,directoryAdapterForTarget,...availability,...use}
   const actions=scope.run(()=>new Function(...Object.keys(deps),destinations.body+';return {events,review,eventRows,showEvents,selectTarget,openTarget};')(...Object.values(deps)))
   return {props,emitted:events,stop:()=>scope.stop(),...actions,deps}
 }

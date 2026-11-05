@@ -13,6 +13,9 @@ export const geoDirectoryApplicationsApi = {
 
 export const directoryAdapter = 'grokcode_api_transit_v1'
 export const directoryEntry = 'https://grokcode.cn/api-transit?modal=submit-transit'
+export const apiznzAdapter = 'apiznz_external_receipt_v1'
+export const apiznzEntry = 'https://www.apiznz.com/submit'
+export const apiznzHome = 'https://www.apiznz.com/'
 export const directoryFieldNames = Object.freeze(['name','url','rate','source','models','contact','notes'])
 export const directoryLimits = Object.freeze({name:120,url:500,rate:500,source:1500,contact:500,notes:2000})
 export const directoryDigest = value => typeof value==='string' && /^[a-f0-9]{64}$/.test(value)
@@ -25,11 +28,20 @@ export const isGrokCodeDirectory = target => {
       ['/api-transit','/api-transit/'].includes(url.pathname) && !url.search && !url.hash
   } catch {return false}
 }
+export const isApiznzDirectory = target => {
+  try {
+    const url = new URL(target?.config?.source_scope)
+    return url.origin === new URL(apiznzHome).origin && !url.username && !url.password &&
+      ['/', '/site/lists', '/site/lists/'].includes(url.pathname) && !url.search && !url.hash
+  } catch { return false }
+}
+export const directoryAdapterForTarget = target => isGrokCodeDirectory(target) ? directoryAdapter : isApiznzDirectory(target) ? apiznzAdapter : ''
 export const directoryTargetForChannel = (cycle,key) => {
   if(typeof key!=='string'||!key)return null
-  const known=(cycle?.destinations || []).filter(isGrokCodeDirectory)
+  const known=(cycle?.destinations || []).filter(directoryAdapterForTarget)
+  const legacy=known.filter(isGrokCodeDirectory)
   return known.find(target=>target.key===key || target.id===key || `target_${target.id}`===key) ||
-    (key.toLowerCase()==='grokcode'&&known.length===1?known[0]:null)
+    (key.toLowerCase()==='grokcode'&&legacy.length===1?legacy[0]:null)
 }
 
 export const directoryFields = value => ({name:typeof value?.name==='string'?value.name:'',
@@ -52,15 +64,16 @@ export const directoryOfficialUrls = cycle => {
 }
 
 export const directoryScope = (cycle,target) => {
+  const adapter=directoryAdapterForTarget(target)
   if(!cycle?.id || !Number.isSafeInteger(cycle.project_id) || cycle.project_id<=0 || !target?.id ||
-    !Number.isSafeInteger(target.revision) || !isGrokCodeDirectory(target) ||
+    !Number.isSafeInteger(target.revision) || !adapter ||
     !cycle.destinations?.some(item=>item.id===target.id && item.revision===target.revision))return null
-  return Object.freeze({cycleId:cycle.id,projectId:cycle.project_id,targetId:target.id,targetRevision:target.revision,
+  return Object.freeze({cycleId:cycle.id,projectId:cycle.project_id,targetId:target.id,targetRevision:target.revision,adapter,
     material:JSON.stringify([target.config_sha256 || target.config,cycle.profile || cycle.baseline?.profile])})
 }
 export const directoryScopeKey = (cycle,target) => JSON.stringify(directoryScope(cycle,target))
 export const directoryProjectRecord = (record,scope) => Boolean(scope && directoryIdentifier(record?.id) &&
-  record.project_id===scope.projectId && record.adapter===directoryAdapter &&
+  record.project_id===scope.projectId && record.adapter===scope.adapter &&
   Number.isSafeInteger(record.revision) && record.revision>=0 && directoryDigest(record.review_sha256))
 export const directoryRecordBelongs = (record,scope) => directoryProjectRecord(record,scope) && record.target_id===scope.targetId
 export const directoryRecordCurrent = (record,scope) => directoryRecordBelongs(record,scope) &&

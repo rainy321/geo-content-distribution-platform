@@ -927,6 +927,8 @@ class DesktopGeoJobs:
         database = self.data / 'database.db'
         try:
             record = directory.get_application(database, cycle_id, application_id)
+            if inspection_only and not record['can_inspect']:
+                raise ValueError('该目录使用普通浏览器核对，工作台只登记本人提供的回执。')
             if not inspection_only and (not record['can_open'] or review_sha256 != record['review_sha256']
                                         or not isinstance(open_nonce, str) or open_nonce != record.get('open_nonce')):
                 raise ValueError('请先核对并确认当前七字段预览；原授权不可重复使用。')
