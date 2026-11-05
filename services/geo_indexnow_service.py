@@ -110,7 +110,7 @@ def _profile_url(value):
     return _public_url(trusted_source_url(value))
 
 
-def _scope(connection, cycle):
+def _profiles(connection, cycle):
     website = _profile_url(cycle['profile'].get('website'))
     project_id = cycle['project_id']
     if type(project_id) is not int or project_id <= 0:
@@ -124,6 +124,61 @@ def _scope(connection, cycle):
     # Revalidate the currently saved website too; normalization alone must not
     # make a malformed current project eligible for a frozen old website.
     _profile_url(current.get('website'))
+    return website, current
+
+
+def _asset(value, project_id, *, primary=False):
+    parsed = urlsplit(_profile_url(value))
+    origin, path = 'https://' + parsed.netloc, parsed.path.rstrip('/') or '/'
+    return {'id': _digest({'project_id': project_id, 'site_origin': origin, 'path': path}),
+            'url': origin + path, 'site_origin': origin,
+            'page_scope': origin + (path.rstrip('/') + '/' if path != '/' else '/'),
+            'primary': primary, 'basis': 'frozen_website' if primary else 'configured_official_url',
+            'control_status': 'not_checked'}
+
+
+def _validate_asset_id(asset_id):
+    if asset_id is not None and (not isinstance(asset_id, str) or not re.fullmatch('[0-9a-f]{64}', asset_id)):
+        raise ValueError('官网资产编号无效，请从本轮已登记地址重新选择')
+
+
+def _assets(cycle, current, website):
+    """Configured addresses are candidates, never ownership evidence.
+
+    A secondary scope must still exist at exactly the same canonical host/path
+    in both profiles. A removed root cannot be retained through a narrower URL.
+    """
+    project_id = cycle['project_id']
+    primary = _asset(website, project_id, primary=True)
+    result, seen = [primary], {primary['id']}
+    active = set()
+    for value in current.get('official_urls') or []:
+        try:
+            active.add(_asset(value, project_id)['id'])
+        except (ValueError, TypeError, UnicodeError):
+            continue
+    for value in cycle['profile'].get('official_urls') or []:
+        try:
+            item = _asset(value, project_id)
+        except (ValueError, TypeError, UnicodeError):
+            continue
+        if item['id'] in active and item['id'] not in seen:
+            result.append(item)
+            seen.add(item['id'])
+    return result
+
+
+def _scope(connection, cycle, asset_id=None):
+    website, current = _profiles(connection, cycle)
+    assets = _assets(cycle, current, website)
+    selected = assets[0]
+    if asset_id is not None:
+        _validate_asset_id(asset_id)
+        selected = next((item for item in assets if item['id'] == asset_id), None)
+        if selected is None:
+            raise ValueError('该官网地址不在冻结资料与当前项目的共同登记范围内，旧记录保留')
+        website = selected['url']
+    project_id = cycle['project_id']
     parsed = urlsplit(website)
     base = parsed.path.rstrip('/')
     identity = {'cycle_id': cycle['id'], 'project_id': project_id,
@@ -131,13 +186,23 @@ def _scope(connection, cycle):
         'frozen_profile_sha256': profile_sha256(cycle['profile']),
         'current_profile_sha256': profile_sha256(current),
         'site_origin': 'https://' + parsed.netloc, 'path': base or '/'}
+    # The original primary identity and dedup remain byte-for-byte compatible.
+    if not selected['primary']:
+        identity.update(asset_id=selected['id'], registered_url=selected['url'])
     # Stable across cycles and nonidentity edits: changing a description, key or
     # batch grouping must not reset delivery-unknown or accepted content history.
     dedup = {'project_id': project_id, 'site_origin': identity['site_origin'],
              'path': identity['path'], 'name': current['name'].strip().casefold(),
              'entity_type': current.get('entity_type', 'product')}
     return {**identity, 'context_sha256': _digest(identity), 'dedup_scope': _digest(dedup),
+            'content_entity_sha256': _digest({key: dedup[key] for key in ('project_id', 'name', 'entity_type')}),
             'page_scope': identity['site_origin'] + (base + '/' if base else '/')}
+
+
+def _scope_metadata(scope):
+    return {'asset_id': _digest({'project_id': scope['project_id'],
+                                'site_origin': scope['site_origin'], 'path': scope['path']}),
+            'site_origin': scope['site_origin'], 'page_scope': scope['page_scope']}
 
 
 def _inside(url, scope):
@@ -249,8 +314,41 @@ def _records(connection, table, *, scope=None, cycle_id=None, limit=None):
     return [json.loads(row['record']) for row in connection.execute(sql, args)]
 
 
+def _content_records(connection, scope):
+    table = 'geo_indexnow_notifications'
+    if not _has_table(connection, table):
+        return []
+    # Existing dedup hashes stay intact. Reconcile URL/content across registered
+    # paths using each original cycle's frozen entity, including legacy receipts
+    # and roots removed in a later cycle. This never grants a send scope.
+    rows = connection.execute('SELECT cycle_id,record FROM ' + table +
+        ' WHERE project_id=? ORDER BY created_at DESC,id DESC', (scope['project_id'],))
+    candidates = []
+    for row in rows:
+        record = json.loads(row['record'])
+        parsed = urlsplit(_public_url(record['key_location']))
+        if 'https://' + parsed.netloc == scope['site_origin']:
+            candidates.append((row['cycle_id'], record))
+    identities = {}
+    cycle_ids = sorted({identifier for identifier, _ in candidates})
+    # One profile per distinct historical cycle, in bounded SQL batches; never
+    # one SQL lookup or report projection per notification row.
+    for start in range(0, len(cycle_ids), 100):
+        batch = cycle_ids[start:start + 100]
+        sql = 'SELECT id,baseline FROM geo_content_cycles WHERE project_id=? AND id IN (' + ','.join('?' for _ in batch) + ')'
+        for row in connection.execute(sql, [scope['project_id'], *batch]):
+            profile = json.loads(row['baseline'])['profile']
+            if not isinstance(profile.get('name'), str) or not profile['name'].strip():
+                raise ValueError('历史通知的冻结对象范围无法核对，未发送通知')
+            identities[row['id']] = _digest({'project_id': scope['project_id'],
+                'name': profile['name'].strip().casefold(), 'entity_type': profile.get('entity_type', 'product')})
+    if len(identities) != len(cycle_ids):
+        raise ValueError('历史通知的冻结对象记录缺失，未发送通知')
+    return [record for identifier, record in candidates if identities[identifier] == scope['content_entity_sha256']]
+
+
 def _blocked(connection, scope, pages):
-    prior = _records(connection, 'geo_indexnow_notifications', scope=scope['dedup_scope'])
+    prior = _content_records(connection, scope)
     blocked, changed = [], []
     for page in pages:
         match = next((record for record in prior if record['status'] in _BLOCKING
@@ -267,7 +365,7 @@ def _retry_record(connection, scope, pages):
     """A rejected receipt cannot be bypassed by reordering/regrouping its pages."""
     selected = {(item['url'], item['sha256']) for item in pages}
     matches = {}
-    for record in _records(connection, 'geo_indexnow_notifications', scope=scope['dedup_scope']):
+    for record in _content_records(connection, scope):
         if record['status'] != 'rejected':
             continue
         for page in record['pages']:
@@ -280,7 +378,9 @@ def _retry_record(connection, scope, pages):
 
 
 def _preview_public(record):
-    return {key: copy.deepcopy(value) for key, value in record.items() if key not in ('key', 'scope')}
+    result = {key: copy.deepcopy(value) for key, value in record.items() if key not in ('key', 'scope')}
+    result.update(_scope_metadata(record['scope']))
+    return result
 
 
 def _receipt_public(record, *, idempotent=False):
@@ -290,21 +390,29 @@ def _receipt_public(record, *, idempotent=False):
         key_validation_pending=record['status'] == 'key_pending',
         delivery_unknown=record['status'] in ('delivery_unknown', 'reserved'),
         indexing_verified=False, geo_effect_verified=False)
+    # Historical receipts have no asset metadata. Their checked key location
+    # still identifies the exact host; do not infer control or a wider scope.
+    if 'site_origin' not in visible and isinstance(record.get('key_location'), str):
+        parsed = urlsplit(record['key_location'])
+        visible['site_origin'] = 'https://' + parsed.netloc
     return visible
 
 
-def overview(connection, cycle):
+def overview(connection, cycle, asset_id=None):
     result = {'supported': False, 'reason': '', 'cycle_id': cycle['id'], 'project_id': cycle['project_id'],
         'site_origin': None, 'page_scope': None, 'context_sha256': None, 'endpoint': ENDPOINT,
+        'assets': [], 'selected_asset_id': None,
         'limits': {'max_urls': MAX_URLS, 'preview_seconds': PREVIEW_SECONDS, 'max_page_bytes': MAX_PAGE_BYTES,
                    'total_seconds': TOTAL_SECONDS}, 'previews': [], 'notifications': [], 'limitations': list(LIMITATIONS)}
     try:
-        scope = _scope(connection, cycle)
+        website, current = _profiles(connection, cycle)
+        result['assets'] = _assets(cycle, current, website)
+        scope = _scope(connection, cycle, asset_id)
     except (ValueError, TypeError, KeyError) as error:
         result['reason'] = str(error)
     else:
         result.update(supported=True, site_origin=scope['site_origin'], page_scope=scope['page_scope'],
-                      context_sha256=scope['context_sha256'])
+                      context_sha256=scope['context_sha256'], selected_asset_id=_scope_metadata(scope)['asset_id'])
     result['previews'] = [_preview_public(item) for item in _records(connection, 'geo_indexnow_previews',
         cycle_id=cycle['id'], limit=HISTORY_LIMIT)]
     result['notifications'] = [_receipt_public(item) for item in _records(connection, 'geo_indexnow_notifications',
@@ -312,34 +420,35 @@ def overview(connection, cycle):
     return result
 
 
-def get_overview(database, cycle_id):
+def get_overview(database, cycle_id, asset_id=None):
+    _validate_asset_id(asset_id)
     from services.geo_content_store import _connect, _cycle
     with closing(_connect(database)) as connection:
-        return overview(connection, _cycle(connection, cycle_id))
+        return overview(connection, _cycle(connection, cycle_id), asset_id)
 
 
-def _context(connection, cycle_id, expected):
+def _context(connection, cycle_id, expected, asset_id=None):
     from services.geo_content_store import _cycle
     if not isinstance(expected, str) or not re.fullmatch('[0-9a-f]{64}', expected):
         raise ValueError('请先刷新官网范围，再预检或通知')
     cycle = _cycle(connection, cycle_id)
-    scope = _scope(connection, cycle)
+    scope = _scope(connection, cycle, asset_id)
     if scope['context_sha256'] != expected:
         raise ValueError('官网资料或项目身份已变化，请重新预检；旧通知记录保留')
     return cycle, scope
 
 
-def _prepare(database, cycle_id, payload):
+def _prepare(database, cycle_id, payload, asset_id=None):
     deadline = time.monotonic() + TOTAL_SECONDS
     with closing(_connect_before(database, deadline)) as connection:
-        _, scope = _context(connection, cycle_id, payload['context_sha256'])
+        _, scope = _context(connection, cycle_id, payload['context_sha256'], asset_id)
     try:
         key, pages = _check_public(scope, payload['key_location'], payload['urls'], deadline)
     except (OSError, TimeoutError, http.client.HTTPException, UnicodeError):
         raise ValueError('公开页面预检未完整完成，未发送通知；请核对地址和网络后再预检') from None
     with closing(_connect_before(database, deadline)) as connection, connection:
         connection.execute('BEGIN IMMEDIATE')
-        cycle, latest = _context(connection, cycle_id, payload['context_sha256'])
+        cycle, latest = _context(connection, cycle_id, payload['context_sha256'], asset_id)
         _budget(deadline)
         changed, blocked = _blocked(connection, latest, pages)
         retry = _retry_record(connection, latest, [page for page in pages if page['url'] in changed])
@@ -355,7 +464,7 @@ def _prepare(database, cycle_id, payload):
         connection.execute('INSERT INTO geo_indexnow_previews VALUES(?,?,?,?,?,?,?)',
             (record['id'], cycle_id, cycle['project_id'], scope['context_sha256'], record['created_at'],
              record['expires_at'], _json(record)))
-        return {'overview': overview(connection, cycle), 'preview': _preview_public(record)}
+        return {'overview': overview(connection, cycle, asset_id), 'preview': _preview_public(record)}
 
 
 def _prior_request(connection, request_id, request_sha, cycle_id):
@@ -424,22 +533,22 @@ def _post_indexnow(body, deadline):
         connection.close()
 
 
-def _submit(database, cycle_id, payload):
+def _submit(database, cycle_id, payload, asset_id=None):
     from services.geo_content_store import _cycle
     validate_request_id(payload['request_id'])
     retry_id = payload.get('retry_receipt_id')
     if retry_id is not None and (not isinstance(retry_id, str) or not re.fullmatch('[0-9a-f]{32}', retry_id)):
         raise ValueError('只能显式重试一条明确拒绝的历史通知')
-    request_sha = _digest(payload)
+    request_sha = _digest(payload if asset_id is None else {'asset_id': asset_id, 'payload': payload})
     deadline = time.monotonic() + TOTAL_SECONDS
     with closing(_connect_before(database, deadline)) as connection:
         # A repeated exact intent returns its receipt before network or expiry
         # validation. An accepted receipt cannot turn into an expired failure.
         prior = _prior_request(connection, payload['request_id'], request_sha, cycle_id)
         if prior is not None:
-            return {'overview': overview(connection, _cycle(connection, cycle_id)),
+            return {'overview': overview(connection, _cycle(connection, cycle_id), asset_id),
                     'receipt': _receipt_public(prior, idempotent=True)}
-        _, scope = _context(connection, cycle_id, payload['context_sha256'])
+        _, scope = _context(connection, cycle_id, payload['context_sha256'], asset_id)
         preview = _preview(connection, cycle_id, payload['preview_id'], payload['context_sha256'])
     try:
         key, pages = _check_public(scope, preview['key_location'], preview['urls'], deadline)
@@ -451,9 +560,9 @@ def _submit(database, cycle_id, payload):
         connection.execute('BEGIN IMMEDIATE')
         prior = _prior_request(connection, payload['request_id'], request_sha, cycle_id)
         if prior is not None:
-            return {'overview': overview(connection, _cycle(connection, cycle_id)),
+            return {'overview': overview(connection, _cycle(connection, cycle_id), asset_id),
                     'receipt': _receipt_public(prior, idempotent=True)}
-        cycle, scope = _context(connection, cycle_id, payload['context_sha256'])
+        cycle, scope = _context(connection, cycle_id, payload['context_sha256'], asset_id)
         preview = _preview(connection, cycle_id, payload['preview_id'], payload['context_sha256'])
         _budget(deadline)
         changed, blocked = _blocked(connection, scope, pages)
@@ -479,6 +588,7 @@ def _submit(database, cycle_id, payload):
             'created_at': _now().isoformat(), 'completed_at': None, 'status': 'reserved',
             'http_status': None, 'reason': '通知意图已保存，正在发送；结果未确认时不得重复发送',
             'retry_receipt_id': retry_id, 'indexing_verified': False, 'geo_effect_verified': False}
+        receipt.update(_scope_metadata(scope))
         connection.execute(_NOTIFICATIONS)
         connection.execute('INSERT INTO geo_indexnow_notifications VALUES(?,?,?,?,?,?,?,?,?,?,?)',
             (receipt['id'], cycle_id, cycle['project_id'], payload['request_id'], request_sha,
@@ -510,10 +620,11 @@ def _submit(database, cycle_id, payload):
             (receipt['status'], _json(receipt), receipt['id'], 'reserved'))
         if updated.rowcount != 1:
             raise ValueError('通知回执状态已变化，请查看原记录，不能再次发送')
-        return {'overview': overview(connection, _cycle(connection, cycle_id)), 'receipt': _receipt_public(receipt)}
+        return {'overview': overview(connection, _cycle(connection, cycle_id), asset_id), 'receipt': _receipt_public(receipt)}
 
 
-def perform_action(database, cycle_id, payload):
+def perform_action(database, cycle_id, payload, asset_id=None):
+    _validate_asset_id(asset_id)
     common = {'action', 'context_sha256'}
     if not isinstance(payload, dict) or payload.get('action') not in ('preview', 'submit'):
         raise ValueError('只接受公开页面预检或按预检通知，不接受自定义端点或提交结果')
@@ -521,13 +632,13 @@ def perform_action(database, cycle_id, payload):
         if set(payload) != common | {'key_location', 'urls'}:
             raise ValueError('预检只接受当前官网范围、公开密钥文件地址和所选页面')
         try:
-            return _prepare(database, cycle_id, payload)
+            return _prepare(database, cycle_id, payload, asset_id)
         except TimeoutError:
             raise ValueError('公开预检超过本次时间限制，未发送通知') from None
     if set(payload) not in (common | {'preview_id', 'request_id'},
                            common | {'preview_id', 'request_id', 'retry_receipt_id'}):
         raise ValueError('通知只接受当前预检编号、请求编号及可选的明确拒绝重试编号')
     try:
-        return _submit(database, cycle_id, payload)
+        return _submit(database, cycle_id, payload, asset_id)
     except TimeoutError:
         raise ValueError('官网通知操作超过本次时间限制，请先查看原回执，不要自动重发') from None

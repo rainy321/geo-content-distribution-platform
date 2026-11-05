@@ -1194,7 +1194,8 @@ def geo_webmaster(identifier):
 
 
 @app.route('/api/geo-content/cycles/<identifier>/indexnow', methods=['GET', 'POST'])
-def geo_indexnow(identifier):
+@app.route('/api/geo-content/cycles/<identifier>/indexnow/assets/<asset_id>', methods=['GET', 'POST'])
+def geo_indexnow(identifier, asset_id=None):
     from services import geo_indexnow_service as indexnow
 
     def private_response(value):
@@ -1209,12 +1210,12 @@ def geo_indexnow(identifier):
                 return private_response(rejected)
             if request.args or request.content_length or request.stream.read(1):
                 raise ValueError('官网通知范围只从本轮资料读取，查询不接受覆盖参数或正文')
-            result = indexnow.get_overview(app.config['DATABASE_PATH'], identifier)
+            result = indexnow.get_overview(app.config['DATABASE_PATH'], identifier, asset_id)
         else:
             data, rejected = _external_feedback_json(maximum=16 * 1024)
             if rejected is not None:
                 return private_response(rejected)
-            result = indexnow.perform_action(app.config['DATABASE_PATH'], identifier, data)
+            result = indexnow.perform_action(app.config['DATABASE_PATH'], identifier, data, asset_id)
     except RequestEntityTooLarge:
         return private_response((jsonify(code=413, msg='官网更新通知JSON不能超过16KiB', data=None), 413))
     except geo_content_store.ResearchNotFoundError as error:

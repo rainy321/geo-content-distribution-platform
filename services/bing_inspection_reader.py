@@ -81,7 +81,7 @@ function Field([string[]]$lines, [string]$label) {
     for ($n=0; $n -lt $lines.Length; $n++) {
         if ($lines[$n] -ieq $label) {
             if ($n+1 -lt $lines.Length) { $found += $lines[$n+1] }
-        } elseif ($lines[$n] -imatch ('^' + [Regex]::Escape($label) + '\s*:\s*(.+)$')) {
+        } elseif ($lines[$n] -imatch ('^' + [Regex]::Escape($label) + '\s*:?\s*(\S.*)$')) {
             $found += $Matches[1].Trim()
         }
     }

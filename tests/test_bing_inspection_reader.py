@@ -73,7 +73,9 @@ class NativeTransportTests(unittest.TestCase):
             json.dumps({**observed(), 'body': 'synthetic private text'}).encode(),
             json.dumps(observed(index_status='success')).encode(),
             json.dumps(observed(last_crawl_text='synthetic account name')).encode(),
+            json.dumps(observed(last_crawl_text='20 Oct 2026 at 10:55Page FetchSuccessful')).encode(),
             json.dumps(observed(page_fetch_text='synthetic entire document')).encode(),
+            json.dumps(observed(page_fetch_text='successful')).encode(),
             json.dumps(observed(observed_at='no time')).encode(),
             json.dumps(observed(status='need_action', reason='bing_login_required')).encode()]
         for raw in invalid:
@@ -138,6 +140,74 @@ class OfficialAddressContractTests(unittest.TestCase):
         completed = subprocess.run(command, input=json.dumps({'expected': expected, 'cases': cases}).encode(),
             capture_output=True, timeout=8, creationflags=subprocess.CREATE_NO_WINDOW, check=True)
         self.assertEqual(json.loads(completed.stdout), [expected_value for _, expected_value in cases])
+
+
+@unittest.skipUnless(sys.platform == 'win32', 'Pure PowerShell field contract is Windows-only; no UIA is loaded')
+class FieldContractTests(unittest.TestCase):
+    def fields(self, texts):
+        code = reader.POWERSHELL_READER
+        start = code.index('function Field(')
+        end = code.index('\ntry {', start)
+        validation_start = code.index("    $crawl = Field $lines 'Last crawl attempted'")
+        validation_end = code.index("    $index = if ($indexed)", validation_start)
+        # Run the exact production Field function and its actual allowlists.
+        # Fixture text is stdin JSON data, never interpolated PowerShell source.
+        program = "$ErrorActionPreference='Stop';" + code[start:end] + r'''
+        [Console]::InputEncoding=[System.Text.UTF8Encoding]::new($false)
+        [Console]::OutputEncoding=[System.Text.UTF8Encoding]::new($false)
+        $data=[Console]::In.ReadToEnd()|ConvertFrom-Json
+        $results=@(foreach($text in $data.texts){
+            $lines=@($text.Split([char]10)|ForEach-Object{$_.Trim()}|Where-Object{$_})
+        ''' + code[validation_start:validation_end] + r'''
+            @{last_crawl_text=$crawl;page_fetch_text=$fetch}
+        })
+        [Console]::Write(($results|ConvertTo-Json -Compress))
+        '''
+        command = [reader._powershell_executable(), '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
+                   base64.b64encode(program.encode('utf-16-le')).decode()]
+        completed = subprocess.run(command, input=json.dumps({'texts': texts}).encode(), capture_output=True,
+            timeout=8, creationflags=subprocess.CREATE_NO_WINDOW, check=True)
+        return json.loads(completed.stdout)
+
+    def test_joined_card_newline_colon_and_space_layouts_share_the_production_contract(self):
+        actual_card = ('Discover\nDiscovered on20 Oct 2026\nCrawl\n'
+            'Last crawl attempted20 Oct 2026 at 10:55\nCrawl allowed?Yes\n'
+            'Page FetchSuccessful\nIndexing allowed?Yes\nIndex\nCanonical URL- -\nView Indexed page\n')
+        texts = [actual_card,
+            'Last crawl attempted\n20 Oct 2026 at 10:55\nPage Fetch\nSuccessful',
+            'Last crawl attempted:20 Oct 2026 at 10:55\nPage Fetch: Successful',
+            'Last crawl attempted 20 Oct 2026 at 10:55\nPage Fetch Successful',
+            'last crawl attempted20 Oct 2026 at 10:55\npage fetchSuccessful']
+        self.assertEqual(self.fields(texts), [
+            {'last_crawl_text': '20 Oct 2026 at 10:55', 'page_fetch_text': 'Successful'}] * len(texts))
+        self.assertEqual(self.fields([
+            'Last crawl attemptedToday at 10:21\nPage FetchNot available',
+            'Last crawl attempted 2026-11-05 10:11:12\nPage Fetch: Timed out']), [
+            {'last_crawl_text': 'Today at 10:21', 'page_fetch_text': 'Not available'},
+            {'last_crawl_text': '2026-11-05 10:11:12', 'page_fetch_text': 'Timed out'}])
+
+    def test_duplicate_labels_remain_unknown_instead_of_choosing_one_value(self):
+        self.assertEqual(self.fields([
+            'Last crawl attempted20 Oct 2026 at 10:55\nLast crawl attempted: 21 Oct 2026 at 11:55\nPage FetchSuccessful',
+            'Last crawl attempted\n20 Oct 2026 at 10:55\nLast crawl attempted20 Oct 2026 at 10:55\nPage FetchSuccessful',
+            'Last crawl attempted20 Oct 2026 at 10:55\nPage FetchSuccessful\nPage Fetch: Failed',
+            'Last crawl attempted20 Oct 2026 at 10:55\nLast crawl attemptedprivate value\nPage FetchSuccessful']), [
+            {'last_crawl_text': None, 'page_fetch_text': 'Successful'},
+            {'last_crawl_text': None, 'page_fetch_text': 'Successful'},
+            {'last_crawl_text': '20 Oct 2026 at 10:55', 'page_fetch_text': None},
+            {'last_crawl_text': None, 'page_fetch_text': 'Successful'}])
+
+    def test_unknown_or_invalid_values_do_not_cross_the_field_boundary(self):
+        texts = [
+            'Last crawl attemptedprivate account text\nPage FetchSuccessful but private text',
+            'Last crawl attempted20 Oct 2026 at 10:55 extra\nPage Fetchsuccessful',
+            'Last crawl attempted2026-11-05+00:00\nPage Fetch$(throw "fixture must remain data")',
+            'Unrelated Last crawl attempted20 Oct 2026 at 10:55\nUnrelated Page FetchSuccessful',
+            'Last crawl attempted:\nPage Fetch:',
+            'Last crawl attempted',
+            'Page Fetching']
+        self.assertEqual(self.fields(texts), [
+            {'last_crawl_text': None, 'page_fetch_text': None}] * len(texts))
 
 
 class NativeObservationTests(ProbeFixture, unittest.TestCase):
