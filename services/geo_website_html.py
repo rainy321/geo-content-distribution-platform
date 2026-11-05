@@ -206,6 +206,9 @@ def inspect_html(data, metadata, final_url, configured_name, official_identity):
         links.append({'url': url, 'text': text(''.join(item['text']), 200), 'scope': scope, 'automatically_fetched': False})
     findings = []
     for condition, code, label in (
+        (not body.strip(), 'body_text_not_observed',
+         '本次读取的页面HTML没有正文文字，内容可能需要JavaScript加载。可请网站负责人在公开页面的HTML中直接提供产品、服务或能力说明。'
+         '若展示价格，只使用已确认可公开的对客售价，避免公开成本价或利润。'),
         (not title, 'title_not_observed', '本次服务端HTML未观察到title'),
         (not description, 'description_not_observed', '本次服务端HTML未观察到meta description'),
         (not canonical_urls, 'canonical_not_observed', '本次HTML未观察到有效canonical；它并非索引保证或必备成功项'),

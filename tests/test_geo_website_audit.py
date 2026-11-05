@@ -109,6 +109,34 @@ class HTMLObservationTests(unittest.TestCase):
         self.assertIsNone(result['name_text_match']['body_text_present'])
         self.assertIsNone(result['title'])
 
+    def test_empty_and_script_only_server_bodies_get_scoped_advice_even_with_complete_metadata(self):
+        private_text = '内部成本价：0.00456，利润：987.65'
+        bodies = ('', '\n \t', '<div id="root"></div>',
+                  '<div id="app"></div><script>' + private_text + '</script><style>.models{display:block}</style>')
+        for body in bodies:
+            with self.subTest(body=body):
+                result = self.inspect(document(body=body))
+                findings = result['findings']
+                codes = [item['code'] for item in findings]
+                self.assertIn('body_text_not_observed', codes)
+                self.assertNotIn('title_not_observed', codes)
+                self.assertNotIn('description_not_observed', codes)
+                self.assertNotIn('canonical_not_observed', codes)
+                self.assertIn('JavaScript', findings[0]['message'])
+                self.assertIn('已确认可公开的对客售价', findings[0]['message'])
+                self.assertNotIn(private_text, json.dumps(result, ensure_ascii=False))
+                self.assertIsNot(result['name_text_match']['body_text_present'], True)
+                self.assertFalse(result['browser_rendered'])
+                self.assertNotIn('indexed', result)
+
+    def test_short_public_text_or_visible_login_consent_error_copy_is_not_an_empty_shell(self):
+        for body in ('<h1>工具</h1>', '<p>对客售价每百万Token输入2元、输出8元。</p>',
+                     '<p>登录后查看。</p>', '<p>请先选择隐私偏好。</p>', '<h1>服务暂不可用。</h1>',
+                     '<noscript>请启用JavaScript。</noscript>'):
+            with self.subTest(body=body):
+                result = self.inspect(document(body=body))
+                self.assertNotIn('body_text_not_observed', [item['code'] for item in result['findings']])
+
     def test_service_and_web_application_graphs_remain_distinct_from_the_organization(self):
         product = 'Orbit Relay'
         company_id = 'https://synthetic.example.org/#organization'
@@ -270,6 +298,28 @@ class WebsiteFixture(ProbeFixture):
 
 
 class WebsiteAuditServiceTests(WebsiteFixture, unittest.TestCase):
+    def test_empty_html_advice_reaches_saved_audit_while_index_and_AI_results_stay_unknown(self):
+        self.raw = document(self.cycle['profile']['name'], body='<div id="root"></div><script src="/app.js"></script>')
+        result, fetch = self.run_audit()
+        record = result['audit']
+        self.assertEqual(fetch.call_count, 1)
+        self.assertEqual(record['pages'][0]['status'], 'html_observed')
+        self.assertIn('body_text_not_observed', [item['code'] for item in record['pages'][0]['findings']])
+        self.assertEqual(record['index_status'], 'unknown')
+        self.assertEqual(record['ai_adoption'], 'unknown')
+        self.assertEqual(audit.get_overview(self.database, self.cycle['id'])['latest']['pages'], record['pages'])
+
+    def test_HTTP_errors_and_non_HTML_documents_keep_their_existing_status_gate(self):
+        selection = {'selected_page_ids': [self.view['allowed_pages'][0]['id']]}
+        cases = [(status, 'text/html', 'http_not_ok') for status in (401, 403, 404, 500)]
+        cases.extend([(200, 'application/xml', 'non_html'), (200, 'text/plain', 'non_html')])
+        for status, content_type, expected in cases:
+            with self.subTest(status=status, content_type=content_type), patch.object(webmaster, '_fetch_bounded',
+                    return_value=response(b'', status=status, content_type=content_type)):
+                page = audit.inspect_pages(self.cycle, self.view, selection)[0]
+                self.assertEqual(page['status'], expected)
+                self.assertNotIn('body_text_not_observed', [item['code'] for item in page['findings']])
+
     def test_overview_is_network_free_and_does_not_create_or_write_a_table(self):
         before = self.database.read_bytes()
         with patch.object(webmaster, '_fetch_bounded', side_effect=AssertionError('No fetch')), \
