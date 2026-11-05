@@ -120,6 +120,7 @@ class SubmissionReceipt:
         self.submission_format, self.baseline_user_count = submission_format, baseline_user_count
         self.attempts, self.observed_url, self.observed_at = 0, None, None
         self.navigation_urls, self.invalid_reason = [], None
+        self.stale_local_snapshot_count = 0
         self.manual_action_seen, self.navigation_tracking = False, False
         self.deferred_assistant_count = None
         if hasattr(page, 'on') and hasattr(page, 'main_frame'):
@@ -159,22 +160,38 @@ class SubmissionReceipt:
         elif routes[0][0] == 'canonical' and any(route != routes[0] for route in routes[1:]):
             self.invalid_reason = 'conversation_navigation_changed'
 
+    def _stale_local_snapshot(self, url):
+        if not self.navigation_tracking or self.invalid_reason or len(self.navigation_urls) != 2:
+            return False
+        local_url, canonical_url = self.navigation_urls
+        if url != local_url or self.page.main_frame.url != canonical_url:
+            return False
+        local, canonical = self._route(local_url), self._route(canonical_url)
+        return bool(local and canonical and local[0] == 'local' and canonical[0] == 'canonical')
+
     def observe(self, page, question, snapshot):
         if page is not self.page or question != self.question or self.attempts != 1:
             self.invalid_reason = 'request_identity_changed'
             return False, None
         url = snapshot.get('page_url')
-        if self.observed_url:
-            self._navigate(url)
-        if self.invalid_reason:
-            return False, None
-        if isinstance(snapshot.get('user_message_count'), int) and snapshot['user_message_count'] > 1:
-            self.invalid_reason = 'multiple_user_messages'
-            return False, None
+        user_count = snapshot.get('user_message_count')
+        multiple_users = isinstance(user_count, int) and user_count > 1
         literal = snapshot.get('question_verified') is True and self.submission_format == 'plain'
         fenced = (snapshot.get('verbatim_question_verified') is True and self.submission_format == 'verbatim_fenced'
                   and self.editor_readback_verified and self.baseline_count == 0 and self.baseline_user_count == 0
-                  and snapshot.get('user_message_count') == 1)
+                  and user_count == 1)
+        if self.observed_url:
+            # The awaited DOM result can arrive after the main frame has moved
+            # to its canonical URL. Ignore only an empty or still-exact old DOM.
+            if (user_count == 0 or user_count == 1 and (literal or fenced)) and self._stale_local_snapshot(url):
+                self.stale_local_snapshot_count += 1
+                return False, None
+            self._navigate(url)
+        if self.invalid_reason:
+            return False, None
+        if multiple_users:
+            self.invalid_reason = 'multiple_user_messages'
+            return False, None
         if literal or fenced:
             if not self.observed_url:
                 self.observed_url, self.observed_at = url, datetime.now(HK_TIME).isoformat()
@@ -210,6 +227,7 @@ class SubmissionReceipt:
                 'baseline_user_count': self.baseline_user_count, 'submission_format': self.submission_format,
                 'submitted_text_sha256': self.submitted_text_sha256, 'editor_readback_verified': self.editor_readback_verified,
                 'observed_at': self.observed_at, 'navigation_urls': list(self.navigation_urls),
+                'stale_local_snapshot_count': self.stale_local_snapshot_count,
                 'navigation_tracking': self.navigation_tracking, 'manual_action_seen': self.manual_action_seen,
                 'deferred_assistant_count': self.deferred_assistant_count,
                 'invalid_reason': self.invalid_reason}

@@ -66,6 +66,46 @@ class ReceiptTests(unittest.TestCase):
         self.assertFalse(after['question_verified'])
         self.assertEqual(receipt.evidence()['navigation_urls'], [LOCAL, CANONICAL])
 
+    def test_stale_local_snapshot_after_canonical_navigation_does_not_poison_fresh_literal_receipt(self):
+        page, receipt = self.receipt()
+        receipt.manual_action_seen = False
+        page.navigate(CANONICAL)
+        stale = snapshot(assistant_count=1, completion_marker=True)
+        self.assertEqual(receipt.observe(page, receipt.question, stale), (False, None))
+        stale_empty = snapshot(question_verified=False, user_message_count=0)
+        self.assertEqual(receipt.observe(page, receipt.question, stale_empty), (False, None))
+        self.assertIsNone(receipt.invalid_reason)
+        self.assertEqual(receipt.evidence()['stale_local_snapshot_count'], 2)
+        self.assertEqual(receipt.evidence()['navigation_urls'], [LOCAL, CANONICAL])
+        missing = snapshot(page_url=CANONICAL, question_verified=False, user_message_count=0, assistant_count=1)
+        self.assertEqual(receipt.observe(page, receipt.question, missing), (False, None))
+        fresh = snapshot(page_url=CANONICAL, assistant_count=1, completion_marker=True)
+        self.assertEqual(receipt.observe(page, receipt.question, fresh), (True, 'literal_user_dom'))
+
+    def test_current_local_revisit_still_permanently_invalidates_canonical_receipt(self):
+        for event_delivered in (False, True):
+            with self.subTest(event_delivered=event_delivered):
+                page, receipt = self.receipt()
+                page.navigate(CANONICAL)
+                if event_delivered:
+                    page.navigate(LOCAL)
+                else:
+                    page.main_frame.url = LOCAL
+                self.assertEqual(receipt.observe(page, receipt.question, snapshot()), (False, None))
+                page.navigate(CANONICAL)
+                self.assertFalse(receipt.observe(page, receipt.question, snapshot(page_url=CANONICAL))[0])
+                self.assertEqual(receipt.invalid_reason, 'conversation_navigation_changed')
+                self.assertEqual(receipt.evidence()['stale_local_snapshot_count'], 0)
+
+    def test_stale_local_snapshot_cannot_hide_different_or_multiple_user_messages(self):
+        for stale in (snapshot(question_verified=False), snapshot(user_message_count=2)):
+            with self.subTest(stale=stale):
+                page, receipt = self.receipt()
+                page.navigate(CANONICAL)
+                self.assertFalse(receipt.observe(page, receipt.question, stale)[0])
+                self.assertFalse(receipt.observe(page, receipt.question, snapshot(page_url=CANONICAL))[0])
+                self.assertIsNotNone(receipt.invalid_reason)
+
     def test_other_routes_new_questions_pages_and_multiple_submits_never_reuse_receipt(self):
         for change in ('external', 'second-conversation', 'different-question', 'different-page', 'new-user', 'resubmit'):
             page, receipt = self.receipt()
