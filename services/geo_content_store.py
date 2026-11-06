@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import json
+import copy
+import hashlib
 import re
 import sqlite3
 import uuid
@@ -373,18 +375,108 @@ def save_facts(database, identifier, facts, revision):
     return get_cycle(database, identifier)
 
 
-def save_analysis(database, identifier, raw, provenance, revision):
+def _analysis_runs(analysis):
+    runs = analysis.get('scope_runs', [])
+    if (not isinstance(runs, list) or len(runs) > 20
+            or any(not isinstance(run, dict) or not isinstance(run.get('operation_id'), str) for run in runs)
+            or len({run['operation_id'] for run in runs}) != len(runs)):
+        raise ValueError('策划运行历史格式或容量无效，请保留原记录并核对')
+    return runs
+
+
+def _fresh_analysis_brief_ids(connection, cycle, briefs):
+    """Allocate new IDs without changing any historical brief or draft lineage."""
+    occupied = {brief.get('id') for brief in cycle['analysis'].get('briefs', []) if isinstance(brief, dict)}
+    for item in cycle['analysis'].get('history', []):
+        occupied.update(brief.get('id') for brief in item['analysis'].get('briefs', []) if isinstance(brief, dict))
+    for run in _analysis_runs(cycle['analysis']):
+        occupied.update(run.get('brief_ids', []))
+    for row in connection.execute('SELECT brief_id,provenance FROM geo_content_drafts WHERE cycle_id=?', (cycle['id'],)):
+        occupied.add(row['brief_id'])
+        try:
+            occupied.add(json.loads(row['provenance']).get('brief', {}).get('id'))
+        except (ValueError, TypeError, AttributeError):
+            raise ValueError('旧稿选题出处不能核对，未替换当前选题')
+    numbers = [int(match.group(1)) for value in occupied if isinstance(value, str)
+               for match in [re.fullmatch(r'b([0-9]{1,20})', value)] if match]
+    number = max(numbers, default=0) + 1
+    result = []
+    for brief in briefs:
+        identifier = f'b{number:02d}'
+        while identifier in occupied:
+            number += 1
+            identifier = f'b{number:02d}'
+        occupied.add(identifier)
+        result.append({**copy.deepcopy(brief), 'id': identifier})
+        number += 1
+    return result
+
+
+def save_analysis(database, identifier, raw, provenance, revision, analysis_scope=None):
+    from services.geo_content_research import analysis_history, prepare_analysis, ANALYSIS_HISTORY_LIMIT
+    if not isinstance(provenance, dict) or not isinstance(raw, str):
+        raise ValueError('策划结果与应用出处格式无效')
+    operation = provenance.get('analysis_operation_id')
+    if operation is not None and (not isinstance(operation, str) or not re.fullmatch(r'[a-f0-9]{32}', operation)):
+        raise ValueError('策划操作编号无效')
+    if analysis_scope is None and provenance.get('analysis_scope') is not None:
+        raise ValueError('单题范围须由应用显式传入，不能仅由结果出处决定')
+    generation = fingerprint({'raw': raw, 'provenance': provenance, 'analysis_scope': analysis_scope})
     with closing(_connect(database)) as connection, connection:
         connection.execute('BEGIN IMMEDIATE')
         cycle = _cycle(connection, identifier)
-        _check_revision(cycle, revision, connection)
-        from services.geo_research_probe_service import list_probes
-        from services.geo_planning_feedback import planning_feedback
-        cycle['probes'] = list_probes(connection, identifier)
-        if provenance.get('feedback_inputs_sha256') and provenance['feedback_inputs_sha256'] != fingerprint(planning_feedback(cycle)):
-            raise ValueError('策划期间后续反馈或核对意见变化，本次结果未覆盖，请重新核对后策划')
-        analysis = parse_research(raw, cycle, provenance)
-        connection.execute('UPDATE geo_content_cycles SET analysis=?,revision=revision+1,updated_at=? WHERE id=?', (_json(analysis), _now(), identifier))
+        prior_runs = _analysis_runs(cycle['analysis'])
+        previous_run = next((run for run in prior_runs if operation and run['operation_id'] == operation), None)
+        if previous_run:
+            if previous_run.get('generation_sha256') != generation:
+                raise ValueError('同一策划操作的结果或范围已变化，未覆盖或重复归档')
+            # Reconcile the same committed output without another AI request,
+            # history entry, revision increment, or mutation of later work.
+        else:
+            _check_revision(cycle, revision, connection)
+            from services.geo_research_probe_service import list_probes
+            from services.geo_planning_feedback import planning_feedback
+            cycle['probes'] = list_probes(connection, identifier)
+            history = analysis_history(cycle)
+            preserve_history = analysis_scope is not None or bool(history or prior_runs)
+            if preserve_history and (not operation or len(history) >= ANALYSIS_HISTORY_LIMIT):
+                raise ValueError('单题或有历史的策划须绑定操作编号且历史少于20次，未保存结果')
+            if analysis_scope is not None:
+                prepared = prepare_analysis(cycle, analysis_scope)
+                expected = prepared['provenance_fields']
+                if any(provenance.get(key) != value for key, value in expected.items()):
+                    raise ValueError('策划期间原题、来源、事实、反馈或合并范围变化，本次结果未覆盖')
+                if provenance.get('prompt_sha256') != fingerprint(prepared['prompt']):
+                    raise ValueError('单题策划原始提示指纹不匹配，未保存结果')
+            elif provenance.get('feedback_inputs_sha256') and provenance['feedback_inputs_sha256'] != fingerprint(planning_feedback(cycle)):
+                raise ValueError('策划期间后续反馈或核对意见变化，本次结果未覆盖，请重新核对后策划')
+            analysis = parse_research(raw, cycle, provenance, analysis_scope=analysis_scope)
+            if preserve_history:
+                new_briefs = _fresh_analysis_brief_ids(connection, cycle, analysis['briefs'])
+                scope_ids = list(analysis_scope['case_ids']) if analysis_scope is not None else [case['id'] for case in cycle['test_plan']['cases']]
+                stamp = _now()
+                run = {'operation_id': operation, 'created_at': stamp,
+                    'mode': 'selected_case' if analysis_scope is not None else 'all_cases', 'case_ids': scope_ids,
+                    'brief_ids': [brief['id'] for brief in new_briefs], 'diagnosis': analysis['diagnosis'],
+                    'provenance': copy.deepcopy(provenance),
+                    'response_sha256': hashlib.sha256(raw.encode('utf-8')).hexdigest(), 'generation_sha256': generation}
+                previous = copy.deepcopy(cycle['analysis'])
+                previous.pop('history', None)
+                archived = {'operation_id': operation, 'created_at': stamp,
+                    'analysis_scope': copy.deepcopy(analysis_scope), 'analysis': previous, 'analysis_sha256': fingerprint(previous)}
+                if analysis_scope is not None:
+                    selected = set(scope_ids)
+                    retained = [brief for brief in cycle['analysis']['briefs'] if not selected.intersection(brief['case_ids'])]
+                    # All guards and capacity checks precede this merge. Old
+                    # objects stay exactly equal for existing draft matching.
+                    analysis = {**copy.deepcopy(cycle['analysis']), 'method': 'mixed_scope_planning',
+                                'briefs': [*copy.deepcopy(retained), *new_briefs]}
+                else:
+                    analysis['briefs'] = new_briefs
+                analysis.update(history=[*copy.deepcopy(history), archived],
+                    scope_runs=[*copy.deepcopy(prior_runs), run], latest_scope=copy.deepcopy(run))
+            connection.execute('UPDATE geo_content_cycles SET analysis=?,revision=revision+1,updated_at=? WHERE id=?',
+                               (_json(analysis), _now(), identifier))
     return get_cycle(database, identifier)
 
 

@@ -37,3 +37,19 @@ test('changed server article or a new brief without a draft preserve edits only 
   assert.equal(noDraft.articleId.value,null);assert.equal(noDraft.activeDraft.value,null)
   assert.equal(noDraft.recoveryDraft.value.editor.title,'旧稿本地未保存标题')
 })
+
+test('q02 archival cannot bind saved article14 to b07 and preserves unrelated article13 local edits',()=>{
+  const page=harness()
+  const brief13={id:'b04',topic:'q01原选题',case_ids:['q01']},brief14={id:'b02',topic:'q02原选题',case_ids:['q02']}
+  const saved13=article(13,brief13,{brief_id:'b04'}),saved14=article(14,brief14,{brief_id:'b02'})
+  page.cycle.value={...page.cycle.value,analysis:{briefs:[brief13,brief14]},drafts:[saved13,saved14]}
+  page.briefId.value='b04';page.articleId.value=13
+  const next={...page.cycle.value,profile:{},channels:{owned_web:'官网'},analysis:{method:'mixed_scope_planning',
+    briefs:[brief13,{id:'b07',topic:'q02新选题',case_ids:['q02']}],history:[{analysis:{briefs:[brief13,brief14]}}]}}
+  page.apply(next,{keepEditor:true})
+  assert.equal(page.articleId.value,13);assert.equal(page.briefId.value,'b04')
+  assert.equal(page.editor.title,'旧稿本地未保存标题');assert.equal(page.recoveryDraft.value,null);assert.deepEqual(page.loads,[])
+  page.briefId.value='b07'
+  assert.deepEqual(page.matchingDrafts.value,[])
+  assert.equal(page.cycle.value.drafts.find(row=>row.article_id===14).provenance.brief.id,'b02')
+})

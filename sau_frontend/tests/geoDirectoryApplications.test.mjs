@@ -5,6 +5,7 @@ import * as Vue from 'vue'
 import {renderToString} from '@vue/server-renderer'
 import {parse,compileScript,compileTemplate,compileStyle} from '@vue/compiler-sfc'
 import * as destinationAvailability from '../src/utils/geoDestinationAvailability.js'
+import {planningRequestScope,planningScopeView} from '../src/utils/geoPlanningScope.js'
 
 const apiSource=fs.readFileSync(new URL('../src/api/geoDirectoryApplications.js',import.meta.url),'utf8')
 const exported=[...apiSource.matchAll(/export const (\w+)/g)].map(item=>item[1])
@@ -74,7 +75,7 @@ function journeyHarness({directory=true,oldDraft=null,analysisReady=true,nextTic
     hasPublication:Vue.ref(false),feedbackTotals:Vue.ref({withAnswers:0}),provider:Vue.ref('api'),working:Vue.ref(false),error:Vue.ref(''),
     form:{name:value.profile.name,website:value.profile.website,description:'示例介绍'},publication:{url:'',publishedAt:null,confirmed:false},
     directoryPanel:Vue.ref({openPanel:()=>calls.push(['directory-panel'])})}
-  const deps={...helpers,...destinationAvailability,...state,computed:Vue.computed,nextTick,contextEpoch:0,destroyed:false,
+  const deps={...helpers,...destinationAvailability,...state,planningCaseId:Vue.ref(''),planningScopeState:Vue.computed(()=>planningScopeView(state.cycle.value)),planningRequestScope,computed:Vue.computed,nextTick,contextEpoch:0,destroyed:false,
     destinationSupportsFill:()=>true,confirmedFacts:()=>[],options:()=>({}),run:async action=>action(),
     startNative:async(kind,action)=>{calls.push(['native',kind]);return action()},
     window:{pywebview:{api:{generate_research:async(...args)=>calls.push(['native-generate',...args]),open_destination:async(...args)=>calls.push(['generic-login',...args])}}},
@@ -172,7 +173,7 @@ function contentHarness({directory=true,analysisReady=true}={}){
   const value=cycle({destinations:[configured],facts:[{text:'已核对事实',source_url:'https://example.org/',confirmed:true}],analysis:{method:analysisReady?'ai_api':'rule_observations_not_ai',briefs:[{id:'brief-a'}]},drafts:[old,article],channels:{zhihu:'知乎',[configured.key]:'GrokCode'}})
   const state={cycle:Vue.ref(value),cycleId:Vue.ref(value.id),platform:Vue.ref(directory?configured.key:'zhihu'),briefId:Vue.ref('brief-a'),task:Vue.ref({status:'idle'}),working:Vue.ref(false),confirmed:Vue.ref(true),factsText:Vue.ref('已核对事实 | https://example.org/'),
     publication:Vue.ref({article_id:12,published_at:'2026-11-02T02:31',confirmed:true,url:'https://example.org/'}),publicationVisible:Vue.ref(false),cycles:Vue.ref([]),contentRecovery:Vue.ref(null),recoveryUnreadable:Vue.ref(false),nativeAvailable:Vue.ref(true)}
-  const deps={...helpers,...destinationAvailability,...state,computed:Vue.computed,cycleScope:()=>({id:value.id,epoch:0}),sameCycleScope:()=>true,options:()=>({}),
+  const deps={...helpers,...destinationAvailability,...state,planningCaseId:Vue.ref(''),planningRequestScope,computed:Vue.computed,cycleScope:()=>({id:value.id,epoch:0}),sameCycleScope:()=>true,options:()=>({}),
     rememberContentRecovery:()=>{},storeContentRecovery:()=>{},applyCycle:()=>true,destinationSupportsFill:()=>true,destinationPreparationText:()=>'',destinationContinuationText:()=>'',
     window:{pywebview:{api:{generate_research:async(...args)=>{calls.push(['native-generate',...args]);return {id:'task-a',status:'running'}},stop_task:()=>calls.push(['stop']),open_destination:async(...args)=>{calls.push(['generic-open',...args]);return {id:'task-a',status:'running'}}}}},
     geoContentApi:{generate:async(...args)=>{calls.push(['generate',...args]);return {data:{cycle:value}}},list:async()=>({data:[]}),publication:async(...args)=>{calls.push(['article-receipt',...args]);return {data:value}}},

@@ -307,6 +307,46 @@ def _webmaster(view, cycle):
         view.action('review_webmaster', '核对站点与索引证据', '分别检查验证、索引和采用；不把站点地图数量或验证完成当作效果指标。', [ref], priority=55)
 
 
+def _scoped_planning_state(cycle, analysis, valid, global_feedback, global_digest):
+    """A single-question edit cannot refresh retained briefs for other questions."""
+    runs = _rows(analysis.get('scope_runs'), 21)
+    latest = _dict(analysis.get('latest_scope'))
+    if not runs or not latest:
+        return None
+    per_case = []
+    active = _rows(analysis.get('briefs'), 6)
+    for identifier in valid:
+        run = next((row for row in reversed(runs) if row.get('mode') in ('selected_case', 'all_cases')
+                    and isinstance(row.get('case_ids'), list) and identifier in row['case_ids']), None)
+        if run is None:
+            per_case.append({'case_id': identifier, 'context_status': 'not_replanned',
+                             'referenced_feedback_count': 0})
+            continue
+        scoped = run['mode'] == 'selected_case'
+        feedback = planning_feedback(cycle, case_ids=[identifier]) if scoped else global_feedback
+        digest = hashlib.sha256(json.dumps(feedback, ensure_ascii=False, sort_keys=True,
+                                          separators=(',', ':')).encode()).hexdigest() if scoped else global_digest
+        prior = _dict(run.get('provenance')).get('feedback_inputs_sha256')
+        status = 'legacy_unknown' if not prior else 'current' if prior == digest else 'outdated'
+        known = {row['probe_id'] for row in feedback if row.get('case_id') == identifier}
+        run_briefs = run.get('brief_ids') if isinstance(run.get('brief_ids'), list) else []
+        referenced = {probe_id for brief in active if brief.get('id') in run_briefs
+                      for probe_id in (brief.get('feedback_probe_ids')[:6]
+                                       if isinstance(brief.get('feedback_probe_ids'), list) else [])
+                      if isinstance(probe_id, str) and probe_id in known}
+        per_case.append({'case_id': identifier, 'context_status': status,
+                         'referenced_feedback_count': len(referenced)})
+    # Keep partial coverage explicit even if separately generated inputs happen
+    # to be current. A current whole-cycle run retains its existing semantics.
+    whole_current = (latest.get('mode') == 'all_cases' and bool(per_case)
+                     and all(row['context_status'] == 'current' for row in per_case))
+    return {'context_status': 'current' if whole_current else 'partial',
+            'per_case': per_case, 'latest_case_ids': latest.get('case_ids', []),
+            'needs_update': any(row['context_status'] != 'current' for row in per_case),
+            'attribution_status': 'unknown' if not whole_current else
+                'referenced' if any(row['referenced_feedback_count'] for row in per_case) else 'not_recorded'}
+
+
 def diagnose_cycle(value):
     """Project existing cycle evidence without modifying it or its public metrics."""
     cycle = _dict(value)
@@ -341,6 +381,11 @@ def diagnose_cycle(value):
                     if isinstance(brief.get('feedback_probe_ids'),list) else [])
                 if isinstance(identifier,str) and identifier in known}
     attribution_status=('unknown' if context_status!='current' or not feedback else 'referenced' if referenced else 'not_recorded')
+    scoped_state = _scoped_planning_state(cycle, analysis, valid, feedback, feedback_digest)
+    if scoped_state is not None:
+        context_status = scoped_state['context_status']
+        needs_update = scoped_state['needs_update']
+        attribution_status = scoped_state['attribution_status']
     if needs_update:
         refs=[view.reference('probe',item['probe_id'],'后来收到的单题或外部反馈',case_id=item['case_id']) for item in feedback[:3]]
         view.action('review_drafts','用后续反馈更新选题','当前选题的反馈输入版本待更新或核对；可重新策划，既有稿件与发布记录保留，不会自动重发。',refs,priority=25)
@@ -358,4 +403,9 @@ def diagnose_cycle(value):
                                  'context_status':context_status,'attribution_status':attribution_status,
                                  'referenced_feedback_count':len(referenced),
                                  'role':'editorial_signal_only_not_writing_fact_or_public_metric'}
+    if scoped_state is not None:
+        result['planning_feedback'].update(per_case=scoped_state['per_case'],
+                                          latest_case_ids=scoped_state['latest_case_ids'],
+                                          referenced_feedback_count=sum(row['referenced_feedback_count']
+                                                                        for row in scoped_state['per_case']))
     return result

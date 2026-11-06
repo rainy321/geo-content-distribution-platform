@@ -4,8 +4,15 @@ import {feedbackReviewView} from './geoFeedbackReview.js'
 export function planningFeedbackNotice(cycle) {
   const feedback = cycle?.feedback_diagnostics?.planning_feedback
   if (!feedback || typeof feedback !== 'object' || Array.isArray(feedback)) return null
-  if (feedback.available_count === 0) return null
   const context = feedback.context_status
+  if (context === 'partial') {
+    const latest=cycle?.analysis?.latest_scope
+    const selected=latest?.mode==='selected_case' && Array.isArray(latest.case_ids) && latest.case_ids.length===1
+      && typeof latest.case_ids[0]==='string' && /^[A-Za-z0-9_-]{1,100}$/.test(latest.case_ids[0]) ? latest.case_ids[0] : null
+    return {message: selected ? `最近仅更新 ${selected} 的内容选题；其他原题选题保留，待分别核对或更新，不代表整体 GEO 效果。`
+      : '当前策划只覆盖部分原题；其他原题选题保留，待分别核对或更新，不代表整体 GEO 效果。', canReplan:feedback.needs_update===true}
+  }
+  if (feedback.available_count === 0) return null
   if (context === 'current') {
     if (feedback.attribution_status === 'not_recorded') {
       const briefs = cycle?.analysis?.briefs

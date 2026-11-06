@@ -265,7 +265,7 @@ class DesktopGeoJobs:
             self._persist()
 
     def _start(self, kind, operation, *, client_name="", cycle_id=None, target_id=None, collector_config=None,
-               automation_profile_mode=None, session_profile_mode=None):
+               automation_profile_mode=None, session_profile_mode=None, analysis_context=None):
         with self.lock:
             if self.job["status"] == "running":
                 return {"error": "已有任务正在执行，请先等待或停止"}
@@ -285,6 +285,8 @@ class DesktopGeoJobs:
                 self.job['cycle_id'] = cycle_id
             if target_id:
                 self.job['target_id'] = target_id
+            if analysis_context is not None:
+                self.job['analysis_context'] = copy.deepcopy(analysis_context)
             self._destination_check = self._destination_check_loop = None
             self._destination_check_task_id = None
             self._destination_check_pending = False
@@ -693,14 +695,19 @@ class DesktopGeoJobs:
         return self._start('run', resume, client_name=details['plan']['profile']['name'],
                            cycle_id=cycle_id, collector_config=config, session_profile_mode=execution.get('profile_mode'))
 
-    def generate_research(self, cycle_id, kind, brief_id, platform, options):
+    def generate_research(self, cycle_id, kind, brief_id, platform, options, analysis_scope=None):
         database = self.data / 'database.db'
         try:
             cycle = geo_content_store.get_cycle(database, cycle_id)
             config = self._config(options)
             if kind == 'analysis':
-                prompt = geo_content_research.research_prompt(cycle)
+                prepared = geo_content_research.prepare_analysis(cycle, copy.deepcopy(analysis_scope))
+                prompt = prepared['prompt']
+                analysis_fields = {**prepared['provenance_fields'], 'analysis_operation_id': uuid.uuid4().hex}
+                analysis_scope = copy.deepcopy(analysis_fields.get('analysis_scope'))
             elif kind == 'draft':
+                if analysis_scope is not None:
+                    raise ValueError('单题策划范围仅适用于内容策划，不能用于生成草稿')
                 prompt = geo_content_research.draft_prompt(cycle, brief_id, platform)
             else:
                 raise ValueError('生成类型无效')
@@ -727,16 +734,19 @@ class DesktopGeoJobs:
                           'client_mode': (result.get('environment') or {}).get('client_mode'), 'evidence_path': str(path),
                           'role': 'content_editing_not_exposure_test', 'prompt_sha256': geo_content_research.fingerprint(prompt)}
             if kind == 'analysis':
-                provenance['feedback_inputs_sha256'] = geo_content_research.fingerprint(geo_content_research.planning_feedback(cycle))
+                provenance.update(analysis_fields)
             if kind == 'draft':
                 provenance['input_sha256'] = geo_content_research.fingerprint(geo_content_research.draft_input(cycle, brief_id, platform))
             if kind == 'analysis':
-                geo_content_store.save_analysis(database, cycle_id, result['response'], provenance, cycle['revision'])
+                geo_content_store.save_analysis(database, cycle_id, result['response'], provenance, cycle['revision'],
+                                                analysis_scope=analysis_scope)
             else:
                 geo_content_store.save_draft(database, cycle_id, brief_id, platform, result['response'], provenance, cycle['revision'])
             return {'cycle_id': cycle_id}
         return self._start('research' if kind == 'analysis' else 'draft', generate, client_name=cycle['profile']['name'],
-                           cycle_id=cycle_id, collector_config=config)
+                           cycle_id=cycle_id, collector_config=config,
+                           analysis_context=({**analysis_fields, 'prompt_sha256': geo_content_research.fingerprint(prompt),
+                                              'scope_summary': prepared['scope_summary']} if kind == 'analysis' else None))
 
     def preview_research_draft(self, task_id, cycle_id):
         from services import geo_draft_recovery

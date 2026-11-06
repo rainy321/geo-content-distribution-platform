@@ -11,6 +11,8 @@
     <GeoDiscoveryFunnel v-if="cycle && step>=2" :cycle="cycle" :busy="busy" @navigate="navigateDiagnostic"/>
     <GeoOptimizationPlan v-if="cycle && step===2 && !directoryReady" :cycle="cycle" :selected-brief-id="briefId" :busy="busy" @select="selectContent('brief',$event)"/>
     <GeoFollowupSources v-if="cycle && step>=2" :cycle="cycle"/>
+    <GeoPlanningScope v-if="cycle && step===2" :cycle="cycle" :selected-case-id="planningCaseId" :busy="busy" action-label="按所选范围策划" @update:selected-case-id="planningCaseId=$event" @generate="updateResearchFromFeedback"/>
+    <GeoHistoricalPlanningDrafts v-if="cycle && step===2" :cycle="cycle" :busy="busy" @edit="editHistoricalDraft" @export="downloadHistoricalDraft"/>
     <details v-if="cycle && step===2 && hasOptimizationPlan" class="journey-secondary-tools" data-testid="journey-other-actions"><summary>其他推进事项</summary><GeoNextActions :cycle="cycle" :busy="busy" @navigate="navigateDiagnostic"/></details>
     <GeoNextActions v-else-if="cycle && step>=2" :cycle="cycle" :busy="busy" @navigate="navigateDiagnostic"/>
     <el-alert v-if="error && !recoveredTaskError" type="error" :title="error" :closable="false" show-icon class="journey-alert"/>
@@ -198,6 +200,9 @@ import { destinationContinuationText, destinationPreparationText, destinationSup
 import { destinationEnabled, destinationCanPrepare, destinationPublicationGate, writingChannelEnabled, writingChannelLabel, inactiveDestinationMessage } from '@/utils/geoDestinationAvailability'
 import { articleSnapshot, baselineEvidenceSummary, canRestoreArticleEdits, canRestoreFactEdits, entityLabel, entityProfileFields, entityType, journeyDate, journeyDraftLimits, journeyLengthReview, lastJourneyProject, normalizeWebsite, profileLines, readJourney, reportEntityContext, restoreEntityDraftFields, safeLink, sameBrand, sameResearchBrief, targetDraftOutdated, writeJourney } from '@/utils/geoJourney'
 import { planningFeedbackNotice } from '@/utils/geoPlanningFeedback'
+import GeoPlanningScope from '@/components/GeoPlanningScope.vue'
+import GeoHistoricalPlanningDrafts from '@/components/GeoHistoricalPlanningDrafts.vue'
+import {planningScopeView,planningRequestScope,planningTouchesDraft,historicalPlanningDrafts} from '@/utils/geoPlanningScope'
 
 const route=useRoute(), router=useRouter(), steps=['品牌','搜索基线','内容','发布','反馈']
 const categoryKeys=['discovery','brand_identity','website_guided'], categoryNames={discovery:'自然选型',brand_identity:'品牌核验',website_guided:'官网核验'}
@@ -289,6 +294,8 @@ const formProfile=()=>entityProfileFields({...form,aliases:form.aliasesText,offi
 const profileDirty=computed(()=>{if(!project.value)return true;try{return !sameBrand(form,project.value)||form.description.trim()!==String(project.value.description||'').trim()||JSON.stringify(formProfile())!==JSON.stringify(entityProfileFields(project.value))}catch{return true}})
 const needsAnalysis=computed(()=>['rule_observations_not_ai','user_reported_external_editorial_clues'].includes(cycle.value?.analysis?.method))
 const planningFeedback=computed(()=>planningFeedbackNotice(cycle.value))
+const planningCaseId=ref('')
+const planningScopeState=computed(()=>planningScopeView(cycle.value,planningCaseId.value))
 const diagnosisPreview=computed(()=>{const text=cycle.value?.analysis?.diagnosis||'';return text.length>180?`${text.slice(0,180).trim()}…`:text})
 const matchingDrafts=computed(()=>(cycle.value?.drafts||[]).filter(item=>item.platform===platform.value&&item.brief_id===briefId.value&&sameResearchBrief(item,cycle.value.analysis?.briefs?.find(brief=>brief.id===briefId.value))))
 const channelOptionLabel=(key,label)=>directoryTargetForChannel(cycle.value,key)?`${label} · 目录资料${writingChannelEnabled(cycle.value,key)?'':' · 用途待核对'}`:cycle.value?.destinations?.some(item=>item.key===key)?writingChannelLabel(cycle.value,key,`${label} · 已接入目标`):`${label} · 通用格式`
@@ -338,6 +345,7 @@ const canVisit=index=>index===0||Boolean(project.value&&!profileDirty.value&&(in
 const stepComplete=index=>directoryTarget.value&&[2,3].includes(index)?false:index===0?Boolean(project.value):index===1?externalCycle.value||usableReport.value:index===2?reviewedDraft.value||publishedDraft.value:index===3?hasPublication.value:feedbackTotals.value.withAnswers>0
 const primaryLabel=computed(()=>directoryReady.value&&[2,3].includes(step.value)?'打开目录申请':directoryTarget.value&&step.value===3?'先完成来源分析':[2,3].includes(step.value)&&needsReplacement.value?'按当前目标另存新稿':step.value===0?'保存品牌并继续':step.value===1?(externalCycle.value?'继续核对资料和内容':report.value?'分析这份报告':plan.value?'开始真实搜索测试':'生成 3 个测试问题'):step.value===2?(needsAnalysis.value?'分析来源并制定选题':!activeDraft.value?(!factsSaved.value?'保存已核对的事实':'生成平台草稿'):publishedDraft.value?'查看发布反馈':!reviewedDraft.value?'保存审稿并标记就绪':'继续发布'):step.value===3?(publisherPaused.value?'发布器当前暂停':targetPublisher.value?`使用${publisherName.value}发布器`:selectedTarget.value?(destinationSupportsFill(selectedTarget.value)?'打开目标平台并填写':'配置平台编辑入口'):ownedDraft.value?'导出官网稿件':'打开发布中心'):externalCycle.value?'查看并追加外部回答':'开始同题复测')
 const primaryDisabled=computed(()=>{
+  if(step.value===2&&needsAnalysis.value&&!planningScopeState.value.allowed)return true
   if(step.value===1&&!externalCycle.value&&!report.value&&collectionPath.value==='automatic'&&!automaticReady.value)return true
   if(busy.value)return true
   if(directoryReady.value&&[2,3].includes(step.value))return false
@@ -585,13 +593,37 @@ const resetBaseline=async reuse=>{try{await ElMessageBox.confirm(reuse?'将用�
 const newBaseline=()=>resetBaseline(false)
 const repeatBaseline=()=>resetBaseline(true)
 const createCycle=async()=>{if(!sameBrand(report.value.profile,project.value))throw new Error('采集报告与当前品牌不一致');if(!usableReport.value)throw new Error('当前报告没有有效回答，请新建一轮基线');applyCycle((await geoContentApi.create({report_id:reportId.value,project_id:projectId.value})).data);step.value=2}
-const generateResearch=async kind=>{if(kind==='draft'){requireArticleChannel();if(!writingChannelEnabled(cycle.value,platform.value))throw new Error(destinationPublicationGate(selectedTarget.value).reason)}if(provider.value==='doubao')await startNative(kind,()=>window.pywebview.api.generate_research(cycleId.value,kind,briefId.value,platform.value,options()));else{const result=(await geoContentApi.generate(cycleId.value,{kind,brief_id:briefId.value,platform:platform.value})).data;applyCycle(result.cycle);if(result.article_id){articleId.value=result.article_id;loadEditor()}}}
+const generateResearch=async kind=>{
+  const analysisScope=kind==='analysis'?planningRequestScope(cycle.value,planningCaseId.value,kind):undefined
+  if(kind==='draft'){requireArticleChannel();if(!writingChannelEnabled(cycle.value,platform.value))throw new Error(destinationPublicationGate(selectedTarget.value).reason)}
+  if(provider.value==='doubao')await startNative(kind,()=>{
+    const args=[cycleId.value,kind,briefId.value,platform.value,options()]
+    if(analysisScope)args.push(analysisScope)
+    return window.pywebview.api.generate_research(...args)
+  })
+  else{const result=(await geoContentApi.generate(cycleId.value,{kind,brief_id:briefId.value,platform:platform.value,...(analysisScope?{analysis_scope:analysisScope}:{})})).data;applyCycle(result.cycle,{keepEditor:kind==='analysis'});if(result.article_id){articleId.value=result.article_id;loadEditor()}}
+}
 const updateResearchFromFeedback=()=>run(async()=>{
-  if(editorDirty.value)throw new Error('请先保存当前稿件编辑，再用后续反馈更新选题。')
+  const scope=planningScopeView(cycle.value,planningCaseId.value)
+  if(!scope.allowed)throw new Error(scope.blockedReason)
+  if(editorDirty.value&&planningTouchesDraft(cycle.value,planningCaseId.value,activeDraft.value))throw new Error('请先保存所选范围内的当前稿件编辑，再更新选题。')
   if(!factsSaved.value&&confirmedFacts().length)throw new Error('请先保存当前事实资料，再更新选题。')
-  try{await ElMessageBox.confirm('将用当前采集与后续反馈重新生成选题。旧稿和原发布任务保留，不会自动改稿或重发；未确认的回答内容仍不能作为文章事实。','更新内容选题',{confirmButtonText:'重新策划',cancelButtonText:'保留当前选题'})}catch{return}
+  try{await ElMessageBox.confirm(`${scope.message} 将用当前采集与后续反馈策划；旧稿和原发布任务保留，不会自动改稿或重发。`,'更新内容选题',{confirmButtonText:'重新策划',cancelButtonText:'保留当前选题'})}catch{return}
   await generateResearch('analysis')
 })
+const editHistoricalDraft=async draft=>{
+  const original=historicalPlanningDrafts(cycle.value).find(item=>item.draft.article_id===draft?.article_id)?.draft
+  if(busy.value||!original||directoryTargetForChannel(cycle.value,original.platform))return
+  persist()
+  if(saveError.value)return
+  await router.push({path:'/content-create',query:{articleId:original.article_id}})
+}
+const downloadHistoricalDraft=draft=>{
+  const original=historicalPlanningDrafts(cycle.value).find(item=>item.draft.article_id===draft?.article_id)?.draft
+  if(!original||busy.value)return
+  const url=URL.createObjectURL(new Blob([`# ${original.title}\n\n${original.content}`],{type:'text/markdown;charset=utf-8'})),link=document.createElement('a')
+  link.href=url;link.download=`article-${original.article_id}.md`;link.click();setTimeout(()=>URL.revokeObjectURL(url),1000)
+}
 const replaceTargetDraft=async()=>{
   requireArticleChannel()
   applyCycle((await geoContentApi.get(cycleId.value)).data,{keepEditor:true})
@@ -679,6 +711,7 @@ const poll=async()=>{
 watch([projectId,cycleId],()=>{contextEpoch++},{flush:'sync'})
 watch([step,cycleId,()=>visibleRecoveryInfo.value?.taskId,nativeAvailable,nativeBusy],()=>{void refreshRetestResume()},{flush:'sync'})
 watch([step,form,clientMode,automaticProfileMode,automaticProfileModeExplicit,model,provider,plan,reportId,cycleId,briefId,platform,articleId,editor,factRows,replacementSourceId,recoveryTask],persist,{deep:true})
+watch(cycleId,()=>{planningCaseId.value=''}, {flush:'sync'})
 watch(step,value=>{if(value===3&&!capabilitiesLoaded.value&&!busy.value)void refreshAccounts()})
 watch(()=>[form.name,form.website,form.entity_type,form.company,form.audience,form.description,form.aliasesText,form.officialUrlsText],()=>{if(!restoring){plan.value=null;planConfirmed.value=false}},{flush:'sync'})
 watch(()=>[editor.title,editor.content],()=>{reviewConfirmed.value=false},{flush:'sync'})

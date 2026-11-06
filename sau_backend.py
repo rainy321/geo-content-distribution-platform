@@ -1285,8 +1285,13 @@ def geo_content_generate(identifier):
         cycle = geo_content_store.get_cycle(app.config['DATABASE_PATH'], identifier)
         kind = data.get('kind')
         if kind == 'analysis':
-            prompt = geo_content_research.research_prompt(cycle)
+            prepared = geo_content_research.prepare_analysis(cycle, data.get('analysis_scope'))
+            prompt = prepared['prompt']
+            analysis_fields = {**prepared['provenance_fields'], 'analysis_operation_id': uuid.uuid4().hex}
+            analysis_scope = analysis_fields.get('analysis_scope')
         elif kind == 'draft':
+            if data.get('analysis_scope') is not None:
+                raise ValueError('单题策划范围仅适用于内容策划，不能用于生成草稿')
             prompt = geo_content_research.draft_prompt(cycle, data.get('brief_id'), data.get('platform'))
             existing = geo_content_store.existing_draft(app.config['DATABASE_PATH'], cycle, data.get('brief_id'), data.get('platform'))
             if existing:
@@ -1303,12 +1308,13 @@ def geo_content_generate(identifier):
                                        http_post=research_requests.post, system_message=geo_content_research.SYSTEM)
         provenance = {'method': 'ai_api', 'model': settings.model, 'prompt_sha256': geo_content_research.fingerprint(prompt)}
         if kind == 'analysis':
-            provenance['feedback_inputs_sha256'] = geo_content_research.fingerprint(geo_content_research.planning_feedback(cycle))
+            provenance.update(analysis_fields)
         if kind == 'draft':
             provenance['input_sha256'] = geo_content_research.fingerprint(geo_content_research.draft_input(cycle, data['brief_id'], data['platform']))
         result = {}
         if kind == 'analysis':
-            geo_content_store.save_analysis(app.config['DATABASE_PATH'], identifier, raw, provenance, cycle['revision'])
+            geo_content_store.save_analysis(app.config['DATABASE_PATH'], identifier, raw, provenance, cycle['revision'],
+                                            analysis_scope=analysis_scope)
         else:
             result = geo_content_store.save_draft(app.config['DATABASE_PATH'], identifier, data['brief_id'], data['platform'], raw, provenance, cycle['revision'])
         return jsonify(code=200, msg='内容结果已保存', data={'cycle': geo_content_store.get_cycle(app.config['DATABASE_PATH'], identifier), **result})

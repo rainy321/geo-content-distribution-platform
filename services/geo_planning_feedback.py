@@ -63,12 +63,17 @@ def _user_reported_sources(probe):
     return result
 
 
-def planning_feedback(cycle):
+def planning_feedback(cycle, case_ids=None):
     """Return a stable public projection; omit private/incomplete/foreign text."""
     identifier=cycle.get('id')
     plan=cycle.get('test_plan') or {}
     anchors=cycle.get('test_plan') if cycle.get('baseline_source')=='user_reported_external' else cycle.get('baseline')
     allowed={row.get('id') for row in (anchors or {}).get('cases',[]) if isinstance(row,dict)}
+    if case_ids is not None:
+        if (not isinstance(case_ids,list) or len(case_ids)!=1 or not isinstance(case_ids[0],str)
+                or case_ids[0] not in allowed):
+            raise ValueError('单题策划范围须为当前冻结计划中的一道原题')
+        allowed=allowed.intersection(case_ids)
     probes=cycle.get('probes') or []
     if not isinstance(probes,list):return []
     rows=[]
@@ -128,5 +133,9 @@ def planning_feedback(cycle):
     selection={'basis':'latest_source_and_client_mode_representatives_then_recent',
                'available_count':len(rows),'selected_count':len(selected),'truncated':len(rows)>len(selected),
                'represents_all_feedback':False,'note':'代表样本，仅供编辑线索；存在截断时不代表全部反馈，也不比较正负比例。'}
+    if case_ids is not None:
+        selection.update(case_ids=list(case_ids),basis='same_case_then_latest_source_and_client_mode_representatives_then_recent',
+            available_feedback_sha256=hashlib.sha256(json.dumps(rows,ensure_ascii=False,
+                sort_keys=True,separators=(',',':')).encode('utf-8')).hexdigest())
     for row in selected:row['selection']=dict(selection)
     return selected

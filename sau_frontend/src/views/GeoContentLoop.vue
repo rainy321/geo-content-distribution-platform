@@ -27,10 +27,11 @@
       <GeoWebsiteAudit :cycle="cycle" :busy="working || nativeBusy || feedbackBusy" @busy="websiteAuditBusy=$event"/>
       <GeoOtherSearchEntries :cycle="cycle" :busy="busy" @busy="setFeedbackBusy"/>
       <el-card shadow="never">
-        <div class="row"><h2>2 · {{ cycle.profile.name }} · 内容选题</h2><el-tag>{{ cycle.analysis.method === 'user_reported_external_editorial_clues' ? '外部原文线索，尚未 AI 策划' : cycle.analysis.method === 'rule_observations_not_ai' ? '采集待办，尚未 AI 策划' : '已完成 AI 策划' }}</el-tag></div>
+        <div class="row"><h2>2 · {{ cycle.profile.name }} · 内容选题</h2><el-tag>{{ cycle.analysis.method === 'user_reported_external_editorial_clues' ? '外部原文线索，尚未 AI 策划' : cycle.analysis.method === 'rule_observations_not_ai' ? '采集待办，尚未 AI 策划' : cycle.analysis.method==='mixed_scope_planning' ? '已保存分题策划，其他题保留' : '已完成 AI 策划' }}</el-tag></div>
         <p>{{ cycle.analysis.diagnosis }}</p>
         <p v-if="planningFeedback" class="hint" :data-testid="planningFeedback.canReplan ? 'research-feedback-planning-stale' : 'research-feedback-planning-note'">{{ planningFeedback.message }}</p>
-        <div class="row"><el-button v-if="nativeAvailable" type="primary" :disabled="busy" @click="generate('analysis', 'doubao')">豆包分析采集并制定选题</el-button><el-button :disabled="busy" @click="generate('analysis', 'api')">用已配置的 AI API 策划</el-button><el-button @click="download(cycle, 'research-task.json')">导出任务单</el-button></div>
+        <GeoPlanningScope :cycle="cycle" :selected-case-id="planningCaseId" :busy="busy" @update:selected-case-id="planningCaseId=$event"/>
+        <div class="row"><el-button v-if="nativeAvailable" type="primary" :disabled="busy || !planningScopeState.allowed" @click="generate('analysis', 'doubao')">豆包分析所选范围并制定选题</el-button><el-button :disabled="busy || !planningScopeState.allowed" @click="generate('analysis', 'api')">用已配置的 AI API 策划所选范围</el-button><el-button @click="download(cycle, 'research-task.json')">导出任务单</el-button></div>
         <div class="observations"><p v-for="item in cycle.observations.cases" :key="item.id"><strong>{{ item.id }} · {{ category[item.category] }}</strong>：{{ item.finding }}</p></div>
         <el-table :data="cycle.analysis.briefs" data-testid="research-briefs"><el-table-column label="优先级" width="90"><template #default="{row}">{{ row.priority === 'high' ? '优先' : '后续' }}</template></el-table-column><el-table-column prop="topic" label="选题" min-width="220"/><el-table-column label="采集依据 / 待补资料" min-width="300"><template #default="{row}"><p>{{ row.case_ids.join('、') }} · {{ row.why }}</p><p v-for="text in row.missing_evidence" :key="text" class="hint">待补：{{ text }}</p><p v-if="row.outline.length" class="hint">结构：{{ row.outline.join(' → ') }}</p></template></el-table-column></el-table>
         <el-collapse data-geo-section="sources"><el-collapse-item title="查看观察到的来源（网址未知仍保留未知）" name="sources"><p class="hint">{{ cycle.observations.source_note }}</p><p class="hint">主体标签只按来源域名、标题或已确认的关系区分范围，不等于业务事实已核实；其他公司的条目仍可作为平台线索。</p><ul><li v-for="source in cycle.observations.sources" :key="source.id">{{ source.id }} · {{ source.case_id }} · {{ source.kind === 'citations' ? '正文引用' : '界面资料' }} · <a v-if="source.url" :href="safeUrl(source.url)" target="_blank" rel="noopener noreferrer">{{ source.title || source.domain }}</a><span v-else>{{ source.title || '标题未知' }} · 网址未确认</span><GeoSourceIdentity :identity="source.source_identity" compact/></li></ul></el-collapse-item></el-collapse>
@@ -59,7 +60,8 @@
         <div class="row"><el-button v-if="nativeAvailable" type="primary" :disabled="busy || !canDraft" @click="generate('draft','doubao')">豆包生成并存入内容库</el-button><el-button :disabled="busy || !canDraft" @click="generate('draft','api')">AI API 生成并存入内容库</el-button></div>
         <p v-if="!canDraft && (!selectedDestination || destinationCanPrepare(selectedDestination))" class="hint">请先保存核对后的事实资料，并保持输入与已保存内容一致。</p>
         </template>
-        <article v-for="draft in cycle.drafts" :key="draft.article_id" class="draft" data-testid="research-draft">
+        <GeoHistoricalPlanningDrafts :cycle="cycle" :busy="busy" @edit="edit" @export="downloadArticle"/>
+        <article v-for="draft in visibleDrafts" :key="draft.article_id" class="draft" data-testid="research-draft">
           <h3>{{ draft.title }}</h3><p>{{ cycle.channels[draft.platform] }} · {{ status[draft.status] || draft.status }} · 原始问题 {{ draft.provenance.brief.case_ids.join('、') }}</p>
           <p>{{ draft.summary }}</p>
           <p v-if="directoryTargetForChannel(cycle,draft.platform)" class="hint">此目录渠道的旧文章与原任务仍保留，仅供只读预览和导出；目录申请使用上方独立资料与回执。</p>
@@ -138,6 +140,9 @@ import {storedSessionScope} from '@/utils/geoAutomaticCollection'
 import { isExternalCycle, nativeCycleCapability } from '@/utils/geoExternalBaseline'
 import { retestCollection } from '@/utils/geoFeedback'
 import { planningFeedbackNotice } from '@/utils/geoPlanningFeedback'
+import GeoPlanningScope from '@/components/GeoPlanningScope.vue'
+import GeoHistoricalPlanningDrafts from '@/components/GeoHistoricalPlanningDrafts.vue'
+import {planningScopeView,planningRequestScope,historicalPlanningDrafts} from '@/utils/geoPlanningScope'
 import { destinationEnabled, destinationCanPrepare, destinationPublicationGate, writingChannelEnabled, writingChannelLabel, inactiveDestinationMessage } from '@/utils/geoDestinationAvailability'
 
 const route = useRoute(), router = useRouter()
@@ -165,6 +170,9 @@ const nativeBusy = computed(() => task.value.status === 'running'), busy = compu
 const writingContextPending = computed(() => Boolean(cycleId.value && cycle.value?.id !== cycleId.value))
 const externalCycle = computed(() => isExternalCycle(cycle.value))
 const planningFeedback = computed(() => planningFeedbackNotice(cycle.value))
+const planningCaseId=ref('')
+const planningScopeState=computed(()=>planningScopeView(cycle.value,planningCaseId.value))
+const visibleDrafts=computed(()=>{const historical=new Set(historicalPlanningDrafts(cycle.value).map(item=>item.draft.article_id));return(cycle.value?.drafts||[]).filter(item=>!historical.has(item.article_id))})
 const progressProject = computed(() => Number.isSafeInteger(cycle.value?.project_id)&&cycle.value.project_id>0?{...cycle.value.profile,id:cycle.value.project_id}:null)
 const nativeRetestAllowed = computed(() => Boolean(cycle.value?.baseline && nativeCycleCapability(cycle.value,'native_retest')))
 const recoveryTask=ref(null),recoveryStorageError=ref(''),recoveryUnreadable=ref(false)
@@ -308,6 +316,7 @@ const generate = async (kind, provider) => {
   const scope = cycleScope()
   working.value = true
   try {
+    const analysisScope=kind==='analysis'?planningRequestScope(cycle.value,planningCaseId.value,kind):undefined
     if (provider === 'doubao') {
       rememberContentRecovery(task.value,scope)
       const recovery=contentRecovery.value
@@ -315,12 +324,14 @@ const generate = async (kind, provider) => {
         try{await ElMessageBox.confirm(`${recovery?.submissionText||'上次任务的发送状态未能读取，请先核对豆包原会话。'} 这会新建一次请求，不是继续原问题。`,'重新开始前核对原会话',{confirmButtonText:'已核对，重新开始',cancelButtonText:'保留原任务'})}catch{return}
         if(!sameCycleScope(scope))return
       }
-      const result = await window.pywebview.api.generate_research(scope.id,kind,briefId.value,platform.value,options())
+      const args=[scope.id,kind,briefId.value,platform.value,options()]
+      if(analysisScope)args.push(analysisScope)
+      const result = await window.pywebview.api.generate_research(...args)
       if (result.error) throw new Error(result.error)
       if(typeof result.id!=='string'||!result.id)throw new Error('桌面任务尚未确认启动，原任务提醒仍保留')
       if (sameCycleScope(scope)) {task.value = result;storeContentRecovery(null,scope)}
     } else {
-      const result = (await geoContentApi.generate(scope.id,{kind,brief_id:briefId.value,platform:platform.value})).data
+      const result = (await geoContentApi.generate(scope.id,{kind,brief_id:briefId.value,platform:platform.value,...(analysisScope?{analysis_scope:analysisScope}:{})})).data
       if(!applyCycle(result.cycle,{scope}))return
       const items=(await geoContentApi.list()).data;if(!sameCycleScope(scope))return;cycles.value=items
       ElMessage.success(kind === 'draft' ? result.already_saved ? '相同资料已有草稿，已保留原稿，没有重复生成。' : '草稿已存入内容库，请审稿' : '选题已保存')
@@ -399,6 +410,7 @@ const poll = async () => {
   } catch { /* Native shutdown leaves the last durable task untouched. */ }
 }
 watch(cycleId, () => { loginRequest++; loginScope.value = null },{flush:'sync'})
+watch(cycleId,()=>{planningCaseId.value=''}, {flush:'sync'})
 watch(()=>cycleId.value, () => {
   cycleEpoch++; cycleLoadRequest++
   loadContentRecovery()
