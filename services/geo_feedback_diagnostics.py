@@ -330,10 +330,20 @@ def diagnose_cycle(value):
     feedback=planning_feedback(cycle)
     feedback_digest=hashlib.sha256(json.dumps(feedback,ensure_ascii=False,sort_keys=True,separators=(',',':')).encode()).hexdigest()
     prior=_dict(_dict(cycle.get('analysis')).get('provenance')).get('feedback_inputs_sha256')
-    needs_update=bool(feedback and _dict(cycle.get('analysis')).get('method') not in (None,'rule_observations_not_ai') and prior!=feedback_digest)
+    analysis=_dict(cycle.get('analysis'))
+    generated=analysis.get('method') not in (None,'rule_observations_not_ai','user_reported_external_editorial_clues')
+    context_status=('not_generated' if not generated else 'legacy_unknown' if not prior
+                    else 'current' if prior==feedback_digest else 'outdated')
+    needs_update=bool(feedback and generated and context_status!='current')
+    known={item['probe_id'] for item in feedback}
+    referenced={identifier for brief in _rows(analysis.get('briefs'),6)
+                for identifier in (brief.get('feedback_probe_ids')[:6]
+                    if isinstance(brief.get('feedback_probe_ids'),list) else [])
+                if isinstance(identifier,str) and identifier in known}
+    attribution_status=('unknown' if context_status!='current' or not feedback else 'referenced' if referenced else 'not_recorded')
     if needs_update:
         refs=[view.reference('probe',item['probe_id'],'后来收到的单题或外部反馈',case_id=item['case_id']) for item in feedback[:3]]
-        view.action('review_drafts','用后续反馈更新选题','原选题尚未使用当前后续反馈；可重新策划，既有稿件与发布记录保留，不会自动重发。',refs,priority=25)
+        view.action('review_drafts','用后续反馈更新选题','当前选题的反馈输入版本待更新或核对；可重新策划，既有稿件与发布记录保留，不会自动重发。',refs,priority=25)
     funnel = discovery_funnel(cycle)
     for priority in funnel['priorities']:
         refs = [view.reference('baseline', identifier, '发现路径对应原题 ' + identifier, case_id=identifier)
@@ -345,5 +355,7 @@ def diagnose_cycle(value):
     result=view.result(has_baseline=bool(valid))
     result['discovery_funnel'] = funnel
     result['planning_feedback']={'available_count':len(feedback),'context_sha256':feedback_digest,'needs_update':needs_update,
+                                 'context_status':context_status,'attribution_status':attribution_status,
+                                 'referenced_feedback_count':len(referenced),
                                  'role':'editorial_signal_only_not_writing_fact_or_public_metric'}
     return result

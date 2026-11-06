@@ -10,6 +10,7 @@
     <GeoOptimizationProgress v-if="project" :project="project" :busy="busy" :blocked="profileDirty" @busy="setFeedbackBusy"/>
     <GeoDiscoveryFunnel v-if="cycle && step>=2" :cycle="cycle" :busy="busy" @navigate="navigateDiagnostic"/>
     <GeoOptimizationPlan v-if="cycle && step===2 && !directoryReady" :cycle="cycle" :selected-brief-id="briefId" :busy="busy" @select="selectContent('brief',$event)"/>
+    <GeoFollowupSources v-if="cycle && step>=2" :cycle="cycle"/>
     <details v-if="cycle && step===2 && hasOptimizationPlan" class="journey-secondary-tools" data-testid="journey-other-actions"><summary>其他推进事项</summary><GeoNextActions :cycle="cycle" :busy="busy" @navigate="navigateDiagnostic"/></details>
     <GeoNextActions v-else-if="cycle && step>=2" :cycle="cycle" :busy="busy" @navigate="navigateDiagnostic"/>
     <el-alert v-if="error && !recoveredTaskError" type="error" :title="error" :closable="false" show-icon class="journey-alert"/>
@@ -73,7 +74,7 @@
         <DoubaoSessionControls v-if="nativeAvailable && provider==='doubao'" :client-mode="clientMode" :model="model" :busy="busy" @mode="selectSessionMode" @model="model=$event" @login="login"/>
         <BaselineContext/>
         <div class="diagnosis"><p>{{ diagnosisPreview }}</p><details v-if="cycle.analysis?.diagnosis?.length>180" class="hint"><summary>查看完整分析</summary><p>{{ cycle.analysis.diagnosis }}</p></details><span v-if="needsAnalysis" class="hint">当前观察线索尚未经 AI 策划，下一步用 AI 制定选题。</span></div>
-        <div v-if="cycle.feedback_diagnostics?.planning_feedback?.needs_update" class="feedback-planning-note"><p>后来收到的单题或外部反馈尚未用于当前选题。可以重新策划；既有文章和发布记录会保留。</p><el-button :disabled="busy" data-testid="journey-update-from-feedback" @click="updateResearchFromFeedback">用后续反馈更新选题</el-button></div>
+        <div v-if="planningFeedback" class="feedback-planning-note" data-testid="journey-planning-feedback"><p>{{ planningFeedback.message }}</p><el-button v-if="planningFeedback.canReplan" :disabled="busy" data-testid="journey-update-from-feedback" @click="updateResearchFromFeedback">用后续反馈更新选题</el-button></div>
         <el-collapse class="source-summary"><el-collapse-item :title="`来源线索：${sourceCounts.verified} 个网址平台候选 · ${sourceCounts.unknown} 组网址未知`" name="opportunities"><p class="hint">主体摘要只区分来源范围，不代表业务事实已核实；其他公司的来源仍可用于发现平台。</p><article v-for="item in cycle.opportunities || []" :key="item.id" class="source-row"><strong>{{ item.candidate?.name || item.domain || '网址未知' }}</strong><el-tag size="small" effect="plain">{{ surfaceLabels[item.surface] || '待核对' }}</el-tag><p>{{ item.note }}</p><p class="hint" data-testid="journey-source-identity-summary">{{ sourceIdentitySummary(item,cycle.observations?.sources) }}</p><p v-for="lead in item.title_leads || []" :key="lead.candidate.name" class="hint">标题线索：{{ lead.candidate.name }}，尚未核实网址。</p></article><el-button text @click="openDetails">接入或配置目标平台</el-button></el-collapse-item></el-collapse>
         <details class="journey-secondary-tools"><summary>官网与企业资料维护（百度 / 头条接入）<span>{{ websiteAuditBusy || sourceMaintenanceBusy || webmasterBusy ? ' · 正在处理' : ' · 按需展开' }}</span></summary>
         <GeoSourceMaintenance :focus-task-id="sourceTaskFocus" data-geo-section="maintenance" :cycle="cycle" :busy="working || finishingTask || webmasterBusy || websiteAuditBusy || feedbackBusy || nativeBusy && (task.kind!=='source_maintenance' || task.cycle_id!==cycleId)" :native-task-active="nativeBusy && task.kind==='source_maintenance' && task.cycle_id===cycleId" :native-available="nativeAvailable" @busy="sourceMaintenanceBusy=$event" @task="adoptSourceMaintenanceTask"/>
@@ -182,6 +183,7 @@ import GeoWebsiteAudit from '@/components/GeoWebsiteAudit.vue'
 import GeoOtherSearchEntries from '@/components/GeoOtherSearchEntries.vue'
 import GeoOptimizationProgress from '@/components/GeoOptimizationProgress.vue'
 import GeoOptimizationPlan from '@/components/GeoOptimizationPlan.vue'
+import GeoFollowupSources from '@/components/GeoFollowupSources.vue'
 import {optimizationPlanView} from '@/utils/geoOptimizationPlan'
 import { publicationReviewArticles } from '@/utils/geoPublicationReview'
 import { builtinPublicationArticles, builtinPublicationRecords } from '@/utils/geoBuiltinPublication'
@@ -195,6 +197,7 @@ import {automaticBridgeReady,automaticCollectionOptions,automaticCollectionUnava
 import { destinationContinuationText, destinationPreparationText, destinationSupportsFill, isDestinationTask } from '@/utils/geoDestinationSession'
 import { destinationEnabled, destinationCanPrepare, destinationPublicationGate, writingChannelEnabled, writingChannelLabel, inactiveDestinationMessage } from '@/utils/geoDestinationAvailability'
 import { articleSnapshot, baselineEvidenceSummary, canRestoreArticleEdits, canRestoreFactEdits, entityLabel, entityProfileFields, entityType, journeyDate, journeyDraftLimits, journeyLengthReview, lastJourneyProject, normalizeWebsite, profileLines, readJourney, reportEntityContext, restoreEntityDraftFields, safeLink, sameBrand, sameResearchBrief, targetDraftOutdated, writeJourney } from '@/utils/geoJourney'
+import { planningFeedbackNotice } from '@/utils/geoPlanningFeedback'
 
 const route=useRoute(), router=useRouter(), steps=['品牌','搜索基线','内容','发布','反馈']
 const categoryKeys=['discovery','brand_identity','website_guided'], categoryNames={discovery:'自然选型',brand_identity:'品牌核验',website_guided:'官网核验'}
@@ -285,6 +288,7 @@ const restoreTaskRecovery=async()=>{
 const formProfile=()=>entityProfileFields({...form,aliases:form.aliasesText,official_urls:form.officialUrlsText})
 const profileDirty=computed(()=>{if(!project.value)return true;try{return !sameBrand(form,project.value)||form.description.trim()!==String(project.value.description||'').trim()||JSON.stringify(formProfile())!==JSON.stringify(entityProfileFields(project.value))}catch{return true}})
 const needsAnalysis=computed(()=>['rule_observations_not_ai','user_reported_external_editorial_clues'].includes(cycle.value?.analysis?.method))
+const planningFeedback=computed(()=>planningFeedbackNotice(cycle.value))
 const diagnosisPreview=computed(()=>{const text=cycle.value?.analysis?.diagnosis||'';return text.length>180?`${text.slice(0,180).trim()}…`:text})
 const matchingDrafts=computed(()=>(cycle.value?.drafts||[]).filter(item=>item.platform===platform.value&&item.brief_id===briefId.value&&sameResearchBrief(item,cycle.value.analysis?.briefs?.find(brief=>brief.id===briefId.value))))
 const channelOptionLabel=(key,label)=>directoryTargetForChannel(cycle.value,key)?`${label} · 目录资料${writingChannelEnabled(cycle.value,key)?'':' · 用途待核对'}`:cycle.value?.destinations?.some(item=>item.key===key)?writingChannelLabel(cycle.value,key,`${label} · 已接入目标`):`${label} · 通用格式`

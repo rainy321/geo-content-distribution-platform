@@ -1,3 +1,5 @@
+import {feedbackRoutesForBrief} from './geoFollowupSources.js'
+
 const goals = Object.freeze({
   discovery: {key: 'natural_discovery', label: '自然需求发现'},
   brand_identity: {key: 'identity_accuracy', label: '品牌与业务识别'},
@@ -48,13 +50,13 @@ export function optimizationPlanView(cycle, selectedBriefId = '') {
       goals: [...new Map(actionQuestions.map(question => [question.goal, {key: question.goal, label: question.label}])).values()],
       gap: text(item.gap), changeSummary: text(item.change_summary),
       writingRequirements: strings(item.writing_requirements), evidenceNeeded: strings(item.evidence_needed),
-      sourceRoutes: (Array.isArray(item.source_routes) ? item.source_routes : []).slice(0, 10).flatMap(route => {
+      sourceRoutes: [...(Array.isArray(item.source_routes) ? item.source_routes : []).slice(0, 10).flatMap(route => {
         const id = routeId(route?.id), opportunity = opportunities.get(id)
         const existing = new Set(ids(opportunity?.source_ids))
         const matched = ids(route?.source_ids).filter(id => allowedSources.has(id) && existing.has(id))
         return opportunity && matched.length ? [{id, label: text(route.label, 200),
           surface: text(route.surface, 80), sourceIds: matched}] : []
-      }),
+      }), ...feedbackRoutesForBrief(cycle, brief, item.source_routes)],
       checks: checks.length ? checks : actionQuestions.map(question => ({...question, signal: '按这道原题记录后续回答，再核对实际内容与来源。'}))})
   }
   if (!actions.length) return null

@@ -1,12 +1,46 @@
 """Bounded, attributed follow-up signals for editorial planning, never facts."""
 from __future__ import annotations
 import hashlib
+import json
 import re
 from services.geo_test_service import answer_evaluation_error
 from services.geo_source_url import trusted_source_url
 from services.geo_source_identity import unconfirmed_source_url_status
 
 ROLE='editorial_signal_only_not_writing_fact_or_public_metric'
+SOURCE_LIMIT=20
+SOURCE_TEXT_LIMIT=8000
+
+
+def _observed_sources(after):
+    """Budget sources independently of answer excerpts and probe selection.
+
+    Keep saved order and existing URL trust rules. The full public projection
+    digest also changes when an omitted source changes; no private URL is
+    recovered from an explicitly unconfirmed source.
+    """
+    candidates=[]
+    for kind in ('citations','displayed_sources'):
+        values=after.get(kind)
+        for item in values if isinstance(values,list) else []:
+            if not isinstance(item,dict):continue
+            title=item.get('title')[:200] if isinstance(item.get('title'),str) else ''
+            unconfirmed=unconfirmed_source_url_status(item)
+            url=None if unconfirmed else trusted_source_url(item.get('url'))
+            candidates.append({'title':title,'url':url,'kind':kind,'basis':'saved_probe_source_not_verified_fact',
+                               'url_status':unconfirmed or ('provided' if url else 'unknown')})
+    selected=[];text_size=0
+    for item in candidates:
+        cost=len(item['title'])+len(item['url'] or '')
+        if len(selected)>=SOURCE_LIMIT or text_size+cost>SOURCE_TEXT_LIMIT:continue
+        selected.append(item);text_size+=cost
+    omitted=len(candidates)-len(selected)
+    return selected,{'basis':'saved_order_citations_then_displayed_sources','policy_version':1,
+        'available_count':len(candidates),'selected_count':len(selected),'omitted_count':omitted,
+        'truncated':bool(omitted),'max_count':SOURCE_LIMIT,'max_text_characters':SOURCE_TEXT_LIMIT,
+        'selected_text_characters':text_size,
+        'available_sources_sha256':hashlib.sha256(json.dumps(candidates,ensure_ascii=False,
+            sort_keys=True,separators=(',',':')).encode('utf-8')).hexdigest()}
 
 def _user_reported_sources(probe):
     """Keep operator-provided links separate from collected source evidence."""
@@ -77,19 +111,7 @@ def planning_feedback(cycle):
             and item.get('status') in ('acknowledged','not_acknowledged','unknown')
             and item.get('scope')=='manual_or_assistant_business_material_acknowledgment_not_automated_fact_accuracy'
             and item.get('response_sha256')==digest and isinstance(item.get('quote'),str) and item['quote'] in response]
-        sources=[]
-        for key in ('citations','displayed_sources'):
-            values=after.get(key)
-            for item in values[:10] if isinstance(values,list) else []:
-                if not isinstance(item,dict):continue
-                title=item.get('title')[:200] if isinstance(item.get('title'),str) else ''
-                unconfirmed=unconfirmed_source_url_status(item)
-                raw_url=item.get('url');url=None if unconfirmed else trusted_source_url(raw_url)
-                sources.append({'title':title,'url':url,'kind':key,'basis':'saved_probe_source_not_verified_fact',
-                                'url_status':unconfirmed or ('provided' if url else 'unknown')})
-                if len(sources)>=6:break
-            if len(sources)>=6:break
-        row['observed_sources']=sources
+        row['observed_sources'],row['source_selection']=_observed_sources(after)
         row['user_reported_sources']=_user_reported_sources(probe) if source=='user_reported_external' else []
         rows.append(row);seen.add(probe_id)
     # Select by provenance, never by a positive/negative reading of the answer.

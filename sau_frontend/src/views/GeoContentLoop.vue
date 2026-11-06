@@ -29,13 +29,14 @@
       <el-card shadow="never">
         <div class="row"><h2>2 · {{ cycle.profile.name }} · 内容选题</h2><el-tag>{{ cycle.analysis.method === 'user_reported_external_editorial_clues' ? '外部原文线索，尚未 AI 策划' : cycle.analysis.method === 'rule_observations_not_ai' ? '采集待办，尚未 AI 策划' : '已完成 AI 策划' }}</el-tag></div>
         <p>{{ cycle.analysis.diagnosis }}</p>
-        <p v-if="cycle.feedback_diagnostics?.planning_feedback?.needs_update" class="hint" data-testid="research-feedback-planning-stale">后来收到的单题或外部反馈尚未用于当前选题。用下方 AI 策划按钮更新后，旧稿与原发布任务仍会保留。</p>
+        <p v-if="planningFeedback" class="hint" :data-testid="planningFeedback.canReplan ? 'research-feedback-planning-stale' : 'research-feedback-planning-note'">{{ planningFeedback.message }}</p>
         <div class="row"><el-button v-if="nativeAvailable" type="primary" :disabled="busy" @click="generate('analysis', 'doubao')">豆包分析采集并制定选题</el-button><el-button :disabled="busy" @click="generate('analysis', 'api')">用已配置的 AI API 策划</el-button><el-button @click="download(cycle, 'research-task.json')">导出任务单</el-button></div>
         <div class="observations"><p v-for="item in cycle.observations.cases" :key="item.id"><strong>{{ item.id }} · {{ category[item.category] }}</strong>：{{ item.finding }}</p></div>
         <el-table :data="cycle.analysis.briefs" data-testid="research-briefs"><el-table-column label="优先级" width="90"><template #default="{row}">{{ row.priority === 'high' ? '优先' : '后续' }}</template></el-table-column><el-table-column prop="topic" label="选题" min-width="220"/><el-table-column label="采集依据 / 待补资料" min-width="300"><template #default="{row}"><p>{{ row.case_ids.join('、') }} · {{ row.why }}</p><p v-for="text in row.missing_evidence" :key="text" class="hint">待补：{{ text }}</p><p v-if="row.outline.length" class="hint">结构：{{ row.outline.join(' → ') }}</p></template></el-table-column></el-table>
         <el-collapse data-geo-section="sources"><el-collapse-item title="查看观察到的来源（网址未知仍保留未知）" name="sources"><p class="hint">{{ cycle.observations.source_note }}</p><p class="hint">主体标签只按来源域名、标题或已确认的关系区分范围，不等于业务事实已核实；其他公司的条目仍可作为平台线索。</p><ul><li v-for="source in cycle.observations.sources" :key="source.id">{{ source.id }} · {{ source.case_id }} · {{ source.kind === 'citations' ? '正文引用' : '界面资料' }} · <a v-if="source.url" :href="safeUrl(source.url)" target="_blank" rel="noopener noreferrer">{{ source.title || source.domain }}</a><span v-else>{{ source.title || '标题未知' }} · 网址未确认</span><GeoSourceIdentity :identity="source.source_identity" compact/></li></ul></el-collapse-item></el-collapse>
       </el-card>
       <GeoOptimizationPlan :cycle="cycle" :selected-brief-id="briefId" :busy="busy" @select="briefId=$event"/>
+      <GeoFollowupSources :cycle="cycle"/>
       <GeoDestinations data-geo-section="destinations" :cycle="cycle" :task="task" :busy="busy" :native-available="nativeAvailable" @updated="applyCycle" @select="selectDestination" @open="openDestination" @checked="poll"/>
       <el-card shadow="never" data-geo-section="facts">
         <h2>3 · 补充可用于写作的事实</h2>
@@ -126,6 +127,7 @@ import GeoWebsiteAudit from '@/components/GeoWebsiteAudit.vue'
 import GeoOtherSearchEntries from '@/components/GeoOtherSearchEntries.vue'
 import GeoOptimizationProgress from '@/components/GeoOptimizationProgress.vue'
 import GeoOptimizationPlan from '@/components/GeoOptimizationPlan.vue'
+import GeoFollowupSources from '@/components/GeoFollowupSources.vue'
 import GeoNextActions from '@/components/GeoNextActions.vue'
 import GeoDiscoveryFunnel from '@/components/GeoDiscoveryFunnel.vue'
 import {diagnosticSection,focusDiagnosticSection} from '@/utils/geoNextActions'
@@ -135,6 +137,7 @@ import { createWritingPreferences } from '@/utils/geoWritingOptions'
 import {storedSessionScope} from '@/utils/geoAutomaticCollection'
 import { isExternalCycle, nativeCycleCapability } from '@/utils/geoExternalBaseline'
 import { retestCollection } from '@/utils/geoFeedback'
+import { planningFeedbackNotice } from '@/utils/geoPlanningFeedback'
 import { destinationEnabled, destinationCanPrepare, destinationPublicationGate, writingChannelEnabled, writingChannelLabel, inactiveDestinationMessage } from '@/utils/geoDestinationAvailability'
 
 const route = useRoute(), router = useRouter()
@@ -161,6 +164,7 @@ const publicationVisible = ref(false), publication = ref({url:'',published_at:''
 const nativeBusy = computed(() => task.value.status === 'running'), busy = computed(() => working.value || nativeBusy.value || websiteAuditBusy.value || feedbackBusy.value)
 const writingContextPending = computed(() => Boolean(cycleId.value && cycle.value?.id !== cycleId.value))
 const externalCycle = computed(() => isExternalCycle(cycle.value))
+const planningFeedback = computed(() => planningFeedbackNotice(cycle.value))
 const progressProject = computed(() => Number.isSafeInteger(cycle.value?.project_id)&&cycle.value.project_id>0?{...cycle.value.profile,id:cycle.value.project_id}:null)
 const nativeRetestAllowed = computed(() => Boolean(cycle.value?.baseline && nativeCycleCapability(cycle.value,'native_retest')))
 const recoveryTask=ref(null),recoveryStorageError=ref(''),recoveryUnreadable=ref(false)

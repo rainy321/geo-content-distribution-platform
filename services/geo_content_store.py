@@ -72,6 +72,12 @@ def _cycle(connection, identifier, *, for_update=False):
     result['channels'] = {**CHANNELS, **{target['key']: target['config']['name'] for target in result['destinations']}}
     result['opportunities'] = destinations.opportunities(result['observations'], result['destinations'], result['profile'].get('website', ''))
     result['fact_candidates'] = _fact_candidates(connection, result)
+    # Transactional draft/CAS readers must bind the same current follow-up
+    # routes as get_cycle. Legacy briefs keep their original query/input path.
+    if any(isinstance(brief, dict) and isinstance(brief.get('feedback_probe_ids'), list)
+           and brief['feedback_probe_ids'] for brief in result['analysis'].get('briefs', [])):
+        from services.geo_research_probe_service import list_probes
+        result['probes'] = list_probes(connection, identifier)
     return result
 
 
@@ -328,7 +334,10 @@ def get_cycle(database, identifier):
             result['retests'].append({'run_id': report['run_id'], 'updated_at': report.get('updated_at'),
                                       'comparison': comparison, 'collection': collection_summary(report)})
         from services.geo_research_probe_service import list_probes, project_probe_address_evidence
-        result['probes'] = list_probes(connection, identifier)
+        if 'probes' not in result:
+            result['probes'] = list_probes(connection, identifier)
+        from services.geo_followup_opportunities import followup_opportunities
+        result['followup_opportunities'] = followup_opportunities(result)
         from services.source_maintenance_service import overview
         result['source_maintenance'] = overview(connection, result)
         from services.webmaster_service import overview as webmaster_overview

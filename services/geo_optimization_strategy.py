@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 
 from services.geo_test_reports import project_report_evaluation
+from services.geo_followup_opportunities import followup_projection, source_routes_for_brief
 
 
 SCHEMA_VERSION = 'geo_optimization_plan_v1'
@@ -134,6 +135,7 @@ def optimization_plan(cycle):
     by_question = {item['case_id']: item for item in questions}
     sources = _unique_rows(_rows(_dict(cycle.get('observations')).get('sources'), 6000))
     briefs = _unique_rows(_rows(_dict(cycle.get('analysis')).get('briefs'), 100))
+    followup = followup_projection(cycle)
     actions = []
     for identifier, brief in briefs.items():
         case_ids = _ids(brief.get('case_ids'), 12)
@@ -156,7 +158,8 @@ def optimization_plan(cycle):
                   'gap': gap or '已存选题尚未说明具体缺口，先核对本题回答与已确认资料。',
                   'change_summary': change[:1500],
                   'writing_requirements': [*BASE_REQUIREMENTS, *(GOAL_REQUIREMENTS[goal] for goal in goals)],
-                  'evidence_needed': missing, 'source_routes': _source_routes(cycle, source_ids),
+                  'evidence_needed': missing, 'source_routes': [*_source_routes(cycle, source_ids),
+                                                               *source_routes_for_brief(followup, brief)],
                   'acceptance_checks': [{'case_id': case, 'question': by_question[case]['question'],
                       'goal': by_question[case]['goal'], 'label': by_question[case]['label'],
                       'signal': GOALS[by_question[case]['category']][2]} for case in case_ids],

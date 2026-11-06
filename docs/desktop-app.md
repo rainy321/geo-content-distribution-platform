@@ -14,7 +14,9 @@
 
 桌面程序名为“GEO AI 搜索工作台”，启动文件为 `GEO_AI_Workbench.exe`。使用独立 WebView2 窗口，包含 Python 后端和已构建的界面。需要 Windows x64、Microsoft WebView2 和可用的 Chrome 或 Edge。
 
-本文对应 **2026.11.05.4**。默认流程由软件自动检查豆包网页会话，再自动出题和逐题采集回答与来源。登录和安全验证在专用窗口正常完成后，软件继续当前请求。实际普通对话或工作网页分别记录，模型选项留空时使用页面当前模型。已有人工作答记录的客户可只读沿用冻结原题，预览确认后另建独立网页基线。手机录入收为可选补充，高级指定模式继续保留。
+本文对应 **2026.11.06.1**。默认流程由软件自动检查豆包网页会话，再自动出题和逐题采集回答与来源。登录和安全验证在专用窗口正常完成后，软件继续当前请求。实际普通对话或工作网页分别记录，模型选项留空时使用页面当前模型。已有人工作答记录的客户可只读沿用冻结原题，预览确认后另建独立网页基线。手机录入收为可选补充，高级指定模式继续保留。
+
+后续单题复测的来源会单独显示为渠道研究线索，并可在选题中追溯到对应原题与反馈。它们不混入原始采集来源编号，也不代表投稿权限或客户业务事实。每份反馈的来源投影保留最多20项，并设有文本预算，超出时明确提示省略；策划输入版本与选题是否标注反馈出处分开显示。策划与写稿共用事实边界检查，未通过时保留原选题和稿件，不自动重试或发布。
 
 品牌核验的单题对照可逐个查看已登记的官方地址，分别观察正文地址、来源面板与正文引用。来源或引用采集不全时显示未知。运营关系仍通过原文及已确认资料核对，旧回答和效果统计保持原记录。
 
@@ -162,7 +164,7 @@ CSDN 专用辅助填写无需配置 CSS 选择器；仅确认空白或完整匹�
 
 ## 本机安装与数据
 
-本次目标版本为 **2026.11.02.3**。从 [GitHub Releases](https://github.com/rainy321/geo-content-distribution-platform/releases) 中实际公开的版本下载 Windows x64 ZIP，并核对对应清单；完整解压后打开 `GEO_AI_Workbench/GEO_AI_Workbench.exe`，保留同级 `_internal` 目录。[2026.10.25.2 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.25.2)、[2026.10.25.1 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.25.1)、[2026.10.22.3 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.22.3)、[2026.10.22.2 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.22.2)、[2026.10.22.1 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.22.1)、[2026.10.21.5 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.5)、[2026.10.21.4 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.4)及[2026.10.21.3 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.3)继续保留。[2026.10.20 五步流程版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.20)保留此前真实发布走查。更早版本在[旧版归档 Release](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-legacy-backup-2026.10.15)，仅用于备份恢复。
+本次目标版本为 **2026.11.06.1**。从 [GitHub Releases](https://github.com/rainy321/geo-content-distribution-platform/releases) 中实际公开的版本下载 Windows x64 ZIP，并核对对应清单；完整解压后打开 `GEO_AI_Workbench/GEO_AI_Workbench.exe`，保留同级 `_internal` 目录。[2026.10.25.2 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.25.2)、[2026.10.25.1 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.25.1)、[2026.10.22.3 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.22.3)、[2026.10.22.2 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.22.2)、[2026.10.22.1 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.22.1)、[2026.10.21.5 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.5)、[2026.10.21.4 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.4)及[2026.10.21.3 版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.21.3)继续保留。[2026.10.20 五步流程版](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-workbench-2026.10.20)保留此前真实发布走查。更早版本在[旧版归档 Release](https://github.com/rainy321/geo-content-distribution-platform/releases/tag/geo-legacy-backup-2026.10.15)，仅用于备份恢复。
 
 本机安装文件：`%LOCALAPPDATA%\Programs\GEO_AI_Workbench\GEO_AI_Workbench.exe`。桌面和开始菜单有“GEO AI搜索工作台”快捷方式。
 
