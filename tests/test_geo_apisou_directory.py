@@ -140,11 +140,14 @@ class PublicControl:
     async def count(self): return 1
     async def is_visible(self): return True
     async def is_editable(self): return True
-    async def evaluate(self, _): return self.key not in self.form.invalid
+    async def evaluate(self, expression):
+        if expression == 'e=>e.defaultChecked': return self.key in self.form.default_checked
+        return self.key not in self.form.invalid
     async def input_value(self): return self.form.values[self.key]
     async def fill(self, value): self.form.writes.append(self.key); self.form.values[self.key] = value
     async def is_checked(self): return self.key in self.form.checked
     async def check(self): self.form.writes.append(self.key); self.form.checked.add(self.key)
+    async def uncheck(self): self.form.writes.append('uncheck:' + self.key); self.form.checked.discard(self.key)
     async def select_option(self, *, label): self.form.writes.append(self.key); self.form.values[self.key] = label
     async def inner_text(self): return self.form.values['type']
     async def all_text_contents(self): return directory.APISOU_TYPES
@@ -157,12 +160,17 @@ class PublicControl:
 class ApisouForm:
     def __init__(self):
         self.values = {key: '' for key in ('name', 'url', 'tagline', 'contact', 'note', 'website')}
-        self.values['type'] = '商业'; self.checked = set(); self.writes = []; self.invalid = set()
+        self.values['type'] = '商业'; self.checked = {'mod_文本'}; self.default_checked = {'mod_文本'}
+        self.writes = []; self.invalid = set()
+        self.schema_names = ['name', 'url', 'tagline', 'contact', 'note', 'website', 'type',
+            *('line_' + item for item in directory.APISOU_MODEL_LINES), *('mod_' + item for item in directory.APISOU_MODALITIES)]
     async def count(self): return 1
     async def is_visible(self): return True
     async def wait_for(self, **_): pass
     def locator(self, selector):
         if selector == '[required]': return self
+        if selector == 'input:not([type="hidden"]),textarea,select':
+            return type('Names', (), {'evaluate_all': AsyncMock(side_effect=lambda _: sorted(self.schema_names))})()
         if selector == 'input[type="checkbox"]': return type('Count', (), {'count': AsyncMock(return_value=17)})()
         import re
         match = re.fullmatch(r'(?:input|select|textarea)\[name="([^"]+)"\](?: option:checked)?', selector)
@@ -171,16 +179,38 @@ class ApisouForm:
     async def evaluate_all(self, _): return ['name', 'url']
 
 
+INITIAL_MARKER = '__geo_apisou_initial_' + 'a' * 32
+
+
+async def initial_state_evaluate(page, expression, value):
+    """Lifecycle fake only; the private offline DOM suite executes the actual JS."""
+    if expression == '(key)=>window[key]?.isPristine()===true':
+        return page.initial_marker == value and not page.touched and not page.claimed
+    if expression == '(value)=>window[value.marker]?.claimInitialState(value.clearDefault)===true':
+        if page.initial_marker != value['marker'] or page.touched or page.claimed or page.claim_fails:
+            return False
+        page.claimed = True
+        if value['clearDefault']:
+            page.form.writes.append('normalize-default:mod_文本'); page.form.checked.discard('mod_文本')
+        return True
+    raise AssertionError(expression)
+
+
 class ApisouFormTests(unittest.IsolatedAsyncioTestCase):
     def page(self):
         form = ApisouForm()
-        return type('Page', (), {'url': directory.APISOU_ENTRY_URL, 'form': form, 'locator': lambda _, selector: PublicControl(form, 'name')})()
+        return type('Page', (), {'url': directory.APISOU_ENTRY_URL, 'form': form,
+            'initial_marker': INITIAL_MARKER, 'touched': False, 'claimed': False, 'claim_fails': False,
+            'evaluate': initial_state_evaluate, 'locator': lambda _, selector: PublicControl(form, 'name')})()
+    async def prepare(self, page, fields):
+        return await browser.prepare_apisou_form(page, fields, initial_state_marker=INITIAL_MARKER)
     def fields(self):
         return {'name': 'Synthetic Product', 'url': 'https://example.org/', 'tagline': '', 'type': '商业', 'contact': '', 'note': 'Public note', 'model_lines': [], 'modalities': []}
     async def test_fill_and_readback_optional_defaults_without_touching_honeypot_or_submit(self):
-        page = self.page(); fields = self.fields()
-        await browser.prepare_apisou_form(page, fields)
-        self.assertEqual(page.form.writes, ['name', 'url', 'note'])
+        page = self.page(); fields = self.fields(); before = copy.deepcopy(fields)
+        await self.prepare(page, fields)
+        self.assertEqual(page.form.writes, ['normalize-default:mod_文本', 'name', 'url', 'note'])
+        self.assertEqual(fields, before)
         self.assertEqual(page.form.checked, set()); self.assertEqual(page.form.values['website'], '')
         await browser.readback_apisou_form(page.form, fields)
         page.form.values['url'] = 'https://changed.example.org/'
@@ -191,12 +221,99 @@ class ApisouFormTests(unittest.IsolatedAsyncioTestCase):
             if change == 'existing_note': page.form.values['note'] = 'Keep existing'
             elif change == 'existing_model': page.form.checked.add('line_openai')
             else: page.form.invalid.add('url')
-            with self.subTest(change=change), self.assertRaises(ValueError): await browser.prepare_apisou_form(page, self.fields())
+            with self.subTest(change=change), self.assertRaises(ValueError): await self.prepare(page, self.fields())
             self.assertEqual(page.form.writes, [])
+
+    async def test_user_choice_or_other_platform_default_is_never_cleared(self):
+        for change in ('user_checked_text', 'other_checked_model', 'other_default_model', 'missing_text_default'):
+            page = self.page()
+            if change == 'user_checked_text': page.form.default_checked.clear()
+            elif change == 'other_checked_model': page.form.checked.add('line_openai')
+            elif change == 'other_default_model': page.form.default_checked.add('line_openai')
+            else:
+                page.form.default_checked.clear(); page.form.checked.clear()
+            prior = set(page.form.checked)
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                await self.prepare(page, self.fields())
+            self.assertEqual(page.form.checked, prior); self.assertEqual(page.form.writes, [])
+
+    async def test_known_default_can_only_be_normalized_after_all_schema_and_initial_state_checks(self):
+        for change in ('unknown_optional_field', 'duplicate_known_field', 'matching_existing_note', 'different_type', 'late_invalid_checkbox'):
+            page = self.page()
+            if change == 'unknown_optional_field': page.form.schema_names.append('new_optional')
+            elif change == 'duplicate_known_field': page.form.schema_names.append('name')
+            elif change == 'matching_existing_note': page.form.values['note'] = self.fields()['note']
+            elif change == 'different_type': page.form.values['type'] = '开源'
+            else: page.form.invalid.add('mod_向量')
+            fields = self.fields()
+            if change == 'different_type': fields['type'] = '开源'
+            with self.subTest(change=change), self.assertRaises(ValueError): await self.prepare(page, fields)
+            self.assertEqual(page.form.writes, []); self.assertIn('mod_文本', page.form.checked)
+
+    async def test_approved_text_selection_is_retained_and_pristine_unchecked_state_stays_unchecked(self):
+        page = self.page(); fields = self.fields(); fields['modalities'] = ['文本']
+        await self.prepare(page, fields)
+        self.assertEqual(page.form.checked, {'mod_文本'}); self.assertNotIn('normalize-default:mod_文本', page.form.writes)
+        page = self.page(); page.form.checked.clear()
+        await self.prepare(page, self.fields())
+        self.assertEqual(page.form.checked, set()); self.assertNotIn('normalize-default:mod_文本', page.form.writes)
+
+    async def test_failed_atomic_initial_state_claim_stops_before_any_write(self):
+        page = self.page(); fields = self.fields()
+        page.claim_fails = True
+        with self.assertRaisesRegex(ValueError, '已有交互或初始状态变化'):
+            await self.prepare(page, fields)
+        self.assertEqual(page.form.writes, []); self.assertIn('mod_文本', page.form.checked)
+        self.assertEqual(fields['modalities'], [])
+
+    async def test_missing_touched_or_already_claimed_initial_state_never_fills(self):
+        for change in ('missing', 'touched', 'claimed'):
+            page = self.page()
+            if change == 'missing': page.initial_marker = None
+            elif change == 'touched': page.touched = True
+            else: page.claimed = True
+            with self.subTest(change=change), self.assertRaisesRegex(ValueError, '缺少未交互'):
+                await self.prepare(page, self.fields())
+            self.assertEqual(page.form.writes, []); self.assertEqual(page.form.checked, {'mod_文本'})
+        with self.assertRaisesRegex(ValueError, '缺少未交互'):
+            await browser.prepare_apisou_form(self.page(), self.fields())
+        with self.assertRaises(ValueError): browser.apisou_initial_state_script('untrusted-marker')
+
+    async def test_late_touch_during_preflight_stops_before_first_write(self):
+        page = self.page(); original = page.evaluate
+        async def touch_before_claim(expression, value):
+            if 'claimInitialState' in expression: page.touched = True
+            return await original(expression, value)
+        page.evaluate = touch_before_claim
+        with self.assertRaisesRegex(ValueError, '已有交互或初始状态变化'):
+            await self.prepare(page, self.fields())
+        self.assertEqual(page.form.writes, [])
+
+    async def test_post_normalization_platform_reset_cannot_pass_exact_readback(self):
+        page = self.page(); original = PublicControl.fill
+        async def reset_on_fill(control, value):
+            await original(control, value)
+            control.form.checked.add('mod_文本')
+        with patch.object(PublicControl, 'fill', new=reset_on_fill):
+            with self.assertRaisesRegex(ValueError, '回读不一致'): await self.prepare(page, self.fields())
+        self.assertIn('mod_文本', page.form.checked)
 
     async def test_actual_session_dispatch_uses_only_prefill_and_controlled_close(self):
         import asyncio
         context = Context(); context.pages[0].form = ApisouForm()
+        page = context.pages[0]; page.initial_marker = None
+        page.touched = page.claimed = page.claim_fails = False
+        original_evaluate, original_init = page.evaluate, context.add_init_script
+        async def evaluate(expression, *values):
+            if 'isPristine' in expression or 'claimInitialState' in expression:
+                return await initial_state_evaluate(page, expression, values[0])
+            return await original_evaluate(expression, *values)
+        async def add_init_script(*, script):
+            await original_init(script=script)
+            if 'claimInitialState' in script:
+                import re
+                page.initial_marker = re.search(r'__geo_apisou_initial_[a-f0-9]{32}', script).group()
+        page.evaluate, context.add_init_script = evaluate, add_init_script
         close_signal = asyncio.Event(); stages = []
         def progress(value):
             stages.append(value['stage'])
@@ -211,6 +328,7 @@ class ApisouFormTests(unittest.IsolatedAsyncioTestCase):
                 playwright_factory=Runtime, close_requested=close_signal, timeout_seconds=1)
         self.assertTrue(context.closed); self.assertEqual(context.pages[0].url, directory.APISOU_ENTRY_URL)
         self.assertIn('awaiting_human_confirmation', stages)
+        self.assertTrue(page.claimed); self.assertIsNotNone(page.initial_marker)
         self.assertEqual(result['stage'], 'closed_not_submitted'); self.assertEqual(result['allowed_posts'], 0)
         with self.assertRaises(ValueError): await browser.open_session({'adapter': 'unknown'}, Path('unused'), 'unused')
 

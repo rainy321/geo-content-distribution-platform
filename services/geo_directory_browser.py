@@ -395,14 +395,78 @@ async def readback_apisou_form(form, fields):
         raise ValueError('API搜公开字段回读不一致；不会重复填写或发送申请')
 
 
-async def prepare_apisou_form(page, fields):
+def apisou_initial_state_script(marker):
+    """Observe form touches before navigation; no text or account data is kept."""
+    if not isinstance(marker, str) or not re.fullmatch(r'__geo_apisou_initial_[a-f0-9]{32}', marker):
+        raise ValueError('API搜初始状态标记无效')
+    options = json.dumps({'marker': marker, 'entry': APISOU_ENTRY_URL, 'types': APISOU_TYPES,
+        'names': ['name', 'url', 'tagline', 'contact', 'note', 'website', 'type',
+            *('line_' + item for item in APISOU_MODEL_LINES), *('mod_' + item for item in APISOU_MODALITIES)]}, ensure_ascii=False)
+    return '''(() => {
+      const options = ''' + options + ''';
+      let touched = false, claimed = false;
+      const owns = form => form instanceof HTMLFormElement && form.querySelector('input[name="name"]') && form.querySelector('input[name="url"]');
+      const touch = event => {
+        if (claimed) return;
+        const element = event.target;
+        const form = element instanceof HTMLFormElement ? element : element instanceof Element ? element.closest('form') : null;
+        if (owns(form)) touched = true;
+      };
+      for (const kind of ['input','change','reset','pointerdown','keydown','click']) document.addEventListener(kind,touch,true);
+      const claimInitialState = clearDefault => {
+        if (location.href !== options.entry || touched || claimed || typeof clearDefault !== 'boolean') return false;
+        let checkbox;
+        if (clearDefault) {
+          const form = document.querySelector('input[name="name"]')?.closest('form');
+          if (!owns(form)) return false;
+          const controls = Array.from(form.querySelectorAll('input:not([type="hidden"]),textarea,select'));
+          if (JSON.stringify(controls.map(e=>e.name).sort()) !== JSON.stringify([...options.names].sort())) return false;
+          if (JSON.stringify(controls.filter(e=>e.required).map(e=>e.name).sort()) !== JSON.stringify(['name','url'])) return false;
+          for (const name of ['name','url','tagline','contact','note','website']) {
+            const item = controls.find(e=>e.name===name);
+            const type = name==='note'?'textarea':name==='url'?'url':'text';
+            if (!item || item.type!==type || item.disabled || item.readOnly || item.value!=='') return false;
+          }
+          const select = controls.find(e=>e.name==='type');
+          if (!select || select.tagName!=='SELECT' || select.disabled || select.selectedOptions[0]?.textContent.trim()!=='商业' ||
+              JSON.stringify(Array.from(select.options,o=>o.textContent))!==JSON.stringify(options.types)) return false;
+          const checks = controls.filter(e=>e.type==='checkbox');
+          if (checks.length!==17 || checks.some(e=>e.disabled || e.defaultChecked!==(e.name==='mod_文本') || e.checked!==(e.name==='mod_文本'))) return false;
+          checkbox = checks.find(e=>e.name==='mod_文本');
+          if (!checkbox || !checkbox.getClientRects().length || getComputedStyle(checkbox).visibility==='hidden') return false;
+        }
+        // This event-loop turn checks prior interaction and clears only the
+        // reviewed platform default atomically. Our following fills may emit
+        // input/change; a claimed marker can never authorize another prepare.
+        claimed = true;
+        if (clearDefault) {
+          checkbox.click();
+          return checkbox.checked===false;
+        }
+        return true;
+      };
+      Object.defineProperty(window,options.marker,{configurable:false,writable:false,
+        value:Object.freeze({isPristine:()=>!touched&&!claimed,claimInitialState})});
+    })();'''
+
+
+async def prepare_apisou_form(page, fields, *, initial_state_marker=None):
     if page.url != APISOU_ENTRY_URL:
         raise ValueError('当前不是固定API搜申请入口')
+    if (not isinstance(initial_state_marker, str) or not re.fullmatch(r'__geo_apisou_initial_[a-f0-9]{32}', initial_state_marker)
+            or await page.evaluate('(key)=>window[key]?.isPristine()===true', initial_state_marker) is not True):
+        raise ValueError('API搜缺少未交互的初始状态凭据，保留当前表单，不会填写')
     form = page.locator('input[name="name"]').locator('xpath=ancestor::form')
     await _unique_visible(form)
     required = await form.locator('[required]').evaluate_all('(items)=>items.map(e=>e.name).sort()')
     if required != ['name', 'url']:
         raise ValueError('API搜必填字段已变化，请重新核对适配')
+    known_names = ['name', 'url', 'tagline', 'contact', 'note', 'website', 'type',
+                   *('line_' + item for item in APISOU_MODEL_LINES), *('mod_' + item for item in APISOU_MODALITIES)]
+    actual_names = await form.locator('input:not([type="hidden"]),textarea,select').evaluate_all(
+        '(items)=>items.map(e=>e.name).sort()')
+    if actual_names != sorted(known_names):
+        raise ValueError('API搜公开表单字段有变化，未填写或改变选项')
     honeypot = form.locator('input[name="website"]')
     if await honeypot.count() != 1 or await honeypot.input_value():
         raise ValueError('API搜平台自有字段状态有变化，未填写')
@@ -428,17 +492,45 @@ async def prepare_apisou_form(page, fields):
             if not await field.is_editable() or not await field.evaluate("e=>e.tagName==='INPUT'&&e.type==='checkbox'"):
                 raise ValueError('API搜选项有变化，未填写')
             checked = await field.is_checked()
-            if checked and option not in fields[key]:
+            default_checked = await field.evaluate('e=>e.defaultChecked')
+            text_default = prefix == 'mod_' and option == '文本'
+            # The anonymous server HTML and fresh DOM agree on exactly this
+            # one default. Different defaults are a changed schema, not user
+            # permission to clear a checked control.
+            if default_checked is not text_default:
+                raise ValueError('API搜选项默认状态有变化，未填写或改变现有选择')
+            wanted = option in fields[key]
+            clear_default = checked and not wanted and text_default
+            if checked and not wanted and not clear_default:
                 raise ValueError('API搜已有其它模型或能力选择，保留原选择')
-            checks.append((field, checked, option in fields[key]))
+            checks.append((field, checked, wanted, clear_default, prefix + option))
     if await form.locator('input[type="checkbox"]').count() != len(checks):
         raise ValueError('API搜有尚未核对的选项，未填写')
+    if any(clear_default for _, _, _, clear_default, _ in checks):
+        # Only normalize the fully observed untouched initial state. Existing
+        # public text, another checked option or a non-default type is retained.
+        checked_names = {name for _, checked, _, _, name in checks if checked}
+        if any(prior for _, prior in controls.values()) or prior_type != '商业' or checked_names != {'mod_文本'}:
+            raise ValueError('API搜当前不是已核对的初始默认状态，保留现有内容和选择')
+    # Recheck everything that could be changed while the full schema was read,
+    # before the first text fill or default normalization is allowed.
+    for field, prior in controls.values():
+        if await field.input_value() != prior:
+            raise ValueError('API搜公开内容在核对期间有变化，未填写')
+    if (await select.locator('option:checked').inner_text()).strip() != prior_type:
+        raise ValueError('API搜站点类型在核对期间有变化，未填写')
+    for field, checked, _, _, name in checks:
+        if await field.is_checked() != checked or await field.evaluate('e=>e.defaultChecked') is not (name == 'mod_文本'):
+            raise ValueError('API搜选项在核对期间有变化，未填写')
+    if await page.evaluate('(value)=>window[value.marker]?.claimInitialState(value.clearDefault)===true',
+            {'marker': initial_state_marker, 'clearDefault': any(row[3] for row in checks)}) is not True:
+        raise ValueError('API搜表单已有交互或初始状态变化，保留现有内容，不会填写')
     for key, (field, prior) in controls.items():
         if prior != fields[key]:
             await field.fill(fields[key])
     if prior_type != fields['type']:
         await select.select_option(label=fields['type'])
-    for field, checked, wanted in checks:
+    for field, checked, wanted, clear_default, _ in checks:
         if wanted and not checked:
             await field.check()
     await readback_apisou_form(form, fields)
@@ -456,7 +548,11 @@ async def open_session(record, profile, executable_path, *, fallback_executable_
         raise ValueError('当前目录尚无已核对的辅助窗口适配')
     apisou = adapter == APISOU_ADAPTER
     entry_url, list_url = (APISOU_ENTRY_URL, 'https://www.apisou.com/') if apisou else (ENTRY_URL, LIST_URL)
-    prepare, readback = (prepare_apisou_form, readback_apisou_form) if apisou else (prepare_form, readback_form)
+    initial_state_marker = '__geo_apisou_initial_' + uuid.uuid4().hex if apisou else None
+    prepare, readback = prepare_form, readback_apisou_form if apisou else readback_form
+    if apisou:
+        async def prepare(page, fields):
+            return await prepare_apisou_form(page, fields, initial_state_marker=initial_state_marker)
     if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 3600:
         raise ValueError('目录窗口等待时间无效')
     profile = Path(profile)
@@ -519,6 +615,7 @@ async def open_session(record, profile, executable_path, *, fallback_executable_
                 marker = '__geo_directory_submit_seen_' + uuid.uuid4().hex
                 if apisou:
                     await context.add_init_script(script=apisou_prefill_notice_script())
+                    await context.add_init_script(script=apisou_initial_state_script(initial_state_marker))
                 def form_submitted(source):
                     if (source.get('page') is page and source.get('frame') is page.main_frame
                             and page.url in (entry_url, list_url)):
