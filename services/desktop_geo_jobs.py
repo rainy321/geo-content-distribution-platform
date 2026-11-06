@@ -766,6 +766,8 @@ class DesktopGeoJobs:
             cycle = geo_content_store.get_cycle(database, cycle_id)
             target = geo_destination_service.get_target(database, cycle['project_id'], target_id)
             geo_destination_service.assert_publication_allowed(target)
+            if geo_destination_service.is_directory_target(target):
+                raise ValueError('此目标使用目录申请资料，请从原目录申请卡操作；普通文章窗口不会打开')
             if article_id is not None and (type(article_id) is not int or article_id <= 0):
                 raise ValueError('文章编号无效')
         except (ValueError, geo_content_store.ResearchNotFoundError) as error:
@@ -780,6 +782,8 @@ class DesktopGeoJobs:
             else:
                 current = geo_destination_service.get_target(database, cycle['project_id'], target_id)
             geo_destination_service.assert_publication_allowed(current)
+            if geo_destination_service.is_directory_target(current):
+                raise ValueError('目标已变为目录申请，请从原目录申请卡操作；普通窗口不会打开')
             check_requested = asyncio.Event()
             with self.lock:
                 self._destination_check = check_requested
@@ -931,7 +935,7 @@ class DesktopGeoJobs:
                 raise ValueError('该目录使用普通浏览器核对，工作台只登记本人提供的回执。')
             if not inspection_only and (not record['can_open'] or review_sha256 != record['review_sha256']
                                         or not isinstance(open_nonce, str) or open_nonce != record.get('open_nonce')):
-                raise ValueError('请先核对并确认当前七字段预览；原授权不可重复使用。')
+                raise ValueError('请先核对并确认当前公开资料预览；原授权不可重复使用。')
         except (ValueError, TypeError, sqlite3.Error, geo_content_store.ResearchNotFoundError) as error:
             return {'error': str(error)}
 
@@ -995,7 +999,7 @@ class DesktopGeoJobs:
                     browser_record = latest
                     publish()
                 result = await open_session(browser_record,
-                    self.data / 'directory-profiles' / str(record['project_id']) / directory.ADAPTER / uuid.uuid4().hex,
+                    self.data / 'directory-profiles' / str(record['project_id']) / record['adapter'] / uuid.uuid4().hex,
                     edge_executable(), fallback_executable_path=chrome_executable(), progress=progress,
                     before_submit=None if inspection_only else before_submit,
                     save_receipt=None if inspection_only else save_receipt,

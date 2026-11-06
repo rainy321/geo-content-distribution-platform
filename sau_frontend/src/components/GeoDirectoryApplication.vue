@@ -1,11 +1,11 @@
 <template>
-  <section class="directory-application" aria-label="GrokCode目录申请" data-testid="directory-application">
-    <header><div><strong>GrokCode 目录申请</strong><p>单独登记目录线索，由你在平台最终确认；待审核或结果未知都不表示已收录。</p></div><el-button :disabled="loading" @click="openPanel">{{ record ? '查看目录申请' : '目录申请' }}</el-button></header>
+  <section class="directory-application" :aria-label="`${platformName}目录申请`" data-testid="directory-application">
+    <header><div><strong>{{ platformName }} 目录申请</strong><p>{{ isApisou ? '软件内核对公开资料，辅助填写和回读；当前不发送最终申请。' : '单独登记目录线索，由你在平台最终确认；待审核或结果未知都不表示已收录。' }}</p></div><el-button :disabled="loading" @click="openPanel">{{ record ? '查看目录申请' : '目录申请' }}</el-button></header>
     <p v-if="record" class="directory-summary"><el-tag type="info" size="small">{{ directoryStage(record) }}</el-tag><span>{{ evidenceLabel }}{{ record.receipt?.intake_uid ? ` · 回执 ${record.receipt.intake_uid}` : '' }}</span></p>
     <p v-if="error && !visible" class="directory-error" role="alert">{{ error }}</p>
-    <el-dialog v-model="visible" class="geo-directory-dialog" modal-class="geo-directory-modal" align-center title="GrokCode 目录申请" width="min(720px, 94vw)" :close-on-click-modal="false" :show-close="!localBusy" :close-on-press-escape="!localBusy">
+    <el-dialog v-model="visible" class="geo-directory-dialog" modal-class="geo-directory-modal" align-center :title="`${platformName} 目录申请`" width="min(720px, 94vw)" :close-on-click-modal="false" :show-close="!localBusy" :close-on-press-escape="!localBusy">
       <div class="directory-content" tabindex="0" role="region" aria-label="目录申请资料与预览">
-      <p class="directory-intro">只填写对客售价与公开联系入口，不上传成本、利润或原表。软件辅助填写；登录或安全验证在同一平台窗口正常完成，最终提交由你在平台确认。</p>
+      <p class="directory-intro">{{ isApisou ? '仅名称和官网地址必填。模型与能力未核实请不选，联系方式留空；不上传成本、利润、凭证或原表。当前窗口只辅助填写并回读，不放行最终申请。已有结果须另行登记真实凭据。' : '只填写对客售价与公开联系入口，不上传成本、利润或原表。软件辅助填写；登录或安全验证在同一平台窗口正常完成，最终提交由你在平台确认。' }}</p>
       <p v-if="!supported" class="directory-notice" role="status">{{ supportReason }}</p>
       <p v-if="historyRecord" class="directory-notice">这是本项目此前轮次或目标的原申请，可查看，不能从当前目标重新申请。</p>
       <p v-if="outdatedRecord || contextRefreshAllowed" class="directory-notice">资料或平台配置已更新，原申请仍绑定当时的资料。{{ contextRefreshFrozen ? '此前窗口已受控结束且本次未提交；公开内容保持不变，可采用当前配置后重新审阅。' : '尚未打开平台的草稿，可采用当前配置和下方公开内容后重新核对。' }}</p>
@@ -15,15 +15,32 @@
       <p v-if="storageWarning" class="directory-notice" role="status">{{ storageWarning }}</p>
       <el-form v-if="!record || record.can_edit || contextRefreshEditable" label-position="top" @submit.prevent="saveDraft">
         <div class="directory-pair"><el-form-item label="服务名称"><el-input v-model="form.name" :disabled="editorDisabled" :maxlength="limits.name" placeholder="填写本次要登记的服务名称"/></el-form-item><el-form-item label="公开服务网址"><el-select v-model="form.url" :disabled="editorDisabled" :fit-input-width="true" placeholder="选择本轮已登记的官方入口"><el-option v-for="url in officialUrls" :key="url" :label="url" :value="url" :title="url"/></el-select><p class="directory-hint">要登记的入口须在本轮客户官方地址中；缺少时先在品牌资料补充。</p></el-form-item></div>
+        <template v-if="isApisou">
+          <el-form-item label="一句话介绍（可选）"><el-input v-model="form.tagline" :disabled="editorDisabled" :maxlength="limits.tagline"/></el-form-item>
+          <el-form-item label="站点类型"><el-select v-model="form.type" :disabled="editorDisabled"><el-option v-for="item in apisouTypes" :key="item" :value="item" :label="item"/></el-select><p class="directory-hint">沿用平台默认“商业”，其它类型须有依据；选择不代表资质已核验。</p></el-form-item>
+          <el-form-item label="支持的模型线路（可选）"><el-checkbox-group v-model="form.model_lines" :disabled="editorDisabled"><el-checkbox v-for="item in apisouModelLines" :key="item" :value="item">{{ apisouModelLabels[item] }}</el-checkbox></el-checkbox-group></el-form-item>
+          <el-form-item label="能力分类（可选）"><el-checkbox-group v-model="form.modalities" :disabled="editorDisabled"><el-checkbox v-for="item in apisouModalities" :key="item" :value="item">{{ item }}</el-checkbox></el-checkbox-group></el-form-item>
+          <el-form-item label="补充说明（可选）"><el-input v-model="form.note" :disabled="editorDisabled" :maxlength="limits.note" type="textarea" :rows="4"/></el-form-item>
+          <p class="directory-hint">线路与能力默认不选，不从 AI 回答自动推断支持情况；联系方式保持为空。</p>
+        </template><template v-else>
         <el-form-item label="对客价格与计价单位"><el-input v-model="form.rate" :disabled="editorDisabled" type="textarea" :rows="2" :maxlength="limits.rate" show-word-limit placeholder="只填写已确认的对客售价，写清币种、输入/输出及计价单位"/></el-form-item>
         <el-form-item label="公开资料来源"><el-input v-model="form.source" :disabled="editorDisabled" type="textarea" :rows="2" :maxlength="limits.source" placeholder="填写已核对的公开价格页或说明；资料未知请先核对"/></el-form-item>
         <el-form-item label="涉及的模型类型（选一项）"><el-checkbox-group v-model="form.models" :max="1" :disabled="editorDisabled"><el-checkbox v-for="model in modelOptions" :key="model" :value="model">{{ model }}</el-checkbox></el-checkbox-group><p class="directory-hint">这里只选择目录申请类型，不表示模型能力或可用情况已经核验。</p></el-form-item>
         <div class="directory-pair"><el-form-item label="公开联系入口（可选）"><el-input v-model="form.contact" :disabled="editorDisabled" :maxlength="limits.contact" placeholder="公开售后页或联系入口，可留空"/></el-form-item><el-form-item label="补充说明（可选）"><el-input v-model="form.notes" :disabled="editorDisabled" :maxlength="limits.notes" type="textarea" :rows="2"/></el-form-item></div>
+        </template>
       </el-form>
       <section v-if="supported || record" class="directory-snapshot" aria-label="将公开的申请内容">
-        <h4>{{ record?.read_only && !contextRefreshEditable ? '本次申请记录的公开内容' : '将公开给平台的内容' }}</h4><dl><template v-for="[key,label] in fieldLabels" :key="key"><dt>{{ label }}</dt><dd>{{ key==='models' ? previewFields.models.join('、') || '尚未选择' : previewFields[key] || '未填写' }}</dd></template></dl>
+        <h4>{{ record?.read_only && !contextRefreshEditable ? '本次申请记录的公开内容' : '将公开给平台的内容' }}</h4><dl><template v-for="[key,label] in fieldLabels" :key="key"><dt>{{ label }}</dt><dd>{{ fieldText(key,previewFields[key]) }}</dd></template></dl>
       </section>
-      <details v-if="dirty && record?.read_only && !contextRefreshEditable" class="directory-local-copy"><summary>查看保留的本机未保存编辑</summary><dl><template v-for="[key,label] in fieldLabels" :key="key"><dt>{{ label }}</dt><dd>{{ key==='models' ? form.models.join('、') : form[key] || '未填写' }}</dd></template></dl></details>
+      <section v-if="isApisou" class="directory-snapshot" aria-label="API搜预填后的下一步">
+        <h4>此窗口仅预填核对，暂不能提交</h4>
+        <p class="directory-hint">需要最终申请时，请先结束辅助窗口，再把官方入口复制到日常浏览器。可复制本轮已核对资料；这不是申请成功或收录回执。</p>
+        <p class="directory-hint"><a :href="entryUrl" target="_blank" rel="noopener noreferrer">{{ entryUrl }}</a></p>
+        <div class="directory-actions"><el-button @click="copyDirectoryValue('entry')">复制官方入口</el-button><el-button :disabled="!canCopyReviewed" @click="copyDirectoryValue('fields')">复制已审资料</el-button></div>
+        <details v-if="canCopyReviewed"><summary>查看可复制的已审资料</summary><pre>{{ reviewedCopy }}</pre></details>
+        <p v-if="copyNotice" class="directory-hint" role="status">{{ copyNotice }}</p>
+      </section>
+      <details v-if="dirty && record?.read_only && !contextRefreshEditable" class="directory-local-copy"><summary>查看保留的本机未保存编辑</summary><dl><template v-for="[key,label] in fieldLabels" :key="key"><dt>{{ label }}</dt><dd>{{ fieldText(key,form[key]) }}</dd></template></dl></details>
       <template v-if="record">
         <p class="directory-status" role="status"><strong>{{ directoryStage(record) }}</strong><br/>{{ stageDetail }}</p>
         <p class="directory-hint">{{ evidenceLabel }}。这条目录申请不计作文章发布或 GEO 成功。</p>
@@ -35,8 +52,9 @@
       <el-collapse v-if="record?.can_record_external_receipt" v-model="receiptExpanded" class="directory-external"><el-collapse-item name="receipt" title="已经在软件外提交？登记已有回执">
         <p class="directory-hint">只登记这份申请的既有结果，不发送或重复提交。登记来源为用户声明，软件未独立核验。</p>
         <el-form label-position="top" @submit.prevent="saveExternalReceipt">
-          <el-form-item label="已有回执编号"><el-input v-model="external.intakeUid" :disabled="receiptDisabled" maxlength="160"/></el-form-item>
-          <el-form-item label="当时看到的结果"><el-select v-model="external.status" :disabled="receiptDisabled"><el-option label="平台已接收，待审核" value="submitted_pending_review"/><el-option label="已在目录看到收录（用户登记）" value="accepted"/></el-select></el-form-item>
+          <el-form-item v-if="isApisou" label="实际凭据的 SHA-256"><input type="file" :disabled="receiptDisabled || hashingEvidence" aria-label="选择已有回执凭据，仅在本机计算摘要" @change="readReceiptEvidence"/><el-input v-model="external.evidenceSha" :disabled="receiptDisabled || hashingEvidence" maxlength="64" placeholder="选择已有凭据计算摘要，或填写真实校验值，不生成回执编号"/><p class="directory-hint">文件只在本机计算摘要，不上传文件、名称或路径。</p><p v-if="evidenceError" class="directory-error">{{ evidenceError }}</p></el-form-item>
+          <el-form-item v-else label="已有回执编号"><el-input v-model="external.intakeUid" :disabled="receiptDisabled" maxlength="160"/></el-form-item>
+          <el-form-item label="当时看到的结果"><el-select v-model="external.status" :disabled="receiptDisabled"><el-option label="平台已接收，待审核" value="submitted_pending_review"/><el-option v-if="!isApisou" label="已在目录看到收录（用户登记）" value="accepted"/></el-select></el-form-item>
           <div class="directory-pair"><el-form-item label="观察时间精度"><el-select v-model="external.precision" :disabled="receiptDisabled"><el-option label="精确到分钟" value="minute"/><el-option label="精确到秒" value="second"/></el-select></el-form-item><el-form-item label="实际观察时间（北京时间）"><input v-model="external.observedAt" :disabled="receiptDisabled" :type="external.precision==='second'?'text':'datetime-local'" :placeholder="external.precision==='second'?'2026-11-02T02:31:00':''" step="60" aria-label="已有回执的实际观察时间（北京时间）" class="directory-time"/></el-form-item></div>
           <p class="directory-hint">按实际记录填写，不使用当前保存时间。精确到秒时按示例明确填写秒数，不补秒。</p>
           <el-form-item label="回执来源与核对说明"><el-input v-model="external.note" :disabled="receiptDisabled" maxlength="1000" type="textarea" :rows="2" placeholder="说明在哪个正常平台页面看到回执及如何确认对应本次申请"/></el-form-item>
@@ -48,7 +66,7 @@
       <p v-if="error" class="directory-error" role="alert">{{ error }}</p>
       </div>
       <template #footer><div class="directory-footer">
-        <p v-if="record?.can_review || record?.can_open" class="directory-confirm"><el-checkbox v-model="confirmed" :disabled="localBusy || dirty || editConflict || !currentRecord">我已逐项核对上方公开内容，只含获准公开的售价和联系入口；由我在平台最终确认</el-checkbox></p>
+        <p v-if="record?.can_review || record?.can_open" class="directory-confirm"><el-checkbox v-model="confirmed" :disabled="localBusy || dirty || editConflict || !currentRecord">{{ isApisou ? '我已逐项核对公开资料；当前仅辅助填写，不发送最终申请' : '我已逐项核对上方公开内容，只含获准公开的售价和联系入口；由我在平台最终确认' }}</el-checkbox></p>
         <p v-if="contextRefreshAllowed" class="directory-confirm"><el-checkbox v-model="contextConfirmed" :disabled="localBusy || loading">采用当前平台配置和上方公开内容，保留原版本为历史并撤销旧确认，再重新核对</el-checkbox></p>
         <div class="directory-actions directory-main-actions" data-testid="directory-primary-actions" role="group" aria-label="目录申请主要操作">
           <el-button v-if="!record || record.can_edit" type="primary" :loading="saving" :disabled="!canSave" @click="saveDraft">保存草稿</el-button>
@@ -67,23 +85,27 @@
 
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
-import { geoDirectoryApplicationsApi, directoryAdapter, directoryEntry, directoryFields, directoryFieldsKey, directoryInitialFields, directoryOfficialUrls,
+import { geoDirectoryApplicationsApi, directoryAdapter, directoryEntry, directoryAdapterForTarget, apisouAdapter, apisouEntry, apisouLimits, apisouTypes, apisouModelLines, apisouModelLabels, apisouModalities, directoryFields, directoryFieldsKey, directoryInitialFields, directoryOfficialUrls,
   directoryFieldsIssue, directoryLimits, directoryScope, directoryScopeKey, directoryProjectRecord, directoryRecordBelongs, directoryRecordCurrent,
   directoryDigest, directoryIdentifier, directoryReceiptTime, directorySafeMessage, directoryStage } from '@/api/geoDirectoryApplications'
 
 const props=defineProps({cycle:{type:Object,required:true},target:{type:Object,required:true},task:{type:Object,default:()=>({})},busy:Boolean,nativeAvailable:Boolean})
-const visible=ref(false),loading=ref(false),saving=ref(false),reviewing=ref(false),opening=ref(false),checking=ref(false),closing=ref(false),inspecting=ref(false),savingReceipt=ref(false),refreshingContext=ref(false)
-const closeRequestedTask=ref('')
-const overview=ref(null),record=ref(null),form=reactive(directoryFields()),dirty=ref(false),confirmed=ref(false),error=ref(''),uncertain=ref(false)
+const adapter=computed(()=>directoryAdapterForTarget(props.target)),isApisou=computed(()=>adapter.value===apisouAdapter)
+const platformName=computed(()=>isApisou.value?'API搜':'GrokCode'),entryUrl=computed(()=>isApisou.value?apisouEntry:directoryEntry)
+const readFields=value=>directoryFields(value,adapter.value),fieldsKey=value=>directoryFieldsKey(value,adapter.value)
+const initialFields=()=>directoryInitialFields(props.cycle,adapter.value)
+const visible=ref(false),loading=ref(false),saving=ref(false),reviewing=ref(false),opening=ref(false),checking=ref(false),closing=ref(false),inspecting=ref(false),savingReceipt=ref(false),refreshingContext=ref(false),hashingEvidence=ref(false),evidenceError=ref('')
+const closeRequestedTask=ref(''),copyNotice=ref('')
+const overview=ref(null),record=ref(null),form=reactive(readFields()),dirty=ref(false),confirmed=ref(false),error=ref(''),uncertain=ref(false)
 const editConflict=ref(false),storageWarning=ref(''),editorScope=ref(directoryScope(props.cycle,props.target)),editorContext=ref(''),editorBase=ref(null)
 const contextConfirmed=ref(false)
-const receiptExpanded=ref([]),external=reactive({intakeUid:'',status:'submitted_pending_review',observedAt:'',precision:'minute',note:'',confirmed:false})
+const receiptExpanded=ref([]),external=reactive({intakeUid:'',evidenceSha:'',status:'submitted_pending_review',observedAt:'',precision:'minute',note:'',confirmed:false})
 let epoch=0,readVersion=0,disposed=false,syncing=false,polling=false,timer,pendingEditor=null
 const localBusy=computed(()=>saving.value||reviewing.value||opening.value||checking.value||closing.value||inspecting.value||savingReceipt.value||refreshingContext.value)
 const scope=computed(()=>directoryScope(props.cycle,props.target))
-const supported=computed(()=>Boolean(scope.value && overview.value?.supported===true && overview.value.adapter===directoryAdapter && directoryDigest(overview.value.context_sha256)))
+const supported=computed(()=>Boolean(scope.value && overview.value?.supported===true && overview.value.adapter===adapter.value && directoryDigest(overview.value.context_sha256)))
 const supportReason=computed(()=>directorySafeMessage(overview.value?.reason,'目录申请服务尚未就绪，请刷新或更新软件后使用。'))
-const limits=computed(()=>({...directoryLimits,...Object.fromEntries(Object.entries(overview.value?.field_limits || {}).filter(([key,value])=>Object.hasOwn(directoryLimits,key)&&Number.isSafeInteger(value)&&value>0&&value<=directoryLimits[key]))}))
+const limits=computed(()=>{const base=isApisou.value?apisouLimits:directoryLimits;return {...base,...Object.fromEntries(Object.entries(overview.value?.field_limits || {}).filter(([key,value])=>Object.hasOwn(base,key)&&Number.isSafeInteger(value)&&value>0&&value<=base[key]))}})
 const modelOptions=computed(()=>(overview.value?.model_options || []).filter(item=>typeof item==='string' && item.length>0 && item.length<=80))
 const officialUrls=computed(()=>directoryOfficialUrls(props.cycle))
 const currentRecord=computed(()=>directoryRecordCurrent(record.value,scope.value))
@@ -95,8 +117,8 @@ const contextRefreshEditable=computed(()=>contextRefreshAllowed.value&&record.va
 const contextRefreshFrozen=computed(()=>contextRefreshAllowed.value&&!contextRefreshEditable.value)
 const nativeReady=computed(()=>props.nativeAvailable && typeof window.pywebview?.api?.open_directory_application==='function')
 const editorDisabled=computed(()=>props.busy||localBusy.value||loading.value||!supported.value||Boolean(record.value&&!contextRefreshEditable.value&&(!currentRecord.value||record.value.can_edit!==true||record.value.read_only===true||record.value.submit_attempted===true||record.value.submit_intent||record.value.receipt||record.value.session_count!==0||!['draft','reviewed'].includes(record.value.stage)))||editConflict.value&&!contextRefreshEditable.value||uncertain.value)
-const canSave=computed(()=>!editorDisabled.value && !editConflict.value && (!record.value||currentRecord.value&&record.value.can_edit===true&&record.value.read_only!==true) && !directoryFieldsIssue(form,limits.value,modelOptions.value) && Boolean(dirty.value||!record.value))
-const canRefreshContext=computed(()=>Boolean(supported.value&&contextRefreshAllowed.value&&!props.busy&&!localBusy.value&&!loading.value&&!uncertain.value&&contextConfirmed.value&&!directoryFieldsIssue(contextRefreshFrozen.value?record.value.fields:form,limits.value,modelOptions.value)))
+const canSave=computed(()=>!editorDisabled.value && !editConflict.value && (!record.value||currentRecord.value&&record.value.can_edit===true&&record.value.read_only!==true) && !directoryFieldsIssue(form,limits.value,modelOptions.value,adapter.value) && Boolean(dirty.value||!record.value))
+const canRefreshContext=computed(()=>Boolean(supported.value&&contextRefreshAllowed.value&&!props.busy&&!localBusy.value&&!loading.value&&!uncertain.value&&contextConfirmed.value&&!directoryFieldsIssue(contextRefreshFrozen.value?record.value.fields:form,limits.value,modelOptions.value,adapter.value)))
 const canReview=computed(()=>Boolean(supported.value&&currentRecord.value&&record.value.can_review===true&&record.value.submit_attempted!==true&&!record.value.submit_intent&&!record.value.receipt&&['draft','reviewed','closed_not_submitted'].includes(record.value.stage)&&!props.busy&&!localBusy.value&&!loading.value&&!dirty.value&&!editConflict.value&&!uncertain.value&&confirmed.value))
 const canOpen=computed(()=>Boolean(supported.value&&currentRecord.value&&record.value.can_open===true&&record.value.stage==='reviewed'&&record.value.submit_attempted!==true&&!record.value.submit_intent&&!record.value.receipt&&record.value.reviewed===true&&directoryIdentifier(record.value.open_nonce)&&nativeReady.value&&!props.busy&&!localBusy.value&&!loading.value&&!dirty.value&&!editConflict.value&&!uncertain.value&&confirmed.value))
 const ownedWindowTask=computed(()=>Boolean(record.value&&props.task?.status==='running'&&props.task.kind==='directory_application'&&directoryIdentifier(props.task.id)&&props.task.id===record.value.native_task_id&&props.task.cycle_id===scope.value?.cycleId&&props.task.directory_application_id===record.value.id))
@@ -107,11 +129,14 @@ const canClose=computed(()=>Boolean(props.nativeAvailable&&typeof window.pywebvi
 const canCheck=computed(()=>Boolean(record.value&&currentRecord.value&&record.value.window_open===true&&directoryIdentifier(record.value.native_task_id)&&props.nativeAvailable&&typeof window.pywebview?.api?.check_directory_application_session==='function'&&!localBusy.value&&(!props.busy||ownedWindowTask.value)))
 const canInspect=computed(()=>Boolean(record.value&&directoryProjectRecord(record.value,scope.value)&&record.value.can_inspect===true&&props.nativeAvailable&&typeof window.pywebview?.api?.inspect_directory_application==='function'&&!props.busy&&!localBusy.value))
 const receiptDisabled=computed(()=>props.busy||localBusy.value||dirty.value||editConflict.value||uncertain.value||!currentRecord.value)
-const canSaveReceipt=computed(()=>Boolean(record.value?.can_record_external_receipt===true&&!record.value.window_open&&!record.value.receipt&&['draft','reviewed','submission_unknown','closed_not_submitted'].includes(record.value.stage)&&!receiptDisabled.value&&external.confirmed&&external.intakeUid.trim()&&external.note.trim()&&directoryReceiptTime(external.observedAt,external.precision)))
-const previewFields=computed(()=>record.value?.read_only&&!contextRefreshEditable.value?directoryFields(record.value.fields):directoryFields(form))
-const fieldLabels=[['name','服务名称'],['url','公开服务网址'],['rate','对客价格与单位'],['source','公开资料来源'],['models','模型类型'],['contact','公开联系入口'],['notes','补充说明']]
+const canSaveReceipt=computed(()=>Boolean(record.value?.can_record_external_receipt===true&&!record.value.window_open&&!record.value.receipt&&['draft','reviewed','submission_unknown','closed_not_submitted'].includes(record.value.stage)&&!receiptDisabled.value&&!hashingEvidence.value&&external.confirmed&&(isApisou.value?directoryDigest(external.evidenceSha.trim().toLowerCase())&&external.status==='submitted_pending_review':external.intakeUid.trim())&&external.note.trim()&&directoryReceiptTime(external.observedAt,external.precision)))
+const previewFields=computed(()=>record.value?.read_only&&!contextRefreshEditable.value?readFields(record.value.fields):readFields(form))
+const fieldLabels=computed(()=>isApisou.value?[['name','服务名称'],['url','公开服务网址'],['tagline','一句话介绍'],['type','站点类型'],['model_lines','模型线路'],['modalities','能力分类'],['contact','联系入口（留空）'],['note','补充说明']]:[['name','服务名称'],['url','公开服务网址'],['rate','对客价格与单位'],['source','公开资料来源'],['models','模型类型'],['contact','公开联系入口'],['notes','补充说明']])
+const canCopyReviewed=computed(()=>Boolean(isApisou.value&&currentRecord.value&&record.value.current_context!==false&&record.value.reviewed===true&&!record.value.receipt&&!dirty.value&&!editConflict.value&&!localBusy.value&&!uncertain.value&&['reviewed','awaiting_human_confirmation'].includes(record.value.stage)))
+const fieldText=(key,value)=>Array.isArray(value)?value.map(item=>key==='model_lines'?apisouModelLabels[item]||item:item).join('、')||'未选择':value||'未填写'
+const reviewedCopy=computed(()=>canCopyReviewed.value?fieldLabels.value.map(([key,label])=>`${label}：${fieldText(key,record.value.fields[key])}`).join('\n'):'')
 const evidenceLabel=computed(()=>record.value?.evidence_level==='owner_reported'?'用户登记，未独立核验':record.value?.evidence_level==='prepared_only'?'软件内资料草稿，尚未提交':record.value?.evidence_level==='native_observed_receipt'?'软件窗口观察回执，收录另行核对':record.value?.source?.startsWith('software')?'软件辅助操作记录，收录待核对':'记录来源待核对')
-const stageDetail=computed(()=>({draft:'先保存并逐项核对公开内容，再打开平台。',reviewed:'已核对保存的这份资料；在平台最终确认前仍可检查。',opening:'请等待同一平台窗口打开，不要再次申请。',
+const stageDetail=computed(()=>isApisou.value&&['reviewed','awaiting_human_confirmation'].includes(record.value?.stage)?'这份公开资料已核对。当前软件只辅助填写并回读，不放行最终申请；请受控结束原窗口后登记已有真实凭据。':isApisou.value&&record.value?.stage==='awaiting_human_verification'?'API搜公开申请表尚未出现，请核对当前页面；软件不会猜测控件、注册账号或发送申请。':({draft:'先保存并逐项核对公开内容，再打开平台。',reviewed:'已核对保存的这份资料；在平台最终确认前仍可检查。',opening:'请等待同一平台窗口打开，不要再次申请。',
   awaiting_human_verification:'请在原平台窗口正常完成当前登录或安全验证，保持同一窗口，再检查当前窗口。',needs_manual_review:'页面与公开字段尚未完整核对，请先查看原窗口。本提示不能确认提交结果；以原申请和回执为准，不要重新申请。',
   awaiting_human_confirmation:'请在同一平台窗口正常完成验证、核对并最终确认，再返回检查当前窗口。',submitted_pending_review:'平台已接收申请，原回执保留；请等待审核，不要再次申请。',
   submission_unknown:'尚未确认平台是否收到，请先查看原平台与原回执，不要重新申请。',window_closed:'原窗口已结束，不能据此认定未提交；请先查看原平台。',
@@ -124,30 +149,30 @@ const receiptTime=value=>{
 const cacheKey=value=>value?`geo-directory-editor-v1:${JSON.stringify(value)}`:''
 const persistEditor=()=>{
   if(!dirty.value||!editorScope.value)return
-  try {window.localStorage?.setItem(cacheKey(editorScope.value),JSON.stringify({fields:directoryFields(form),context:editorContext.value,base:editorBase.value}));storageWarning.value=''}
+  try {window.localStorage?.setItem(cacheKey(editorScope.value),JSON.stringify({fields:readFields(form),context:editorContext.value,base:editorBase.value}));storageWarning.value=''}
   catch {storageWarning.value='本机编辑暂未自动保留，请先保存草稿后再关闭。'}
 }
 const clearCache=()=>{try{window.localStorage?.removeItem(cacheKey(editorScope.value))}catch{ /* The server draft is authoritative after an acknowledged save. */ }}
 const syncEditor=()=>{
-  syncing=true;Object.assign(form,record.value?directoryFields(record.value.fields):directoryInitialFields(props.cycle));syncing=false;dirty.value=false;confirmed.value=false;contextConfirmed.value=false
+  syncing=true;Object.assign(form,record.value?readFields(record.value.fields):initialFields());syncing=false;dirty.value=false;confirmed.value=false;contextConfirmed.value=false
   editorContext.value=overview.value?.context_sha256 || '';editorBase.value=record.value?{id:record.value.id,revision:record.value.revision}:null
   editConflict.value=false;clearCache()
 }
 const restoreEditor=()=>{
   try {
     const cached=JSON.parse(window.localStorage?.getItem(cacheKey(editorScope.value)) || 'null')
-    if(!cached || !directoryDigest(cached.context) || !cached.fields || Object.keys(cached.fields).sort().join(',')!=='contact,models,name,notes,rate,source,url')return
-    if(Object.entries(cached.fields).some(([key,value])=>key==='models'?!Array.isArray(value)||value.length>1:typeof value!=='string'||value.length>directoryLimits[key]*2))return
-    syncing=true;Object.assign(form,directoryFields(cached.fields));syncing=false;dirty.value=true;editorContext.value=cached.context;editorBase.value=cached.base || null
+    if(!cached || !directoryDigest(cached.context) || !cached.fields || Object.keys(cached.fields).sort().join(',')!==Object.keys(readFields()).sort().join(','))return
+    if(Object.entries(cached.fields).some(([key,value])=>['models','model_lines','modalities'].includes(key)?!Array.isArray(value)||value.length>(key==='models'?1:key==='model_lines'?apisouModelLines.length:apisouModalities.length):typeof value!=='string'||value.length>limits.value[key]*2))return
+    syncing=true;Object.assign(form,readFields(cached.fields));syncing=false;dirty.value=true;editorContext.value=cached.context;editorBase.value=cached.base || null
   } catch { /* An unavailable or malformed local copy cannot replace a server record. */ }
 }
 const acceptOverview=value=>{
-  if(!scope.value || value?.adapter!==directoryAdapter || value.entry_url!==directoryEntry || !Array.isArray(value.applications) || value.applications.length>1 ||
+  if(!scope.value || value?.adapter!==adapter.value || value.entry_url!==entryUrl.value || !Array.isArray(value.applications) || value.applications.length>1 ||
     value.applications.some(item=>!directoryProjectRecord(item,scope.value)))throw new Error('目录申请资料与当前项目或目标不一致，请刷新原申请。')
   const next=value.applications[0] || null
   const authorizationChanged=record.value?.stage!==next?.stage||record.value?.reviewed!==next?.reviewed||record.value?.open_nonce!==next?.open_nonce
   overview.value=value;record.value=next
-  if(!dirty.value && (authorizationChanged||editorContext.value!==value.context_sha256||JSON.stringify(editorBase.value)!==JSON.stringify(next?{id:next.id,revision:next.revision}:null)||directoryFieldsKey(form)!==directoryFieldsKey(next?next.fields:directoryInitialFields(props.cycle))))syncEditor()
+  if(!dirty.value && (authorizationChanged||editorContext.value!==value.context_sha256||JSON.stringify(editorBase.value)!==JSON.stringify(next?{id:next.id,revision:next.revision}:null)||fieldsKey(form)!==fieldsKey(next?next.fields:initialFields())))syncEditor()
   else if(editorContext.value!==value.context_sha256 || JSON.stringify(editorBase.value)!==JSON.stringify(next?{id:next.id,revision:next.revision}:null))editConflict.value=true
 }
 const refreshOverview=async()=>{
@@ -180,34 +205,34 @@ const mutation=async(action)=>{
   catch(cause){if(!disposed&&version===epoch){uncertain.value=true;error.value=directorySafeMessage(cause)}}
 }
 const setRecord=(value,expectedFields,expectedId)=>{
-  if(!directoryRecordCurrent(value,scope.value) || expectedFields && directoryFieldsKey(value.fields)!==expectedFields || expectedId && value.id!==expectedId)throw new Error('保存结果与当前申请不一致，请刷新原申请。')
+  if(!directoryRecordCurrent(value,scope.value) || expectedFields && fieldsKey(value.fields)!==expectedFields || expectedId && value.id!==expectedId)throw new Error('保存结果与当前申请不一致，请刷新原申请。')
   record.value=value;overview.value={...overview.value,applications:[value]}
   if(!dirty.value)editorBase.value={id:value.id,revision:value.revision}
 }
 const saveDraft=async()=>{
   if(!canSave.value)return
-  const version=epoch,selected=scope.value,fields=directoryFields(form)
-  for(const key of ['name','url','rate','source','contact','notes'])fields[key]=fields[key].trim()
+  const version=epoch,selected=scope.value,fields=readFields(form)
+  for(const key of Object.keys(fields))if(typeof fields[key]==='string')fields[key]=fields[key].trim()
   const payload=Object.freeze({target_id:selected.targetId,expected_context_sha256:editorContext.value,fields,
     ...(record.value?{application_id:record.value.id,revision:record.value.revision}:{})})
   saving.value=true
-  await mutation(async current=>{const result=await geoDirectoryApplicationsApi.save(selected.cycleId,payload);if(!current())return;setRecord(result.data,directoryFieldsKey(fields),payload.application_id);syncEditor();uncertain.value=false})
+  await mutation(async current=>{const result=await geoDirectoryApplicationsApi.save(selected.cycleId,payload);if(!current())return;setRecord(result.data,fieldsKey(fields),payload.application_id);syncEditor();uncertain.value=false})
   if(version===epoch&&!disposed)saving.value=false
 }
 const reviewDraft=async()=>{
   if(!canReview.value)return
-  const version=epoch,selected=scope.value,opened=record.value,fieldsKey=directoryFieldsKey(opened.fields)
+  const version=epoch,selected=scope.value,opened=record.value,expectedFieldsKey=fieldsKey(opened.fields)
   reviewing.value=true
   await mutation(async current=>{
     const result=await geoDirectoryApplicationsApi.review(selected.cycleId,opened.id,{expected_revision:opened.revision,expected_review_sha256:opened.review_sha256,confirmed:true})
-    if(!current())return;if(result.data?.reviewed!==true)throw new Error('尚未确认资料核对结果，请刷新原申请。');setRecord(result.data,fieldsKey,opened.id);uncertain.value=false
+    if(!current())return;if(result.data?.reviewed!==true)throw new Error('尚未确认资料核对结果，请刷新原申请。');setRecord(result.data,expectedFieldsKey,opened.id);uncertain.value=false
   })
   if(version===epoch&&!disposed)reviewing.value=false
 }
 const refreshDraftContext=async()=>{
   if(!canRefreshContext.value)return
-  const version=epoch,selected=scope.value,opened=record.value,frozen=contextRefreshFrozen.value,fields=directoryFields(frozen?opened.fields:form),retainLocalEdits=frozen&&dirty.value
-  if(!frozen)for(const key of ['name','url','rate','source','contact','notes'])fields[key]=fields[key].trim()
+  const version=epoch,selected=scope.value,opened=record.value,frozen=contextRefreshFrozen.value,fields=readFields(frozen?opened.fields:form),retainLocalEdits=frozen&&dirty.value
+  if(!frozen)for(const key of Object.keys(fields))if(typeof fields[key]==='string')fields[key]=fields[key].trim()
   const payload={expected_revision:opened.revision,expected_review_sha256:opened.review_sha256,
     expected_context_sha256:overview.value.context_sha256,confirmed:true,fields}
   refreshingContext.value=true
@@ -215,7 +240,7 @@ const refreshDraftContext=async()=>{
     const result=await geoDirectoryApplicationsApi.refreshContext(selected.cycleId,opened.id,payload);if(!current())return
     if(result.data?.stage!=='draft'||result.data?.reviewed!==false||result.data?.open_nonce)throw new Error('尚未确认新资料已重新载入，请刷新原申请。')
     if(frozen&&(result.data.session_count!==opened.session_count||result.data.can_edit!==false||result.data.read_only!==true))throw new Error('申请原公开内容的只读状态尚未确认，请刷新原申请。')
-    setRecord(result.data,directoryFieldsKey(fields),opened.id)
+    setRecord(result.data,fieldsKey(fields),opened.id)
     if(retainLocalEdits){confirmed.value=false;contextConfirmed.value=false;editConflict.value=true;persistEditor()}else syncEditor()
     uncertain.value=false
   })
@@ -256,19 +281,37 @@ const closeWindow=async()=>{
 }
 const saveExternalReceipt=async()=>{
   if(!canSaveReceipt.value)return
-  const version=epoch,selected=scope.value,opened=record.value,fieldsKey=directoryFieldsKey(opened.fields)
+  const version=epoch,selected=scope.value,opened=record.value,expectedFieldsKey=fieldsKey(opened.fields)
   const payload=Object.freeze({expected_revision:opened.revision,expected_review_sha256:opened.review_sha256,confirmed:true,
-    status:external.status,intake_uid:external.intakeUid.trim(),observed_at:directoryReceiptTime(external.observedAt,external.precision),
+    status:external.status,...(isApisou.value?{evidence_sha256:external.evidenceSha.trim().toLowerCase()}:{intake_uid:external.intakeUid.trim()}),observed_at:directoryReceiptTime(external.observedAt,external.precision),
     observed_at_precision:external.precision,note:external.note.trim()})
   savingReceipt.value=true
   await mutation(async current=>{
     const result=await geoDirectoryApplicationsApi.externalReceipt(selected.cycleId,opened.id,payload);if(!current())return
     const saved=result.data,receipt=saved?.receipt
-    if(!receipt||receipt.intake_uid!==payload.intake_uid||receipt.observed_at_precision!==payload.observed_at_precision||
+    if(!receipt||(isApisou.value?receipt.intake_uid!==null||receipt.evidence_sha256!==payload.evidence_sha256||receipt.owner_reported!==true||receipt.public_listing_verified!==false||saved.geo_effect_evidence!==false:receipt.intake_uid!==payload.intake_uid)||receipt.observed_at_precision!==payload.observed_at_precision||
       Date.parse(receipt.observed_at)!==Date.parse(payload.observed_at)||receipt.note!==payload.note||saved.stage!==payload.status||saved.evidence_level!=='owner_reported')throw new Error('尚未确认回执已保存，请刷新原申请。')
-    setRecord(saved,fieldsKey,opened.id);external.confirmed=false;receiptExpanded.value=[];uncertain.value=false
+    setRecord(saved,expectedFieldsKey,opened.id);external.confirmed=false;receiptExpanded.value=[];uncertain.value=false
   })
   if(version===epoch&&!disposed)savingReceipt.value=false
+}
+const readReceiptEvidence=async event=>{
+  const file=event.target.files?.[0],version=epoch,selected=directoryScopeKey(props.cycle,props.target)
+  event.target.value=''
+  if(!isApisou.value||!file||receiptDisabled.value||hashingEvidence.value)return
+  hashingEvidence.value=true;evidenceError.value='';external.evidenceSha=''
+  try{
+    if(file.size<=0||file.size>25*1024*1024)throw new Error('size')
+    const digest=await globalThis.crypto.subtle.digest('SHA-256',await file.arrayBuffer())
+    if(!disposed&&version===epoch&&selected===directoryScopeKey(props.cycle,props.target))external.evidenceSha=Array.from(new Uint8Array(digest),byte=>byte.toString(16).padStart(2,'0')).join('')
+  }catch{if(!disposed&&version===epoch)evidenceError.value='请选择25 MB以内的已有凭据，或填写其真实校验值。'}
+  finally{if(!disposed&&version===epoch)hashingEvidence.value=false}
+}
+const copyDirectoryValue=async kind=>{
+  if(!isApisou.value||kind==='fields'&&!canCopyReviewed.value||!['entry','fields'].includes(kind))return
+  const version=epoch,selected=directoryScopeKey(props.cycle,props.target),text=kind==='entry'?apisouEntry:reviewedCopy.value
+  try{await window.navigator.clipboard.writeText(text);if(!disposed&&version===epoch&&selected===directoryScopeKey(props.cycle,props.target))copyNotice.value=kind==='entry'?'官方入口已复制，请在日常浏览器打开。':'已复制当前已审公开资料，尚未发送申请。'}
+  catch{if(!disposed&&version===epoch)copyNotice.value='复制未完成，可直接选择上方完整地址或展开的已审资料。'}
 }
 const poll=async()=>{
   if(disposed||polling||loading.value||localBusy.value||!scope.value||!visible.value&&!record.value?.window_open)return
@@ -276,18 +319,20 @@ const poll=async()=>{
   try {await refreshOverview()}catch { /* Polling never retries a write or replaces a local edit. */ }
   finally {polling=false}
 }
-watch(()=>directoryFieldsKey(form),()=>{if(syncing)return;dirty.value=true;confirmed.value=false;contextConfirmed.value=false;external.confirmed=false;persistEditor()},{flush:'sync'})
-watch(()=>[external.precision,external.status,external.intakeUid,external.observedAt,external.note],()=>{external.confirmed=false},{flush:'sync'})
+watch(()=>fieldsKey(form),()=>{if(syncing)return;dirty.value=true;confirmed.value=false;contextConfirmed.value=false;external.confirmed=false;persistEditor()},{flush:'sync'})
+watch(()=>[external.precision,external.status,external.intakeUid,external.evidenceSha,external.observedAt,external.note],()=>{external.confirmed=false},{flush:'sync'})
 watch(()=>directoryScopeKey(props.cycle,props.target),()=>{
-  const nextScope=scope.value,candidate=dirty.value&&editorScope.value?{scope:editorScope.value,fields:directoryFields(form),context:editorContext.value,base:editorBase.value,visible:visible.value}:pendingEditor
-  const retain=Boolean(candidate&&nextScope&&['cycleId','projectId','targetId'].every(key=>candidate.scope[key]===nextScope[key]))
+  const nextScope=scope.value,candidate=dirty.value&&editorScope.value?{scope:editorScope.value,fields:readFields(form),context:editorContext.value,base:editorBase.value,visible:visible.value}:pendingEditor
+  const retain=Boolean(candidate&&nextScope&&['cycleId','projectId','targetId','adapter'].every(key=>candidate.scope[key]===nextScope[key]))
   persistEditor();pendingEditor=nextScope?null:candidate;epoch++;readVersion++;visible.value=retain?candidate.visible:false;overview.value=null;record.value=null;editorScope.value=nextScope
-  for(const flag of [loading,saving,reviewing,opening,checking,closing,inspecting,savingReceipt,refreshingContext,confirmed,contextConfirmed,uncertain])flag.value=false
+  for(const flag of [loading,saving,reviewing,opening,checking,closing,inspecting,savingReceipt,refreshingContext,confirmed,contextConfirmed,uncertain,hashingEvidence])flag.value=false
+  evidenceError.value=''
+  copyNotice.value=''
   closeRequestedTask.value=''
   dirty.value=retain;editorContext.value=retain?candidate.context:'';editorBase.value=retain?candidate.base:null
-  syncing=true;Object.assign(form,retain?candidate.fields:directoryFields());syncing=false
+  syncing=true;for(const key of Object.keys(form))delete form[key];Object.assign(form,retain?candidate.fields:readFields());syncing=false
   editConflict.value=Boolean(retain);error.value='';storageWarning.value=''
-  Object.assign(external,{intakeUid:'',status:'submitted_pending_review',observedAt:'',precision:'minute',note:'',confirmed:false});receiptExpanded.value=[]
+  Object.assign(external,{intakeUid:'',evidenceSha:'',status:'submitted_pending_review',observedAt:'',precision:'minute',note:'',confirmed:false});receiptExpanded.value=[]
   if(retain)persistEditor();else restoreEditor();void refresh()
 },{flush:'sync'})
 onMounted(()=>{restoreEditor();void refresh();timer=setInterval(poll,1800)})
@@ -295,6 +340,7 @@ onUnmounted(()=>{persistEditor();disposed=true;epoch++;readVersion++;clearInterv
 </script>
 
 <style scoped>
+.directory-snapshot pre{white-space:pre-wrap;overflow-wrap:anywhere;font:inherit;max-width:100%}.directory-content input[type=file]{max-width:100%}
 :global(.geo-directory-modal .el-overlay-dialog){display:flex;align-items:center;justify-content:center;box-sizing:border-box;padding:16px;overflow:hidden}
 :global(.geo-directory-modal .geo-directory-dialog){display:flex;flex-direction:column;min-width:0;max-width:calc(100vw - 32px);max-height:calc(100vh - 32px);max-height:calc(100dvh - 32px);margin:0;padding:0;overflow:hidden}
 :global(.geo-directory-modal .geo-directory-dialog .el-dialog__header){flex:0 0 auto;margin:0;padding:16px 20px 12px;border-bottom:1px solid var(--el-border-color-lighter,#ebeef5)}

@@ -38,10 +38,10 @@ function harness({initial=[],overrides={},nativeOverrides={},store=storage(),val
   let server=overview(initial)
   const api={
     list:async(...args)=>{calls.push(['list',...args]);return {data:server}},
-    save:async(id,payload)=>{calls.push(['save',id,payload]);server={...server,applications:[record({fields:structuredClone(payload.fields),revision:(server.applications[0]?.revision || 0)+1})]};return {data:server.applications[0]}},
+    save:async(id,payload)=>{calls.push(['save',id,payload]);server={...server,applications:[record({adapter:helpers.directoryAdapterForTarget(props.target),fields:structuredClone(payload.fields),revision:(server.applications[0]?.revision || 0)+1})]};return {data:server.applications[0]}},
     review:async(id,application,payload)=>{calls.push(['review',id,application,payload]);server={...server,applications:[{...server.applications[0],revision:server.applications[0].revision+1,stage:'reviewed',reviewed:true,can_review:false,can_open:true,open_nonce:'open-nonce-a'}]};return {data:server.applications[0]}},
     refreshContext:async(id,application,payload)=>{calls.push(['refresh-context',id,application,payload]);const frozen=server.applications[0].session_count>0;server={...server,applications:[{...server.applications[0],target_revision:props.target.revision,revision:server.applications[0].revision+1,fields:structuredClone(payload.fields),review_sha256:'d'.repeat(64),context_sha256:server.context_sha256,stage:'draft',reviewed:false,open_nonce:null,can_edit:!frozen,can_review:true,can_open:false,can_refresh_context:false,read_only:frozen}]};return {data:server.applications[0]}},
-    externalReceipt:async(id,application,payload)=>{calls.push(['external',id,application,payload]);server={...server,applications:[{...server.applications[0],revision:server.applications[0].revision+1,stage:payload.status,receipt:{intake_uid:payload.intake_uid,observed_at:payload.observed_at,observed_at_precision:payload.observed_at_precision,note:payload.note,owner_reported:true},can_edit:false,can_review:false,can_open:false,can_inspect:true,can_record_external_receipt:false,read_only:true,evidence_level:'owner_reported',source:'operator_assisted'}]};return {data:server.applications[0]}},
+    externalReceipt:async(id,application,payload)=>{calls.push(['external',id,application,payload]);server={...server,applications:[{...server.applications[0],revision:server.applications[0].revision+1,stage:payload.status,receipt:{intake_uid:payload.intake_uid??null,evidence_sha256:payload.evidence_sha256,observed_at:payload.observed_at,observed_at_precision:payload.observed_at_precision,note:payload.note,owner_reported:true,public_listing_verified:false},geo_effect_evidence:false,can_edit:false,can_review:false,can_open:false,can_inspect:true,can_record_external_receipt:false,read_only:true,evidence_level:'owner_reported',source:'operator_assisted'}]};return {data:server.applications[0]}},
     ...overrides}
   const native={
     open_directory_application:async(...args)=>{calls.push(['open',...args]);server={...server,applications:[{...server.applications[0],stage:'awaiting_human_confirmation',can_edit:false,can_review:false,can_open:false,can_inspect:false,open_nonce:null,window_open:true,native_task_id:'native-app-a',read_only:true}]};return {id:'native-app-a',status:'running',kind:'directory_application',cycle_id:props.cycle.id,directory_application_id:'application-a'}},
@@ -50,7 +50,7 @@ function harness({initial=[],overrides={},nativeOverrides={},store=storage(),val
     inspect_directory_application:async(...args)=>{calls.push(['inspect',...args]);return {id:'native-inspect-a',status:'running',kind:'directory_application_inspect',cycle_id:props.cycle.id,directory_application_id:'application-a'}},
     ...nativeOverrides}
   const deps={...helpers,computed:Vue.computed,reactive:Vue.reactive,ref:Vue.ref,watch:Vue.watch,onMounted:fn=>mounted.push(fn),onUnmounted:fn=>unmounted.push(fn),
-    defineProps:()=>props,defineExpose:value=>Object.assign(exposed,value),window:{pywebview:{api:native},localStorage:store},setInterval:fn=>{timers.push(fn);return timers.length},clearInterval:()=>{},geoDirectoryApplicationsApi:api}
+    defineProps:()=>props,defineExpose:value=>Object.assign(exposed,value),window:{pywebview:{api:native},localStorage:store,navigator:{clipboard:{writeText:async text=>calls.push(['clipboard',text])}}},setInterval:fn=>{timers.push(fn);return timers.length},clearInterval:()=>{},geoDirectoryApplicationsApi:api}
   const page=scope.run(()=>new Function(...Object.keys(deps),source+`;return {${names.join(',')}}`)(...Object.values(deps)))
   const result={...page,props,calls,api,native,store,timers,exposed,server:()=>server,setServer:value=>{server=value},
     mount:async()=>{for(const fn of mounted)fn();await settle()},fill:changes=>Object.assign(page.form,fields(changes)),
@@ -620,6 +620,37 @@ test('directory native task guidance does not reuse destination or Doubao instru
   assert.match(journey,/directoryTask\s*\? directoryTask\.detail/)
 })
 
+test('actual API搜 prefill task banners in both views defer to card capability and never urge final confirmation',async()=>{
+  const task={id:'native-apisou-prefill',kind:'directory_application',status:'running',cycle_id:'cycle-a',
+    directory_application_id:'apisou-application',progress:{directory_application:{stage:'awaiting_human_confirmation',window_open:true}}}
+  const directoryTask=helpers.directoryTaskView(task)
+  assert.match(directoryTask.detail,/是否支持最终提交，以原卡显示能力为准/)
+  assert.match(directoryTask.detail,/仅预填窗口暂不能提交/)
+  assert.doesNotMatch(directoryTask.detail,/核对公开内容并最终确认|正常完成验证/)
+  const page=journeyHarness()
+  page.cycle.value.destinations=[{...page.configured,config:{...page.configured.config,source_scope:helpers.apisouHome}}]
+  for(const step of [2,3]){page.step.value=step;assert.match(page.actionHint.value,/此窗口仅预填核对，暂不能提交/);assert.doesNotMatch(page.actionHint.value,/由你在平台最终确认/)}
+  const journeyDescriptor=parse(fs.readFileSync(new URL('../src/views/GeoJourney.vue',import.meta.url),'utf8')).descriptor
+  const find=(node,predicate)=>node?.type===1&&predicate(node)?node:(node?.children||[]).map(child=>find(child,predicate)).find(Boolean)
+  const sections=[find(journeyDescriptor.template.ast,node=>node.props?.some(prop=>prop.name==='class'&&prop.value?.content==='task-progress')),
+    find(contentDescriptor.template.ast,node=>node.tag==='el-card'&&node.loc.source.includes('data-testid="content-directory-task"'))]
+  for(const section of sections){
+    assert.ok(section)
+    const render=Vue.compile(section.loc.source)
+    const app=Vue.createSSRApp({render,setup:()=>({task,directoryTask,nativeAvailable:true,nativeBusy:true,busy:true,
+      isDestinationTask:()=>false,stopTask:()=>{},writingContextPending:false,externalCycle:false,cycle:null})})
+    for(const name of ['el-icon','Loading','el-button','el-card','el-option','el-select','el-input','DoubaoPreparation','DoubaoTaskRecovery'])app.component(name,{setup:(_,{slots})=>()=>Vue.h(name==='el-button'?'button':'div',slots.default?.())})
+    const html=await renderToString(app)
+    assert.match(html,/仅预填窗口暂不能提交/);assert.doesNotMatch(html,/核对公开内容并最终确认/)
+  }
+  const heading=find(journeyDescriptor.template.ast,node=>node.props?.some(prop=>prop.name==='class'&&prop.value?.content==='section-heading')&&node.loc.source.includes('本渠道使用目录资料'))
+  assert.ok(heading)
+  const headerApp=Vue.createSSRApp({render:Vue.compile(heading.loc.source),setup:()=>({step:2,directoryTarget:apisouTarget(),isApiznzDirectory:helpers.isApiznzDirectory,isApisouDirectory:helpers.isApisouDirectory})})
+  const header=await renderToString(headerApp)
+  assert.match(header,/不要求价格/);assert.match(header,/此窗口仅预填核对，暂不能提交/)
+  assert.doesNotMatch(header,/对客售价|由你在平台最终确认/)
+})
+
 test('the target card retains first-time purpose review and separates directory actions from article controls',async()=>{
   const parent=fs.readFileSync(new URL('../src/components/GeoDestinations.vue',import.meta.url),'utf8'),parentDescriptor=parse(parent).descriptor
   const render=Vue.compile(parentDescriptor.template.content)
@@ -657,10 +688,11 @@ test('new and existing target components compile with readable narrow layouts an
   for(const style of descriptor.styles)assert.deepEqual(compileStyle({source:style.content,filename:filename.pathname,id:'directory-application-test',scoped:true}).errors,[])
   const renderedText=descriptor.template.content.replace(/<[^>]*>/g,'').replace(/\{\{[\s\S]*?\}\}/g,'')
   assert.doesNotMatch(renderedText,/review_sha|context_sha|nonce|fingerprint|Traceback|CSS|schema/)
-  assert.doesNotMatch(descriptor.template.content,/<el-upload|type="file"/)
+  assert.doesNotMatch(descriptor.template.content,/<el-upload/)
+  assert.match(descriptor.template.content,/<el-form-item v-if="isApisou" label="实际凭据的 SHA-256"><input type="file"/)
   assert.match(descriptor.styles[0].content,/prefers-reduced-motion/)
   const parent=fs.readFileSync(new URL('../src/components/GeoDestinations.vue',import.meta.url),'utf8')
-  assert.match(parent,/<GeoDirectoryApplication v-if="isGrokCodeDirectory\(target\)"/)
+  assert.match(parent,/<GeoDirectoryApplication v-if="isGrokCodeDirectory\(target\) \|\| isApisouDirectory\(target\)"/)
   assert.match(parent,/<DestinationSessionCard/);assert.match(parent,/@click="review\(target\)"/)
 })
 
@@ -724,4 +756,68 @@ test('API指南针 target routing and external receipt workflow stay local and s
     await settle()
     assert.equal(page.record.value,null)
   }finally{scope.stop()}
+})
+
+const apisouTarget=()=>target({config:{name:'API搜',source_scope:helpers.apisouHome}})
+const apisouValue=changes=>helpers.apisouFields({name:'示例协作服务',url:'https://example.org/',...changes})
+const apisouOverview=applications=>overview(applications,{adapter:helpers.apisouAdapter,entry_url:helpers.apisouEntry,
+  field_limits:helpers.apisouLimits,field_required:['name','url'],prefill_only:true,native_submission_supported:false})
+function apisouHarness(){const item=apisouTarget(),page=harness({value:cycle({destinations:[item]})});page.setServer(apisouOverview([]));return page}
+
+test('API搜 is a separate exact-origin directory with optional model defaults and no article/price requirement',async()=>{
+  assert.equal(helpers.directoryAdapterForTarget(apisouTarget()),helpers.apisouAdapter)
+  for(const url of ['https://apisou.com/','https://www.apisou.com.evil.example/','https://www.apisou.com/submit','https://www.apisou.com/?x=1'])assert.equal(helpers.isApisouDirectory(target({config:{source_scope:url}})),false)
+  const value=apisouValue()
+  assert.equal(helpers.directoryFieldsIssue(value,helpers.apisouLimits,[],helpers.apisouAdapter),'')
+  assert.deepEqual(value.model_lines,[]);assert.deepEqual(value.modalities,[]);assert.equal(value.contact,'');assert.equal(value.type,'商业')
+  assert.equal(Object.hasOwn(value,'rate'),false)
+  assert.notEqual(helpers.directoryFieldsIssue({...value,contact:'private@example.org'},helpers.apisouLimits,[],helpers.apisouAdapter),'')
+  const page=apisouHarness();await page.mount();Object.assign(page.form,value)
+  assert.equal(page.canSave.value,true);assert.equal(page.isApisou.value,true)
+  assert.match(page.stageDetail.value,/刷新|保存/)
+  await page.saveDraft();assert.equal(page.record.value.adapter,helpers.apisouAdapter)
+  assert.deepEqual(page.calls.find(row=>row[0]==='save')[2].fields,value)
+  page.confirmed.value=true;await page.reviewDraft();page.confirmed.value=true
+  await page.copyDirectoryValue('fields')
+  assert.match(page.calls.find(row=>row[0]==='clipboard')[1],/公开服务网址：https:\/\/example.org\//)
+  assert.match(page.copyNotice.value,/尚未发送申请/)
+  assert.equal(page.canOpen.value,true)
+  await page.openWindow();assert.equal(page.calls.filter(row=>row[0]==='open').length,1)
+  assert.match(page.stageDetail.value,/不放行最终申请/)
+  assert.equal(page.calls.filter(row=>row[0]==='external').length,0)
+})
+
+test('API搜 existing receipt requires real evidence SHA, never adds UID or native/GEO success',async()=>{
+  const page=apisouHarness();await page.mount();Object.assign(page.form,apisouValue());await page.saveDraft()
+  page.confirmed.value=true;await page.reviewDraft()
+  Object.assign(page.external,{observedAt:'2026-01-01T10:21',precision:'minute',note:'本人已在正常平台看到本次申请成功提示',confirmed:true})
+  assert.equal(page.canSaveReceipt.value,false)
+  page.external.evidenceSha='f'.repeat(64);page.external.confirmed=true;assert.equal(page.canSaveReceipt.value,true)
+  await page.saveExternalReceipt()
+  const payload=page.calls.find(row=>row[0]==='external')[3]
+  assert.equal(Object.hasOwn(payload,'intake_uid'),false);assert.equal(payload.evidence_sha256,'f'.repeat(64))
+  assert.equal(page.record.value.receipt.intake_uid,null);assert.equal(page.record.value.evidence_level,'owner_reported')
+  assert.equal(page.record.value.receipt.public_listing_verified,false);assert.equal(page.record.value.geo_effect_evidence,false)
+  assert.equal(page.canOpen.value,false);assert.equal(page.calls.filter(row=>row[0]==='open').length,0)
+})
+
+test('changing a target adapter cannot retain another directory schema or local authorization',async()=>{
+  const page=apisouHarness();await page.mount();Object.assign(page.form,apisouValue({note:'Keep only API搜 local draft'}))
+  const grok=target();page.setServer(overview([]));page.props.cycle=cycle({destinations:[grok]});page.props.target=grok;await settle()
+  assert.equal(page.isApisou.value,false);assert.equal(Object.hasOwn(page.form,'model_lines'),false)
+  assert.equal(page.form.notes,'');assert.equal(page.confirmed.value,false)
+  const before=page.calls.filter(row=>row[0]==='clipboard').length
+  await page.copyDirectoryValue('fields');assert.equal(page.calls.filter(row=>row[0]==='clipboard').length,before)
+})
+
+test('API搜 evidence file is hashed locally and its bytes/name/path never enter a receipt request',async()=>{
+  const page=apisouHarness();await page.mount();Object.assign(page.form,apisouValue());await page.saveDraft()
+  page.confirmed.value=true;await page.reviewDraft()
+  const bytes=new TextEncoder().encode('synthetic already-existing receipt')
+  const expected=Array.from(new Uint8Array(await globalThis.crypto.subtle.digest('SHA-256',bytes)),byte=>byte.toString(16).padStart(2,'0')).join('')
+  const event={target:{value:'local-file',files:[{name:'not-uploaded.txt',size:bytes.length,arrayBuffer:async()=>bytes.buffer}]}}
+  await page.readReceiptEvidence(event)
+  assert.equal(event.target.value,'');assert.equal(page.external.evidenceSha,expected)
+  assert.equal(page.calls.filter(row=>row[0]==='external').length,0)
+  assert.equal(JSON.stringify(page.external).includes('not-uploaded'),false)
 })

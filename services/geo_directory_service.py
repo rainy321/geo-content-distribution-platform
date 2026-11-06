@@ -1,7 +1,8 @@
 """Frozen, project-scoped directory applications and their receipt evidence.
 
 GrokCode has a native browser adapter. API指南针 records receipts from submissions
-completed outside the application.
+completed outside the application. API搜 phase one only prefills public fields;
+its receipt is owner-reported and no native final submission is authorized.
 """
 from __future__ import annotations
 
@@ -28,6 +29,13 @@ APIZNZ_HOST = 'www.apiznz.com'
 APIZNZ_ENTRY_URL = f'https://{APIZNZ_HOST}/submit'
 APIZNZ_FIELD_LIMITS = {'name': 120, 'domain': 253, 'intro': 2000, 'api_base': 500}
 APIZNZ_REQUIRED_FIELDS = ['name', 'domain', 'intro']
+APISOU_ADAPTER = 'apisou_directory_prefill_v1'
+APISOU_HOST = 'www.apisou.com'
+APISOU_ENTRY_URL = f'https://{APISOU_HOST}/submit'
+APISOU_FIELD_LIMITS = {'name': 120, 'url': 500, 'tagline': 200, 'type': 10, 'contact': 500, 'note': 2000}
+APISOU_TYPES = ['官转', '商业', '公益', '逆向', '开源']
+APISOU_MODEL_LINES = ['openai', 'anthropic', 'google', 'xai', 'deepseek', 'qwen', 'doubao', 'moonshot', 'minimax', 'zhipu', 'runway', 'bfl']
+APISOU_MODALITIES = ['文本', '图像', '视频', '音频', '向量']
 FIELD_LIMITS = {'name': 120, 'url': 500, 'rate': 500, 'source': 1500, 'contact': 500, 'notes': 2000}
 REQUIRED_FIELDS = ['name', 'url', 'rate', 'source', 'models']
 FIELDS = frozenset((*FIELD_LIMITS, 'models'))
@@ -83,15 +91,29 @@ def _public_url(value):
 
 def _target_adapter(config):
     scope = urlsplit(config.get('source_scope', ''))
-    return APIZNZ_ADAPTER if scope.netloc == APIZNZ_HOST else ADAPTER
+    return APISOU_ADAPTER if scope.netloc == APISOU_HOST else APIZNZ_ADAPTER if scope.netloc == APIZNZ_HOST else ADAPTER
+
+
+def _native_adapter(adapter):
+    return adapter in (ADAPTER, APISOU_ADAPTER)
+
+
+def _entry_url(adapter):
+    return {ADAPTER: ENTRY_URL, APIZNZ_ADAPTER: APIZNZ_ENTRY_URL, APISOU_ADAPTER: APISOU_ENTRY_URL}[adapter]
 
 
 def _known_target(target, adapter):
+    if adapter not in (ADAPTER, APIZNZ_ADAPTER, APISOU_ADAPTER):
+        raise ValueError('目录适配器尚未核对，不能准备申请')
     config = target['config']
     destinations.assert_target_enabled(target)
     for key in ('home_url', 'source_scope', 'editor_url', 'login_url'):
         parsed = _public_url(config.get(key, ''))
-        if adapter == APIZNZ_ADAPTER:
+        if adapter == APISOU_ADAPTER:
+            allowed_paths = ('',) if key in ('home_url', 'source_scope') else ('/submit',)
+            if parsed.netloc != APISOU_HOST or parsed.path.rstrip('/') not in allowed_paths or parsed.query:
+                raise ValueError('请使用已核对的API搜目录及申请入口')
+        elif adapter == APIZNZ_ADAPTER:
             allowed_paths = ('', '/site/lists') if key in ('home_url', 'source_scope') else ('/submit',)
             if parsed.netloc != APIZNZ_HOST or parsed.path.rstrip('/') not in allowed_paths or parsed.query:
                 raise ValueError('请使用已核对的API指南针目录及申请入口')
@@ -175,6 +197,38 @@ def _apiznz_public_text(value, maximum, *, required=False):
 def _validate_application_fields(adapter, value, profile):
     if adapter == ADAPTER:
         return validate_fields(value, profile)
+    if adapter == APISOU_ADAPTER:
+        if not isinstance(value, dict) or set(value) != set(APISOU_FIELD_LIMITS) | {'model_lines', 'modalities'}:
+            raise ValueError('请只填写API搜已核对的公开字段，不接受隐藏字段或提交参数')
+        fields = {key: _safe_text(value[key], limit, required=key in ('name', 'url'))
+                  for key, limit in APISOU_FIELD_LIMITS.items()}
+        fields['type'] = fields['type'] or '商业'
+        if fields['type'] not in APISOU_TYPES:
+            raise ValueError('请选择API搜表单实际提供的站点类型')
+        if fields['contact']:
+            raise ValueError('当前API搜辅助填写的联系方式请留空，联系资料仅在平台本人核对')
+        for key, options in (('model_lines', APISOU_MODEL_LINES), ('modalities', APISOU_MODALITIES)):
+            items = value[key]
+            if not isinstance(items, list) or len(items) > len(options) or any(not isinstance(item, str) or item not in options for item in items) or len(set(items)) != len(items):
+                raise ValueError('模型线路或能力只能从已核对选项中选择；未核实请不选')
+            fields[key] = list(items)
+        names = [profile['name'], *(profile.get('aliases') or [])]
+        if not any(name and name in fields['name'] for name in names):
+            raise ValueError('申请名称须保留当前客户品牌，不能混入其它客户')
+        official = [profile.get('website', ''), *(profile.get('official_urls') or [])]
+        official = [url for url in official if url]
+        if fields['url'].rstrip('/') not in {url.rstrip('/') for url in official}:
+            raise ValueError('服务网址必须是本轮客户已登记的官网或官方服务入口')
+        _public_url(fields['url'])
+        allowed_hosts = {_public_url(url).hostname for url in official}
+        for text in fields.values():
+            if isinstance(text, str):
+                for address in re.findall(r'https?://[^\s<>"）)\]，。；;]+', text):
+                    if _public_url(address).hostname not in allowed_hosts:
+                        raise ValueError('公开字段中的链接只能引用当前客户已登记的官方域名')
+        return fields
+    if adapter != APIZNZ_ADAPTER:
+        raise ValueError('目录适配器尚未核对，不能保存申请')
     if not isinstance(value, dict) or value.keys() != APIZNZ_FIELD_LIMITS.keys():
         raise ValueError('请只填写API指南针的名称、域名、简介和API基础地址')
     fields = {key: _apiznz_public_text(value[key], maximum, required=key in APIZNZ_REQUIRED_FIELDS)
@@ -255,7 +309,8 @@ def _controlled_closed_draft(record):
 
 
 def _can_record_external_receipt(record):
-    stages = ('draft', 'reviewed', 'submission_unknown', 'closed_not_submitted') if record['adapter'] == ADAPTER else ('reviewed',)
+    stages = (('draft', 'reviewed', 'submission_unknown', 'closed_not_submitted') if record['adapter'] == ADAPTER
+              else ('reviewed', 'submission_unknown', 'closed_not_submitted') if record['adapter'] == APISOU_ADAPTER else ('reviewed',))
     return record['stage'] in stages and not record.get('window_open') and not record.get('receipt')
 
 
@@ -272,7 +327,7 @@ def _decorate(connection, cycle_id, record):
     result['context_reason'] = context_reason
     result['can_edit'] = current and record['stage'] in ('draft', 'reviewed') and record.get('session_count', 0) == 0
     result['can_review'] = current and record['stage'] in ('draft', 'reviewed', 'closed_not_submitted') and not record.get('submit_intent')
-    native = record['adapter'] == ADAPTER
+    native = _native_adapter(record['adapter'])
     result['can_open'] = native and current and record['stage'] == 'reviewed' and record['reviewed'] is True and bool(record.get('open_nonce'))
     result['can_inspect'] = native
     result['can_record_external_receipt'] = current and _can_record_external_receipt(record)
@@ -292,6 +347,8 @@ def _decorate(connection, cycle_id, record):
     result['auto_publish_verified'] = False
     result['geo_effect_evidence'] = False
     result['native_submit_attempted'] = bool(record.get('submit_attempted'))
+    if record['adapter'] == APISOU_ADAPTER:
+        result.update(prefill_only=True, native_submission_supported=False)
     return result
 
 
@@ -301,17 +358,20 @@ def get_overview(database, cycle_id, target_id):
         row = connection.execute('SELECT config FROM geo_distribution_targets WHERE id=? AND project_id=?',
                                  (target_id, cycle['project_id'])).fetchone()
         adapter = _target_adapter(json.loads(row['config'])) if row else ADAPTER
-        native = adapter == ADAPTER
+        native = _native_adapter(adapter)
         records = [json.loads(row[0]) for row in connection.execute(
             'SELECT record FROM geo_directory_applications WHERE project_id=? AND adapter=? ORDER BY created_at',
             (cycle['project_id'], adapter))] if _exists(connection) else []
         result = {'supported': False, 'reason': '', 'adapter': adapter,
-                  'entry_url': ENTRY_URL if native else APIZNZ_ENTRY_URL, 'context_sha256': None,
-                  'field_limits': FIELD_LIMITS if native else APIZNZ_FIELD_LIMITS,
-                  'field_required': REQUIRED_FIELDS if native else APIZNZ_REQUIRED_FIELDS,
+                  'entry_url': _entry_url(adapter), 'context_sha256': None,
+                  'field_limits': APISOU_FIELD_LIMITS if adapter == APISOU_ADAPTER else FIELD_LIMITS if native else APIZNZ_FIELD_LIMITS,
+                  'field_required': ['name', 'url'] if adapter == APISOU_ADAPTER else REQUIRED_FIELDS if native else APIZNZ_REQUIRED_FIELDS,
                   'applications': [_decorate(connection, cycle_id, item) for item in records]}
-        if native:
+        if adapter == ADAPTER:
             result.update(model_options=MODEL_OPTIONS, models_max_selected=1, model_options_source=MODEL_OPTIONS_SOURCE)
+        elif adapter == APISOU_ADAPTER:
+            result.update(prefill_only=True, native_submission_supported=False, type_options=APISOU_TYPES,
+                          model_lines=APISOU_MODEL_LINES, modalities=APISOU_MODALITIES)
         try:
             _, _, context = _context(connection, cycle_id, target_id)
             result.update(supported=True, context_sha256=digest(context))
@@ -335,7 +395,7 @@ def save_application(database, cycle_id, data):
         if data.get('expected_context_sha256') != digest(context):
             raise ValueError('客户资料或目标版本已变化，请刷新公开预览')
         adapter = context['adapter']
-        native = adapter == ADAPTER
+        native = _native_adapter(adapter)
         fields = _validate_application_fields(adapter, data.get('fields'), cycle['profile'])
         connection.execute(CREATE_TABLE)
         row = connection.execute('SELECT record FROM geo_directory_applications WHERE project_id=? AND adapter=?',
@@ -354,10 +414,10 @@ def save_application(database, cycle_id, data):
         stamp = _now()
         record = {**(previous or {}), 'id': previous['id'] if previous else uuid.uuid4().hex,
             'project_id': cycle['project_id'], 'cycle_id': cycle_id, 'target_id': target['id'],
-            'target_revision': target['revision'], 'adapter': adapter, 'entry_url': ENTRY_URL if native else APIZNZ_ENTRY_URL,
+            'target_revision': target['revision'], 'adapter': adapter, 'entry_url': _entry_url(adapter),
             'context_sha256': digest(context), 'context_snapshot': context, 'fields': fields, 'revision': previous['revision'] + 1 if previous else 1,
             'review_sha256': digest({'context': context, 'fields': fields}), 'reviewed': False, 'open_nonce': None,
-            'stage': 'draft', 'message': ('七字段公开资料已保存，请核对后确认；最终提交由本人在平台完成。' if native
+            'stage': 'draft', 'message': ('API搜公开资料已保存；当前仅辅助填写，不发送最终申请。' if adapter == APISOU_ADAPTER else '七字段公开资料已保存，请核对后确认；最终提交由本人在平台完成。' if native
                                          else '已保存API指南针的公开资料，请核对后确认。'),
             'receipt': None, 'evidence_level': 'prepared_only', 'source': 'software_prepared',
             'created_at': previous['created_at'] if previous else stamp, 'updated_at': stamp,
@@ -403,7 +463,7 @@ def refresh_context(database, cycle_id, identifier, data):
         fields = _validate_application_fields(record['adapter'], data.get('fields', record['fields']), cycle['profile'])
         controlled_closed = _controlled_closed_draft(record)
         if controlled_closed and fields != record['fields']:
-            raise ValueError('已打开过的申请七字段保持逐字冻结；只能重新核对当前目标配置')
+            raise ValueError('已打开过的申请公开字段保持逐字冻结；只能重新核对当前目标配置')
         history = list(record.get('history', []))
         if len(history) >= 50:
             raise ValueError('已保留50次草稿配置变更，请检查原记录，不会删除历史')
@@ -432,9 +492,9 @@ def review_application(database, cycle_id, identifier, data):
             raise ValueError('此申请已提交、结果未知或窗口未结束，不能重新授权发送')
         if record['stage'] == 'closed_not_submitted' and not _normal_no_submission(record.get('no_submission_evidence')):
             raise ValueError('缺少正常关窗且未发送的正面证据，不能解锁')
-        native = record['adapter'] == ADAPTER
+        native = _native_adapter(record['adapter'])
         record.update(stage='reviewed', reviewed=True, reviewed_at=_now(), open_nonce=secrets.token_urlsafe(32) if native else None,
-                      revision=record['revision'] + 1, message=('已确认公开资料，请打开辅助窗口并在平台本人最终确认。' if native
+                      revision=record['revision'] + 1, message=('API搜资料已核对；辅助窗口只填写和回读，不发送最终申请。' if record['adapter'] == APISOU_ADAPTER else '已确认公开资料，请打开辅助窗口并在平台本人最终确认。' if native
                           else '已确认公开资料；在API指南针看到提交成功提示后，可登记待审核回执。'))
         _put(connection, record)
         return _decorate(connection, cycle_id, record)
@@ -452,6 +512,8 @@ def reserve_session(database, cycle_id, identifier, review_sha256, open_nonce, *
         record.update(stage='opening', open_nonce=None, session_nonce=secrets.token_urlsafe(32), window_open=False,
             session_count=record['session_count'] + 1, revision=record['revision'] + 1,
             message='正在打开专用目录窗口；软件仅填写并回读，最终提交由本人操作。')
+        if record['adapter'] == APISOU_ADAPTER:
+            record['message'] = '正在打开API搜专用窗口；当前只填写并回读，不发送最终申请。'
         if native_task_id is not None:
             if not isinstance(native_task_id, str) or not re.fullmatch(r'[0-9a-f]{32}', native_task_id):
                 raise ValueError('原生任务编号无效')
@@ -464,7 +526,7 @@ def reserve_session(database, cycle_id, identifier, review_sha256, open_nonce, *
 
 def _session(connection, cycle_id, identifier, session_nonce):
     record = _get(connection, cycle_id, identifier)
-    if (record['adapter'] != ADAPTER or record['cycle_id'] != cycle_id or not isinstance(session_nonce, str) or not session_nonce
+    if (not _native_adapter(record['adapter']) or record['cycle_id'] != cycle_id or not isinstance(session_nonce, str) or not session_nonce
             or not secrets.compare_digest(session_nonce, record.get('session_nonce') or '')):
         raise ValueError('目录会话已过期，不能回放状态或提交')
     return record
@@ -483,6 +545,10 @@ def update_session(database, cycle_id, identifier, session_nonce, *, stage, wind
                      'awaiting_human_verification': '请本人在专用平台窗口完成正常登录或验证；软件不读取密码或验证码，也不代做验证。',
                      'needs_manual_review': '平台表单尚未核对一致，请在当前窗口检查；软件不会猜测控件或点击提交。',
                      'opening': '正在准备专用目录窗口，未点击提交。'}[stage])
+        if record['adapter'] == APISOU_ADAPTER and stage == 'awaiting_human_confirmation':
+            record['message'] = 'API搜公开字段已逐项回读；当前仅辅助填写，最终申请发送尚未接入。请受控结束窗口后核对已有回执。'
+        elif record['adapter'] == APISOU_ADAPTER and stage == 'awaiting_human_verification':
+            record['message'] = 'API搜公开申请表尚未出现，请核对当前页面；软件不会猜测控件、注册账号或发送申请。'
         _put(connection, record)
         return _decorate(connection, cycle_id, record)
 
@@ -503,6 +569,8 @@ def begin_submit(database, cycle_id, identifier, session_nonce, transport):
         connection.execute('BEGIN IMMEDIATE')
         record = _session(connection, cycle_id, identifier, session_nonce)
         _assert_current(connection, cycle_id, record)
+        if record['adapter'] != ADAPTER:
+            raise ValueError('当前目录只支持辅助填写，不放行最终申请')
         if record['stage'] != 'awaiting_human_confirmation' or record.get('submit_intent'):
             raise ValueError('本申请已尝试提交或当前未确认，不会重复发送')
         if transport != expected_transport(record['fields']):
@@ -519,6 +587,8 @@ def record_receipt(database, cycle_id, identifier, session_nonce, body, http_sta
     with closing(store._connect(database)) as connection, connection:
         connection.execute('BEGIN IMMEDIATE')
         record = _session(connection, cycle_id, identifier, session_nonce)
+        if record['adapter'] != ADAPTER:
+            raise ValueError('当前目录没有原生接收回执适配，只能登记本人已有凭据')
         if not record.get('submit_intent') or record['stage'] != 'submission_unknown' or record.get('receipt'):
             raise ValueError('没有对应的单次提交意图，或已有回执，不能重放')
         if (type(http_status) is not int or not 200 <= http_status < 300 or not isinstance(body, dict)
@@ -545,7 +615,7 @@ def close_session(database, cycle_id, identifier, session_nonce, *, no_submissio
                 and record['stage'] in OPEN_STAGES):
             record.update(stage='closed_not_submitted', window_open=False, reviewed=False,
                 no_submission_evidence=no_submission_evidence, controlled_closed_at=_now(),
-                message='已确认本次正常关窗且没有发送申请；原七字段保留，重新核对后可再打开。')
+                message='已确认本次正常关窗且没有发送申请；原公开字段保留，重新核对后可再打开。')
         else:
             record.update(stage='submission_unknown', window_open=False,
                 message='窗口中断、超时或回执未确认；原记录已锁定，请检查原平台，不会自动重发。')
@@ -611,12 +681,12 @@ def register_external_receipt(database, cycle_id, identifier, data):
         else:
             intake = None
             if data.get('status') != 'submitted_pending_review':
-                raise ValueError('API指南针的提交成功提示只能登记为待审核')
+                raise ValueError('此目录的提交成功提示只能登记为待审核')
             note = _apiznz_public_text(data.get('note'), 1000, required=True)
             if not isinstance(evidence, str) or not re.fullmatch(r'[0-9a-f]{64}', evidence):
                 raise ValueError('请用实际保存的提交成功凭据计算证据摘要')
             duplicate = connection.execute('''SELECT 1 FROM geo_directory_applications WHERE adapter=? AND id!=?
-                AND json_extract(record, '$.receipt.evidence_sha256')=?''', (APIZNZ_ADAPTER, record['id'], evidence)).fetchone()
+                AND json_extract(record, '$.receipt.evidence_sha256')=?''', (record['adapter'], record['id'], evidence)).fetchone()
             if duplicate:
                 raise ValueError('此平台回执证据已登记到另一份申请，请保留原记录')
         receipt = {'intake_uid': intake, 'observed_at': observed,
@@ -628,6 +698,7 @@ def register_external_receipt(database, cycle_id, identifier, data):
         record.update(stage=data['status'], source='operator_assisted', evidence_level='owner_reported', receipt=receipt,
                       reviewed=True, open_nonce=None, session_nonce=None, revision=record['revision'] + 1,
                       message=('已登记软件外的本人回执；不冒充原生提交，也不计为公开收录或GEO成效。' if native
+                               else '已登记本人在API搜看到的提交成功提示。当前待审核，未独立核验，不代表原生提交、公开收录或GEO成效。' if record['adapter'] == APISOU_ADAPTER
                                else '已登记本人在API指南针看到的提交成功提示。当前待审核，公开收录和GEO成效须另行核对。'))
         _put(connection, record)
         return _decorate(connection, cycle_id, record)

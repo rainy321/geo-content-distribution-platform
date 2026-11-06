@@ -1,3 +1,5 @@
+import {feedbackReviewView} from './geoFeedbackReview.js'
+
 // A current input snapshot and recorded feedback references are separate signals.
 export function planningFeedbackNotice(cycle) {
   const feedback = cycle?.feedback_diagnostics?.planning_feedback
@@ -5,8 +7,12 @@ export function planningFeedbackNotice(cycle) {
   if (feedback.available_count === 0) return null
   const context = feedback.context_status
   if (context === 'current') {
-    if (feedback.attribution_status === 'not_recorded') return {
-      message: '当前选题的反馈输入已更新；反馈出处未标注，待审阅。', canReplan: false
+    if (feedback.attribution_status === 'not_recorded') {
+      const briefs = cycle?.analysis?.briefs
+      const explained = Array.isArray(briefs) && briefs.length > 0 && briefs.length <= 6
+        && briefs.every(brief => ['not_used', 'no_eligible_feedback'].includes(feedbackReviewView(brief).decision))
+      return {message: explained ? '当前选题的反馈输入已更新；AI已说明未引用后续反馈，理由可在各选题中查看。'
+        : '当前选题的反馈输入已更新；反馈出处未标注，待审阅。', canReplan: false}
     }
     const count = feedback.referenced_feedback_count
     if (feedback.attribution_status === 'referenced' && Number.isSafeInteger(count) && count > 0) return {

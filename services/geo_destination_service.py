@@ -123,6 +123,27 @@ def scope_matches(url, scope):
         return False
 
 
+def is_directory_target(target):
+    """Recognize an exact, public configured directory source scope without I/O.
+
+    A known source scope selects the non-article workflow; it never grants
+    submission permission or validates the platform's other configured routes.
+    """
+    config = target.get('config') if isinstance(target, dict) else None
+    if not isinstance(config, dict):
+        return False
+    url = trusted_source_url(config.get('source_scope'))
+    if url is None:
+        return False
+    parsed = urlsplit(url)
+    if parsed.query or parsed.fragment or '?' in url or '#' in url:
+        return False
+    paths = {'grokcode.cn': {'/api-transit', '/api-transit/'},
+             'www.apiznz.com': {'/', '/site/lists', '/site/lists/'},
+             'www.apisou.com': {'/'}}
+    return (parsed.path or '/') in paths.get(parsed.hostname, set())
+
+
 def opportunities(observations, targets, website=''):
     """Group unique observed URL/question pairs; failed answers never rank targets."""
     usable = {case['id'] for case in observations['cases'] if case['usable']}
@@ -361,7 +382,10 @@ def reserve_fill(database, project_id, identifier, article_id):
         current = connection.execute('SELECT * FROM geo_distribution_targets WHERE id=?', (identifier,)).fetchone()
         if current['revision'] != target['revision']:
             raise ValueError('平台配置发生变化，请刷新')
-        assert_publication_allowed(_target(current))
+        current_target = _target(current)
+        assert_publication_allowed(current_target)
+        if is_directory_target(current_target):
+            raise ValueError('此目标使用目录申请资料，不能用旧文章填写；请在原目录申请卡核对')
         if current['blocked_reason'] or current['state'] == 'preparing':
             raise ValueError('该平台存在待检查的尝试，请检查后明确恢复；不会自动重试')
         row = connection.execute('''SELECT a.*,d.platform FROM articles a JOIN geo_content_drafts d ON d.article_id=a.id

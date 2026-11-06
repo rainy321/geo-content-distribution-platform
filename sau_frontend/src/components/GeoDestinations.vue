@@ -1,6 +1,6 @@
 <template>
   <el-card shadow="never" data-testid="source-destinations">
-    <div class="row"><h2>来源与平台用途</h2><el-button :disabled="busy" @click="configure()">添加其他平台</el-button><el-button v-if="!cycle.destinations.some(isApiznzDirectory)" :disabled="busy" @click="configure(apiznzPreset)">接入 API指南针回执</el-button></div>
+    <div class="row"><h2>来源与平台用途</h2><el-button :disabled="busy" @click="configure()">添加其他平台</el-button><el-button v-if="!cycle.destinations.some(isApiznzDirectory)" :disabled="busy" @click="configure(apiznzPreset)">接入 API指南针回执</el-button><el-button v-if="!cycle.destinations.some(isApisouDirectory)" :disabled="busy" @click="configure(apisouPreset)">接入 API搜目录</el-button></div>
     <p class="hint">先看 AI 引用了哪个栏目，再判断适合资料参考、原创投稿还是商业投放。用途核对后才准备账号；被引用不代表允许推广。</p>
     <el-table :data="cycle.opportunities" data-testid="source-opportunities">
       <el-table-column label="观察来源" min-width="190"><template #default="{row}"><strong>{{ row.domain || '网址未确认' }}</strong><p>{{ surfaces[row.surface] || '待调研网站' }}</p><p class="hint">{{ row.case_ids.join('、') }} · {{ row.observed_pairs }} 条去重线索</p></template></el-table-column>
@@ -15,12 +15,12 @@
     </el-table>
     <p class="hint">注册、实名、验证码及投稿申请需由账号持有人正常完成。首次入口和风格为接入起点，需要按平台现行规则核对。</p>
     <article v-for="target in cycle.destinations" :key="target.id" class="target" data-testid="distribution-target">
-      <div class="row"><strong>{{ target.config.name }}</strong><el-tag>{{ !destinationEnabled(target) ? '已停用' : states[target.state] || target.state }}</el-tag><el-tag type="info">{{ isApiznzDirectory(target) ? '登记外部目录回执' : isGrokCodeDirectory(target) ? '目录辅助申请，待平台确认' : target.capability === 'platform_assisted_fill' ? '平台辅助填写' : target.capability === 'configured_fill' ? '已配置填写，待实站验证' : '登录与导出' }}</el-tag></div>
+      <div class="row"><strong>{{ target.config.name }}</strong><el-tag>{{ !destinationEnabled(target) ? '已停用' : states[target.state] || target.state }}</el-tag><el-tag type="info">{{ isApisouDirectory(target) ? '目录资料辅助填写，不发送申请' : isApiznzDirectory(target) ? '登记外部目录回执' : isGrokCodeDirectory(target) ? '目录辅助申请，待平台确认' : target.capability === 'platform_assisted_fill' ? '平台辅助填写' : target.capability === 'configured_fill' ? '已配置填写，待实站验证' : '登录与导出' }}</el-tag></div>
       <p v-if="!directoryAdapterForTarget(target)" class="hint">{{ target.config.editor_url }}<br/>内部阈值：每 24 小时 {{ target.config.daily_limit }} 次填写，至少间隔 {{ target.config.interval_hours }} 小时。该阈值不是平台官方额度，也不保证免封号。</p>
       <p v-if="target.blocked_reason" class="blocked">{{ target.blocked_reason }}</p>
       <p v-if="!destinationEnabled(target)" class="hint" role="status">{{ inactiveDestinationMessage }}</p>
       <DestinationUseReview v-if="!directoryAdapterForTarget(target) || !destinationCanPrepare(target)" :cycle="cycle" :target="target" :busy="busy" @updated="$emit('updated',$event)"/>
-      <GeoDirectoryApplication v-if="isGrokCodeDirectory(target)" :cycle="cycle" :target="target" :task="task" :busy="busy" :native-available="nativeAvailable"/>
+      <GeoDirectoryApplication v-if="isGrokCodeDirectory(target) || isApisouDirectory(target)" :cycle="cycle" :target="target" :task="task" :busy="busy" :native-available="nativeAvailable"/>
       <GeoExternalDirectoryReceipt v-else-if="isApiznzDirectory(target)" :cycle="cycle" :target="target" :busy="busy"/>
       <DestinationSessionCard v-if="!directoryAdapterForTarget(target) && destinationCanPrepare(target)" :cycle-id="cycle.id" :target="target" :task="task" :busy="busy" :native-available="nativeAvailable" @open="openTarget(target)" @checked="$emit('checked')"/>
       <div v-if="!directoryAdapterForTarget(target)" class="row"><el-button :disabled="busy || !destinationCanPrepare(target)" @click="selectTarget(target.key)">选择此平台写稿</el-button><el-button :disabled="busy" @click="configure(target.config, target)">编辑接入配置</el-button><el-button @click="events(target)">尝试记录</el-button><el-button v-if="destinationEnabled(target) && (target.blocked_reason || ['preparing','filled'].includes(target.state))" :disabled="busy" @click="review(target)">检查后恢复</el-button></div>
@@ -55,7 +55,7 @@ import { geoContentApi } from '@/api/geoContent'
 import DestinationSessionCard from '@/components/DestinationSessionCard.vue'
 import GeoDirectoryApplication from '@/components/GeoDirectoryApplication.vue'
 import GeoExternalDirectoryReceipt from '@/components/GeoExternalDirectoryReceipt.vue'
-import { apiznzEntry, apiznzHome, directoryAdapterForTarget, isApiznzDirectory, isGrokCodeDirectory } from '@/api/geoDirectoryApplications'
+import { apiznzEntry, apiznzHome, apisouEntry, apisouHome, directoryAdapterForTarget, isApiznzDirectory, isGrokCodeDirectory, isApisouDirectory } from '@/api/geoDirectoryApplications'
 import DestinationUseFields from '@/components/DestinationUseFields.vue'
 import DestinationUseReview from '@/components/DestinationUseReview.vue'
 import { destinationUseValues, safeResearchLink } from '@/utils/geoDestinationUse'
@@ -68,6 +68,9 @@ const defaults = () => ({...destinationUseValues(),enabled:true,name:'',home_url
 const apiznzPreset={name:'API指南针',home_url:apiznzHome,source_scope:apiznzHome,publication_scope:apiznzHome,
   login_url:apiznzEntry,editor_url:apiznzEntry,rules_url:apiznzEntry,publication_use:'commercial',
   style:'服务目录，只登记实际公开的名称、官网域名、产品介绍及公开 API 基址。'}
+const apisouPreset={name:'API搜',home_url:apisouHome,source_scope:apisouHome,publication_scope:apisouHome,
+  login_url:apisouEntry,editor_url:apisouEntry,rules_url:apisouEntry,publication_use:'commercial',
+  style:'免费服务目录。只登记已核对的名称、官方入口与公开介绍，未核实的模型及能力不选，联系方式留空。当前只辅助填写并回读，不发送最终申请；收录与GEO效果另行核验。'}
 const form = reactive(defaults())
 const resetUseReview=()=>{form.rule_review={...form.rule_review,state:'unknown',operator_confirmed:false};formPolicy.value=null}
 const surfaces = {community_candidate:'开放内容平台候选，权限待核对',vendor_documentation:'厂商文档 / 自有资料',url_unknown:'仅有标题',owned_site:'客户官网',unknown:'未知网站，需调研'}

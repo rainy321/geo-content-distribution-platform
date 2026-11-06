@@ -26,6 +26,7 @@ class DirectoryBridgeTests(DirectoryFixture, unittest.TestCase):
         events = []
 
         async def browser(value, profile, executable, **options):
+            self.assertEqual(profile.parent.name, directory.ADAPTER)
             self.assertFalse(options['inspection_only'])
             self.assertFalse(profile.exists())
             options['progress']({'stage': 'opening', 'window_open': True})

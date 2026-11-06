@@ -146,6 +146,63 @@ class TestDestinationState(ResearchFixture, unittest.TestCase):
             destinations.reserve_fill(self.database, self.cycle['project_id'], self.target_value['id'], article_id)
         self.assertEqual(destinations.get_target(self.database, self.cycle['project_id'], self.target_value['id'])['events'], [])
 
+    def test_legacy_ready_directory_articles_and_generic_login_fail_without_writes_or_tasks(self):
+        from services.geo_target_publish_guard import article_target_context, configuration_digest
+        for scope in ('https://grokcode.cn/api-transit', 'https://www.apiznz.com/',
+                      'https://www.apiznz.com', 'https://www.apisou.com/', 'https://www.apisou.com'):
+            with self.subTest(scope=scope):
+                target = self.target()
+                article_id = self.article()
+                # A historical ready directory article must be representable
+                # even after new generation is prohibited. Build an exact old
+                # lineage using isolated fixture rows, not the new draft path.
+                legacy_config = {**target['config'], 'home_url': scope, 'source_scope': scope,
+                    'publication_scope': scope, 'login_url': scope, 'editor_url': scope,
+                    'publication_use': 'commercial'}
+                with closing(sqlite3.connect(self.database)) as connection, connection:
+                    connection.execute('UPDATE geo_distribution_targets SET config=? WHERE id=?',
+                        (json.dumps(legacy_config, ensure_ascii=False), target['id']))
+                    row = connection.execute('SELECT provenance FROM geo_content_drafts WHERE article_id=?', (article_id,)).fetchone()
+                    provenance = json.loads(row[0]); provenance['destination_config_sha256'] = configuration_digest(legacy_config)
+                    connection.execute('UPDATE geo_content_drafts SET provenance=? WHERE article_id=?',
+                        (json.dumps(provenance, ensure_ascii=False), article_id))
+                    connection.row_factory = sqlite3.Row
+                    self.assertEqual(article_target_context(connection, article_id)['id'], target['id'])
+                def snapshot():
+                    with closing(sqlite3.connect(self.database)) as connection:
+                        return {table: connection.execute('SELECT * FROM ' + table + ' ORDER BY rowid').fetchall()
+                            for table in ('articles', 'geo_content_drafts', 'geo_distribution_targets', 'geo_distribution_events')}
+                before = snapshot()
+                with self.assertRaisesRegex(ValueError, '目录'):
+                    destinations.reserve_fill(self.database, self.cycle['project_id'], target['id'], article_id)
+                self.assertEqual(snapshot(), before)
+                bridge = DesktopGeoJobs(self.root); self.addCleanup(bridge.shutdown)
+                prior_task = copy.deepcopy(bridge.get_task()); prior_records = bridge.store.records()
+                with patch.object(bridge, '_start') as not_started, patch('services.geo_destination_browser.open_session') as not_opened:
+                    for article in (article_id, None):
+                        self.assertIn('目录', bridge.open_destination(self.cycle['id'], target['id'], article)['error'])
+                    not_started.assert_not_called(); not_opened.assert_not_called()
+                self.assertEqual(bridge.get_task(), prior_task); self.assertEqual(bridge.store.records(), prior_records)
+                self.assertEqual(snapshot(), before)
+
+    def test_generic_login_rechecks_directory_scope_after_task_precheck_before_browser_open(self):
+        target = self.target(); bridge = DesktopGeoJobs(self.root); self.addCleanup(bridge.shutdown)
+        operations = []
+        def reserve(_kind, operation, **_scope):
+            operations.append(operation); return {'status': 'running'}
+        with patch.object(bridge, '_start', side_effect=reserve):
+            bridge.open_destination(self.cycle['id'], target['id'])
+        self.assertEqual(len(operations), 1)
+        current = destinations.save_target(self.database, self.cycle['project_id'],
+            {**target['config'], 'source_scope': 'https://www.apisou.com/', 'publication_use': 'commercial'},
+            target['id'], target['revision'])
+        before = copy.deepcopy(current)
+        with patch('services.geo_destination_browser.open_session', new=AsyncMock()) as not_opened:
+            with self.assertRaisesRegex(ValueError, '目录'):
+                asyncio.run(operations[0]())
+            not_opened.assert_not_awaited()
+        self.assertEqual(destinations.get_target(self.database, self.cycle['project_id'], target['id']), before)
+
     def test_reservation_prevents_duplicates_and_login_does_not_clear_block(self):
         self.target()
         article_id = self.article()

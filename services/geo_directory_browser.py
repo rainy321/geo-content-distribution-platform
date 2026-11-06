@@ -14,7 +14,8 @@ import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from services.geo_directory_service import ENTRY_URL, LIST_URL, LEAD_URL, expected_transport
+from services.geo_directory_service import (ADAPTER, ENTRY_URL, LIST_URL, LEAD_URL, expected_transport,
+    APISOU_ADAPTER, APISOU_ENTRY_URL, APISOU_MODEL_LINES, APISOU_MODALITIES, APISOU_TYPES)
 
 
 MESSAGES = {
@@ -88,9 +89,9 @@ def directory_write(request):
     return _request_kind(request) == 'business'
 
 
-def submit_observer_script(binding, marker):
-    options=json.dumps({'binding':binding,'marker':marker,'entry':ENTRY_URL,'list':LIST_URL,
-                        'names':['name','url','rate','source','contact','notes']})
+def submit_observer_script(binding, marker, *, entry=ENTRY_URL, list_url=LIST_URL, names=None):
+    options=json.dumps({'binding':binding,'marker':marker,'entry':entry,'list':list_url,
+                        'names':names or ['name','url','rate','source','contact','notes']})
     return '''(() => {
       const options = ''' + options + ''';
       window[options.marker] = false;
@@ -311,12 +312,151 @@ async def prepare_form(page, fields):
     return form
 
 
+class ApisouPrefillGuard(SubmissionGuard):
+    """Phase one never authorizes an application POST or interprets a receipt."""
+    def __init__(self, *, progress=None, inspection_only=False):
+        super().__init__(None, before_submit=lambda *_: None, save_receipt=lambda *_: None,
+                         progress=progress, inspection_only=inspection_only)
+
+    async def route(self, route):
+        task = asyncio.current_task()
+        self.routes.add(task)
+        try:
+            # No request body is read. A changed form/action cannot send the
+            # reviewed fields through another host while this phase is fill-only.
+            if route.request.method not in ('GET', 'HEAD', 'OPTIONS'):
+                self.blocked_writes += 1
+                await self._unknown()
+                await route.abort()
+            else:
+                await route.continue_()
+        except Exception:
+            self.unsafe = True
+            try:
+                await route.abort()
+            except Exception:
+                pass
+        finally:
+            self.routes.discard(task)
+
+    async def emit(self, stage, *, window_open=True):
+        self.stage = stage
+        message = ('API搜公开字段已逐项回读；当前只辅助填写，最终申请发送尚未接入，请勿点击提交。'
+                   if stage == 'awaiting_human_confirmation' else
+                   'API搜公开申请表尚未出现，请核对当前页面；软件不会猜测控件、注册账号或发送申请。'
+                   if stage == 'awaiting_human_verification' else
+                   '当前API搜窗口只辅助填写，申请发送已阻止；请核对原窗口，不会重试。'
+                   if stage == 'submission_unknown' else MESSAGES[stage])
+        try:
+            await _callback(self.progress, {'stage': stage, 'message': message, 'window_open': window_open,
+                'inspection_only': self.inspection_only, 'allowed_posts': 0, 'blocked_writes': self.blocked_writes})
+        except Exception:
+            self.unsafe = True
+            raise
+
+
+def apisou_prefill_notice_script():
+    """Fixed local banner, never reads or posts platform/customer form data."""
+    return '''(() => {
+      if (!['https://www.apisou.com/submit','https://www.apisou.com/'].includes(location.href)) return;
+      const explain = '此窗口仅预填核对，暂不能提交。申请尚未发送。请受控结束本窗口后，在日常浏览器打开 https://www.apisou.com/submit ，并使用 GEO 中复制的已审资料。';
+      const show = () => {
+        if (!document.body) return;
+        if (!document.getElementById('geo-apisou-prefill-notice')) {
+          const banner = document.createElement('div');
+          banner.id = 'geo-apisou-prefill-notice'; banner.setAttribute('role','alert');
+          banner.textContent = explain;
+          Object.assign(banner.style,{position:'sticky',top:'0',zIndex:'2147483647',padding:'14px 20px',background:'#fff4d7',color:'#593c0c',borderBottom:'2px solid #b27b18',font:'14px/1.7 sans-serif'});
+          document.body.prepend(banner);
+        }
+        const form = document.querySelector('input[name="name"]')?.closest('form');
+        form?.querySelectorAll('button[type="submit"],input[type="submit"]').forEach(button => {
+          button.disabled = true; button.setAttribute('aria-disabled','true'); button.title = explain;
+        });
+      };
+      const start = () => { show(); new MutationObserver(show).observe(document.body,{childList:true,subtree:true}); };
+      if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded',start,{once:true}); else start();
+    })();'''
+
+
+async def readback_apisou_form(form, fields):
+    shown = {key: await form.locator(f'input[name="{key}"]').input_value()
+             for key in ('name', 'url', 'tagline', 'contact')}
+    shown['note'] = await form.locator('textarea[name="note"]').input_value()
+    shown['type'] = (await form.locator('select[name="type"] option:checked').inner_text()).strip()
+    shown['model_lines'] = [item for item in APISOU_MODEL_LINES
+                            if await form.locator(f'input[name="line_{item}"]').is_checked()]
+    shown['modalities'] = [item for item in APISOU_MODALITIES
+                           if await form.locator(f'input[name="mod_{item}"]').is_checked()]
+    # Compare checkbox sets in fixed platform order, not operator click order.
+    expected = {**fields, 'model_lines': [x for x in APISOU_MODEL_LINES if x in fields['model_lines']],
+                'modalities': [x for x in APISOU_MODALITIES if x in fields['modalities']]}
+    if shown != expected or await form.locator('input[name="website"]').input_value():
+        raise ValueError('API搜公开字段回读不一致；不会重复填写或发送申请')
+
+
+async def prepare_apisou_form(page, fields):
+    if page.url != APISOU_ENTRY_URL:
+        raise ValueError('当前不是固定API搜申请入口')
+    form = page.locator('input[name="name"]').locator('xpath=ancestor::form')
+    await _unique_visible(form)
+    required = await form.locator('[required]').evaluate_all('(items)=>items.map(e=>e.name).sort()')
+    if required != ['name', 'url']:
+        raise ValueError('API搜必填字段已变化，请重新核对适配')
+    honeypot = form.locator('input[name="website"]')
+    if await honeypot.count() != 1 or await honeypot.input_value():
+        raise ValueError('API搜平台自有字段状态有变化，未填写')
+    controls = {}
+    for key in ('name', 'url', 'tagline', 'contact', 'note'):
+        field = await _unique_visible(form.locator(f'{"textarea" if key == "note" else "input"}[name="{key}"]'))
+        if not await field.is_editable() or not await field.evaluate("e=>e.tagName==='TEXTAREA'||e.tagName==='INPUT'&&['text','url'].includes(e.type)"):
+            raise ValueError('API搜公开文本控件有变化，未填写')
+        prior = await field.input_value()
+        if prior and prior != fields[key]:
+            raise ValueError('API搜已有不同内容，保留原内容且不会覆盖')
+        controls[key] = (field, prior)
+    select = await _unique_visible(form.locator('select[name="type"]'))
+    if not await select.is_editable() or await select.locator('option').all_text_contents() != APISOU_TYPES:
+        raise ValueError('API搜站点类型选项有变化，未填写')
+    prior_type = (await select.locator('option:checked').inner_text()).strip()
+    if prior_type not in ('商业', fields['type']):
+        raise ValueError('API搜已有其它站点类型，保留原选择')
+    checks = []
+    for prefix, key, options in (('line_', 'model_lines', APISOU_MODEL_LINES), ('mod_', 'modalities', APISOU_MODALITIES)):
+        for option in options:
+            field = await _unique_visible(form.locator(f'input[name="{prefix}{option}"]'))
+            if not await field.is_editable() or not await field.evaluate("e=>e.tagName==='INPUT'&&e.type==='checkbox'"):
+                raise ValueError('API搜选项有变化，未填写')
+            checked = await field.is_checked()
+            if checked and option not in fields[key]:
+                raise ValueError('API搜已有其它模型或能力选择，保留原选择')
+            checks.append((field, checked, option in fields[key]))
+    if await form.locator('input[type="checkbox"]').count() != len(checks):
+        raise ValueError('API搜有尚未核对的选项，未填写')
+    for key, (field, prior) in controls.items():
+        if prior != fields[key]:
+            await field.fill(fields[key])
+    if prior_type != fields['type']:
+        await select.select_option(label=fields['type'])
+    for field, checked, wanted in checks:
+        if wanted and not checked:
+            await field.check()
+    await readback_apisou_form(form, fields)
+    return form
+
+
 async def open_session(record, profile, executable_path, *, fallback_executable_path=None,
                        progress=None, before_submit=None, save_receipt=None, check_requested=None,
                        close_requested=None, playwright_factory=None, inspection_only=False, timeout_seconds=900):
     from playwright.async_api import async_playwright
     from services.browser_runtime import launch_context
     from services.geo_test_runner import exclusive_lock
+    adapter = record.get('adapter', ADAPTER)
+    if adapter not in (ADAPTER, APISOU_ADAPTER):
+        raise ValueError('当前目录尚无已核对的辅助窗口适配')
+    apisou = adapter == APISOU_ADAPTER
+    entry_url, list_url = (APISOU_ENTRY_URL, 'https://www.apisou.com/') if apisou else (ENTRY_URL, LIST_URL)
+    prepare, readback = (prepare_apisou_form, readback_apisou_form) if apisou else (prepare_form, readback_form)
     if type(timeout_seconds) is not int or not 1 <= timeout_seconds <= 3600:
         raise ValueError('目录窗口等待时间无效')
     profile = Path(profile)
@@ -329,12 +469,13 @@ async def open_session(record, profile, executable_path, *, fallback_executable_
                     or any(candidate.iterdir())):
                 raise ValueError('目录申请需要全新专用会话目录，不会恢复旧浏览器页面')
     fields = copy.deepcopy(record.get('fields'))
-    expected = None if inspection_only else expected_transport(fields)
+    expected = None if inspection_only or apisou else expected_transport(fields)
     if not inspection_only and (record.get('submit_intent') or record.get('stage') not in ('opening', 'reviewed')
                                 or before_submit is None or save_receipt is None):
         raise ValueError('目录申请未处于本次可提交会话，只能只读核对')
-    state = SubmissionGuard(expected, before_submit=before_submit, save_receipt=save_receipt,
-                            progress=progress, inspection_only=inspection_only)
+    state = (ApisouPrefillGuard(progress=progress, inspection_only=inspection_only) if apisou else
+             SubmissionGuard(expected, before_submit=before_submit, save_receipt=save_receipt,
+                             progress=progress, inspection_only=inspection_only))
     closed = asyncio.Event()
     controlled_close = False
     cleanup_succeeded = False
@@ -373,17 +514,20 @@ async def open_session(record, profile, executable_path, *, fallback_executable_
                 await context.route('**/*', state.route)
                 state.route_guard_installed = True
                 page = context.pages[0] if context.pages else await context.new_page()
-                state.form_scope_check = lambda: page.url == ENTRY_URL and not scope_left and not page.is_closed()
+                state.form_scope_check = lambda: page.url == entry_url and not scope_left and not page.is_closed()
                 binding = '__geo_directory_submit_' + uuid.uuid4().hex
                 marker = '__geo_directory_submit_seen_' + uuid.uuid4().hex
+                if apisou:
+                    await context.add_init_script(script=apisou_prefill_notice_script())
                 def form_submitted(source):
                     if (source.get('page') is page and source.get('frame') is page.main_frame
-                            and page.url in (ENTRY_URL, LIST_URL)):
+                            and page.url in (entry_url, list_url)):
                         state.form_submit_seen = True
                 await context.expose_binding(binding, form_submitted)
-                await context.add_init_script(script=submit_observer_script(binding,marker))
+                await context.add_init_script(script=submit_observer_script(binding,marker,entry=entry_url,list_url=list_url,
+                    names=['name','url','tagline','contact'] if apisou else None))
                 async def read_submit_signal():
-                    if page.url not in (ENTRY_URL, LIST_URL):
+                    if page.url not in (entry_url, list_url):
                         return False
                     return await page.evaluate('(key) => window[key] === true',marker)
                 state.submit_signal_read = read_submit_signal
@@ -391,17 +535,17 @@ async def open_session(record, profile, executable_path, *, fallback_executable_
                 page.on('crash', lost_control)
                 def navigated(frame):
                     nonlocal scope_left
-                    if getattr(frame, 'parent_frame', None) is None and getattr(frame, 'url', '') != ENTRY_URL:
+                    if getattr(frame, 'parent_frame', None) is None and getattr(frame, 'url', '') != entry_url:
                         if form is not None:
                             scope_left = True
                         state.form_ready = False
-                        if getattr(frame, 'url', '') not in (ENTRY_URL, LIST_URL):
+                        if getattr(frame, 'url', '') not in (entry_url, list_url):
                             state.form_submit_seen = False
                         navigation_changed.set()
                 page.on('framenavigated', navigated)
                 try:
                     await state.emit('inspection_open' if inspection_only else 'opening')
-                    await _owned_operation(page.goto(LIST_URL if inspection_only else ENTRY_URL,
+                    await _owned_operation(page.goto(list_url if inspection_only else entry_url,
                         wait_until='domcontentloaded', timeout=45000), closed, close_requested, state)
                     waiting_form = not inspection_only
                     while not closed.is_set():
@@ -419,7 +563,7 @@ async def open_session(record, profile, executable_path, *, fallback_executable_
                         poll_form = False
                         if waiting_form and not state.unsafe and not state.intent_attempted and not scope_left:
                             visible = False
-                            if page.url == ENTRY_URL:
+                            if page.url == entry_url:
                                 try:
                                     await page.locator('input[name="name"]').locator('xpath=ancestor::form').wait_for(
                                         state='visible', timeout=min(1000, max(1, int(remaining * 1000))))
@@ -431,7 +575,7 @@ async def open_session(record, profile, executable_path, *, fallback_executable_
                             if visible:
                                 waiting_form = False
                                 try:
-                                    prepared, value = await _owned_operation(prepare_form(page, fields), closed, close_requested, state)
+                                    prepared, value = await _owned_operation(prepare(page, fields), closed, close_requested, state)
                                     if not prepared:
                                         continue
                                     form = value
@@ -439,7 +583,7 @@ async def open_session(record, profile, executable_path, *, fallback_executable_
                                     await state.emit('needs_manual_review')
                                 else:
                                     await state.emit('awaiting_human_confirmation')
-                                    state.form_ready = not scope_left and page.url == ENTRY_URL
+                                    state.form_ready = not scope_left and page.url == entry_url
                             else:
                                 poll_form = True
                                 if state.stage != 'awaiting_human_verification':
@@ -469,15 +613,15 @@ async def open_session(record, profile, executable_path, *, fallback_executable_
                                         waiting_form = True
                                     else:
                                         try:
-                                            if page.url != ENTRY_URL:
+                                            if page.url != entry_url:
                                                 raise ValueError()
-                                            await readback_form(form, fields)
+                                            await readback(form, fields)
                                         except Exception:
                                             state.form_ready = False
                                             await state.emit('needs_manual_review')
                                         else:
                                             await state.emit('awaiting_human_confirmation')
-                                            state.form_ready = not scope_left and page.url == ENTRY_URL
+                                            state.form_ready = not scope_left and page.url == entry_url
                         if navigation_changed.is_set():
                             navigation_changed.clear()
                             if scope_left and not state.receipt_saved:

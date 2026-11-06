@@ -1,4 +1,5 @@
 import {feedbackRoutesForBrief} from './geoFollowupSources.js'
+import {feedbackReviewView} from './geoFeedbackReview.js'
 
 const goals = Object.freeze({
   discovery: {key: 'natural_discovery', label: '自然需求发现'},
@@ -47,6 +48,7 @@ export function optimizationPlanView(cycle, selectedBriefId = '') {
         ? [{...original, signal: text(check.signal)}] : []
     })
     actions.push({id: item.id, topic: text(item.topic, 300), caseIds,
+      feedbackReview: feedbackReviewView(brief),
       goals: [...new Map(actionQuestions.map(question => [question.goal, {key: question.goal, label: question.label}])).values()],
       gap: text(item.gap), changeSummary: text(item.change_summary),
       writingRequirements: strings(item.writing_requirements), evidenceNeeded: strings(item.evidence_needed),
