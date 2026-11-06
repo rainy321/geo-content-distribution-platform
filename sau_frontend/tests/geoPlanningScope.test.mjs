@@ -132,7 +132,8 @@ const renderComponent=async(name,props)=>{
   assert.deepEqual(template.errors,[])
   const code=template.code.replace(/import \{([^}]+)\} from "vue"/g,(_all,imports)=>`const {${imports.split(',').map(value=>value.trim().replace(/\s+as\s+/,':')).join(',')}}=Vue;`).replace('export function render','return function render')
   const render=new Function('Vue',code)(Vue)
-  const app=Vue.createSSRApp({setup:()=>({...props,view:planningScopeView(props.cycle,props.selectedCaseId||''),notice:latestPlanningScopeNotice(props.cycle),items:historicalPlanningDrafts(props.cycle),directoryTargetForChannel:()=>null}),render})
+  const optionQuestion=name==='GeoPlanningScope'?new Function(`return (${page.expression('optionQuestion')})`)():undefined
+  const app=Vue.createSSRApp({setup:()=>({...props,view:planningScopeView(props.cycle,props.selectedCaseId||''),notice:latestPlanningScopeNotice(props.cycle),items:historicalPlanningDrafts(props.cycle),directoryTargetForChannel:()=>null,optionQuestion}),render})
   app.component('el-button',{setup:(_props,{attrs,slots})=>()=>Vue.h('button',attrs,slots.default?.())})
   return renderToString(app)
 }
@@ -146,4 +147,17 @@ test('real templates show full frozen question, explicit all/default, capacity a
   assert.match(historical,/原选题 b02/);assert.match(historical,/编辑已有稿件/);assert.match(historical,/&lt;img/)
   assert.doesNotMatch(historical,/<img|data-article-id="13"|原选题 b07|打开目标平台|进入发布中心/)
   for(const page of [journey,content])assert.deepEqual(compileTemplate({source:page.descriptor.template.content,filename:'page.vue',id:'page',compilerOptions:{bindingMetadata:page.script.bindings}}).errors,[])
+})
+
+test('long select labels are display-only while option title and selected frozen question stay complete',async()=>{
+  const value=cycle(),question='合成原题：团队希望统一管理多个模型、密钥、余额、用量与请求路由，请给出可核对资料。'.repeat(6)
+  value.test_plan.cases[0].question=question;value.observations.cases[0].question=question
+  const before=structuredClone(value),page=sfc('src/components/GeoPlanningScope.vue')
+  const shorten=new Function(`return (${page.expression('optionQuestion')})`)()
+  assert.equal(Array.from(shorten(question)).length,27)
+  assert.equal(shorten('😀'.repeat(30)),'😀'.repeat(26)+'…')
+  const html=await renderComponent('GeoPlanningScope',{cycle:value,selectedCaseId:'q01',busy:false,actionLabel:'按所选范围策划'})
+  assert.ok(html.includes(`title="${question}"`));assert.ok(html.includes(`原题：${question}`))
+  assert.ok(html.includes(`q01 · ${shorten(question)}</option>`))
+  assert.deepEqual(value,before);assert.deepEqual(planningRequestScope(value,'q01','analysis'),{case_ids:['q01']})
 })

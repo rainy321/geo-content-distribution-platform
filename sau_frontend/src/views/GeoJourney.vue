@@ -744,6 +744,7 @@ onUnmounted(()=>{persist();destroyed=true;clearInterval(timer);clearInterval(bri
 </script>
 
 <style scoped>
+.journey>*{min-width:0;max-width:100%}
 .journey-secondary-tools{margin:18px 0;border:1px solid var(--geo-border);border-radius:10px;padding:0 16px;background:#fbfdfc}.journey-secondary-tools>summary{padding:15px 0;cursor:pointer;font-size:13px;color:var(--geo-text)}.journey-secondary-tools>summary span{font-size:11px;color:var(--geo-muted);margin-left:8px}.journey-secondary-tools>summary:focus-visible{outline:2px solid var(--geo-primary);outline-offset:3px}
 
 .feedback-planning-note{display:flex;align-items:center;gap:14px;padding:14px 16px;margin:14px 0;background:#f1f7f5;border-radius:10px}.feedback-planning-note p{flex:1;font-size:12px;color:var(--geo-muted);line-height:1.8;margin:0}@media(max-width:700px){.feedback-planning-note{align-items:flex-start;flex-direction:column}}
