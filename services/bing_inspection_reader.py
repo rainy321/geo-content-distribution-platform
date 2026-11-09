@@ -72,7 +72,8 @@ function OfficialAddress([string]$raw, [Uri]$expected) {
     if ($site.Scheme -cne 'https' -or $site.Host -cne $expected.Host -or $site.Port -ne 443 -or $site.UserInfo -or $site.Query -or $site.Fragment) { return $false }
     # A manually edited input alone does not prove the shown results belong to
     # it. The already-inspected URL in the browser address must match as well.
-    if ($parameters.ContainsKey('urlInspect') -and -not (TargetMatches $parameters['urlInspect'] $expected.AbsoluteUri 1)) { return $false }
+    # Bing may percent-encode either inspected-URL parameter twice.
+    if ($parameters.ContainsKey('urlInspect') -and -not (TargetMatches $parameters['urlInspect'] $expected.AbsoluteUri 2)) { return $false }
     if ($parameters.ContainsKey('urlToInspect') -and -not (TargetMatches $parameters['urlToInspect'] $expected.AbsoluteUri 2)) { return $false }
     return $true
 }

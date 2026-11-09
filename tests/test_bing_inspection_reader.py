@@ -103,29 +103,7 @@ class NativeTransportTests(unittest.TestCase):
 
 @unittest.skipUnless(sys.platform == 'win32', 'Pure URI PowerShell contract is Windows-only; no UIA is loaded')
 class OfficialAddressContractTests(unittest.TestCase):
-    def test_actual_double_encoded_bing_query_and_strict_alias_conflict_boundaries(self):
-        expected = 'https://synthetic.example.org/products/dongai/'
-        site = quote('https://synthetic.example.org/', safe='')
-        single, double, triple = [expected], None, None
-        single = quote(expected, safe='')
-        double = quote(single, safe='')
-        triple = quote(double, safe='')
-        base = 'https://www.bing.com/webmasters/urlinspection?siteUrl=' + site
-        cases = [
-            (base + '&urlInspect=' + single + '&urlToInspect=' + double, True),
-            (base.removeprefix('https://') + '&urlToInspect=' + double, True),
-            (base + '&urlInspect=' + single, True),
-            (base + '&urlToInspect=' + triple, False),
-            (base + '&urlInspect=' + quote(expected + 'other/', safe='') + '&urlToInspect=' + double, False),
-            (base + '&urlInspect=' + single + '&urlToInspect=' + quote(quote(expected + 'other/', safe=''), safe=''), False),
-            (base + '&urlInspect=' + quote(expected.replace('dongai', '%64ongai'), safe=''), False),
-            (base + '&urlToInspect=' + quote(expected.replace('dongai', '%64ongai'), safe=''), False),
-            (base.replace('www.bing.com', 'www.bing.com.evil.example') + '&urlInspect=' + single, False),
-            (base.replace('/urlinspection?', '/urlinspection-other?') + '&urlInspect=' + single, False),
-            (base.replace(site, quote('https://other.example.org/', safe='')) + '&urlInspect=' + single, False),
-            (base + '&urlInspect=' + single + '&urlInspect=' + single, False),
-            (base, False),
-        ]
+    def address_results(self, expected, cases):
         start = reader.POWERSHELL_READER.index('function TargetMatches')
         end = reader.POWERSHELL_READER.index('function Field')
         # Execute only the exact pure URI functions from the production script.
@@ -139,7 +117,92 @@ class OfficialAddressContractTests(unittest.TestCase):
                    base64.b64encode(program.encode('utf-16-le')).decode()]
         completed = subprocess.run(command, input=json.dumps({'expected': expected, 'cases': cases}).encode(),
             capture_output=True, timeout=8, creationflags=subprocess.CREATE_NO_WINDOW, check=True)
-        self.assertEqual(json.loads(completed.stdout), [expected_value for _, expected_value in cases])
+        return json.loads(completed.stdout)
+
+    def test_actual_double_encoded_bing_query_and_strict_alias_conflict_boundaries(self):
+        expected = 'https://synthetic.example.org/products/dongai/'
+        site = quote('https://synthetic.example.org/', safe='')
+        single, double, triple = [expected], None, None
+        single = quote(expected, safe='')
+        double = quote(single, safe='')
+        triple = quote(double, safe='')
+        base = 'https://www.bing.com/webmasters/urlinspection?siteUrl=' + site
+        cases = [
+            (base + '&urlInspect=' + single + '&urlToInspect=' + double, True),
+            # Observed normal Bing shape: both independent aliases are encoded twice.
+            (base + '&urlInspect=' + double + '&urlToInspect=' + double, True),
+            (base + '&urlInspect=' + double, True),
+            (base + '&urlInspect=' + expected, True),
+            (base + '&urlToInspect=' + expected, True),
+            (base + '&urlToInspect=' + single, True),
+            (base + '&urlToInspect=' + double, True),
+            (base.removeprefix('https://') + '&urlToInspect=' + double, True),
+            (base + '&urlInspect=' + single, True),
+            (base + '&urlInspect=' + triple, False),
+            (base + '&urlToInspect=' + triple, False),
+            (base + '&urlInspect=' + triple + '&urlToInspect=' + double, False),
+            (base + '&urlInspect=' + quote(expected + 'other/', safe='') + '&urlToInspect=' + double, False),
+            (base + '&urlInspect=' + single + '&urlToInspect=' + quote(quote(expected + 'other/', safe=''), safe=''), False),
+            (base + '&urlInspect=' + double + '&urlToInspect=' + quote(quote(expected + 'other/', safe=''), safe=''), False),
+            (base + '&urlInspect=' + quote(expected.replace('dongai', '%64ongai'), safe=''), False),
+            (base + '&urlInspect=' + quote(quote(expected.replace('dongai', '%64ongai'), safe=''), safe=''), False),
+            (base + '&urlToInspect=' + quote(expected.replace('dongai', '%64ongai'), safe=''), False),
+            (base.replace('www.bing.com', 'www.bing.com.evil.example') + '&urlInspect=' + single, False),
+            (base.replace('https://www.bing.com', 'http://www.bing.com') + '&urlInspect=' + double, False),
+            (base.replace('www.bing.com', 'www.bing.com:444') + '&urlInspect=' + double, False),
+            (base.replace('www.bing.com', 'user@www.bing.com') + '&urlInspect=' + double, False),
+            (base.replace('/urlinspection?', '/urlinspection-other?') + '&urlInspect=' + single, False),
+            (base.replace(site, quote('https://other.example.org/', safe='')) + '&urlInspect=' + single, False),
+            (base.replace(site, quote('http://synthetic.example.org/', safe='')) + '&urlInspect=' + double, False),
+            (base.replace(site, quote('https://synthetic.example.org/?x=1', safe='')) + '&urlInspect=' + double, False),
+            (base + '&urlInspect=' + single + '&urlInspect=' + single, False),
+            (base + '&urlInspect=' + double + '&url%49nspect=' + double, False),
+            (base + '&urlInspect=' + double + '&siteUrl=' + site, False),
+            (base + '&urlInspect=' + double + '#fragment', False),
+            (base, False),
+        ]
+        actual = self.address_results(expected, cases)
+        self.assertEqual(len(actual), len(cases))
+        for (address, expected_value), actual_value in zip(cases, actual):
+            with self.subTest(address=address):
+                self.assertIs(actual_value, expected_value)
+
+    def test_target_matching_stops_at_first_complete_url_and_has_a_two_layer_limit(self):
+        expected = 'https://synthetic.example.org/products/dongai/'
+        encoded = quote(expected, safe='')
+        double = quote(encoded, safe='')
+        triple = quote(double, safe='')
+        escaped_path = expected.replace('dongai', '%64ongai')
+        cases = [
+            (expected, expected, 2, True),
+            (encoded, expected, 2, True),
+            (double, expected, 2, True),
+            (triple, expected, 2, False),
+            (double, expected, 1, False),
+            (encoded, expected, 0, False),
+            (escaped_path, expected, 2, False),
+            (quote(escaped_path, safe=''), expected, 2, False),
+            (quote(quote(escaped_path, safe=''), safe=''), expected, 2, False),
+            # A deliberate encoded canonical path remains literal after unwrapping.
+            (quote(quote(escaped_path, safe=''), safe=''), escaped_path, 2, True),
+            (expected + 'other/', expected, 2, False),
+        ]
+        start = reader.POWERSHELL_READER.index('function TargetMatches')
+        end = reader.POWERSHELL_READER.index('function OfficialAddress')
+        program = "$ErrorActionPreference='Stop';" + reader.POWERSHELL_READER[start:end] + r'''
+        $data=[Console]::In.ReadToEnd()|ConvertFrom-Json
+        $results=@(foreach($row in $data.cases){TargetMatches $row[0] $row[1] $row[2]})
+        [Console]::Write(($results|ConvertTo-Json -Compress))
+        '''
+        command = [reader._powershell_executable(), '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand',
+                   base64.b64encode(program.encode('utf-16-le')).decode()]
+        completed = subprocess.run(command, input=json.dumps({'cases': cases}).encode(),
+            capture_output=True, timeout=8, creationflags=subprocess.CREATE_NO_WINDOW, check=True)
+        actual = json.loads(completed.stdout)
+        self.assertEqual(len(actual), len(cases))
+        for (raw, target, layers, expected_value), actual_value in zip(cases, actual):
+            with self.subTest(raw=raw, target=target, layers=layers):
+                self.assertIs(actual_value, expected_value)
 
 
 @unittest.skipUnless(sys.platform == 'win32', 'Pure PowerShell field contract is Windows-only; no UIA is loaded')
