@@ -1,3 +1,5 @@
+import {sessionScopeForRecord} from './geoSessionScope.js'
+
 const terminal = new Set(['failed', 'need_action', 'needs_review', 'stopped'])
 const kinds = new Set(['plan', 'run', 'research', 'analysis', 'draft', 'retest'])
 const reasons = {
@@ -27,6 +29,8 @@ const identifier = value => typeof value === 'string' && /^[\w-]{1,100}$/.test(v
 
 // Old task files retain their evidence; only known diagnostic codes are projected.
 export function doubaoTaskRecovery(task) {
+  let session
+  try{session=sessionScopeForRecord(task)}catch{return null}
   const report = task?.result?.report
   if (task?.status === 'completed' && terminal.has(report?.status)) {
     task = {...task, status: report.status, recovery: {...task.recovery,
@@ -51,6 +55,8 @@ export function doubaoTaskRecovery(task) {
     taskId: task.id, kind: task.kind, cycleId: identifier(task.cycle_id), reason, title, description, canLogin,
     loginLabel: reason === 'client_mode_mismatch' ? '打开豆包检查入口' : '重新登录豆包',
     clientMode: mode(source.requested_client_mode),
+    ...(session.session_slot?{sessionSlot:session.session_slot}:{}),
+    ...(session.profile_mode?{profileMode:session.profile_mode}:{}),
     modelLabel: typeof source.requested_model_label === 'string' ? source.requested_model_label.slice(0, 200) : '',
     attempted, submitted, submission, requiresConfirmation: submission !== 'not_submitted',
     submissionText: submission === 'not_submitted' ? '已确认问题尚未发送。重新开始会新建一次请求。'
@@ -63,7 +69,7 @@ export function doubaoTaskRecovery(task) {
 export function recoveryCheckpoint(task) {
   const info = doubaoTaskRecovery(task)
   if (!info) return null
-  return {id: info.taskId, kind: info.kind, status: 'need_action', ...(info.cycleId ? {cycle_id: info.cycleId} : {}),
+  return {id: info.taskId, kind: info.kind, status: 'need_action', ...(info.cycleId ? {cycle_id: info.cycleId} : {}),...sessionScopeForRecord(task),
     recovery: {failure_reason: info.reason, question_submission_attempted: info.attempted,
       question_submitted: info.submitted, requested_client_mode: info.clientMode, requested_model_label: info.modelLabel}}
 }

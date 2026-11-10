@@ -204,6 +204,47 @@ class TestRunner(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "原界面类型"):
             await run_test_plan(self.plan, other, resume=True, collect=self.collect_ok)
 
+    async def test_secondary_run_persists_scope_and_resume_cannot_switch_to_primary(self):
+        config = RunConfig(self.root / 'secondary-run', CollectorConfig(profile_dir=self.root / 'secondary', session_slot='secondary'))
+        calls = []
+        async def collect(item):
+            calls.append(item.question)
+            return answer(item.question, environment={'client_mode': 'consumer', 'session_slot': item.session_slot}), item.output_root / 'result.json'
+        frozen = json.dumps(self.plan, sort_keys=True, ensure_ascii=False)
+        report = await run_test_plan(self.plan, config, collect=collect, sleep=self.sleep)
+        self.assertEqual(report['execution']['session_slot'], 'secondary')
+        self.assertTrue(all(row['session_slot'] == 'secondary' for row in report['cases']))
+        self.assertTrue(all(row['account_identity_status'] == 'unverified' for row in report['cases']))
+        self.assertEqual(json.dumps(self.plan, sort_keys=True, ensure_ascii=False), frozen)
+        other = RunConfig(config.run_dir, CollectorConfig(profile_dir=self.root / 'primary'))
+        with self.assertRaisesRegex(ValueError, '原豆包会话'):
+            await run_test_plan(self.plan, other, resume=True, collect=collect)
+        await run_test_plan(self.plan, config, resume=True, collect=collect)
+        self.assertEqual(calls, [row['question'] for row in self.plan['cases']])
+
+    async def test_legacy_missing_slot_resumes_as_primary_and_secondary_result_mismatch_stops_batch(self):
+        await run_test_plan(self.plan, self.config, collect=self.collect_ok, sleep=self.sleep)
+        path = self.config.run_dir / 'state.json'
+        state = json.loads(path.read_text(encoding='utf-8'))
+        state['execution'].pop('session_slot')
+        path.write_text(json.dumps(state), encoding='utf-8')
+        async def unexpected(_):
+            self.fail('Legacy completed questions must not be replayed')
+        await run_test_plan(self.plan, self.config, resume=True, collect=unexpected)
+        config = RunConfig(self.root / 'wrong-scope-run', CollectorConfig(profile_dir=self.root / 'secondary', session_slot='secondary'))
+        calls = []
+        async def wrong_scope(item):
+            calls.append(item.question)
+            return answer(item.question), item.output_root / 'result.json'
+        report = await run_test_plan(self.plan, config, collect=wrong_scope, sleep=self.sleep)
+        self.assertEqual(report['stop_reason'], 'collector_session_scope_mismatch')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(report['status'], 'needs_review')
+        self.assertFalse(report['cases'][0]['assessment']['answer_evaluable'])
+        self.assertEqual(report['cases'][0]['assessment']['answer_error'], 'collector_session_scope_mismatch')
+        self.assertEqual(report['cases'][0]['session_slot'], 'primary')
+        self.assertIsNone(report['cases'][1]['session_slot'])
+
     async def test_exception_or_interrupted_submission_never_replays(self):
         async def interrupted(config):
             raise RuntimeError("browser died after input")

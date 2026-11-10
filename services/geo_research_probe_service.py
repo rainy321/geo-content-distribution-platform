@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from urllib.parse import urlsplit
 
 from services.geo_source_identity import unconfirmed_source_url_status
+from services.doubao_source_collector import validate_session_slot
 from services.geo_test_service import (
     _scoped_url_identity, assess_answer, answer_evaluation_error, canonical_entity_url,
 )
@@ -33,7 +34,7 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def context(cycle, case_id):
+def context(cycle, case_id, *, session_slot=None):
     if cycle.get('baseline_source') == 'user_reported_external':
         raise ValueError('本轮是用户提供的外部基线，不能当作原生采集复测；请继续登记外部观察或另建原生基线')
     if not isinstance(case_id, str):
@@ -57,6 +58,9 @@ def context(cycle, case_id):
         raise ValueError('原网页会话配置无法确认，未发送')
     if session.get('mode_policy') == 'available_web' and session.get('profile_mode') is None:
         raise ValueError('原专用网页会话类型缺失，未发送')
+    original_slot = validate_session_slot(execution.get('session_slot', 'primary'), mode, session.get('profile_mode'))
+    session['session_slot'] = validate_session_slot(original_slot if session_slot is None else session_slot,
+                                                    mode, session.get('profile_mode'))
     return {'case': copy.deepcopy(selected[0]), 'before': copy.deepcopy(previous[0]),
             'execution': {'client_mode': mode, 'requested_model_label': model, 'timeout_seconds': timeout, **session}}
 
@@ -122,8 +126,13 @@ def build_probe(cycle, case_id, collector_result, *, run_id, source, created_at=
             or not isinstance(collector_result, dict)
             or collector_result.get('question') != details['case']['question']):
         raise ValueError('单题采集身份不一致，原问题与记录保持不变')
+    baseline_slot = details['execution']['session_slot']
+    sampled_slot = (collector_result.get('environment') or {}).get('session_slot', 'primary')
+    details = context(cycle, case_id, session_slot=sampled_slot)
+    validate_session_slot(sampled_slot, (collector_result.get('environment') or {}).get('client_mode') or details['execution']['client_mode'])
     before = _side(cycle['profile'], details['before'])
     after = _side(cycle['profile'], collector_result, result=True)
+    before['session_slot'], after['session_slot'] = baseline_slot, sampled_slot
     website_in_question = _address_present(details['case']['question'], cycle['profile']) is True
     same = lambda field: (before[field] == after[field]) if before[field] and after[field] else None
     return {'schema_version': PROBE_SCHEMA, 'kind': 'geo_research_single_probe',
@@ -140,8 +149,10 @@ def build_probe(cycle, case_id, collector_result, *, run_id, source, created_at=
         'website_in_question': website_in_question,
         'website_test_without_url': not website_in_question and not bool(re.search(r'https?://\S+', details['case']['question'], re.I)),
         'before': before, 'after': after,
-        'execution': {**details['execution'], 'manual_wait_seconds': None, 'collector_invocation_limit': 1},
-        'conditions': {'same_question': True, 'client_mode_match': same('client_mode'), 'model_label_match': same('model_label')},
+        'execution': {**details['execution'], 'manual_wait_seconds': None, 'collector_invocation_limit': 1,
+                      'account_identity_status': 'unverified'},
+        'conditions': {'same_question': True, 'client_mode_match': same('client_mode'), 'model_label_match': same('model_label'),
+                       'session_slot_match': baseline_slot == sampled_slot, 'account_independence_verified': False},
         'evidence': evidence, 'limitations': list(LIMITATIONS),
         'business_relationship_review': None, 'causal_effect': None}
 
@@ -164,7 +175,8 @@ def normalize_import(cycle, raw):
     details = context(cycle, case.get('id'))
     execution = payload.get('execution') or {}
     if (case.get('question') != details['case']['question']
-            or any(execution.get(key) != value for key, value in details['execution'].items())
+            or any(execution.get(key, 'primary' if key == 'session_slot' else None) != value for key, value in details['execution'].items())
+            or ((payload.get('collector_result') or {}).get('environment') or {}).get('session_slot', 'primary') != details['execution']['session_slot']
             or execution.get('manual_wait_seconds') is not None
             or execution.get('normal_profile_lock') is not True
             or execution.get('collector_invocation_limit') != 1):

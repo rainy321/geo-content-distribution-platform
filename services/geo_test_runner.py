@@ -13,7 +13,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 
-from services.doubao_source_collector import CollectorConfig, collect_doubao_sources
+from services.doubao_source_collector import CollectorConfig, collect_doubao_sources, validate_session_slot
 from services.geo_test_service import build_report, validate_plan
 
 
@@ -69,6 +69,7 @@ class RunConfig:
     mode_policy: str | None = None
 
     def __post_init__(self):
+        validate_session_slot(self.collector.session_slot, self.collector.client_mode, self.profile_mode)
         if self.profile_mode not in (None, 'consumer', 'work') or self.mode_policy not in (None, 'available_web'):
             raise ValueError('网页会话配置无效')
         if self.mode_policy == 'available_web' and (self.profile_mode is None or not self.collector.strict_client_mode):
@@ -94,6 +95,8 @@ async def run_test_plan(plan: dict, config: RunConfig, *, resume: bool = False,
             if (state.get("execution") or {}).get("requested_model_label") != config.collector.requested_model_label:
                 raise ValueError("恢复时必须使用原模型选项；更换模型请开启新的一轮")
             execution = state.get('execution') or {}
+            if execution.get('session_slot', 'primary') != config.collector.session_slot:
+                raise ValueError('恢复时必须使用原豆包会话；更换会话请开启新的一轮')
             if (execution.get('profile_mode', execution.get('client_mode', 'consumer'))
                     != (config.profile_mode or config.collector.client_mode)
                     or execution.get('mode_policy') != config.mode_policy):
@@ -116,6 +119,7 @@ async def run_test_plan(plan: dict, config: RunConfig, *, resume: bool = False,
                      "execution": {"platform": "doubao_web", "cooldown_seconds": config.cooldown_seconds,
                                    "headed": config.collector.headed, "timeout_seconds": config.collector.timeout_seconds,
                                    "client_mode": config.collector.client_mode,
+                                   "session_slot": config.collector.session_slot, "account_identity_status": "unverified",
                                    "requested_model_label": config.collector.requested_model_label},
                      "cases": {case["id"]: {"status": "pending"} for case in plan["cases"]}}
             if config.profile_mode is not None:
@@ -163,6 +167,10 @@ async def run_test_plan(plan: dict, config: RunConfig, *, resume: bool = False,
                          finished_at=datetime.now(timezone.utc).isoformat())
             if result.get("question") != case["question"]:
                 state.update(status="needs_review", stop_reason="collector_question_mismatch")
+                _checkpoint(run_dir, plan, state)
+                return build_report(plan, state)
+            if (result.get('environment') or {}).get('session_slot', 'primary') != config.collector.session_slot:
+                state.update(status='needs_review', stop_reason='collector_session_scope_mismatch')
                 _checkpoint(run_dir, plan, state)
                 return build_report(plan, state)
             _checkpoint(run_dir, plan, state)

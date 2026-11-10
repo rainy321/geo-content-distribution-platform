@@ -1,7 +1,9 @@
 <template>
   <section class="single-probe" aria-label="同题单题复测与对照" data-testid="single-case-probes">
     <header><div><h3>只看这一题的变化</h3><p>单题复测会发送一次独立新请求，其他问题不发送，原记录保留。</p></div></header>
-    <div class="probe-controls"><el-select v-model="selectedCaseId" aria-label="单题复测原问题" placeholder="选择要复测的原问题" :disabled="busy || !canStart" data-testid="journey-probe-case"><el-option v-for="item in cases" :key="item.id" :value="item.id" :label="`${item.id} · ${category(item.category)} · ${excerpt(item.question, 48)}`"/></el-select><el-button type="primary" :disabled="!canRequest" data-testid="journey-single-case-probe" @click="requestProbe">只复测这一题</el-button></div>
+    <div class="probe-controls"><el-select v-model="selectedCaseId" aria-label="单题复测原问题" placeholder="选择要复测的原问题" :disabled="busy || !canStart" data-testid="journey-probe-case"><el-option v-for="item in cases" :key="item.id" :value="item.id" :label="`${item.id} · ${category(item.category)} · ${excerpt(item.question, 48)}`"/></el-select><el-select v-model="selectedSessionSlot" aria-label="单题账号会话" :disabled="busy || !canStart || Boolean(sessionScopeError)" data-testid="journey-probe-session"><el-option value="primary" label="账号会话1"/><el-option value="secondary" label="账号会话2" :disabled="sessionMode==='work'"/></el-select><el-button :disabled="busy || !canStart || Boolean(sessionScopeError)" data-testid="journey-probe-login" @click="requestLogin">登录所选会话</el-button><el-button type="primary" :disabled="!canRequest" data-testid="journey-single-case-probe" @click="requestProbe">只复测这一题</el-button></div>
+    <p class="probe-hint">会话2首次使用时，请登录另一个个人账号；以后由软件复用该会话自动采集。分开保存会话本身不证明账号独立，也不计为GEO通过。工作网页仅支持会话1。</p>
+    <p v-if="sessionScopeError" class="probe-unavailable">{{ sessionScopeError }}</p>
     <p v-if="selectedCase" class="probe-question">{{ selectedCase.question }}</p>
     <p v-if="!canStart" class="probe-hint">单题复测暂不可用，已保存的对照记录仍可查看。</p>
     <p v-else-if="!cases.length" class="probe-hint">当前没有可复测的原问题，请先保存搜索基线。</p>
@@ -22,7 +24,7 @@
       <div class="probe-columns" :class="{'external-only':isExternal(item)}">
         <section v-for="side in sides(item)" :key="side.key" class="probe-answer" :aria-label="side.label">
           <div class="answer-heading"><h4>{{ side.label }}</h4><span :class="{unavailable:isExternal(item)||side.value?.answer_evaluable!==true}">{{ isExternal(item) ? '外部原文，采集条件未核验' : side.value?.answer_evaluable===true ? '已取得有效答案' : '未取得有效答案' }}</span></div>
-          <p class="probe-hint">{{ date(side.value?.collected_at) }} · {{ mode(side.value?.client_mode) }} · {{ side.value?.model_label || '模型未知' }}</p>
+          <p class="probe-hint">{{ date(side.value?.collected_at) }} · {{ mode(side.value?.client_mode) }} · {{ side.value?.model_label || '模型未知' }} · <strong data-testid="probe-record-session">{{ recordedSession(side.value,item) }}</strong></p>
           <p v-if="side.value?.answer_evaluable===false || !isExternal(item)&&side.value?.answer_evaluable!==true" class="probe-unavailable">{{ unavailable(side.value) }}</p><p v-else-if="isExternal(item)&&side.value?.answer_evaluable!==true" class="probe-hint">是否为完整最终回答尚未声明；文字观察不进入软件采集的有效题统计。</p>
           <p v-if="side.value?.response" class="probe-excerpt">{{ excerpt(side.value.response) }}</p>
           <p v-else class="probe-hint">尚无可展示的回答原文。</p>
@@ -45,6 +47,7 @@
         </section>
       </div>
       <p class="probe-hint probe-conditions">{{ conditions(item) }}</p>
+      <p class="probe-account-independence" data-testid="probe-account-independence"><strong>账号是否独立未核验</strong> · 会话编号只区分采集会话，不能证明是不同个人账号，也不计为独立GEO通过。</p>
       <details v-if="Array.isArray(item.limitations) && item.limitations.length"><summary>查看这次观察的限制</summary><p v-for="(note,index) in item.limitations" :key="index" class="probe-hint">{{ note }}</p></details>
     </article>
     <el-button v-if="observations.length>recordLimit" text @click="recordLimit+=3">再显示 3 条记录</el-button><el-button v-if="recordLimit>3" text @click="recordLimit=3">收起历史记录</el-button>
@@ -55,12 +58,14 @@
 import { computed, ref, watch } from 'vue'
 import { journeyDate } from '@/utils/geoJourney'
 import { publicationReviewUrl } from '@/utils/geoPublicationReview'
+import { normalizeSessionSlot, sessionSlotForRecord } from '@/utils/geoSessionScope'
 import GeoExternalFeedback from '@/components/GeoExternalFeedback.vue'
 import GeoBusinessReview from '@/components/GeoBusinessReview.vue'
 
 const props=defineProps({cycle:{type:Object,required:true},busy:Boolean,canStart:Boolean})
-const emit=defineEmits(['probe','updated','busy'])
+const emit=defineEmits(['probe','login','selection','updated','busy'])
 const selectedCaseId=ref('')
+const selectedSessionSlot=ref('primary'), sessionScopeError=ref('')
 const recordLimit=ref(3)
 const identifier=value=>typeof value==='string'&&/^[\w-]{1,100}$/.test(value)
 const cases=computed(()=>{
@@ -70,8 +75,11 @@ const cases=computed(()=>{
     &&rows.filter(other=>other?.id===item.id).length===1)
 })
 const selectedCase=computed(()=>cases.value.find(item=>item.id===selectedCaseId.value)||null)
-const canRequest=computed(()=>props.canStart===true&&!props.busy&&Boolean(selectedCase.value))
-const requestProbe=()=>{if(canRequest.value)emit('probe',{cycleId:props.cycle.id,caseId:selectedCase.value.id})}
+const sessionMode=computed(()=>{const baseline=props.cycle?.baseline||{},execution=baseline.execution||{};return execution.profile_mode==='work'||execution.client_mode==='work'||baseline.cases?.some(item=>item.client_mode==='work')?'work':'consumer'})
+const selection=()=>({cycleId:props.cycle.id,caseId:selectedCase.value?.id||'',sessionSlot:normalizeSessionSlot(selectedSessionSlot.value,sessionMode.value)})
+const canRequest=computed(()=>{try{return props.canStart===true&&!props.busy&&!sessionScopeError.value&&Boolean(selectedCase.value)&&Boolean(selection())}catch{return false}})
+const requestProbe=()=>{if(canRequest.value)emit('probe',selection())}
+const requestLogin=()=>{if(props.canStart===true&&!props.busy&&!sessionScopeError.value){try{emit('login',selection())}catch{}}}
 const observations=computed(()=>(Array.isArray(props.cycle?.probes)?props.cycle.probes:[])
   .filter(item=>identifier(item?.id)&&item.cycle_id===props.cycle.id&&item.selected_count===1
     &&typeof item.question==='string'&&identifier(item.case_id)))
@@ -80,6 +88,7 @@ const excerpt=(value,limit=280)=>{const text=typeof value==='string'?value:'';re
 const date=value=>journeyDate(value)
 const mode=value=>value==='work'?'豆包工作':value==='consumer'?'豆包对话':'界面未知'
 const isExternal=item=>item?.source==='user_reported_external'
+const recordedSession=(side,item)=>isExternal(item)?'账号会话由用户提供，未核验':side?.session_slot==='primary'?'账号会话1':side?.session_slot==='secondary'?'账号会话2':'原记录未标明账号会话'
 const contextAttestation=item=>{
   const history=item?.context_attestations
   if(!isExternal(item)||!Array.isArray(history)||!history.length)return null
@@ -112,8 +121,10 @@ const conditions=item=>{
   const value={...item.conditions};if(isExternal(item)&&!item.observed_question)value.same_question=null
   if(isExternal(item)&&(!item.before?.client_mode||!item.after?.client_mode))value.client_mode_match=null
   if(isExternal(item)&&(!item.before?.model_label||!item.after?.model_label))value.model_label_match=null
+  const slots=[item.before?.session_slot,item.after?.session_slot]
+  if(isExternal(item)||slots.some(slot=>!['primary','secondary'].includes(slot))||value.session_slot_match!==(slots[0]===slots[1]))value.session_slot_match=null
   const label=(field,yes,no,unknown)=>value[field]===true?yes:value[field]===false?no:unknown
-  return [label('same_question','沿用同一原题','问题发生变化，不作同题对照','问题一致性未知'),label('client_mode_match','界面一致','界面不同','界面是否一致未知'),label('model_label_match','模型标签一致','模型标签不同','模型是否一致未知')].join(' · ')
+  return [label('same_question','沿用同一原题','问题发生变化，不作同题对照','问题一致性未知'),label('client_mode_match','界面一致','界面不同','界面是否一致未知'),label('model_label_match','模型标签一致','模型标签不同','模型是否一致未知'),label('session_slot_match','账号会话相同','账号会话不同，不作同一会话对照','账号会话是否相同未知')].join(' · ')
 }
 const reviewer=value=>value?.by==='assistant'?'助手核对':'人工核对'
 const businessReview=item=>{
@@ -135,10 +146,15 @@ const sourceRows=side=>[
   ...(Array.isArray(side?.displayed_sources)?side.displayed_sources:[]).map(item=>({item,kind:'来源面板'}))
 ].filter(row=>row.item&&typeof row.item==='object').slice(0,6).map(({item,kind})=>({kind,
   title:typeof item.title==='string'&&item.title.trim()?item.title.slice(0,240):'来源条目',url:publicationReviewUrl(item.url)||null}))
-watch(()=>props.cycle?.id,()=>{selectedCaseId.value='';recordLimit.value=3})
+watch([()=>props.cycle?.id,()=>JSON.stringify(props.cycle?.baseline?.execution||{})],()=>{
+  selectedCaseId.value='';recordLimit.value=3;sessionScopeError.value=''
+  try{selectedSessionSlot.value=sessionSlotForRecord(props.cycle)}catch(cause){sessionScopeError.value=cause.message||'原账号会话范围无效，请核对原记录。'}
+},{immediate:true,flush:'sync'})
+watch([selectedCaseId,selectedSessionSlot,()=>props.cycle?.id],()=>{try{emit('selection',selection())}catch{emit('selection',null)}},{flush:'sync'})
 </script>
 
 <style scoped>
+.probe-account-independence{padding:9px 12px;border-left:3px solid #b78a46;background:#fff7ec;color:#825c2b;font-size:12px}
 .probe-addresses{margin-top:14px}.probe-addresses h5{margin:0;font-size:12px;color:var(--geo-ink,#173e3b)}
 .probe-address{margin:8px 0 0;padding:9px 11px;border:1px solid var(--geo-border,#dce6e2);border-radius:7px;font-size:11px}
 .probe-address-label{display:flex;flex-wrap:wrap;gap:2px 9px;margin:0;overflow-wrap:anywhere}.probe-address dl{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px 10px;margin:6px 0 0}.probe-address dd{margin:0;color:var(--geo-ink,#173e3b)}.probe-address dt{color:var(--geo-muted,#63736f)}

@@ -4,6 +4,7 @@ import test from 'node:test'
 import {ref,watch,nextTick} from 'vue'
 import {parse,compileScript} from '@vue/compiler-sfc'
 import * as automatic from '../src/utils/geoAutomaticCollection.js'
+import * as sessions from '../src/utils/geoSessionScope.js'
 import {baselineWritingOptions} from '../src/utils/geoWritingOptions.js'
 import {sameBrand,profileLines,restoreEntityDraftFields,articleSnapshot} from '../src/utils/geoJourney.js'
 import {scopedRecoveryCheckpoint} from '../src/utils/geoTaskRecovery.js'
@@ -23,7 +24,7 @@ function harness(){
   const calls=[],saved=[]
   const api={plan_automatic:async(...args)=>calls.push(['plan',...args]),start_automatic_run:async(...args)=>calls.push(['run',...args]),
     open_login:async options=>calls.push(['login',options]),start_run:async(...args)=>calls.push(['explicit',...args])}
-  const scope={...automatic,baselineWritingOptions,savedCycleContinuation,savedCycleFactEdits,sameBrand,
+  const scope={...automatic,...sessions,accountSessionSlot:ref('primary'),singleProbeSelection:ref(null),probeSelectionVersion:ref(0),error:ref(''),baselineWritingOptions,savedCycleContinuation,savedCycleFactEdits,sameBrand,
     window:{pywebview:{api}},ElMessageBox:{confirm:async()=>{}},project:ref(owner),projectId:ref(7),profileDirty:ref(false),editorDirty:ref(false),
     formProfile:()=>owner,provider:ref('doubao'),nativeAvailable:ref(true),busy:ref(false),model:ref(''),clientMode:ref('consumer'),
     automaticProfileMode:ref('consumer'),automaticProfileModeExplicit:ref(false),collectionPath:ref('automatic'),
@@ -32,7 +33,7 @@ function harness(){
     plan:ref(null),planConfirmed:ref(false),replacementSourceId:ref(null),briefId:ref(''),platform:ref(''),articleId:ref(null),
     factRows:ref([]),recoveryDraft:ref(null),recoveryFacts:ref(null),recoveryTask:ref(null),taskId:ref(''),taskKind:ref(''),step:ref(1)}
   scope.applyCycle=value=>{scope.cycle.value=value;scope.cycleId.value=value.id}
-  for(const name of ['selectSessionMode','selectCollectionMode','options','retestSessionOptions','continueSavedCycle','resetBaseline','makePlan','collectBaseline','login','useHistory','resetRecords'])scope[name]=action(name,scope)
+  for(const name of ['selectSessionMode','selectCollectionMode','selectAccountSession','options','retestSessionOptions','continueSavedCycle','resetBaseline','makePlan','collectBaseline','login','useHistory','resetRecords'])scope[name]=action(name,scope)
   return {...scope,calls,saved,scope}
 }
 

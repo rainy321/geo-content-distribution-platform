@@ -43,6 +43,46 @@ class TestNativeGeoJobs(unittest.TestCase):
         self.assertIn('error', self.jobs.start_run(value, {'client_mode': 'consumer'}))
         self.assertEqual(self.jobs.get_task()['status'], 'idle')
 
+    def test_secondary_consumer_profile_is_distinct_and_never_copies_primary(self):
+        primary = self.root / 'doubao/consumer-browser-profile'
+        primary.mkdir(parents=True)
+        marker = primary / 'synthetic-session-marker'
+        marker.write_bytes(b'primary-must-stay')
+        secondary = self.jobs._config({'client_mode': 'consumer', 'session_slot': 'secondary'})
+        self.assertEqual(secondary.profile_dir, self.root / 'doubao/consumer-secondary-browser-profile')
+        self.assertEqual(secondary.session_slot, 'secondary')
+        self.assertFalse(secondary.profile_dir.exists())
+        self.assertEqual(marker.read_bytes(), b'primary-must-stay')
+        self.assertEqual(self.jobs._config({}).session_slot, 'primary')
+        self.assertEqual(self.jobs._config({}).profile_dir, primary)
+
+    def test_session_scope_rejects_invalid_slots_paths_and_work_secondary_before_login(self):
+        invalid = [{'session_slot': slot} for slot in (None, '', '../primary', 'SECONDARY', 2, [], {})]
+        invalid += [{'session_slot': 'secondary', 'client_mode': 'work'},
+                    {'session_slot': 'secondary', 'profile_mode': 'work'},
+                    {'profile_dir': 'C:/other'}, {'session_slot': 'secondary', 'path': 'C:/other'}]
+        with patch('services.desktop_geo_jobs.open_doubao_session') as login:
+            for options in invalid:
+                with self.subTest(options=options):
+                    self.assertIn('error', self.jobs.open_login(options))
+        login.assert_not_called()
+        self.assertIsNone(self.jobs.worker)
+
+    def test_login_keeps_selected_secondary_scope_without_claiming_account_identity(self):
+        calls = []
+        async def login(config, wait_seconds):
+            calls.append(config)
+            return {'client_mode': 'consumer', 'login_required': False, 'challenge': False}
+        with patch('services.desktop_geo_jobs.open_doubao_session', login):
+            self.jobs.open_login({'client_mode': 'consumer', 'session_slot': 'secondary'})
+            task = self.wait_finished()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].profile_dir, self.root / 'doubao/consumer-secondary-browser-profile')
+        self.assertEqual(task['session_slot'], 'secondary')
+        self.assertEqual(task['result']['session_slot'], 'secondary')
+        self.assertEqual(task['result']['account_identity_status'], 'unverified')
+        self.assertIsNone(task['result']['session_saved'])
+
     def test_concurrent_task_is_rejected_and_stop_cancels_wait(self):
         entered = threading.Event()
         async def pending():

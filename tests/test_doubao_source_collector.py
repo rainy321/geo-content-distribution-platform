@@ -20,6 +20,16 @@ from services.doubao_submission_transport import EDITOR_READBACK_JS, LITERAL_PRE
 
 
 class SourceEvidenceTests(unittest.TestCase):
+    def test_session_slot_is_closed_and_work_secondary_is_not_a_consumer_control(self):
+        self.assertEqual(CollectorConfig().session_slot, 'primary')
+        self.assertEqual(CollectorConfig(session_slot='secondary').session_slot, 'secondary')
+        for slot in (None, '../primary', 'SECONDARY', 2, [], {}):
+            with self.subTest(slot=slot):
+                with self.assertRaises(ValueError):
+                    CollectorConfig(session_slot=slot)
+        with self.assertRaises(ValueError):
+            CollectorConfig(client_mode='work', session_slot='secondary')
+
     def test_citation_author_suffix_needs_exact_unique_headline_and_public_author(self):
         title = '公开核验标题_合成发布者'
         document = {'url': 'https://www.toutiao.com/article/123456/', 'title': '公开核验标题 - 今日头条',
@@ -896,11 +906,14 @@ class BrowserExtractionTests(unittest.IsolatedAsyncioTestCase):
         </script>'''
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            config = CollectorConfig(question="测试问题", output_root=root / "evidence", profile_dir=root / "profile", stable_seconds=0.1, timeout_seconds=5)
+            config = CollectorConfig(question="测试问题", output_root=root / "evidence", profile_dir=root / "profile", stable_seconds=0.1, timeout_seconds=5,
+                                     session_slot='secondary')
             result, path = await collect_doubao_sources(config, playwright_factory=self.local_browser_factory(html))
             self.assertEqual(result["collection_status"], "success", result)
             self.assertTrue(result["question_submitted"])
             self.assertTrue(result["answer_completed"])
+            self.assertEqual(result['environment']['session_slot'], 'secondary')
+            self.assertEqual(result['environment']['account_identity_status'], 'unverified')
             self.assertEqual(result["visible_citation_count"], 1)
             self.assertEqual(result["visible_source_count"], 2)
             self.assertEqual(result["ui_citation_count"], 1)

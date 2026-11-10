@@ -69,6 +69,19 @@ class PreflightTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['failure_reason'], 'web_mode_unknown_not_submitted')
         self.assertIsNone(result['actual_client_mode'])
 
+    async def test_secondary_preflight_rejects_work_and_persists_unverified_session_scope(self):
+        self.config = replace(self.config, session_slot='secondary')
+        work = {'client_mode': 'work', 'login_required': False, 'challenge': False}
+        result, path = await self.inspect([work, work])
+        self.assertEqual(result['collection_status'], 'need_action')
+        self.assertEqual(result['failure_reason'], 'client_mode_mismatch')
+        self.assertEqual(result['environment']['session_slot'], 'secondary')
+        self.assertEqual(result['environment']['account_identity_status'], 'unverified')
+        self.assertFalse(result['question_submission_attempted'])
+        self.assertEqual(json.loads(path.read_text(encoding='utf-8')), result)
+        self.page.fill.assert_not_awaited()
+        self.page.click.assert_not_awaited()
+
     async def test_spa_hydration_can_finish_before_the_finite_startup_budget(self):
         self.config = replace(self.config, navigation_timeout_seconds=2)
         unknown = {'client_mode': None, 'login_required': None, 'challenge': None}
@@ -307,12 +320,47 @@ class AutomaticBridgeTests(unittest.TestCase):
 
     def test_automatic_options_reject_paths_and_invalid_types_before_starting(self):
         for options in ({'profile_dir': 'C:/other'}, {'client_mode': 'consumer'}, {'executable_path': 'other'},
-                        {'profile_mode': 'phone'}, {'model_label': ['快速']}, None):
+                        {'profile_mode': 'phone'}, {'model_label': ['快速']}, {'session_slot': '../primary'},
+                        {'session_slot': None}, {'session_slot': 'secondary', 'profile_mode': 'work'}, None):
             with patch('services.desktop_geo_jobs.inspect_available_doubao_session', AsyncMock()) as inspect:
                 self.assertIn('error', self.jobs.start_automatic_run(plan(), options))
                 self.assertIn('error', self.jobs.plan_automatic(plan()['profile'], 4, options))
             inspect.assert_not_awaited()
         self.assertIsNone(self.jobs.worker)
+
+    def test_secondary_auto_run_uses_consumer_scope_and_does_not_change_frozen_plan(self):
+        configurations = []
+        value, original = plan(), copy.deepcopy(plan())
+        async def ready(config, **kwargs):
+            configurations.append(config)
+            return {'collection_status': 'preflight_ready', 'actual_client_mode': 'consumer'}, self.root / 'preflight.json'
+        async def runner(value, config, **kwargs):
+            async def collect(item, **_):
+                configurations.append(item)
+                return answer(item.question, environment={'client_mode': 'consumer', 'session_slot': item.session_slot}), self.root / 'answer.json'
+            async def no_sleep(_):
+                pass
+            return await run_test_plan(value, config, collect=collect, sleep=no_sleep, **kwargs)
+        with patch('services.desktop_geo_jobs.inspect_available_doubao_session', ready), \
+             patch('services.desktop_geo_jobs.run_test_plan', runner):
+            self.jobs.start_automatic_run(value, {'session_slot': 'secondary'})
+            task = self.finished()
+        self.assertEqual(task['status'], 'completed')
+        self.assertTrue(all(item.session_slot == 'secondary' and item.client_mode == 'consumer' for item in configurations))
+        self.assertTrue(all(item.profile_dir == self.root / 'doubao/consumer-secondary-browser-profile' for item in configurations))
+        self.assertEqual(task['session_slot'], 'secondary')
+        self.assertEqual(task['result']['report']['execution']['session_slot'], 'secondary')
+        self.assertEqual(value['cases'], original['cases'])
+        self.assertEqual(value['plan_sha256'], original['plan_sha256'])
+
+    def test_secondary_auto_run_does_not_accept_observed_work_or_invoke_runner(self):
+        with patch('services.desktop_geo_jobs.inspect_available_doubao_session', self.ready), \
+             patch('services.desktop_geo_jobs.run_test_plan', AsyncMock()) as runner:
+            self.jobs.start_automatic_run(plan(), {'session_slot': 'secondary'})
+            task = self.finished()
+        runner.assert_not_awaited()
+        self.assertEqual(task['status'], 'need_action')
+        self.assertEqual(task['submission_state'], {'question_submission_attempted': False, 'question_submitted': False})
 
     def test_retest_and_probe_keep_original_web_profile_policy(self):
         value = plan()

@@ -227,11 +227,11 @@ class DesktopProbeTests(ProbeFixture, unittest.TestCase):
         self.jobs = DesktopGeoJobs(self.root)
         self.addCleanup(self.jobs.shutdown)
 
-    def launch(self, collect, case_id='q02'):
+    def launch(self, collect, case_id='q02', options=None):
         with patch('services.desktop_geo_jobs.collect_doubao_sources', collect), \
              patch('services.desktop_geo_jobs.edge_executable', return_value='ordinary-edge'), \
              patch('services.desktop_geo_jobs.chrome_executable', return_value='ordinary-chrome'):
-            ack = self.jobs.start_research_probe(self.cycle['id'], case_id)
+            ack = self.jobs.start_research_probe(self.cycle['id'], case_id, options)
             if 'error' not in ack:
                 self.jobs.worker.join(timeout=5)
                 self.assertFalse(self.jobs.worker.is_alive())
@@ -268,6 +268,77 @@ class DesktopProbeTests(ProbeFixture, unittest.TestCase):
             self.fail('invalid selection must never collect')
         self.assertIn('error', self.launch(collect, '../arbitrary-path'))
         self.assertIn('error', self.jobs.start_research_probe('not-a-cycle', 'q02'))
+
+    def consumer_cycle(self, slot='primary'):
+        baseline = copy.deepcopy(self.baseline)
+        baseline['execution'].update(client_mode='consumer', session_slot=slot)
+        for row in baseline['cases']:
+            row.update(client_mode='consumer', session_slot=slot)
+        self.cycle = store.create_cycle(self.database, baseline, 'synthetic-consumer-reference')
+        with sqlite3.connect(self.database) as connection:
+            return connection.execute('SELECT baseline FROM geo_content_cycles WHERE id=?', (self.cycle['id'],)).fetchone()[0]
+
+    def test_secondary_single_probe_keeps_frozen_question_one_delivery_and_unverified_identity(self):
+        original = self.consumer_cycle()
+        frozen_plan = copy.deepcopy(self.cycle['test_plan'])
+        calls = []
+        primary = self.root / 'doubao/consumer-browser-profile'
+        primary.mkdir(parents=True)
+        (primary / 'synthetic-marker').write_bytes(b'keep-primary')
+        async def collect(config, *, progress):
+            calls.append(config)
+            result = synthetic_result(config.question, environment={'client_mode': 'consumer', 'session_slot': config.session_slot})
+            path = config.output_root / 'synthetic/result.json'
+            write_json(path, result)
+            return result, path
+        ack = self.launch(collect, options={'session_slot': 'secondary'})
+        task = self.jobs.get_task(ack['id'])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].question, self.question)
+        self.assertEqual(calls[0].session_slot, 'secondary')
+        self.assertEqual(calls[0].profile_dir, self.root / 'doubao/consumer-secondary-browser-profile')
+        self.assertFalse((calls[0].profile_dir / 'synthetic-marker').exists())
+        self.assertEqual((primary / 'synthetic-marker').read_bytes(), b'keep-primary')
+        self.assertEqual(task['session_slot'], 'secondary')
+        probe = task['result']['probe']
+        self.assertEqual(probe['execution']['session_slot'], 'secondary')
+        self.assertEqual(probe['execution']['account_identity_status'], 'unverified')
+        self.assertFalse(probe['conditions']['session_slot_match'])
+        self.assertFalse(probe['conditions']['account_independence_verified'])
+        self.assertEqual(probe['question'], self.question)
+        self.assertEqual(probe['question_sha256'], hashlib.sha256(self.question.encode()).hexdigest())
+        self.assertEqual(probe['execution']['collector_invocation_limit'], 1)
+        saved = store.get_cycle(self.database, self.cycle['id'])
+        self.assertEqual(saved['test_plan'], frozen_plan)
+        self.assertEqual(saved['probes'][0]['id'], probe['id'])
+        with sqlite3.connect(self.database) as connection:
+            self.assertEqual(connection.execute('SELECT baseline FROM geo_content_cycles WHERE id=?', (self.cycle['id'],)).fetchone()[0], original)
+        self.assert_original_unchanged()
+
+    def test_secondary_baseline_inherits_slot_and_unknown_delivery_is_never_retried(self):
+        self.consumer_cycle('secondary')
+        calls = []
+        async def collect(config, *, progress):
+            calls.append(config.session_slot)
+            raise TimeoutError('delivery unknown')
+        ack = self.launch(collect)
+        task = self.jobs.get_task(ack['id'])
+        self.assertEqual(calls, ['secondary'])
+        self.assertEqual(task['session_slot'], 'secondary')
+        self.assertEqual(task['result']['probe']['execution']['session_slot'], 'secondary')
+        self.assertEqual(task['result']['probe']['status'], 'needs_review')
+        self.assertFalse(task['result']['probe']['conditions']['account_independence_verified'])
+
+    def test_probe_rejects_invalid_scope_overrides_and_work_secondary_without_collecting(self):
+        invalid = [{'session_slot': slot} for slot in ('../primary', None, 2, {}, [])]
+        invalid += [{'session_slot': 'secondary'}, {'question': 'rewritten'}, {'profile_dir': 'C:/other'},
+                    {'session_slot': 'primary', 'client_mode': 'consumer'}]
+        async def collect(*args, **kwargs):
+            self.fail('Invalid or work-secondary scope must not collect')
+        for options in invalid:
+            with self.subTest(options=options):
+                self.assertIn('error', self.launch(collect, options=options))
+        self.assertIsNone(self.jobs.worker)
 
     def test_active_task_cannot_start_another_probe(self):
         self.jobs.job = {'status': 'running', 'id': 'synthetic-active'}

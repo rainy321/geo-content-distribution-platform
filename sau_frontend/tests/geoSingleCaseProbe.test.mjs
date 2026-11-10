@@ -7,6 +7,8 @@ import { parse,compileScript,compileTemplate,compileStyle } from '@vue/compiler-
 import { journeyDate } from '../src/utils/geoJourney.js'
 import { publicationReviewUrl } from '../src/utils/geoPublicationReview.js'
 import { scopedRecoveryCheckpoint } from '../src/utils/geoTaskRecovery.js'
+import * as sessions from '../src/utils/geoSessionScope.js'
+import {storedSessionScope} from '../src/utils/geoAutomaticCollection.js'
 
 const load=path=>{
   const filename=new URL(path,import.meta.url),{descriptor,errors}=parse(fs.readFileSync(filename,'utf8'),{filename:filename.pathname})
@@ -29,7 +31,7 @@ const externalProbe=(changes={})=>probe({source:'user_reported_external',native_
   conditions:{same_question:null,client_mode_match:null,model_label_match:null},business_relationship_review:businessReview(),...changes})
 const cycle=(changes={})=>({id:'cycle-a',baseline:{cases},probes:[probe()],retests:[],...changes})
 const componentSetup=(props,emit=()=>{})=>{
-  const deps={computed:Vue.computed,ref:Vue.ref,watch:Vue.watch,defineProps:()=>props,defineEmits:()=>emit,journeyDate,publicationReviewUrl}
+  const deps={...sessions,computed:Vue.computed,ref:Vue.ref,watch:Vue.watch,defineProps:()=>props,defineEmits:()=>emit,journeyDate,publicationReviewUrl}
   const body=component.descriptor.scriptSetup.content.replace(/^import .*$/gm,'')
   return new Function(...Object.keys(deps),body+`;return {${component.names.join(',')}};`)(...Object.values(deps))
 }
@@ -39,20 +41,21 @@ const componentHarness=(value=cycle())=>{
 }
 const deferred=()=>{let resolve;const promise=new Promise(done=>resolve=done);return {promise,resolve}}
 const journeyHarness=()=>{
-  const calls={probe:[],whole:[],confirms:[],applied:[]}
-  const deps={computed:Vue.computed,cycle:Vue.ref(cycle()),cycleId:Vue.ref('cycle-a'),step:Vue.ref(4),nativeAvailable:Vue.ref(true),
+  const calls={probe:[],whole:[],login:[],confirms:[],applied:[]}
+  const deps={...sessions,storedSessionScope,unconfirmedNativeTask:Vue.ref(null),accountSessionSlot:Vue.ref('primary'),singleProbeSelection:Vue.ref(null),probeSelectionVersion:Vue.ref(0),computed:Vue.computed,cycle:Vue.ref(cycle()),cycleId:Vue.ref('cycle-a'),step:Vue.ref(4),nativeAvailable:Vue.ref(true),
     task:Vue.ref({status:'idle'}),taskId:Vue.ref('old-task'),taskKind:Vue.ref('retest'),working:Vue.ref(false),finishingTask:Vue.ref(false),error:Vue.ref(''),
-    recoveryTask:Vue.ref({id:'old-failed-retest',kind:'retest'}),replacementSourceId:Vue.ref(null),project:Vue.ref({}),plan:Vue.ref(null),planConfirmed:Vue.ref(false),
+    recoveryTask:Vue.ref({id:'old-failed-retest',kind:'retest'}),recoveryInfo:Vue.ref(null),replacementSourceId:Vue.ref(null),project:Vue.ref({}),plan:Vue.ref(null),planConfirmed:Vue.ref(false),
     report:Vue.ref(null),reports:Vue.ref([]),reportId:Vue.ref(''),reportOrigin:Vue.ref(''),historyReportId:Vue.ref(''),selectedTarget:Vue.ref(null),matchingDrafts:Vue.ref([]),articleId:Vue.ref(null),
     scopedRecoveryCheckpoint,sameBrand:()=>true,loadReports:async()=>{},loadEditor:()=>{},persist:()=>{},
     ElMessageBox:{confirm:async(...args)=>calls.confirms.push(args)}}
-  deps.nativeBusy=Vue.computed(()=>deps.task.value.status==='running')
+  deps.nativeBusy=Vue.computed(()=>deps.task.value.status==='running'||deps.unconfirmedNativeTask.value?.status==='running')
   deps.busy=Vue.computed(()=>deps.working.value||deps.nativeBusy.value||deps.finishingTask.value)
   deps.window={pywebview:{api:{start_research_probe:async(...args)=>{calls.probe.push(args);return {id:'new-probe-task',status:'running'}},
+    open_login:async options=>{calls.login.push(options);return {id:'login-task',status:'running',session_slot:options.session_slot}},
     start_research_retest:async(...args)=>calls.whole.push(args),get_task:async()=>deps.task.value}}}
   deps.geoContentApi={get:async()=>({data:cycle({probes:[probe({source:'native_collector',native_verified:true})]})})}
   deps.applyCycle=(value,options)=>{calls.applied.push(options);deps.cycle.value=value}
-  const names=['singleProbeAvailable','run','startSingleCaseProbe','poll']
+  const names=['singleProbeAvailable','setSingleProbeSelection','singleProbeSessionOptions','run','startNative','loginSingleCaseSession','startSingleCaseProbe','poll']
   const functions=new Function(...Object.keys(deps),`
     let destroyed=false,contextEpoch=0,liveTaskId='',handledTask='',pollPending=false;
     ${names.map(name=>`const ${name}=${journey.expression(name)};`).join('\n')}
@@ -74,10 +77,11 @@ test('single-case selection requires a deliberate original question and never em
   const page=componentHarness()
   page.requestProbe();assert.deepEqual(page.events,[])
   page.selectedCaseId.value='q02';page.requestProbe()
-  assert.deepEqual(page.events,[['probe',{cycleId:'cycle-a',caseId:'q02'}]])
-  page.props.busy=true;page.requestProbe();assert.equal(page.events.length,1)
-  page.props.busy=false;page.props.canStart=false;page.requestProbe();assert.equal(page.events.length,1)
-  page.props.canStart=true;page.selectedCaseId.value='unknown';page.requestProbe();assert.equal(page.events.length,1)
+  assert.deepEqual(page.events,[['selection',{cycleId:'cycle-a',caseId:'q02',sessionSlot:'primary'}],['probe',{cycleId:'cycle-a',caseId:'q02',sessionSlot:'primary'}]])
+  const sent=()=>page.events.filter(item=>item[0]==='probe').length
+  page.props.busy=true;page.requestProbe();assert.equal(sent(),1)
+  page.props.busy=false;page.props.canStart=false;page.requestProbe();assert.equal(sent(),1)
+  page.props.canStart=true;page.selectedCaseId.value='unknown';page.requestProbe();assert.equal(sent(),1)
 })
 
 test('missing or duplicate original questions and foreign-cycle observations cannot be selected as this cycle',()=>{
@@ -228,7 +232,7 @@ test('one explicit confirmation sends only the original case once and keeps whol
   await page.startSingleCaseProbe({cycleId:'cycle-a',caseId:'q02'})
   assert.equal(page.calls.confirms.length,1);assert.deepEqual(page.calls.probe,[])
   decision.resolve();await first
-  assert.deepEqual(page.calls.probe,[['cycle-a','q02']]);assert.deepEqual(page.calls.whole,[])
+  assert.deepEqual(page.calls.probe,[['cycle-a','q02',{session_slot:'primary'}]]);assert.deepEqual(page.calls.whole,[])
   assert.equal(page.taskId.value,'new-probe-task');assert.equal(page.taskKind.value,'probe')
   assert.equal(page.recoveryTask.value,oldHistory);assert.equal(page.cycle.value.baseline.cases.length,3)
   assert.deepEqual(page.cycle.value.retests,[])
@@ -244,7 +248,7 @@ test('wrong case, foreign cycle and unavailable capability never request or send
 test('cancelled confirmation and changed context cannot send or replace the current task',async()=>{
   const cancelled=journeyHarness();cancelled.ElMessageBox.confirm=async()=>{throw new Error('cancel')}
   await cancelled.startSingleCaseProbe({cycleId:'cycle-a',caseId:'q02'});assert.deepEqual(cancelled.calls.probe,[])
-  for(const change of [p=>p.epoch(),p=>p.destroy(),p=>p.step.value=2,p=>p.taskId.value='other-task',p=>p.cycle.value.baseline={cases:[{...cases[1],question:'Changed original question'}]}]){
+  for(const change of [p=>p.epoch(),p=>p.destroy(),p=>p.step.value=2,p=>p.taskId.value='other-task',p=>p.cycle.value.baseline={cases:[{...cases[1],question:'Changed original question'}]},p=>p.cycle.value.baseline.cases=[...p.cycle.value.baseline.cases,{...cases[1]}],p=>p.cycle.value.baseline.execution={client_mode:'work'}]){
     const page=journeyHarness(),decision=deferred();page.ElMessageBox.confirm=()=>decision.promise
     const pending=page.startSingleCaseProbe({cycleId:'cycle-a',caseId:'q02'});change(page);decision.resolve();await pending
     assert.deepEqual(page.calls.probe,[])
@@ -272,6 +276,79 @@ test('completed probe polling refreshes this cycle without replacing baseline or
   assert.equal(page.cycle.value.baseline.cases.length,3);assert.deepEqual(page.cycle.value.retests,[])
 })
 
+test('selected secondary session sends one frozen 81-character case and logs in with the original mode/model only',async()=>{
+  const page=journeyHarness(),question='冻结原题。'.repeat(16)+'题'
+  page.cycle.value.baseline={execution:{client_mode:'consumer',profile_mode:'consumer',mode_policy:'available_web',requested_model_label:'快速'},cases:[{...cases[1],question}]}
+  const before=JSON.stringify(page.cycle.value)
+  await page.loginSingleCaseSession({cycleId:'cycle-a',caseId:'q02',sessionSlot:'secondary'})
+  assert.deepEqual(page.calls.login,[{client_mode:'consumer',model_label:'快速',profile_mode:'consumer',mode_policy:'available_web',session_slot:'secondary'}])
+  page.task.value={status:'idle'}
+  page.window.pywebview.api.start_research_probe=async(...args)=>{page.calls.probe.push(args);return {id:'secondary-probe',status:'running',session_slot:'secondary'}}
+  await page.startSingleCaseProbe({cycleId:'cycle-a',caseId:'q02',sessionSlot:'secondary',question:'不得采用的外来题文'})
+  assert.equal(question.length,81);assert.deepEqual(page.calls.probe,[['cycle-a','q02',{session_slot:'secondary'}]])
+  assert.ok(page.calls.confirms[0][0].endsWith(question));assert.equal(JSON.stringify(page.cycle.value),before)
+})
+
+test('component session choice emits scoped login and selection; work and malformed slots never request a probe',()=>{
+  const page=componentHarness();page.selectedCaseId.value='q02';page.selectedSessionSlot.value='secondary';page.requestLogin();page.requestProbe()
+  assert.deepEqual(page.events.filter(e=>['login','probe'].includes(e[0])),[['login',{cycleId:'cycle-a',caseId:'q02',sessionSlot:'secondary'}],['probe',{cycleId:'cycle-a',caseId:'q02',sessionSlot:'secondary'}]])
+  for(const slot of [null,'foreign','../other']){page.selectedSessionSlot.value=slot;assert.equal(page.canRequest.value,false)}
+  const work=componentHarness(cycle({baseline:{execution:{client_mode:'work'},cases}}));work.selectedCaseId.value='q02';work.selectedSessionSlot.value='secondary';work.requestProbe();work.requestLogin()
+  assert.deepEqual(work.events.filter(e=>['login','probe'].includes(e[0])),[])
+})
+
+test('same-scope refreshes preserve the selected original case and secondary session; changed scope resets both',()=>{
+  const value=cycle({baseline:{execution:{client_mode:'consumer',session_slot:'primary'},cases}}),page=componentHarness(value)
+  page.selectedCaseId.value='q02';page.selectedSessionSlot.value='secondary'
+  const events=page.events.length
+  page.props.cycle=structuredClone(value)
+  assert.equal(page.selectedCaseId.value,'q02');assert.equal(page.selectedSessionSlot.value,'secondary');assert.equal(page.events.length,events)
+  page.props.cycle.baseline.execution.session_slot='secondary'
+  assert.equal(page.selectedCaseId.value,'');assert.equal(page.selectedSessionSlot.value,'secondary')
+  assert.ok(page.events.some(e=>e[0]==='selection'&&e[1]?.caseId===''))
+  page.props.cycle={...structuredClone(value),id:'cycle-b'}
+  assert.equal(page.selectedCaseId.value,'');assert.equal(page.selectedSessionSlot.value,'primary')
+})
+
+test('case/session changes while confirmation is pending cancel even after changing back; invalid work session never confirms',async()=>{
+  for(const next of [{caseId:'q01',sessionSlot:'primary'},{caseId:'q02',sessionSlot:'secondary'}]){
+    const page=journeyHarness(),decision=deferred();page.ElMessageBox.confirm=()=>decision.promise
+    const pending=page.startSingleCaseProbe({cycleId:'cycle-a',caseId:'q02',sessionSlot:'primary'})
+    page.setSingleProbeSelection({cycleId:'cycle-a',...next});page.setSingleProbeSelection({cycleId:'cycle-a',caseId:'q02',sessionSlot:'primary'})
+    decision.resolve();await pending;assert.deepEqual(page.calls.probe,[])
+  }
+  for(const slot of [null,'invalid','secondary']){
+    const page=journeyHarness();page.cycle.value.baseline.execution={client_mode:'work'}
+    await page.startSingleCaseProbe({cycleId:'cycle-a',caseId:'q02',sessionSlot:slot})
+    assert.deepEqual(page.calls.confirms,[]);assert.deepEqual(page.calls.probe,[])
+  }
+})
+
+test('secondary late and mismatched acknowledgements cannot enter the current task or trigger a second send',async()=>{
+  const page=journeyHarness(),response=deferred();let sends=0
+  page.window.pywebview.api.start_research_probe=()=>{sends++;return response.promise}
+  const pending=page.startSingleCaseProbe({cycleId:'cycle-a',caseId:'q02',sessionSlot:'secondary'})
+  await Promise.resolve();await Promise.resolve();await page.startSingleCaseProbe({cycleId:'cycle-a',caseId:'q02',sessionSlot:'secondary'})
+  assert.equal(sends,1);response.resolve({id:'wrong-slot',status:'running',session_slot:'primary'});await pending
+  assert.equal(page.taskId.value,'old-task');assert.match(page.error.value,/尚未确认/)
+  assert.equal(page.busy.value,true);assert.deepEqual(page.unconfirmedNativeTask.value,{id:'wrong-slot',status:'running'})
+  await page.startSingleCaseProbe({cycleId:'cycle-a',caseId:'q02',sessionSlot:'secondary'});assert.equal(sends,1)
+  page.window.pywebview.api.get_task=async id=>{assert.equal(id,'wrong-slot');return {id,status:'completed',session_slot:'primary',result:{probe:probe()}}}
+  await page.poll();assert.equal(page.busy.value,false);assert.equal(page.taskId.value,'old-task');assert.deepEqual(page.calls.applied,[])
+  const late=journeyHarness(),receipt=deferred();late.window.pywebview.api.start_research_probe=()=>receipt.promise
+  const waiting=late.startSingleCaseProbe({cycleId:'cycle-a',caseId:'q02',sessionSlot:'secondary'});await Promise.resolve();await Promise.resolve()
+  late.setSingleProbeSelection({cycleId:'cycle-a',caseId:'q02',sessionSlot:'primary'});receipt.resolve({id:'late-secondary',status:'running',session_slot:'secondary'});await waiting
+  assert.equal(late.taskId.value,'old-task')
+})
+
+test('polling another running session retains only its busy ID and never imports its result',async()=>{
+  const page=journeyHarness()
+  page.window.pywebview.api.get_task=async()=>({id:'foreign-secondary',status:'running',session_slot:'secondary',result:{probe:probe()}})
+  await page.poll()
+  assert.equal(page.taskId.value,'old-task');assert.deepEqual(page.calls.applied,[])
+  assert.equal(page.busy.value,true);assert.deepEqual(page.unconfirmedNativeTask.value,{id:'foreign-secondary',status:'running'})
+})
+
 test('actual compiled UI shows old-to-new presence, research import, raw business text and unknown citations safely',async()=>{
   const example=cycle({probes:[probe({after:side({response:'官网 example.org 展示产品与技术服务。<script>unsafe()</script>',website_presence:true})})]})
   const markup=await renderComponent(example)
@@ -283,6 +360,18 @@ test('actual compiled UI shows old-to-new presence, research import, raw busines
   assert.match(journey.descriptor.template.content,/名称提及率/)
   assert.match(journey.descriptor.template.content,/<GeoSingleCaseProbe/)
   assert.match(journey.expression('primaryAction'),/startNative\('retest'/)
+})
+
+test('saved primary-to-secondary probes render both actual session labels and refuse a same-session or independent-account claim',async()=>{
+  const value=probe({source:'native_collector',native_verified:true,before:side({client_mode:'consumer',session_slot:'primary'}),after:side({client_mode:'consumer',session_slot:'secondary'}),conditions:{same_question:true,client_mode_match:true,model_label_match:true,session_slot_match:false,account_independence_verified:false}})
+  const markup=await renderComponent(cycle({probes:[value]}))
+  assert.match(markup,/账号会话1/);assert.match(markup,/账号会话2/)
+  assert.match(markup,/账号会话不同，不作同一会话对照/);assert.match(markup,/账号是否独立未核验/)
+  assert.doesNotMatch(markup,/账号会话相同|两个独立账号已通过|同一账号对照/)
+  const same=await renderComponent(cycle({probes:[{...value,after:side({client_mode:'consumer',session_slot:'primary'}),conditions:{...value.conditions,session_slot_match:true}}]}))
+  assert.match(same,/账号会话相同/);assert.match(same,/账号是否独立未核验/)
+  const old=await renderComponent(cycle({probes:[probe()]}))
+  assert.match(old,/原记录未标明账号会话/);assert.match(old,/账号会话是否相同未知/);assert.match(old,/账号是否独立未核验/)
 })
 
 test('actual external UI shows the negative business review, original quote and unknown conditions without a false before-after claim',async()=>{

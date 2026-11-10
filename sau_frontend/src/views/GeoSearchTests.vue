@@ -9,11 +9,13 @@
 
     <el-card v-if="isDesktop" shadow="never">
       <h2>软件自动采集</h2><p class="context">先检查专用会话，再采集回答和来源；需要登录或安全验证时在软件提示的窗口完成，原请求继续等待。实际工作网页与普通对话结果分开保留。</p>
+      <el-form-item label="采集账号会话"><el-select v-model="desktopSessionSlot" :disabled="nativeBusy" aria-label="采集账号会话"><el-option label="会话1" value="primary"/><el-option label="会话2（普通对话）" value="secondary" :disabled="desktopClientMode==='work'"/></el-select></el-form-item>
+      <p class="context">首次使用会话2，请在软件打开的窗口登录另一个个人账号。两处分别保存登录状态；会话分隔本身不证明账号独立，也不计GEO效果。工作网页仅使用会话1。</p>
       <el-alert v-if="(collectionPath==='automatic' || sourceRequested) && !automaticReady" type="warning" :closable="false" :title="automaticCollectionUnavailable"/>
       <DoubaoPreparation/>
       <details class="context" data-testid="automatic-advanced-options"><summary>高级采集选项</summary><div class="form-grid">
         <el-form-item :label="collectionPath==='automatic' || sourceRequested ? '专用会话（实际界面由软件检查）' : '指定网页模式'"><el-select v-model="desktopClientMode" :disabled="nativeBusy">
-          <el-option label="普通对话专用会话" value="consumer" /><el-option label="工作专用会话" value="work" />
+          <el-option label="普通对话专用会话" value="consumer" /><el-option label="工作专用会话" value="work" :disabled="desktopSessionSlot==='secondary'" />
         </el-select></el-form-item>
         <el-form-item label="模型选项（可选）"><el-input v-model="desktopModel" :disabled="nativeBusy" placeholder="留空使用当前模型" /></el-form-item>
       </div>
@@ -168,6 +170,7 @@ import { entityLabel, entityProfileFields, profileLines, reportEntityContext, re
 import { restoredSearchRecords, sameSearchProject, searchProjectSnapshot, searchTaskMatchesContext, searchTaskMatchesProject, searchTaskRecoverySource } from '@/utils/geoSearchRestore'
 import { doubaoTaskRecovery } from '@/utils/geoTaskRecovery'
 import {automaticBridgeReady,automaticCollectionOptions,automaticCollectionUnavailable,requireAutomaticBridge,automaticSourceRequest,automaticPlanFromExternalCycle,actualCollectionMode} from '@/utils/geoAutomaticCollection'
+import {normalizeSessionSlot,sessionSlotMatchesRecord} from '@/utils/geoSessionScope'
 
 const projects = ref([]), projectId = ref(null), company = ref(''), audience = ref(''), aliasesText=ref(''), officialUrlsText=ref(''), caseCount = ref(4)
 const loading = ref(false), generating = ref(false), plan = ref(null), report = ref(null), importInput = ref(null)
@@ -179,6 +182,7 @@ const useReport = async () => {
   router.push({path:'/geo-content',query:{cycle:value.id}})
 }
 const desktopClientMode = ref('consumer'), desktopModel = ref(''), nativeTask = ref({ status: 'idle' }), collectionPath=ref('automatic'), autoPlanConfirmed=ref(false)
+const desktopSessionSlot=ref('primary')
 const sourcePreview=ref(null),sourceConfirmed=ref(false),sourceLoading=ref(false),sourceLoadError=ref('')
 const sourceRequested=computed(()=>route.query.source_cycle!==undefined)
 const automaticReady=computed(()=>nativeReady.value&&automaticBridgeReady(window.pywebview?.api))
@@ -209,7 +213,7 @@ const taskRecovery=computed(()=>{
     const current=doubaoTaskRecovery(searchTaskRecoverySource(nativeTask.value));if(current)return current
   }
   const prior=recoveryRecord.value
-  return (sameSearchProject(prior?.project,project.value) || !project.value && prior?.project===null
+  return prior?.sessionSlot===desktopSessionSlot.value && prior.sessionEpoch===sessionEpoch && (sameSearchProject(prior?.project,project.value) || !project.value && prior?.project===null
     && prior.intent===recordIntent.value && sameBrand(prior.profile,prior.profile))?prior.recovery:null
 })
 const nativeMessage = computed(() => {
@@ -222,19 +226,23 @@ const nativeStatusLabel=row=>row.kind==='run' && row.status==='completed'
   ? statusNames[row.id===nativeTask.value.id?nativeTask.value.result?.report?.status:''] || '已结束，查看报告'
   : statusNames[row.status] || row.status
 const recordIntent=ref(0)
-let nativeTimer = null, handledNativeTask = null,searchEpoch=0,nativeRequest=0,reportRequest=0,detailRequest=0,restoreRequest=0,sourceRead=0,destroyed=false
-const searchScope=()=>({epoch:searchEpoch,project:searchProjectSnapshot(project.value),sourceCycle:route.query.source_cycle})
-const sameSearchScope=scope=>!destroyed && scope.epoch===searchEpoch && scope.sourceCycle===route.query.source_cycle && (scope.project?sameSearchProject(scope.project,project.value):!project.value)
-const taskMatchesCurrent=task=>searchTaskMatchesContext(task,project.value,taskBinding.value,recordIntent.value)
+let nativeTimer = null, handledNativeTask = null,searchEpoch=0,sessionEpoch=0,nativeRequest=0,reportRequest=0,detailRequest=0,restoreRequest=0,sourceRead=0,destroyed=false
+const searchScope=()=>({epoch:searchEpoch,sessionEpoch,sessionSlot:desktopSessionSlot.value,sessionMode:desktopClientMode.value,project:searchProjectSnapshot(project.value),sourceCycle:route.query.source_cycle})
+const sameSearchScope=scope=>!destroyed && scope.epoch===searchEpoch && scope.sessionEpoch===sessionEpoch && scope.sessionSlot===desktopSessionSlot.value && scope.sessionMode===desktopClientMode.value && scope.sourceCycle===route.query.source_cycle && (scope.project?sameSearchProject(scope.project,project.value):!project.value)
+const taskMatchesCurrent=task=>!task?.foreignSession && sessionSlotMatchesRecord(task,desktopSessionSlot.value,desktopClientMode.value)
+  && (taskBinding.value?.taskId!==task?.id || taskBinding.value?.sessionEpoch===undefined || taskBinding.value.sessionEpoch===sessionEpoch)
+  && searchTaskMatchesContext(task,project.value,taskBinding.value,recordIntent.value)
 const rememberRecovery=task=>{
   if(!taskMatchesCurrent(task))return
   const recovery=doubaoTaskRecovery(searchTaskRecoverySource(task))
-  if(recovery)recoveryRecord.value={project:searchProjectSnapshot(project.value),profile:taskBinding.value?.profile,intent:recordIntent.value,recovery}
+  if(recovery)recoveryRecord.value={project:searchProjectSnapshot(project.value),profile:taskBinding.value?.profile,intent:recordIntent.value,sessionSlot:desktopSessionSlot.value,sessionEpoch,recovery}
 }
 const nativeBridge = () => {
   if (!window.pywebview?.api) throw new Error('桌面采集服务尚未就绪，请稍后重试')
   return window.pywebview.api
 }
+const taskStatusOnly=task=>({id:task.id,status:task.status,kind:task.kind,foreignSession:true,
+  message:task.status==='running'?'其他账号会话的任务仍在运行，请等待原任务结束。':'其他账号会话的任务已结束；未载入该会话结果。'})
 const startNative = async (kind,automatic=false) => {
   if(nativeBusy.value || generating.value)return
   const scope=searchScope(),request=++nativeRequest,intent=recordIntent.value
@@ -250,7 +258,8 @@ const startNative = async (kind,automatic=false) => {
     if(isAutomatic)requireAutomaticBridge(api)
     if(sourceRequested.value&&(kind==='plan'||kind==='run'&&(!sourceConfirmed.value||!sourcePreview.value)))throw new Error('请先核对原任务单固定问题，再确认另建独立自动测试。')
     if(isAutomatic&&kind==='run'&&!sourceRequested.value&&!autoPlanConfirmed.value)throw new Error('请先预览并确认这份问题计划。')
-    const options=isAutomatic?automaticCollectionOptions(desktopClientMode.value,desktopModel.value):{ client_mode: desktopClientMode.value, model_label: desktopModel.value.trim() }
+    const slot=normalizeSessionSlot(desktopSessionSlot.value,desktopClientMode.value)
+    const options=isAutomatic?automaticCollectionOptions(desktopClientMode.value,desktopModel.value,slot):{ client_mode: desktopClientMode.value, model_label: desktopModel.value.trim(),...(slot==='secondary'?{session_slot:slot}:{}) }
     const runPlan=sourceRequested.value?sourcePreview.value?.plan:plan.value
     const source = kind==='plan' ? await persistProfile() : kind==='run'?runPlan?.profile:project.value || report.value?.profile || runPlan?.profile
     if(!sameSearchScope(scope) || request!==nativeRequest || intent!==recordIntent.value)return
@@ -259,10 +268,19 @@ const startNative = async (kind,automatic=false) => {
       : kind === 'plan' ? isAutomatic?await api.plan_automatic({ ...source,...entityProfileFields(source) }, caseCount.value, options):await api.plan_with_doubao({ ...source,...entityProfileFields(source) }, caseCount.value, options)
         : isAutomatic?await api.start_automatic_run(runPlan, options):await api.start_run(runPlan, options)
     if (result.error) throw new Error(result.error)
-    if(!sameSearchScope(scope) || request!==nativeRequest || intent!==recordIntent.value)return
+    if(!sameSearchScope(scope) || request!==nativeRequest || intent!==recordIntent.value || !sessionSlotMatchesRecord(result,scope.sessionSlot,scope.sessionMode)){
+      // A mismatched acknowledgement must not apply results, but the shared
+      // worker still owns a running task. Keep its busy state until polling ends.
+      if(request===nativeRequest && result.id && result.status==='running'){
+        nativeTask.value={...taskStatusOnly(result),kind}
+        taskBinding.value={taskId:result.id,project:scope.project,profile:searchProjectSnapshot(source),intent,sessionSlot:scope.sessionSlot,sessionEpoch:scope.sessionEpoch}
+      }
+      if(!sessionSlotMatchesRecord(result,scope.sessionSlot,scope.sessionMode))ElMessage.error('任务回执与选定账号会话不一致；原任务保持，不载入其他会话的结果。')
+      return
+    }
     nativeTask.value = { ...result, kind }
     if(kind!=='login'){recordIntent.value++;reportRequest++;detailRequest++;reportChoice.value='task';recoveryRecord.value=null}
-    taskBinding.value={taskId:result.id,project:searchProjectSnapshot(project.value),profile:searchProjectSnapshot(source),intent:recordIntent.value};handledNativeTask=null
+    taskBinding.value={taskId:result.id,project:searchProjectSnapshot(project.value),profile:searchProjectSnapshot(source),intent:recordIntent.value,sessionSlot:slot,sessionEpoch};handledNativeTask=null
     if (kind === 'run') {report.value = null;selectedReportId.value='';sourceConfirmed.value=false;autoPlanConfirmed.value=false}
     const history=await api.list_tasks()
     if(sameSearchScope(scope) && request===nativeRequest)nativeHistory.value=history
@@ -280,6 +298,11 @@ const pollNative = async () => {
   try {
     const task = await nativeBridge().get_task()
     if(!current())return
+    if(!sessionSlotMatchesRecord(task,scope.sessionSlot,scope.sessionMode)){
+      nativeTask.value=taskStatusOnly(task)
+      if(task.status!=='running')handledNativeTask=task.id
+      return
+    }
     nativeTask.value = task
     rememberRecovery(task)
     if (task.status !== 'running' && handledNativeTask !== task.id) {
@@ -308,6 +331,7 @@ const showNativeTask = async id => {
   try {
     const task = await nativeBridge().get_task(id)
     if(!sameSearchScope(scope) || request!==detailRequest || intent!==recordIntent.value || task.id!==id)return
+    if(!sessionSlotMatchesRecord(task,scope.sessionSlot,scope.sessionMode)){ElMessage.info('这条任务属于其他账号会话，请先选择相应会话再查看。');return}
     nativeDetails.value = task
     reportChoice.value='explicit'
     if (task.result?.plan) setRecord(task.result.plan)
@@ -342,7 +366,8 @@ watch([projectId,()=>project.value?.name,()=>project.value?.website,()=>project.
 },{flush:'sync'})
 watch([company, audience, aliasesText, officialUrlsText, caseCount], () => { if (!restoringWorkspace.value) plan.value = null })
 watch(desktopClientMode, () => { if (!restoringWorkspace.value) desktopModel.value = '' })
-watch([plan,collectionPath,desktopClientMode,desktopModel],()=>{autoPlanConfirmed.value=false;sourceConfirmed.value=false},{flush:'sync'})
+watch(desktopSessionSlot,()=>{sessionEpoch++;if(!restoringWorkspace.value){reportRequest++;detailRequest++;recordIntent.value++;reportLoading.value=false}},{flush:'sync'})
+watch([plan,collectionPath,desktopClientMode,desktopModel,desktopSessionSlot],()=>{autoPlanConfirmed.value=false;sourceConfirmed.value=false},{flush:'sync'})
 const rate = value => typeof value === 'number' && Number.isFinite(value) ? `${Math.round(value * 100)}%` : '未知'
 const booleanText = value => value === true ? '出现' : value === false ? '未出现' : '未知'
 const reportDate = value => {
@@ -351,7 +376,7 @@ const reportDate = value => {
   return Number.isNaN(date.getTime()) ? '时间未知' : date.toLocaleString('zh-CN', { timeZone: 'Asia/Hong_Kong', hour12: false })
 }
 const workspaceSnapshot = () => ({ project_id: projectId.value, company: company.value, audience: audience.value,aliases:profileLines(aliasesText.value),official_urls:profileLines(officialUrlsText.value),
-  case_count: caseCount.value, client_mode: desktopClientMode.value, model_label: desktopModel.value,
+  case_count: caseCount.value, client_mode: desktopClientMode.value, model_label: desktopModel.value,session_slot:normalizeSessionSlot(desktopSessionSlot.value,desktopClientMode.value),
   selected_report_id: selectedReportId.value, plan: plan.value, report: report.value })
 const saveWorkspace = () => {
   if (!isDesktop.value || !workspaceReady || restoringWorkspace.value || sourceRequested.value) return
@@ -362,7 +387,7 @@ const saveWorkspace = () => {
     catch { workspaceSaveError.value = '自动保存未成功，请先保留当前计划或报告文件，再重试。' }
   }, 200)
 }
-watch([projectId, company, audience, aliasesText, officialUrlsText, caseCount, desktopClientMode, desktopModel, selectedReportId, plan, report], saveWorkspace, { deep: true })
+watch([projectId, company, audience, aliasesText, officialUrlsText, caseCount, desktopClientMode, desktopModel, desktopSessionSlot, selectedReportId, plan, report], saveWorkspace, { deep: true })
 const restoreWorkspace = async () => {
   if (!isDesktop.value) return
   const request=++restoreRequest,initialEpoch=searchEpoch
@@ -376,7 +401,6 @@ const restoreWorkspace = async () => {
     if(destroyed || request!==restoreRequest || initialEpoch!==searchEpoch)return
     if (saved.project_id != null && projects.value.some(item => item.id === saved.project_id)) projectId.value = saved.project_id
     else {const prior=saved.plan?.profile||saved.report?.profile;projectId.value=prior?projects.value.find(item=>sameBrand(item,prior))?.id||null:null}
-    const scope=searchScope(),intent=recordIntent.value
     const draft=restoreEntityDraftFields(project.value,saved)
     company.value=draft.company
     audience.value=draft.audience
@@ -384,10 +408,12 @@ const restoreWorkspace = async () => {
     officialUrlsText.value=profileLines(draft.official_urls).join('\n')
     if (typeof saved.case_count === 'number') caseCount.value = saved.case_count
     if (['consumer', 'work'].includes(saved.client_mode)) desktopClientMode.value = saved.client_mode
+    desktopSessionSlot.value=normalizeSessionSlot(Object.hasOwn(saved,'session_slot')?saved.session_slot:'primary',desktopClientMode.value)
     if (typeof saved.model_label === 'string') desktopModel.value = saved.model_label
+    const scope=searchScope(),intent=recordIntent.value
     const [task,history]=await Promise.all([api.get_task(),api.list_tasks()])
     if(!sameSearchScope(scope) || request!==restoreRequest || intent!==recordIntent.value)return
-    const matches=searchTaskMatchesProject(task,project.value)
+    const matches=searchTaskMatchesProject(task,project.value)&&sessionSlotMatchesRecord(task,scope.sessionSlot,scope.sessionMode)
     const records=restoredSearchRecords({saved,project:project.value,currentReport:report.value,
       explicitReport:reportChoice.value==='explicit',task:matches?task:null})
     plan.value=null;if(records.plan)setRecord(records.plan)
@@ -399,8 +425,8 @@ const restoreWorkspace = async () => {
         selectedReportId.value=savedReports.value.find(item=>item.run_id===records.report.run_id)?.id || (records.report===saved.report?saved.selected_report_id || '':'')
       }
     } else selectedReportId.value=''
-    nativeTask.value=task;nativeHistory.value=history;handledNativeTask=null
-    if(matches)taskBinding.value={taskId:task.id,project:searchProjectSnapshot(project.value)}
+    nativeTask.value=sessionSlotMatchesRecord(task,scope.sessionSlot,scope.sessionMode)?task:taskStatusOnly(task);nativeHistory.value=history;handledNativeTask=null
+    if(matches)taskBinding.value={taskId:task.id,project:searchProjectSnapshot(project.value),sessionSlot:scope.sessionSlot,sessionEpoch}
     rememberRecovery(task)
     await nextTick()
     workspaceReady = true

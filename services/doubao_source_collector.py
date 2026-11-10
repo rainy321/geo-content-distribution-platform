@@ -56,6 +56,15 @@ class DoubaoSelectors:
     send_button: str = 'button[data-testid="chat_input_send_button"]'
 
 
+def validate_session_slot(slot, client_mode, profile_mode=None):
+    """Closed local session scope; a separate directory is not account identity proof."""
+    if not isinstance(slot, str) or slot not in ('primary', 'secondary'):
+        raise ValueError('豆包会话只能选择 primary 或 secondary')
+    if slot == 'secondary' and (client_mode != 'consumer' or profile_mode not in (None, 'consumer')):
+        raise ValueError('会话 2 只用于普通豆包对话，工作会话只支持会话 1')
+    return slot
+
+
 @dataclass(frozen=True)
 class CollectorConfig:
     question: str = DEFAULT_QUESTION
@@ -73,12 +82,14 @@ class CollectorConfig:
     strict_client_mode: bool = False
     submission_format: str = 'plain'
     selectors: DoubaoSelectors = DoubaoSelectors()
+    session_slot: str = 'primary'
 
     def __post_init__(self) -> None:
         if type(self.strict_client_mode) is not bool:
             raise ValueError('strict_client_mode 必须是布尔值')
         if self.client_mode not in {"consumer", "work"}:
             raise ValueError("client_mode 必须是 consumer 或 work")
+        validate_session_slot(self.session_slot, self.client_mode)
         if self.submission_format not in {'plain', 'verbatim_fenced'}:
             raise ValueError('submission_format 必须是 plain 或 verbatim_fenced')
         if self.requested_model_label is not None and (not self.requested_model_label.strip() or len(self.requested_model_label) > 100):
@@ -1073,6 +1084,8 @@ async def reinspect_existing_sources(config: CollectorConfig, original_result_pa
             or is_deferred_answer(original['response'])
             or original['response'].strip().startswith('算力紧张，办公能力得晚点才能用了')):
         raise ValueError('只可复查原问题已经确认提交且回答完整的采集结果')
+    if (original.get('environment') or {}).get('session_slot', 'primary') != config.session_slot:
+        raise ValueError('复查必须使用原豆包会话，不可切换到其他会话')
     expected_route = SubmissionReceipt._route(original.get('conversation_url'))
     if not expected_route or expected_route[0] != 'canonical':
         raise ValueError('原始结果缺少可绑定的已完成会话网址')
@@ -1208,6 +1221,7 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
         "manual_verification": {"wait_budget_seconds": config.manual_wait_seconds, "waited_seconds": 0, "events": []},
         "environment": {"locale": "zh-CN", "timezone": "Asia/Hong_Kong", "model_version": None,
                         "session": "dedicated_persistent_profile", "new_conversation": False,
+                        "session_slot": config.session_slot, "account_identity_status": "unverified",
                         "requested_client_mode": config.client_mode, "requested_model_label": config.requested_model_label},
     }
     page = None

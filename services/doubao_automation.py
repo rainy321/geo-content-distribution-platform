@@ -48,7 +48,8 @@ async def inspect_available_doubao_session(config: CollectorConfig, *, progress=
         'failure_stage': 'web_preflight', 'failure_reason': None,
         'question_submission_attempted': False, 'question_submitted': False,
         'answer_completed': False, 'actual_client_mode': None, 'model_label': None,
-        'environment': {'session': 'dedicated_persistent_profile', 'requested_client_mode': None},
+        'environment': {'session': 'dedicated_persistent_profile', 'requested_client_mode': None,
+                        'session_slot': config.session_slot, 'account_identity_status': 'unverified'},
         'screenshots': [],
         'manual_verification': {'wait_budget_seconds': config.manual_wait_seconds, 'waited_seconds': 0, 'events': []},
     }
@@ -94,6 +95,9 @@ async def inspect_available_doubao_session(config: CollectorConfig, *, progress=
                         if (observation['client_mode'] in ('consumer', 'work')
                                 and observation['login_required'] is False and observation['challenge'] is False
                                 and ready.get('chat_interface_ready') is True):
+                            if config.session_slot == 'secondary' and observation['client_mode'] != 'consumer':
+                                result.update(actual_client_mode=observation['client_mode'], failure_reason='client_mode_mismatch')
+                                break
                             result.update(collection_status='preflight_ready', actual_client_mode=observation['client_mode'],
                                 model_label=ready.get('model_label') if isinstance(ready.get('model_label'), str) else None)
                             break

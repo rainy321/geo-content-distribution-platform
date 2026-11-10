@@ -156,6 +156,65 @@ class DesktopRetestResumeTests(unittest.TestCase):
             self.assertIn('error', self.resume())
         run.assert_not_awaited()
 
+    def test_secondary_resume_keeps_slot_and_original_bytes_without_replaying_submitted_question(self):
+        self.state['execution'].update(client_mode='consumer', profile_mode='consumer', mode_policy='available_web', session_slot='secondary')
+        self.source.update(requested_client_mode='consumer', profile_mode='consumer', mode_policy='available_web', session_slot='secondary')
+        secondary_report = build_report(self.plan, self.state)
+        write_json(self.source_dir / 'report.json', secondary_report)
+        self.source['result']['report'] = secondary_report
+        self.save_state()
+        self.jobs.store.save(self.source)
+        original = source_manifest(self.source_dir)
+        calls = []
+        async def collect(config, **kwargs):
+            calls.append((config.question, config.profile_dir, config.session_slot))
+            return answer(config.question, environment={'client_mode': 'consumer', 'session_slot': config.session_slot}), self.root / 'synthetic.json'
+        async def no_sleep(_):
+            pass
+        async def runner(value, config, **kwargs):
+            return await run_test_plan(value, config, collect=collect, sleep=no_sleep, **kwargs)
+        with patch('services.desktop_geo_jobs.geo_content_store.get_cycle', return_value=self.cycle), \
+             patch('services.desktop_geo_jobs.geo_content_store.attach_retest'), \
+             patch('services.desktop_geo_jobs.run_test_plan', runner):
+            started = self.resume()
+            self.jobs.worker.join(timeout=5)
+            self.assertFalse(self.jobs.worker.is_alive())
+            saved = self.jobs.get_task(started['id'])
+        self.assertEqual([item[0] for item in calls], [case['question'] for case in self.plan['cases'][1:]])
+        self.assertTrue(all(item[1:] == (self.root / 'doubao/consumer-secondary-browser-profile', 'secondary') for item in calls))
+        self.assertEqual(saved['session_slot'], 'secondary')
+        self.assertEqual(saved['result']['report']['execution']['session_slot'], 'secondary')
+        self.assertEqual(source_manifest(self.source_dir), original)
+
+    def test_resume_rejects_slot_mismatch_including_legacy_task_and_illegal_work_secondary(self):
+        scenarios = [({'session_slot': 'secondary', 'client_mode': 'consumer'}, {}),
+                     ({'session_slot': 'primary'}, {'session_slot': 'secondary'}),
+                     ({'session_slot': 'secondary'}, {'session_slot': 'secondary'}),
+                     ({'session_slot': '../primary'}, {'session_slot': '../primary'})]
+        original_execution, original_source = copy.deepcopy(self.state['execution']), copy.deepcopy(self.source)
+        for execution, source in scenarios:
+            with self.subTest(execution=execution, source=source):
+                self.state['execution'] = {**original_execution, **execution}
+                self.source = {**original_source, **source}
+                if execution.get('client_mode') == 'consumer':
+                    self.source['requested_client_mode'] = 'consumer'
+                self.save_state()
+                self.jobs.store.save(self.source)
+                with patch('services.desktop_geo_jobs.geo_content_store.get_cycle', return_value=self.cycle), \
+                     patch('services.desktop_geo_jobs.run_test_plan', AsyncMock()) as runner:
+                    self.assertIn('error', self.resume())
+                runner.assert_not_awaited()
+        self.assertIsNone(self.jobs.worker)
+
+    def test_resume_rejects_report_slot_that_disagrees_with_original_execution(self):
+        self.source['result']['report']['execution'] = {**self.source['result']['report']['execution'], 'session_slot': 'secondary'}
+        self.jobs.store.save(self.source)
+        with patch('services.desktop_geo_jobs.geo_content_store.get_cycle', return_value=self.cycle), \
+             patch('services.desktop_geo_jobs.run_test_plan', AsyncMock()) as runner:
+            self.assertIn('error', self.resume())
+        runner.assert_not_awaited()
+        self.assertIsNone(self.jobs.worker)
+
     def test_pending_with_any_attempt_trace_unknown_metadata_or_receipt_is_rejected(self):
         original = copy.deepcopy(self.state)
         for fields in ({'question_submission_attempted': True}, {'question_submitted': True},

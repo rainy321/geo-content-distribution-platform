@@ -515,7 +515,12 @@ def build_report(plan: dict, state: dict) -> dict:
     for case in plan["cases"]:
         entry = state["cases"][case["id"]]
         result = entry.get("result") or {}
-        assessment = assess_answer(plan["profile"], result, case["question"])
+        scope_mismatch = bool(result) and ((result.get('environment') or {}).get('session_slot', 'primary')
+                                          != (state.get('execution') or {}).get('session_slot', 'primary'))
+        assessment = assess_answer(plan["profile"], {**result, 'answer_completed': False} if scope_mismatch else result, case["question"])
+        if scope_mismatch:
+            assessment.update(answer_error='collector_session_scope_mismatch',
+                              evaluation_note='采集会话与本轮运行范围不一致，保留原文但不计入有效题分母。')
         status = {"service_capacity_unavailable": "service_unavailable", "background_task_not_final": "deferred_answer",
                   'private_account_context': 'private_account_context'}.get(assessment["answer_error"], entry["status"])
         rows.append({**case, "status": status, "result_path": entry.get("result_path"),
@@ -532,6 +537,8 @@ def build_report(plan: dict, state: dict) -> dict:
                      "visible_citation_count": result.get("visible_citation_count"),
                      "model_label": (result.get("environment") or {}).get("model_label"),
                      "client_mode": (result.get("environment") or {}).get("client_mode"),
+                     "session_slot": (result.get("environment") or {}).get("session_slot", 'primary') if result else None,
+                     "account_identity_status": "unverified",
                      "collected_at": result.get("original_answer_timestamp") or result.get("timestamp"),
                      "source_inspected_at": result.get("timestamp") if result.get("mode") == "inspect_existing_answer" else None,
                      "assessment": assessment})

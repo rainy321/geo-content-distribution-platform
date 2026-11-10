@@ -5,6 +5,7 @@ import { computed, ref } from 'vue'
 import { parse, compileScript, compileTemplate, compileStyle } from '@vue/compiler-sfc'
 import { doubaoTaskRecovery, recoveryCheckpoint, scopedRecoveryCheckpoint } from '../src/utils/geoTaskRecovery.js'
 import {storedSessionScope} from '../src/utils/geoAutomaticCollection.js'
+import * as sessionScope from '../src/utils/geoSessionScope.js'
 
 const failed=(changes={})=>({id:'failed-draft',kind:'draft',status:'need_action',cycle_id:'cycle-a',
   recovery:{failure_reason:'session_redirected_to_logout',question_submission_attempted:false,question_submitted:false,
@@ -118,6 +119,29 @@ test('a completed worker with an interrupted report still needs recovery and nev
   }
 })
 
+test('secondary recovery survives a checkpoint with exact session and profile while legacy shapes stay unchanged',()=>{
+  const value=failed({session_slot:'secondary',profile_mode:'consumer',mode_policy:'available_web',recovery:{...failed().recovery,requested_client_mode:'consumer'}})
+  const before=JSON.stringify(value),info=doubaoTaskRecovery(value),checkpoint=recoveryCheckpoint(value)
+  assert.equal(info.sessionSlot,'secondary');assert.equal(info.profileMode,'consumer')
+  assert.equal(checkpoint.session_slot,'secondary');assert.equal(checkpoint.profile_mode,'consumer');assert.equal(checkpoint.mode_policy,'available_web')
+  assert.equal(doubaoTaskRecovery(JSON.parse(JSON.stringify(checkpoint))).sessionSlot,'secondary')
+  assert.equal(scopedRecoveryCheckpoint(checkpoint,'cycle-a').session_slot,'secondary')
+  assert.equal(Object.hasOwn(recoveryCheckpoint(failed()),'session_slot'),false)
+  assert.equal(Object.hasOwn(doubaoTaskRecovery(failed()),'sessionSlot'),false)
+  assert.equal(JSON.stringify(value),before)
+})
+
+test('invalid or cross-session recovery metadata cannot enable a login or checkpoint',()=>{
+  for(const record of [failed({session_slot:null}),failed({session_slot:'foreign'}),failed({session_slot:'secondary'}),
+    failed({session_slot:'secondary',profile_mode:'consumer',result:{report:{execution:{client_mode:'work'}}}}),
+    failed({session_slot:'secondary',result:{session_slot:'primary'}}),
+    failed({session_slot:'primary',profile_mode:'consumer',result:{report:{execution:{mode_policy:'invalid'}}}})]){
+    assert.equal(doubaoTaskRecovery(record),null)
+    assert.equal(recoveryCheckpoint(record),null)
+    assert.equal(scopedRecoveryCheckpoint(record,'cycle-a'),null)
+  }
+})
+
 const filename=new URL('../src/views/GeoJourney.vue',import.meta.url)
 const {descriptor}=parse(fs.readFileSync(filename,'utf8'))
 const compiled=compileScript(descriptor,{id:'journey-recovery-test'})
@@ -134,7 +158,7 @@ const harness=()=>{
     step:ref(2),clientMode:ref('consumer'),model:ref('当前模型'),busy:ref(false),working:ref(false),
     report:ref(null),reports:ref([]),reportId:ref(''),reportOrigin:ref(''),historyReportId:ref(''),project:ref({}),
     plan:ref(null),planConfirmed:ref(false),replacementSourceId:ref(null),selectedTarget:ref(null),matchingDrafts:ref([]),articleId:ref(null),
-    doubaoTaskRecovery,recoveryCheckpoint,scopedRecoveryCheckpoint,computed,storedSessionScope}
+    doubaoTaskRecovery,recoveryCheckpoint,scopedRecoveryCheckpoint,computed,storedSessionScope,...sessionScope,accountSessionSlot:ref('primary'),unconfirmedNativeTask:ref(null)}
   const confirms=[],calls=[],applies=[]
   values.recoveryInfo=computed(()=>doubaoTaskRecovery(values.recoveryTask.value))
   values.ElMessageBox={confirm:async(...args)=>confirms.push(args)}
@@ -215,7 +239,7 @@ test('a late native acknowledgement cannot overwrite or persist a different cont
 test('missing native acknowledgement preserves the recovery warning',async()=>{
   const page=harness();await page.run(()=>page.startNative('draft',async()=>({status:'running'})))
   assert.equal(page.taskId.value,'failed-draft');assert.equal(page.recoveryTask.value.id,'failed-draft')
-  assert.match(page.error.value,/启动结果尚未确认/)
+  assert.match(page.error.value,/启动结果.*尚未确认/)
 })
 
 test('proved-unsent recovery needs no extra confirmation and unavailable bridge preserves warning',async()=>{

@@ -66,6 +66,27 @@ class BrowserSessionChoiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(primary_data.read_bytes(), b'edge remains independent')
         self.assertEqual(alternate_data.read_bytes(), b'chrome stays logged in')
 
+    async def test_secondary_fallback_and_remembered_launch_never_use_or_seed_primary_profiles(self):
+        root = Path(self.temporary.name)
+        primary, primary_chrome = root / 'consumer-browser-profile', root / 'consumer-browser-profile-chrome'
+        secondary = root / 'consumer-secondary-browser-profile'
+        secondary_chrome = root / 'consumer-secondary-browser-profile-chrome'
+        for path in (primary, primary_chrome):
+            path.mkdir()
+            (path / 'synthetic-marker').write_bytes(path.name.encode())
+        original = {path: (path / 'synthetic-marker').read_bytes() for path in (primary, primary_chrome)}
+        context = SimpleNamespace(close=AsyncMock())
+        playwright, first = self.playwright([RuntimeError('synthetic Edge startup failure'), context])
+        await browser_runtime.launch_context(playwright, secondary, self.options, 'chrome')
+        self.assertEqual([call.args[0] for call in first.await_args_list], [str(secondary), str(secondary_chrome)])
+        self.assertFalse((secondary / 'synthetic-marker').exists())
+        self.assertFalse((secondary_chrome / 'synthetic-marker').exists())
+        playwright, second = self.playwright([context])
+        await browser_runtime.launch_context(playwright, secondary, self.options, 'chrome')
+        self.assertEqual([call.args[0] for call in second.await_args_list], [str(secondary_chrome)])
+        self.assertEqual({path: (path / 'synthetic-marker').read_bytes() for path in original}, original)
+        self.assertFalse((primary / browser_runtime.SELECTION_FILE).exists())
+
     async def test_marker_is_not_created_until_fallback_launch_succeeds(self):
         seen = []
         context = SimpleNamespace(close=AsyncMock())

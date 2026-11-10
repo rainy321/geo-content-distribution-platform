@@ -6,6 +6,7 @@ import { renderToString } from '@vue/server-renderer'
 import { parse,compileScript,compileTemplate,compileStyle } from '@vue/compiler-sfc'
 import * as helpers from '../src/utils/geoSourceMaintenance.js'
 import { journeyDate } from '../src/utils/geoJourney.js'
+import * as sessions from '../src/utils/geoSessionScope.js'
 
 const hash='a'.repeat(64),name='示例协作科技有限公司'
 const fact={id:'fact-web',text:'示例公司官网及协作业务。',confirmed:true,source_url:'https://example.org/about'}
@@ -261,7 +262,7 @@ test('native acknowledgements enter the normal persisted journey task without re
 
 test('source-task completion refreshes maintenance progress while preserving the current editor',async()=>{
   const updated=cycle({source_maintenance:overview({tasks:[record({stage:'submitted_pending_review',read_only:true,can_edit:false})]})}),applied=[],gets=[]
-  const deps={nativeAvailable:Vue.ref(true),taskId:Vue.ref('native-source'),taskKind:Vue.ref('source_maintenance'),task:Vue.ref({status:'running'}),
+  const deps={...sessions,unconfirmedNativeTask:Vue.ref(null),nativeAvailable:Vue.ref(true),taskId:Vue.ref('native-source'),taskKind:Vue.ref('source_maintenance'),task:Vue.ref({status:'running'}),
     finishingTask:Vue.ref(false),cycleId:Vue.ref('cycle-a'),error:Vue.ref(''),replacementSourceId:Vue.ref(null),recoveryTask:Vue.ref(null),
     window:{pywebview:{api:{get_task:async()=>({id:'native-source',kind:'source_maintenance',cycle_id:'cycle-a',status:'completed',result:{source_maintenance:updated.source_maintenance.tasks[0]}})}}},
     scopedRecoveryCheckpoint:()=>null,geoContentApi:{get:async id=>{gets.push(id);return {data:updated}}},applyCycle:(...args)=>applied.push(args),persist:()=>{}}

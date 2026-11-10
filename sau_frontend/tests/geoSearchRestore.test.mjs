@@ -7,6 +7,7 @@ import * as identity from '../src/utils/geoJourney.js'
 import * as restore from '../src/utils/geoSearchRestore.js'
 import { doubaoTaskRecovery } from '../src/utils/geoTaskRecovery.js'
 import * as automaticCollection from '../src/utils/geoAutomaticCollection.js'
+import * as sessionScope from '../src/utils/geoSessionScope.js'
 import {externalSha} from '../src/utils/geoExternalBaseline.js'
 
 const profile=(suffix='a')=>({id:suffix==='a'?1:2,name:'同名软件',entity_type:'product',website:`https://tongyuye.com/products/${suffix}`})
@@ -68,13 +69,13 @@ function harness({saved={project_id:1,plan:plan(),report:null},currentTask=task(
   const messages=[],unmount=[],scope=effectScope()
   const native={get_workspace_state:async()=>saved,get_task:async()=>currentTask,list_tasks:async()=>[currentTask],save_workspace_state:async()=>({saved:true}),...api}
   const journeyImports=Object.fromEntries(['entityLabel','entityProfileFields','profileLines','reportEntityContext','restoreEntityDraftFields','sameBrand'].map(name=>[name,identity[name]]))
-  const dependencies={ref,computed,watch,nextTick,...journeyImports,...restore,...automaticCollection,doubaoTaskRecovery,
+  const dependencies={ref,computed,watch,nextTick,...journeyImports,...restore,...automaticCollection,...sessionScope,doubaoTaskRecovery,
     window:{pywebview:{api:native}},useRoute:()=>({query}),useRouter:()=>({push(){}}),
     ElMessage:{error:value=>messages.push(value),info:value=>messages.push(value),success:value=>messages.push(value)},ElMessageBox:{confirm},
     geoTestApi:{listReports:async()=>({data:reports}),getReport:async()=>({data:report()}),...reportApi},
     projectApi:{updateProject:async(id,fields)=>({data:{...profile(),...fields,id}})},geoContentApi:contentApi,
     onMounted(){},onUnmounted:callback=>unmount.push(callback)}
-  const actions=scope.run(()=>new Function(...Object.keys(dependencies),body+`;return {projects,projectId,project,report,plan,savedReports,selectedReportId,reportChoice,taskBinding,nativeTask,nativeHistory,nativeDetails,nativeStarting,nativeBusy,nativeMessage,taskRecovery,workspaceSaveError,restoreWorkspace,pollNative,startNative,showNativeTask,loadSavedReport,nativeStatusLabel,reportLoading,automaticReady,collectionPath,autoPlanConfirmed,sourcePreview,sourceConfirmed,sourceLoadError,sourceRequested,loadAutomaticSource,displayPlan};`)(...Object.values(dependencies)))
+  const actions=scope.run(()=>new Function(...Object.keys(dependencies),body+`;return {projects,projectId,project,report,plan,savedReports,selectedReportId,reportChoice,taskBinding,nativeTask,nativeHistory,nativeDetails,nativeStarting,nativeBusy,nativeMessage,taskRecovery,workspaceSaveError,restoreWorkspace,pollNative,startNative,showNativeTask,loadSavedReport,nativeStatusLabel,reportLoading,automaticReady,collectionPath,autoPlanConfirmed,sourcePreview,sourceConfirmed,sourceLoadError,sourceRequested,loadAutomaticSource,displayPlan,desktopSessionSlot,desktopClientMode,desktopModel,workspaceSnapshot};`)(...Object.values(dependencies)))
   actions.projects.value=[profile(),profile('b')]
   actions.savedReports.value=reports
   return {...actions,native,messages,stop:()=>{for(const close of unmount)close();scope.stop()}}
@@ -172,6 +173,95 @@ test('automatic session controls and source IDs stay in closed advanced disclosu
   assert.match(advanced,/v-model="desktopClientMode"/);assert.match(advanced,/v-model="desktopModel"/);assert.doesNotMatch(advanced,/\sopen(?:\s|>)/)
   assert.match(template,/<details v-if="sourcePreview" class="context"><summary>查看原任务单依据<\/summary><p>原任务单：[\s\S]*?displayPlan.plan_sha256[\s\S]*?<\/details>/)
   assert.match(template,/<el-checkbox v-if="sourceRequested" v-model="sourceConfirmed"/)
+})
+
+test('the chosen secondary account reaches login, automatic and explicit calls without changing the frozen plan',async()=>{
+  for(const [kind,automatic] of [['login',false],['plan',true],['run',true],['plan',false],['run',false]]){
+    const calls=[],reply={id:`secondary-${kind}`,status:'running',session_slot:'secondary'}
+    const page=harness({currentTask:{status:'idle'},api:{
+      open_login:async options=>{calls.push(options);return reply},
+      plan_automatic:async(...args)=>{calls.push(args.at(-1));return reply},
+      start_automatic_run:async(...args)=>{calls.push(args.at(-1));return reply},
+      plan_with_doubao:async(...args)=>{calls.push(args.at(-1));return reply},
+      start_run:async(...args)=>{calls.push(args.at(-1));return reply}}})
+    try{
+      page.projectId.value=1;page.desktopSessionSlot.value='secondary';page.plan.value=plan()
+      const original=JSON.stringify(page.plan.value)
+      page.autoPlanConfirmed.value=true
+      await page.startNative(kind,automatic)
+      assert.equal(calls.length,1);assert.equal(calls[0].session_slot,'secondary')
+      assert.equal(calls[0][automatic?'profile_mode':'client_mode'],'consumer')
+      assert.equal(Object.hasOwn(page.project.value,'session_slot'),false)
+      if(kind!=='run')assert.equal(JSON.stringify(page.plan.value),original)
+      assert.equal(page.nativeBusy.value,true)
+    }finally{page.stop()}
+  }
+})
+
+test('changing only the account session revokes confirmation and is separate from brand profile and plan hash',async()=>{
+  const page=harness()
+  try{
+    page.projectId.value=1;page.plan.value=plan();page.autoPlanConfirmed.value=true;page.sourceConfirmed.value=true
+    const before=JSON.stringify(page.plan.value)
+    page.desktopSessionSlot.value='secondary'
+    assert.equal(page.autoPlanConfirmed.value,false);assert.equal(page.sourceConfirmed.value,false)
+    assert.equal(JSON.stringify(page.plan.value),before)
+    assert.equal(page.workspaceSnapshot().session_slot,'secondary')
+    assert.equal(Object.hasOwn(page.workspaceSnapshot().plan.profile,'session_slot'),false)
+    assert.match(descriptor.template.content,/另一个个人账号/)
+    assert.match(descriptor.template.content,/会话分隔本身不证明账号独立/)
+    assert.match(descriptor.template.content,/v-model="desktopSessionSlot" :disabled="nativeBusy"/)
+  }finally{page.stop()}
+})
+
+test('late acknowledgements across account changes never apply reports and preserve the running worker busy state',async()=>{
+  const response=deferred(),page=harness({currentTask:{status:'idle'},api:{open_login:()=>response.promise}})
+  try{
+    page.projectId.value=1
+    const pending=page.startNative('login');assert.equal(page.nativeBusy.value,true)
+    page.desktopSessionSlot.value='secondary'
+    response.resolve({id:'primary-worker',status:'running',session_slot:'primary',result:{report:report()},recovery:{failure_reason:'login_required'}});await pending
+    assert.equal(page.nativeTask.value.id,'primary-worker');assert.equal(page.nativeBusy.value,true)
+    assert.equal(page.report.value,null);assert.equal(page.taskRecovery.value,null)
+    assert.equal(page.nativeTask.value.result,undefined);assert.equal(page.nativeTask.value.recovery,undefined)
+  }finally{page.stop()}
+})
+
+test('an acknowledgement with the wrong stored slot cannot be attached even if its brand matches',async()=>{
+  const page=harness({currentTask:{status:'idle'},api:{open_login:async()=>({id:'wrong-slot',status:'running',session_slot:'primary',result:{report:report()},recovery:{failure_reason:'login_required'}})}})
+  try{
+    page.projectId.value=1;page.desktopSessionSlot.value='secondary';await page.startNative('login')
+    assert.equal(page.nativeBusy.value,true);assert.equal(page.report.value,null)
+    assert.equal(page.nativeTask.value.result,undefined);assert.equal(page.nativeTask.value.recovery,undefined)
+    assert.ok(page.messages.some(value=>value.includes('回执与选定账号会话不一致')))
+  }finally{page.stop()}
+})
+
+test('workspace restoration and polling do not apply primary task results or recovery to a selected secondary account',async()=>{
+  const page=harness({saved:{project_id:1,client_mode:'consumer',session_slot:'secondary',plan:plan(),report:null},currentTask:task()})
+  try{
+    await page.restoreWorkspace();assert.equal(page.desktopSessionSlot.value,'secondary')
+    assert.equal(page.report.value,null);assert.equal(page.taskRecovery.value,null)
+    assert.equal(page.nativeTask.value.result,undefined);assert.equal(page.nativeTask.value.recovery,undefined)
+    page.nativeTask.value={id:'secondary-worker',status:'running',session_slot:'secondary'}
+    await page.pollNative();assert.equal(page.report.value,null);assert.equal(page.taskRecovery.value,null)
+    assert.equal(page.nativeTask.value.result,undefined);assert.equal(page.nativeTask.value.recovery,undefined)
+    assert.equal(page.nativeBusy.value,false)
+  }finally{page.stop()}
+})
+
+test('work-secondary combinations are rejected before login and malformed persisted slots never open another session',async()=>{
+  let opens=0
+  const page=harness({currentTask:{status:'idle'},api:{open_login:async()=>{opens++;return {id:'must-not-open'}}}})
+  try{
+    page.projectId.value=1;page.desktopSessionSlot.value='secondary';page.desktopClientMode.value='work'
+    await page.startNative('login');assert.equal(opens,0)
+    assert.ok(page.messages.some(value=>value.includes('会话范围无效')))
+  }finally{page.stop()}
+  for(const slot of [null,'invalid']){
+    const stored=harness({saved:{project_id:1,client_mode:'consumer',session_slot:slot,plan:plan()}})
+    try{await stored.restoreWorkspace();assert.match(stored.workspaceSaveError.value,/未能恢复/)}finally{stored.stop()}
+  }
 })
 
 test('an explicitly selected current report survives workspace restoration and terminal polling',async()=>{

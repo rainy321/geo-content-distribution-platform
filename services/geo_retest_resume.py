@@ -80,6 +80,13 @@ def resume_source(data, source, cycle):
     if not pending:
         raise ValueError('没有可继续的未发送问题；已发送问题不会重发')
     execution = state.get('execution') or {}
+    if (execution.get('session_slot', 'primary') not in ('primary', 'secondary')
+            or source.get('session_slot', 'primary') != execution.get('session_slot', 'primary')
+            or (report.get('execution') or {}).get('session_slot', 'primary') != execution.get('session_slot', 'primary')
+            or (stored_report.get('execution') or {}).get('session_slot', 'primary') != execution.get('session_slot', 'primary')
+            or execution.get('session_slot', 'primary') == 'secondary'
+               and (execution.get('client_mode') != 'consumer' or execution.get('profile_mode', 'consumer') != 'consumer')):
+        raise ValueError('原豆包会话范围缺失或不一致，未继续采集')
     if (execution.get('client_mode') not in {'consumer', 'work'}
             or source.get('requested_client_mode') != execution['client_mode']
             or source.get('requested_model_label') != execution.get('requested_model_label')):

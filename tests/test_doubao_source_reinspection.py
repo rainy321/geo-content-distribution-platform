@@ -67,6 +67,7 @@ class SourceReinspectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result['response'], self.original['response'])
         self.assertEqual(result['original_answer_timestamp'], self.original['timestamp'])
         self.assertEqual(result['original_result_sha256'], hashlib.sha256(self.original_bytes).hexdigest())
+
         self.assertTrue(result['inspection_provenance']['original_result_unchanged'])
         self.assertFalse(result['inspection_provenance']['question_sent'])
         self.assertFalse(result['question_submission_attempted'])
@@ -76,6 +77,13 @@ class SourceReinspectionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(expand.await_count, 1)
         self.assertEqual(expand.await_args.kwargs['progress'],self.events.append)
         self.assertEqual([e['event'] for e in self.events], ['answer_completed'])
+
+    async def test_existing_primary_answer_cannot_be_relabelled_as_secondary(self):
+        self.config = CollectorConfig(question='exact question', output_root=self.root / 'secondary-inspections', session_slot='secondary')
+        with self.assertRaisesRegex(ValueError, '原豆包会话'):
+            await self.inspect()
+        self.assertEqual(self.original_path.read_bytes(), self.original_bytes)
+        self.assertFalse(self.config.output_root.exists())
 
     async def test_changed_question_answer_conversation_or_completion_never_extracts(self):
         for change in ({'answer': 'Different answer'}, {'question_verified': False},

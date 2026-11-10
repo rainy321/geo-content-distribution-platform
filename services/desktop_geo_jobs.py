@@ -13,7 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from dataclasses import replace
 
-from services.doubao_source_collector import CollectorConfig, open_doubao_session
+from services.doubao_source_collector import CollectorConfig, open_doubao_session, validate_session_slot
 from services.geo_test_cli import _plan_with_doubao
 from services.geo_test_runner import RunConfig, exclusive_lock, run_test_plan, write_json
 from services.geo_test_service import build_report, normalize_profile, validate_plan, build_planning_prompt
@@ -158,15 +158,20 @@ class DesktopGeoJobs:
     def _config(self, options):
         if not isinstance(options, dict):
             raise ValueError("采集选项格式无效")
+        if set(options) - {'client_mode', 'profile_mode', 'mode_policy', 'model_label', 'session_slot'}:
+            raise ValueError('采集选项包含不支持的字段，不能指定其他会话路径')
         # Keep public chat separate from a work account's enterprise connectors.
         # The existing profile remains the work profile; no sessions are copied.
         client_mode = options.get("client_mode", "consumer")
         profile_mode = options.get('profile_mode', client_mode)
         if profile_mode not in ('consumer', 'work') or options.get('mode_policy') not in (None, 'available_web'):
             raise ValueError('网页会话配置无效')
+        slot = validate_session_slot(options.get('session_slot', 'primary'), client_mode, profile_mode)
         profile = "consumer-browser-profile" if profile_mode == "consumer" else "browser-profile"
+        if slot == 'secondary':
+            profile = 'consumer-secondary-browser-profile'
         return CollectorConfig(profile_dir=self.data / "doubao" / profile, headed=True,
-                               manual_wait_seconds=None, client_mode=client_mode,
+                               manual_wait_seconds=None, client_mode=client_mode, session_slot=slot,
                                strict_client_mode=options.get('mode_policy') == 'available_web',
                                requested_model_label=options.get("model_label") or None,
                                executable_path=edge_executable(), fallback_executable_path=chrome_executable())
@@ -274,7 +279,8 @@ class DesktopGeoJobs:
                         "created_at": now(), "client_name": client_name}
             if collector_config is not None:
                 self.job.update(requested_client_mode=collector_config.client_mode,
-                                requested_model_label=collector_config.requested_model_label)
+                                requested_model_label=collector_config.requested_model_label,
+                                session_slot=collector_config.session_slot, account_identity_status='unverified')
             if session_profile_mode is not None:
                 self.job.update(profile_mode=session_profile_mode, mode_policy='available_web', automation_scope='doubao_web')
             if automation_profile_mode is not None:
@@ -423,8 +429,8 @@ class DesktopGeoJobs:
             message += '会话保存状态未确认；再次采集前会检查界面、登录与验证状态。'
             return {'message': message, 'login_observation': observation,
                     'requested_client_mode': config.client_mode, 'close_reason': reason,
-                    'session_saved': None}
-        return self._start("login", login)
+                    'session_saved': None, 'session_slot': config.session_slot, 'account_identity_status': 'unverified'}
+        return self._start("login", login, collector_config=config)
 
     def plan_with_doubao(self, profile, case_count, options):
         try:
@@ -441,8 +447,8 @@ class DesktopGeoJobs:
         return self._start("plan", plan, client_name=profile["name"], collector_config=config)
 
     def _automatic_config(self, options):
-        if not isinstance(options, dict) or set(options) - {'model_label', 'profile_mode'}:
-            raise ValueError('自动网页选项只支持模型标签与专用会话类型')
+        if not isinstance(options, dict) or set(options) - {'model_label', 'profile_mode', 'session_slot'}:
+            raise ValueError('自动网页选项只支持模型标签、专用会话类型与会话选择')
         profile_mode = options.get('profile_mode', 'consumer')
         if profile_mode not in ('consumer', 'work'):
             raise ValueError('请选择有效的专用网页会话')
@@ -450,7 +456,8 @@ class DesktopGeoJobs:
         if model is not None and not isinstance(model, str):
             raise ValueError('模型标签必须是界面文字')
         return self._config({'client_mode': profile_mode, 'profile_mode': profile_mode,
-            'model_label': model, 'mode_policy': 'available_web'}), profile_mode
+            'model_label': model, 'mode_policy': 'available_web',
+            'session_slot': options.get('session_slot', 'primary')}), profile_mode
 
     async def _prepare_automatic(self, config, profile_mode, output):
         # The preflight owns and normally closes only the browser it launched.
@@ -459,6 +466,8 @@ class DesktopGeoJobs:
             result, path = await inspect_available_doubao_session(
                 replace(config, output_root=output), progress=self._collector_progress)
         mode = result.get('actual_client_mode')
+        if config.session_slot == 'secondary' and mode == 'work':
+            result = {**result, 'collection_status': 'need_action', 'failure_reason': 'client_mode_mismatch'}
         if result.get('collection_status') != 'preflight_ready' or mode not in ('consumer', 'work'):
             self._collector_progress({'event': 'collector_finished', 'collection_status': 'need_action',
                 'failure_reason': result.get('failure_reason') or 'web_mode_unknown_not_submitted',
@@ -484,7 +493,8 @@ class DesktopGeoJobs:
             locked = await self._prepare_automatic(config, profile_mode, output.parent / 'preflight')
             value = await _plan_with_doubao(profile, SimpleNamespace(case_count=case_count, output=output),
                                           locked, progress=self._collector_progress)
-            value['planner'].update(profile_mode=profile_mode, mode_policy='available_web', automation_scope='doubao_web')
+            value['planner'].update(profile_mode=profile_mode, mode_policy='available_web', automation_scope='doubao_web',
+                                    session_slot=config.session_slot, account_identity_status='unverified')
             write_json(output, value)
             return {'plan': value}
         return self._start('plan', plan, client_name=profile['name'], collector_config=config,
@@ -540,26 +550,30 @@ class DesktopGeoJobs:
             execution = cycle['baseline'].get('execution') or {}
             options = {'client_mode': execution.get('client_mode') or next((case.get('client_mode') for case in cycle['baseline']['cases'] if case.get('client_mode')), 'consumer'),
                        'model_label': execution.get('requested_model_label') or ''}
-            for key in ('profile_mode', 'mode_policy'):
+            for key in ('profile_mode', 'mode_policy', 'session_slot'):
                 if key in execution:
                     options[key] = execution[key]
             return self.start_run(cycle['test_plan'], options, cycle_id=cycle_id)
         except (ValueError, geo_content_store.ResearchNotFoundError) as error:
             return {'error': str(error)}
 
-    def start_research_probe(self, cycle_id, case_id):
+    def start_research_probe(self, cycle_id, case_id, options=None):
         """Collect one unchanged cycle question once; never create a full report."""
         from services.geo_research_probe_service import context, attach_probe
         database = self.data / 'database.db'
         try:
+            if options is not None and (not isinstance(options, dict) or set(options) - {'session_slot'}):
+                raise ValueError('单题采集只支持选择受控豆包会话')
+            if options is not None and 'session_slot' in options:
+                validate_session_slot(options['session_slot'], 'consumer')
             if not isinstance(cycle_id, str) or not cycle_id:
                 raise ValueError('请选择本轮实验')
             cycle = geo_content_store.get_cycle(database, cycle_id)
-            details = context(cycle, case_id)
+            details = context(cycle, case_id, session_slot=options.get('session_slot') if options is not None else None)
             execution = details['execution']
             config = replace(self._config({'client_mode': execution['client_mode'],
                 'model_label': execution['requested_model_label'],
-                **{key: execution[key] for key in ('profile_mode', 'mode_policy') if key in execution}}),
+                **{key: execution[key] for key in ('profile_mode', 'mode_policy', 'session_slot') if key in execution}}),
                 question=details['case']['question'], timeout_seconds=execution['timeout_seconds'])
         except (ValueError, TypeError, KeyError, sqlite3.Error, geo_content_store.ResearchNotFoundError) as error:
             return {'error': str(error)}
@@ -570,7 +584,7 @@ class DesktopGeoJobs:
         async def probe():
             import hashlib
             current = geo_content_store.get_cycle(database, cycle_id)
-            fresh = context(current, case_id)
+            fresh = context(current, case_id, session_slot=execution['session_slot'])
             if (current['test_plan']['plan_sha256'] != cycle['test_plan']['plan_sha256']
                     or current['profile'] != cycle['profile'] or fresh != details):
                 raise ValueError('原实验问题或资料已变化，未发送，请重新核对')
@@ -586,7 +600,8 @@ class DesktopGeoJobs:
                 write_json(directory / 'single_probe_intent.json', {'probe_id': probe_id,
                     'cycle_id': cycle_id, 'case_id': case_id, 'question': config.question,
                     'plan_sha256': cycle['test_plan']['plan_sha256'], 'created_at': now(),
-                    'collector_invocation_limit': 1, 'automatic_retry': False})
+                    'collector_invocation_limit': 1, 'automatic_retry': False,
+                    'session_slot': config.session_slot, 'account_identity_status': 'unverified'})
                 try:
                     # Do not retry any call, including exceptions after sending.
                     result, path = await collect_doubao_sources(config, progress=self._collector_progress)
@@ -597,6 +612,8 @@ class DesktopGeoJobs:
                     raw = path.read_bytes()
                     if json.loads(raw.decode('utf-8')) != result or result.get('question') != config.question:
                         raise ValueError('单题采集问题或持久结果不一致')
+                    if (result.get('environment') or {}).get('session_slot', 'primary') != config.session_slot:
+                        raise ValueError('单题采集会话与选定范围不一致')
                     evidence = {'result_path': str(path), 'result_sha256': hashlib.sha256(raw).hexdigest()}
                 except asyncio.CancelledError:
                     cancelled = True
@@ -607,7 +624,8 @@ class DesktopGeoJobs:
                 if result is None:
                     result = {'question': config.question, 'response': '', 'collection_status': 'failed',
                         'failure_reason': 'collector_exception_submission_unknown',
-                        'timestamp': now(), 'environment': {'client_mode': execution['client_mode']}}
+                        'timestamp': now(), 'environment': {'client_mode': execution['client_mode'],
+                            'session_slot': config.session_slot, 'account_identity_status': 'unverified'}}
                 self._collector_progress({'event': 'collector_finished',
                     'failure_reason': result.get('failure_reason'), 'failure_stage': result.get('failure_stage'),
                     'collection_status': result.get('collection_status'),
@@ -659,7 +677,7 @@ class DesktopGeoJobs:
             execution = details['execution']
             config = self._config({'client_mode': execution['client_mode'],
                                    'model_label': execution.get('requested_model_label'),
-                                   **{key: execution[key] for key in ('profile_mode', 'mode_policy') if key in execution}})
+                                   **{key: execution[key] for key in ('profile_mode', 'mode_policy', 'session_slot') if key in execution}})
             config = replace(config, timeout_seconds=execution.get('timeout_seconds', config.timeout_seconds))
             cooldown = execution.get('cooldown_seconds', 15)
             source = details['run_dir']

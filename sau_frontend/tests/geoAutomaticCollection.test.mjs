@@ -4,6 +4,7 @@ import fs from 'node:fs'
 import {parse,compileScript,compileTemplate} from '@vue/compiler-sfc'
 import {ref} from 'vue'
 import * as automatic from '../src/utils/geoAutomaticCollection.js'
+import * as sessionScope from '../src/utils/geoSessionScope.js'
 import {externalSha} from '../src/utils/geoExternalBaseline.js'
 
 const owner={id:7,name:'合成产品',entity_type:'product',website:'https://example.org/products/service'}
@@ -21,11 +22,18 @@ test('automatic bridges are explicit capabilities and missing either cannot sile
   assert.equal(automatic.requireAutomaticBridge(api),api)
   assert.deepEqual(automatic.automaticCollectionOptions('consumer',' 模型 A '),{profile_mode:'consumer',model_label:'模型 A'})
   assert.deepEqual(automatic.automaticCollectionOptions('work'),{profile_mode:'work',model_label:''})
+  assert.deepEqual(automatic.automaticCollectionOptions('consumer',' 模型 A ','secondary'),{profile_mode:'consumer',model_label:'模型 A',session_slot:'secondary'})
+  for(const slot of [null,'invalid',0])assert.throws(()=>automatic.automaticCollectionOptions('consumer','',slot))
+  assert.throws(()=>automatic.automaticCollectionOptions('work','','secondary'))
   for(const [profile,model] of [['auto',''],['work',null],['consumer','x'.repeat(101)]])assert.throws(()=>automatic.automaticCollectionOptions(profile,model))
 })
 test('stored session scope uses only the native whitelist and never silently substitutes an invalid profile',()=>{
   assert.deepEqual(automatic.storedSessionScope({}),{})
   assert.deepEqual(automatic.storedSessionScope({client_mode:'work',profile_mode:'consumer',mode_policy:'available_web',cookie:'private'}),{profile_mode:'consumer',mode_policy:'available_web'})
+  assert.deepEqual(automatic.storedSessionScope({client_mode:'consumer',profile_mode:'consumer',mode_policy:'available_web',session_slot:'secondary'}),{profile_mode:'consumer',mode_policy:'available_web',session_slot:'secondary'})
+  assert.deepEqual(automatic.storedSessionScope({session_slot:'primary'}),{session_slot:'primary'})
+  for(const execution of [{session_slot:null},{session_slot:'foreign'},{session_slot:'secondary',client_mode:'work'},
+    {session_slot:'secondary',profile_mode:'consumer',client_mode:'work'},{session_slot:'secondary',profile_mode:'work'}])assert.throws(()=>automatic.storedSessionScope(execution))
   for(const execution of [{profile_mode:'foreign'},{profile_mode:null},{profile_mode:'consumer',mode_policy:'force_consumer'},{mode_policy:'available_web'}])assert.throws(()=>automatic.storedSessionScope(execution))
 })
 test('an external cycle supplies an independently cloned exact frozen plan and a route without starting or comparing',async()=>{
@@ -56,7 +64,7 @@ const action=(name,values)=>Function(...Object.keys(values),`return (${expressio
 test('Journey automatic collection uses exactly the new two-argument run and explicit mode remains a deliberate choice',async()=>{
   const calls=[],plan=ref((await frozen()).test_plan),collectionPath=ref('automatic')
   const api={plan_automatic(){},start_automatic_run:(...args)=>calls.push(['automatic',...args]),start_run:(...args)=>calls.push(['explicit',...args])}
-  const values={...automatic,window:{pywebview:{api}},plan,collectionPath,clientMode:ref('work'),automaticProfileMode:ref('consumer'),model:ref('快速'),options:()=>({client_mode:'work',model_label:'指定'})}
+  const values={...automatic,...sessionScope,accountSessionSlot:ref('primary'),window:{pywebview:{api}},plan,collectionPath,clientMode:ref('work'),automaticProfileMode:ref('consumer'),model:ref('快速'),options:()=>({client_mode:'work',model_label:'指定'})}
   const run=action('collectBaseline',values);await run();assert.equal(calls[0].length,3)
   assert.deepEqual(calls[0],['automatic',plan.value,{profile_mode:'consumer',model_label:'快速'}])
   collectionPath.value='explicit';await run();assert.deepEqual(calls[1],['explicit',plan.value,{client_mode:'work',model_label:'指定'}])

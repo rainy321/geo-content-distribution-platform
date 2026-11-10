@@ -1,11 +1,13 @@
 import {sameBrand} from './geoJourney.js'
 import {externalSha,isExternalCycle} from './geoExternalBaseline.js'
+import {normalizeSessionSlot} from './geoSessionScope.js'
 
 export const automaticCollectionUnavailable='当前软件缺少自动网页采集能力，请更新软件；不会切换到旧采集方式或要求手机录入。'
 export const automaticBridgeReady=api=>['plan_automatic','start_automatic_run'].every(name=>typeof api?.[name]==='function')
-export function automaticCollectionOptions(profileMode,model=''){
+export function automaticCollectionOptions(profileMode,model='',sessionSlot='primary'){
   if(!['consumer','work'].includes(profileMode)||typeof model!=='string'||model.length>100)throw Error('请核对专用会话与模型选项。')
-  return {profile_mode:profileMode,model_label:model.trim()}
+  const slot=normalizeSessionSlot(sessionSlot,profileMode)
+  return {profile_mode:profileMode,model_label:model.trim(),...(slot==='secondary'?{session_slot:slot}:{})}
 }
 const profileModeKnown=value=>['consumer','work'].includes(value)
 const nativeExecution=record=>isExternalCycle(record)||record?.baseline_source==='user_reported_external'?{}:record?.baseline?.execution||record?.execution||{}
@@ -36,6 +38,10 @@ export function storedSessionScope(execution={}){
   if(Object.hasOwn(execution,'mode_policy')){
     if(execution.mode_policy!=='available_web'||!scope.profile_mode)throw Error('原自动测试会话策略或范围未核对，未打开其他会话。')
     scope.mode_policy=execution.mode_policy
+  }
+  if(Object.hasOwn(execution,'session_slot')){
+    scope.session_slot=normalizeSessionSlot(execution.session_slot,scope.profile_mode??execution.client_mode??'consumer')
+    if(Object.hasOwn(execution,'client_mode'))normalizeSessionSlot(execution.session_slot,execution.client_mode)
   }
   return scope
 }

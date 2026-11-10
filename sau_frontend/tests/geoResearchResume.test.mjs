@@ -4,6 +4,7 @@ import test from 'node:test'
 import { computed, ref } from 'vue'
 import { parse, compileScript, compileTemplate, compileStyle } from '@vue/compiler-sfc'
 import { doubaoTaskRecovery, scopedRecoveryCheckpoint } from '../src/utils/geoTaskRecovery.js'
+import * as sessions from '../src/utils/geoSessionScope.js'
 
 const filename=new URL('../src/views/GeoJourney.vue',import.meta.url)
 const {descriptor,errors}=parse(fs.readFileSync(filename,'utf8'),{filename:filename.pathname})
@@ -20,7 +21,7 @@ const sourceTask=(changes={})=>({id:'source-retest',kind:'run',status:'failed',c
 const harness=(source=sourceTask())=>{
   const calls={reads:[],resumes:[],wholeRounds:[],confirms:[],persist:[]}
   const checkpoint={id:'source-retest',kind:'retest',status:'need_action',cycle_id:'cycle-a',recovery:{question_submitted:true}}
-  const values={computed,step:ref(4),cycle:ref({id:'cycle-a'}),cycleId:ref('cycle-a'),nativeAvailable:ref(true),retestResume:ref(null),
+  const values={...sessions,unconfirmedNativeTask:ref(null),accountSessionSlot:ref('primary'),computed,step:ref(4),cycle:ref({id:'cycle-a'}),cycleId:ref('cycle-a'),nativeAvailable:ref(true),retestResume:ref(null),
     visibleRecoveryInfo:ref({kind:'retest',taskId:'source-retest',requiresConfirmation:true}),
     task:ref(source),taskId:ref('source-retest'),taskKind:ref('retest'),recoveryTask:ref(checkpoint),working:ref(false),error:ref('')}
   values.nativeBusy=computed(()=>values.task.value.status==='running')
