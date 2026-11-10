@@ -74,7 +74,7 @@ class TestNativeGeoJobs(unittest.TestCase):
             calls.append(config)
             return {'client_mode': 'consumer', 'login_required': False, 'challenge': False}
         with patch('services.desktop_geo_jobs.open_doubao_session', login):
-            self.jobs.open_login({'client_mode': 'consumer', 'session_slot': 'secondary'})
+            ack = self.jobs.open_login({'client_mode': 'consumer', 'session_slot': 'secondary'})
             task = self.wait_finished()
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0].profile_dir, self.root / 'doubao/consumer-secondary-browser-profile')
@@ -82,14 +82,121 @@ class TestNativeGeoJobs(unittest.TestCase):
         self.assertEqual(task['result']['session_slot'], 'secondary')
         self.assertEqual(task['result']['account_identity_status'], 'unverified')
         self.assertIsNone(task['result']['session_saved'])
+        self.assertEqual(ack['id'], task['id'])
+        self.assertEqual(ack['status'], 'running')
+        self.assertEqual(ack['kind'], 'login')
+        self.assertEqual(ack['session_slot'], calls[0].session_slot)
+        self.assertEqual(ack['requested_client_mode'], 'consumer')
+        self.assertEqual(ack['account_identity_status'], 'unverified')
+
+    def test_primary_legacy_and_work_login_acks_keep_their_actual_config_scope(self):
+        calls = []
+        async def login(config, _wait):
+            calls.append(config)
+            return None
+        with patch('services.desktop_geo_jobs.open_doubao_session', login):
+            for options, mode, directory in (({}, 'consumer', 'consumer-browser-profile'),
+                                             ({'client_mode': 'work'}, 'work', 'browser-profile')):
+                with self.subTest(mode=mode):
+                    ack = self.jobs.open_login(options)
+                    task = self.wait_finished()
+                    self.assertEqual(ack['id'], task['id'])
+                    self.assertEqual((ack['status'], ack['session_slot'], ack['requested_client_mode']),
+                                     ('running', 'primary', mode))
+                    self.assertEqual(calls[-1].session_slot, ack['session_slot'])
+                    self.assertEqual(calls[-1].profile_dir, self.root / 'doubao' / directory)
+
+    def test_automatic_ack_is_frozen_before_the_real_worker_updates_observations(self):
+        config = self.jobs._config({'session_slot': 'secondary'})
+        async def completed():
+            with self.jobs.lock:
+                self.jobs.job.update(requested_client_mode='consumer', observed_client_mode='consumer')
+            return {}
+        # Use the real worker, but join inside start so completion must precede
+        # the ACK return. A post-start job snapshot would lose the initial scope.
+        class JoinedThread(threading.Thread):
+            def start(thread):
+                super().start()
+                thread.join(timeout=5)
+        with patch('services.desktop_geo_jobs.threading.Thread', JoinedThread):
+            ack = self.jobs._start('plan', completed, collector_config=config, automation_profile_mode='consumer')
+        task = self.wait_finished()
+        self.assertEqual(task['status'], 'completed')
+        self.assertEqual(task['requested_client_mode'], 'consumer')
+        self.assertEqual(ack['status'], 'running')
+        self.assertEqual(ack['session_slot'], 'secondary')
+        self.assertIsNone(ack['requested_client_mode'])
+        self.assertEqual((ack['profile_mode'], ack['mode_policy'], ack['automation_scope']),
+                         ('consumer', 'available_web', 'doubao_web'))
+        self.assertNotIn('result', ack)
+
+    def test_secondary_probe_real_start_ack_binds_frozen_q02_and_one_collector_call(self):
+        value = plan()
+        cycle = {'id': 'synthetic-cycle', 'profile': value['profile'], 'test_plan': value,
+                 'baseline': {'execution': {'client_mode': 'consumer', 'profile_mode': 'consumer',
+                     'mode_policy': 'available_web'}, 'cases': value['cases']}}
+        question = value['cases'][1]['question']
+        frozen = json.dumps(value, ensure_ascii=False, sort_keys=True)
+        calls = []
+        async def collect(config, *, progress):
+            calls.append(config)
+            result = answer(config.question, environment={'client_mode': 'consumer', 'session_slot': config.session_slot})
+            path = config.output_root / 'synthetic/result.json'
+            path.parent.mkdir(parents=True)
+            path.write_text(json.dumps(result, ensure_ascii=False), encoding='utf-8')
+            return result, path
+        def attach(_database, cycle_id, result, **kwargs):
+            self.assertEqual(cycle_id, cycle['id'])
+            return {'id': result['run_id'], 'after': {'answer_evaluable': True},
+                    'execution': {'session_slot': result['collector_result']['environment']['session_slot']}}
+        with patch('services.desktop_geo_jobs.geo_content_store.get_cycle', return_value=cycle), \
+             patch('services.desktop_geo_jobs.collect_doubao_sources', collect), \
+             patch('services.geo_research_probe_service.attach_probe', attach):
+            ack = self.jobs.start_research_probe(cycle['id'], 'q02', {'session_slot': 'secondary'})
+            task = self.wait_finished()
+        self.assertEqual(task['status'], 'completed')
+        self.assertEqual(ack['id'], task['id'])
+        self.assertEqual((ack['status'], ack['kind'], ack['cycle_id']), ('running', 'probe', cycle['id']))
+        self.assertEqual((ack['session_slot'], ack['profile_mode'], ack['mode_policy']),
+                         ('secondary', 'consumer', 'available_web'))
+        self.assertEqual(ack['requested_client_mode'], 'consumer')
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].session_slot, ack['session_slot'])
+        self.assertEqual(calls[0].question, question)
+        self.assertEqual(json.dumps(value, ensure_ascii=False, sort_keys=True), frozen)
+        self.assertEqual(calls[0].profile_dir, self.root / 'doubao/consumer-secondary-browser-profile')
+
+    def test_both_automatic_api_acks_propagate_the_secondary_collector_scope(self):
+        async def ready(config, _mode, _output):
+            return config
+        async def planner(_profile, _args, config, **kwargs):
+            self.assertEqual(config.session_slot, 'secondary')
+            return plan()
+        async def runner(_value, config, **kwargs):
+            self.assertEqual(config.collector.session_slot, 'secondary')
+            return {'status': 'completed'}
+        with patch.object(self.jobs, '_prepare_automatic', ready), \
+             patch('services.desktop_geo_jobs._plan_with_doubao', planner), \
+             patch('services.desktop_geo_jobs.run_test_plan', runner):
+            for kind in ('plan', 'run'):
+                with self.subTest(kind=kind):
+                    ack = (self.jobs.plan_automatic(plan()['profile'], 4, {'session_slot': 'secondary'}) if kind == 'plan'
+                           else self.jobs.start_automatic_run(plan(), {'session_slot': 'secondary'}))
+                    task = self.wait_finished()
+                    self.assertEqual(task['status'], 'completed')
+                    self.assertEqual(ack['id'], task['id'])
+                    self.assertEqual((ack['kind'], ack['session_slot'], ack['profile_mode'], ack['mode_policy']),
+                                     (kind, 'secondary', 'consumer', 'available_web'))
+                    self.assertIsNone(ack['requested_client_mode'])
 
     def test_concurrent_task_is_rejected_and_stop_cancels_wait(self):
         entered = threading.Event()
         async def pending():
             entered.set()
             await asyncio.sleep(3600)
-        self.jobs._start('synthetic-test', pending)
+        ack = self.jobs._start('synthetic-test', pending, collector_config=self.jobs._config({'session_slot': 'secondary'}))
         self.assertTrue(entered.wait(timeout=3))
+        self.assertEqual(ack['session_slot'], 'secondary')
         self.assertIn('error', self.jobs._start('second-synthetic-test', pending))
         self.jobs.stop_task()
         self.assertEqual(self.wait_finished()['status'], 'stopped')

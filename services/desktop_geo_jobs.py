@@ -298,6 +298,13 @@ class DesktopGeoJobs:
             self._destination_check_pending = False
             self._persist()
             task_identifier = self.job['id']
+            # Freeze the accepted scope before the worker can finish or update
+            # observations. The UI must verify the same session on this ACK.
+            acknowledgement = {key: copy.deepcopy(self.job[key]) for key in (
+                'id', 'status', 'kind', 'session_slot', 'account_identity_status',
+                'profile_mode', 'mode_policy', 'automation_scope',
+                'requested_client_mode', 'requested_model_label', 'cycle_id', 'target_id')
+                if key in self.job}
 
         def run():
             async def execute():
@@ -362,7 +369,7 @@ class DesktopGeoJobs:
                         self.task = self.loop = None
         self.worker = threading.Thread(target=run, daemon=True, name="GEO native collector")
         self.worker.start()
-        return {"id": self.job["id"], "status": "running"}
+        return acknowledgement
 
     def _apply_incomplete_run(self, report):
         """A completed worker is not a successfully completed collection run."""
