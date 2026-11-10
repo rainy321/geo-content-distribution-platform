@@ -554,6 +554,7 @@ const startNative=async(kind,action,requestedSlot)=>{
   if(!result||typeof result.id!=='string'||!(/^[\w-]{1,100}$/).test(result.id)||kind!=='destination'&&!sessionSlotMatchesRecord(result,slot))throw new Error('任务启动结果或账号会话尚未确认，请先查看任务记录；原记录已保留，不会自动重发')
   task.value={...result,kind:result.kind||kind};taskId.value=result.id;liveTaskId=result.id;taskKind.value=kind;handledTask=''
   unconfirmedNativeTask.value=null
+  if(kind!=='destination'&&error.value==='任务账号会话与当前记录不一致，未混入其他会话回执。')error.value=''
   if(!['login','destination'].includes(kind))recoveryTask.value=null
   persist()
 }
@@ -577,6 +578,7 @@ const resumeUnsentRetest=()=>run(async()=>{
     throw new Error('续采启动结果尚未确认，请查看原任务与任务记录，不要重复点击继续。')
   task.value={...result,kind:'run',cycle_id:cycle};taskId.value=result.id;liveTaskId=result.id;taskKind.value='retest';handledTask=''
   recoveryTask.value=null
+  if(error.value==='任务账号会话与当前记录不一致，未混入其他会话回执。')error.value=''
   persist()
 })
 const startSingleCaseProbe=selection=>run(async()=>{
@@ -602,6 +604,7 @@ const startSingleCaseProbe=selection=>run(async()=>{
     throw new Error('单题任务启动结果尚未确认，请查看任务记录，不要重复发送。')
   task.value={...result,kind:'probe',cycle_id:id,case_id:selected.id,session_slot:slot};taskId.value=result.id;liveTaskId=result.id;taskKind.value='probe';handledTask=''
   unconfirmedNativeTask.value=null
+  if(error.value==='任务账号会话与当前记录不一致，未混入其他会话回执。')error.value=''
   persist()
 })
 const loginSingleCaseSession=selection=>run(async()=>{
@@ -715,13 +718,14 @@ const poll=async()=>{
   let slot
   try{slot=sessionSlotForRecord(task.value)}catch(cause){error.value=cause.message;return}
   pollPending=true
-  const epoch=contextEpoch,selectedTaskId=taskId.value
-  const currentScope=()=>!destroyed&&epoch===contextEpoch&&selectedTaskId===taskId.value&&sessionSlotMatchesRecord(task.value,slot)
+  const epoch=contextEpoch,selectedTaskId=taskId.value,unconfirmedTaskId=unconfirmedNativeTask.value?.id
+  const currentScope=()=>!destroyed&&epoch===contextEpoch&&selectedTaskId===taskId.value&&unconfirmedTaskId===unconfirmedNativeTask.value?.id&&sessionSlotMatchesRecord(task.value,slot)
   try{
-    const unconfirmed=unconfirmedNativeTask.value
-    const current=await window.pywebview.api.get_task(unconfirmed?.id);if(!currentScope())return
-    if(unconfirmed){if(current.id===unconfirmed.id&&current.status!=='running'){unconfirmedNativeTask.value=null;error.value='原启动回执的会话范围未确认，任务已结束，请核对原记录；没有自动重发。'}return}
-    if(current.id&&!sessionSlotMatchesRecord(current,slot)){if(current.status==='running'&&/^[\w-]{1,100}$/.test(current.id))unconfirmedNativeTask.value={id:current.id,status:'running'};throw new Error('任务账号会话与当前记录不一致，未混入其他会话回执。')}
+    const requestedTaskId=unconfirmedTaskId||selectedTaskId||undefined
+    const current=await window.pywebview.api.get_task(requestedTaskId);if(!currentScope())return
+    if(!current||typeof current!=='object'||requestedTaskId&&current.id!==requestedTaskId)return
+    if(unconfirmedTaskId){if(current.status!=='running'){unconfirmedNativeTask.value=null;error.value='原启动回执的会话范围未确认，任务已结束，请核对原记录；没有自动重发。'}return}
+    if(current.id&&!sessionSlotMatchesRecord(current,slot)){if(current.status==='running'&&/^[\w-]{1,100}$/.test(current.id))unconfirmedNativeTask.value={id:current.id,status:'running'};error.value='任务账号会话与当前记录不一致，未混入其他会话回执。';return}
     finishingTask.value=Boolean(current.id&&current.id===taskId.value&&current.status!=='running'&&handledTask!==current.id);task.value=current
     if(!current.id||current.status==='running'||current.id!==taskId.value||handledTask===current.id)return
     const recovery=scopedRecoveryCheckpoint(current,cycleId.value)

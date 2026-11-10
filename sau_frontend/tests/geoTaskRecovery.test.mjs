@@ -263,6 +263,69 @@ test('a late old poll cannot overwrite a newly started task or another project c
   }
 })
 
+test('a restored primary task is polled by ID instead of the latest secondary login',async()=>{
+  const page=harness(),selected=failed(),latest={id:'latest-secondary-login',kind:'login',status:'completed',session_slot:'secondary'},reads=[]
+  page.window.pywebview.api.get_task=async id=>{reads.push(id);return id===selected.id?selected:latest}
+  await page.restoreTaskRecovery();await page.poll()
+  assert.deepEqual(reads,[selected.id,selected.id])
+  assert.equal(page.task.value.id,selected.id);assert.equal(page.error.value,'')
+  assert.equal(page.unconfirmedNativeTask.value,null);assert.equal(page.applies.length,1)
+})
+
+test('a pinned poll cannot replace its running selected task with a null or different same-slot record',async()=>{
+  for(const result of [null,{id:'unrelated-primary',kind:'login',status:'completed',session_slot:'primary'}]){
+    const page=harness(),selected={id:'selected-running',kind:'draft',status:'running',session_slot:'primary'},reads=[]
+    page.task.value=selected;page.taskId.value=selected.id;page.error.value='本次保存请求失败'
+    page.window.pywebview.api.get_task=async id=>{reads.push(id);return result}
+    await page.poll()
+    assert.deepEqual(reads,[selected.id]);assert.deepEqual(page.task.value,selected)
+    assert.equal(page.error.value,'本次保存请求失败');assert.deepEqual(page.applies,[])
+  }
+})
+
+test('an old unconfirmed poll cannot clear or report over a newer unconfirmed task',async()=>{
+  for(const outcome of ['completed','reject']){
+    const page=harness(),response=deferred(),reads=[]
+    page.unconfirmedNativeTask.value={id:'unconfirmed-a',status:'running'}
+    page.window.pywebview.api.get_task=id=>{reads.push(id);return response.promise}
+    const polling=page.poll()
+    page.unconfirmedNativeTask.value={id:'unconfirmed-b',status:'running'};page.error.value='新任务的启动结果尚未确认'
+    response.resolve(outcome==='completed'?{id:'unconfirmed-a',status:'completed'}:Promise.reject(new Error('旧任务读取失败')))
+    await polling
+    assert.deepEqual(reads,['unconfirmed-a']);assert.equal(page.unconfirmedNativeTask.value.id,'unconfirmed-b')
+    assert.equal(page.error.value,'新任务的启动结果尚未确认');assert.deepEqual(page.applies,[])
+  }
+})
+
+test('accepted native ACK clears only a scope warning arriving while that ACK is pending',async()=>{
+  const warning='任务账号会话与当前记录不一致，未混入其他会话回执。'
+  for(const kind of ['login','draft','destination'])for(const error of [warning,'本次保存请求失败']){
+    const page=harness(),response=deferred();let starts=0
+    const starting=page.run(()=>page.startNative(kind,()=>{starts++;return response.promise},'secondary'))
+    await Promise.resolve();await Promise.resolve();assert.equal(starts,1)
+    page.error.value=error
+    response.resolve({id:'accepted-native',status:'running',session_slot:'secondary'});await starting
+    assert.equal(starts,1);assert.equal(page.taskId.value,'accepted-native')
+    assert.equal(page.error.value,error===warning&&kind!=='destination'?'':error)
+    if(kind==='login')assert.equal(page.recoveryTask.value.id,'failed-draft')
+  }
+})
+
+test('null wrong-slot and late native ACKs cannot erase a pending scope warning or restart',async()=>{
+  const warning='任务账号会话与当前记录不一致，未混入其他会话回执。'
+  for(const variant of ['null','wrong-slot','late']){
+    const page=harness(),response=deferred();let starts=0
+    const starting=page.run(()=>page.startNative('login',()=>{starts++;return response.promise},'secondary'))
+    page.error.value=warning
+    if(variant==='late')page.epoch()
+    response.resolve(variant==='null'?null:{id:'unaccepted-native',status:'running',session_slot:variant==='wrong-slot'?'primary':'secondary'})
+    await starting
+    assert.equal(starts,1);assert.equal(page.taskId.value,'failed-draft');assert.notEqual(page.error.value,'')
+    assert.equal(page.recoveryTask.value.id,'failed-draft')
+    if(variant==='late')assert.equal(page.error.value,warning)
+  }
+})
+
 test('failed draft polling keeps edited content and shows a recovery card instead of a raw red error',async()=>{
   const page=harness();await page.poll()
   assert.equal(page.error.value,'');assert.equal(page.recoveryTask.value.id,'failed-draft')

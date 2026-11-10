@@ -176,22 +176,41 @@ test('late continuation acknowledgement cannot overwrite another operation conte
   const page=harness();await page.refreshRetestResume()
   const response=deferred();page.window.pywebview.api.resume_research_retest=(...args)=>{page.calls.resumes.push(args);return response.promise}
   const resuming=page.resumeUnsentRetest();await Promise.resolve();await Promise.resolve()
+  page.error.value='任务账号会话与当前记录不一致，未混入其他会话回执。'
   page.epoch();page.taskId.value='different-current-task'
   response.resolve({id:'continued-retest',status:'running'});await resuming
   assert.equal(page.calls.resumes.length,1);assert.equal(page.taskId.value,'different-current-task')
   assert.equal(page.recoveryTask.value.id,'source-retest')
+  assert.equal(page.error.value,'任务账号会话与当前记录不一致，未混入其他会话回执。')
+})
+
+test('accepted continuation ACK clears only the scope warning arriving during its wait',async()=>{
+  const warning='任务账号会话与当前记录不一致，未混入其他会话回执。'
+  for(const error of [warning,'本次保存请求失败']){
+    const page=harness();await page.refreshRetestResume()
+    const response=deferred();page.window.pywebview.api.resume_research_retest=(...args)=>{page.calls.resumes.push(args);return response.promise}
+    const pending=page.resumeUnsentRetest();await Promise.resolve();await Promise.resolve();assert.equal(page.calls.resumes.length,1);page.error.value=error
+    response.resolve({id:'accepted-continuation',status:'running'});await pending
+    assert.equal(page.taskId.value,'accepted-continuation');assert.equal(page.calls.resumes.length,1)
+    assert.deepEqual(page.calls.wholeRounds,[]);assert.equal(page.error.value,error===warning?'':error)
+  }
 })
 
 test('ambiguous or foreign acknowledgement preserves the original checkpoint and disables replay',async()=>{
   for(const result of [null,{}, {id:'source-retest',status:'running'}, {id:'../bad',status:'running'},
     {id:'new',status:'completed'},{id:'new',status:'running',kind:'draft'},
     {id:'new',status:'running',cycle_id:'cycle-b'},
+    {id:'new',status:'running',session_slot:'secondary'},
     {id:'new',status:'running',resumed_from_task_id:'other-source'}]){
     const page=harness();await page.refreshRetestResume()
-    page.window.pywebview.api.resume_research_retest=async(...args)=>{page.calls.resumes.push(args);return result}
-    await page.resumeUnsentRetest();await page.resumeUnsentRetest()
+    const response=deferred();page.window.pywebview.api.resume_research_retest=(...args)=>{page.calls.resumes.push(args);return response.promise}
+    const pending=page.resumeUnsentRetest();await Promise.resolve();await Promise.resolve()
+    page.error.value='任务账号会话与当前记录不一致，未混入其他会话回执。'
+    response.resolve(result);await pending
+    assert.notEqual(page.error.value,'');await page.resumeUnsentRetest()
     assert.equal(page.calls.resumes.length,1);assert.equal(page.taskId.value,'source-retest')
     assert.equal(page.recoveryTask.value.id,'source-retest');assert.equal(page.retestResume.value,null)
+    assert.deepEqual(page.calls.wholeRounds,[])
   }
 })
 

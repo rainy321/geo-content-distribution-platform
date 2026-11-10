@@ -341,11 +341,39 @@ test('secondary late and mismatched acknowledgements cannot enter the current ta
   assert.equal(late.taskId.value,'old-task')
 })
 
+test('accepted single-probe ACK clears only the old scope warning that arrived during its wait',async()=>{
+  const warning='任务账号会话与当前记录不一致，未混入其他会话回执。'
+  for(const error of [warning,'本次保存请求失败']){
+    const page=journeyHarness(),response=deferred();let sends=0
+    page.window.pywebview.api.start_research_probe=()=>{sends++;return response.promise}
+    const pending=page.startSingleCaseProbe({cycleId:'cycle-a',caseId:'q02',sessionSlot:'secondary'})
+    await Promise.resolve();await Promise.resolve();assert.equal(sends,1);page.error.value=error
+    response.resolve({id:'accepted-secondary',status:'running',session_slot:'secondary'});await pending
+    assert.equal(sends,1);assert.equal(page.taskId.value,'accepted-secondary')
+    assert.equal(page.error.value,error===warning?'':error)
+  }
+})
+
+test('null wrong and late single-probe ACKs retain an error without another send',async()=>{
+  const warning='任务账号会话与当前记录不一致，未混入其他会话回执。'
+  for(const variant of ['null','wrong-slot','late']){
+    const page=journeyHarness(),response=deferred();let sends=0
+    page.window.pywebview.api.start_research_probe=()=>{sends++;return response.promise}
+    const pending=page.startSingleCaseProbe({cycleId:'cycle-a',caseId:'q02',sessionSlot:'secondary'})
+    await Promise.resolve();await Promise.resolve();page.error.value=warning
+    if(variant==='late')page.setSingleProbeSelection({cycleId:'cycle-a',caseId:'q02',sessionSlot:'primary'})
+    response.resolve(variant==='null'?null:{id:'unaccepted-probe',status:'running',session_slot:variant==='wrong-slot'?'primary':'secondary'})
+    await pending
+    assert.equal(sends,1);assert.equal(page.taskId.value,'old-task');assert.notEqual(page.error.value,'')
+    if(variant==='late')assert.equal(page.error.value,warning)
+  }
+})
+
 test('polling another running session retains only its busy ID and never imports its result',async()=>{
-  const page=journeyHarness()
-  page.window.pywebview.api.get_task=async()=>({id:'foreign-secondary',status:'running',session_slot:'secondary',result:{probe:probe()}})
+  const page=journeyHarness(),reads=[];page.taskId.value=''
+  page.window.pywebview.api.get_task=async id=>{reads.push(id);return id?{id,status:'completed'}:{id:'foreign-secondary',status:'running',session_slot:'secondary',result:{probe:probe()}}}
   await page.poll()
-  assert.equal(page.taskId.value,'old-task');assert.deepEqual(page.calls.applied,[])
+  assert.deepEqual(reads,[undefined]);assert.equal(page.taskId.value,'');assert.deepEqual(page.calls.applied,[])
   assert.equal(page.busy.value,true);assert.deepEqual(page.unconfirmedNativeTask.value,{id:'foreign-secondary',status:'running'})
 })
 
