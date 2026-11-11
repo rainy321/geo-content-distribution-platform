@@ -554,13 +554,15 @@ def _submission_context_view(snapshot: dict[str, Any]) -> dict[str, Any]:
 
 async def _settle_consumer_composer(page: Any, config: CollectorConfig,
                                      initial: dict[str, Any], run_dir: Path) -> dict[str, Any]:
-    """Wait for a stable consumer model before filling, never rebaseline after input.
+    """Wait for a strict ordinary-web composer before filling, never after input.
 
     The editor/mode can hydrate before the model selector. The ordinary editor
-    has already been observed visible by the caller. Strict web sessions must
-    additionally show the complete composer on the official chat origin.
-    Known mode, conversation or model changes still fail closed.
+    has already been observed visible by the caller. This gate belongs only to
+    strict official web sessions; legacy custom collectors retain their unknown
+    model contract. Known mode, conversation or model changes fail closed.
     """
+    if config.client_mode != 'consumer' or config.strict_client_mode is not True:
+        raise ValueError('submission_composer_scope_invalid_not_submitted')
     proof = {'observations': [], 'stable_complete_observations': 0, 'ready': False, 'stop_reason': None}
     path = run_dir / 'composer-readiness.json'
     def persist():
@@ -586,7 +588,7 @@ async def _settle_consumer_composer(page: Any, config: CollectorConfig,
                 raise ValueError('submission_context_changed_not_submitted')
             known_model = label
         complete = (snapshot.get('client_mode') == 'consumer' and label is not None
-                    and (not config.strict_client_mode or snapshot.get('chat_interface_ready') is True))
+                    and snapshot.get('chat_interface_ready') is True)
         stable = stable + 1 if complete else 0
         proof['stable_complete_observations'] = stable
         if stable >= 2:
@@ -1336,7 +1338,7 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                 baseline = await read_snapshot(page, config)
                 baseline = await _wait_for_manual_verification(page, config, run_dir, result, baseline, progress=progress)
                 baseline = await _settle_pre_submission_mode(page, config, baseline)
-                if config.client_mode == 'consumer':
+                if config.client_mode == 'consumer' and config.strict_client_mode:
                     stage = 'composer_readiness'
                     baseline = await _settle_consumer_composer(page, config, baseline, run_dir)
                 if baseline["assistant_count"]:

@@ -39,6 +39,37 @@ class ConsumerHydrationDOMTests(unittest.IsolatedAsyncioTestCase):
             status=200, content_type='text/html; charset=utf-8', body=FIXTURE.read_text(encoding='utf8')))
         await self.page.goto('https://www.doubao.com/chat/')
 
+    async def test_legacy_custom_session_keeps_unknown_model_without_claiming_identity(self):
+        await self.page.evaluate('''() => {
+            document.querySelector('[data-testid="chat_input_action_model"]').remove();
+            document.querySelector('#promotion-layer').remove();
+            document.querySelector('#flow-end-msg-send').addEventListener('click', () => {
+                const user = document.createElement('div'); user.dataset.messageRole = 'user';
+                user.textContent = document.querySelector('textarea').value;
+                const assistant = document.createElement('div'); assistant.dataset.messageRole = 'assistant';
+                assistant.innerHTML = '<div data-testid="message_text_content">这是合成兼容测试的完整回答。</div><button data-testid="message_action_copy">复制</button>';
+                document.body.append(user, assistant);
+            });
+        }''')
+        context = SimpleNamespace(new_page=AsyncMock(return_value=self.page), browser=None, close=AsyncMock())
+        @asynccontextmanager
+        async def factory():
+            yield SimpleNamespace()
+        config = collector.CollectorConfig(question='合成兼容问题', client_mode='consumer',
+            profile_dir=self.root/'profile', output_root=self.root/'evidence', stable_seconds=.05, timeout_seconds=4)
+        self.assertFalse(config.strict_client_mode)
+        with patch.object(collector, 'launch_context', AsyncMock(return_value=context)), \
+             patch.object(collector, '_navigate_to_doubao', AsyncMock()):
+            result, path = await collector.collect_doubao_sources(config, playwright_factory=factory)
+        self.assertEqual(result['collection_status'], 'success', result)
+        self.assertTrue(result['question_submitted'])
+        self.assertTrue(result['answer_completed'])
+        self.assertIsNone(result['environment']['model_label'])
+        self.assertEqual(result['environment']['account_identity_status'], 'unverified')
+        self.assertFalse((path.parent/'composer-readiness.json').exists())
+        self.assertEqual(await self.page.evaluate('({send:sendClicks,close:closeClicks,enter:enterPresses})'),
+                         {'send': 1, 'close': 0, 'enter': 0})
+
     async def test_delayed_model_hydration_is_ready_before_fill_and_one_normal_send_after_ad(self):
         await self.page.evaluate('''() => {
             document.querySelector('[data-testid="chat_input_action_model"]').remove();
