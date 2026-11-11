@@ -46,11 +46,12 @@ class FakePage:
 class InspectionFixture(ProbeFixture):
     def setUp(self):
         super().setUp()
+        self.result = {**self.result, 'environment': {**self.result['environment'], 'model_label': 'Quick'}}
         self.probe_id, self.task_id = 'e' * 32, 'd' * 32
         self.url = 'https://www.doubao.com/chat/12345678901234567'
         self.snapshot = {'page_url': self.url, 'question_verified': True, 'user_message_count': 1,
             'assistant_count': 1, 'completion_marker': True, 'busy': False,
-            'answer': self.result['response'], 'client_mode': 'work', 'model_label': '测试模型'}
+            'answer': self.result['response'], 'client_mode': 'work', 'model_label': 'Quick'}
         self.raw_path = self.root / 'geo-content/probes' / self.probe_id / 'evidence/original/result.json'
         snapshot_path = self.raw_path.parent / 'answer.json'
         write_json(snapshot_path, self.snapshot)
@@ -71,7 +72,7 @@ class InspectionFixture(ProbeFixture):
         self.details = inspection.resolve(self.root, self.cycle, self.probe_id)
         self.expected = copy.deepcopy(self.details['expected'])
         self.config = CollectorConfig(question=self.question, headed=True, client_mode='work',
-            requested_model_label='测试模型', profile_dir=self.root / 'doubao/browser-profile',
+            requested_model_label='Quick', profile_dir=self.root / 'doubao/browser-profile',
             output_root=self.root / 'geo-content/probe-source-inspections' / self.probe_id)
         self.config.profile_dir.mkdir(parents=True)
         self.calls = []
@@ -277,6 +278,22 @@ class SourceInspectionTests(InspectionFixture, unittest.TestCase):
             outcome = asyncio.run(inspection.inspect(self.root, self.cycle, self.details, self.config))
         self.assertTrue(outcome['source_reinspection']['source_collection_complete'])
         self.assertEqual(sum(row[0] == 'reinspect' for row in self.calls), 1)
+
+    def test_complete_history_waits_for_late_mode_and_quick_label_before_reinspect(self):
+        states = [{**self.snapshot, 'client_mode': 'unknown', 'model_label': None, 'user_message_count': 0,
+                   'assistant_count': 0, 'answer': '', 'question_verified': False, 'completion_marker': False},
+                  {**self.snapshot, 'client_mode': 'unknown', 'model_label': None},
+                  {**self.snapshot, 'model_label': None}, self.snapshot, self.snapshot, self.snapshot]
+        async def read(*args, **kwargs):
+            return copy.deepcopy(states.pop(0))
+        with patch.object(inspection, 'open_original_page', self.page), \
+             patch.object(inspection, 'read_snapshot', read), \
+             patch.object(inspection, 'reinspect_existing_sources', self.collect):
+            outcome = asyncio.run(inspection.inspect(self.root, self.cycle, self.details, self.config))
+        self.assertEqual(self.details['model_label'], 'Quick')
+        self.assertTrue(outcome['source_reinspection']['source_collection_complete'])
+        self.assertEqual(sum(row[0] == 'reinspect' for row in self.calls), 1)
+        self.assertEqual(states, [])
 
     def test_capability_requires_real_native_original_job_raw_and_answer_snapshot(self):
         view = self.cycle['probes'][0]

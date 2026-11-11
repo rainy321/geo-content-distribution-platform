@@ -253,6 +253,8 @@ async def wait_for_original_answer(page, config, details, *, navigation=None,
         ready = (snapshot.get('question_verified') is True and type(snapshot.get('user_message_count')) is int
                  and snapshot['user_message_count'] == 1 and type(snapshot.get('assistant_count')) is int
                  and snapshot['assistant_count'] >= 1 and snapshot.get('completion_marker') is True
+                 and snapshot.get('client_mode') == details['client_mode']
+                 and snapshot.get('model_label') == details['model_label']
                  and not snapshot.get('busy') and isinstance(snapshot.get('answer'), str) and snapshot['answer'])
         if ready:
             identity = verify_snapshot(snapshot, details)
