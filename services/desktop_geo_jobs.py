@@ -63,6 +63,9 @@ class DesktopGeoJobs:
             if record.get("status") == "running":
                 record.update(status="needs_review", updated_at=now(),
                               message="软件上次关闭时任务未完成，记录已保留；提交状态需检查，不会自动重发。")
+                if record.get('kind') == 'probe_source_inspection':
+                    record.update(message='上次来源补采被中断，原回答未改变；不会重新提问或自动重复补采。',
+                                  question_sent=False, new_answer_collected=False)
                 session = (record.get('progress') or {}).get('destination_session')
                 if isinstance(session, dict):
                     session.update(can_check=False, window_open=False)
@@ -334,7 +337,10 @@ class DesktopGeoJobs:
                 except Exception:
                     logging.exception("Could not save interrupted native run; original running state remains")
                 with self.lock:
-                    self.job.update(status="stopped", waiting_for_user=False, message="已停止；提交状态不明确的问题保留待检查，不会自动重发")
+                    self.job.update(status="stopped", waiting_for_user=False, message=(
+                        '来源补采已停止；原回答未改变，没有重新提问，也不会自动重复补采。'
+                        if kind == 'probe_source_inspection' else
+                        "已停止；提交状态不明确的问题保留待检查，不会自动重发"))
                     self.job.pop('wait_reason', None)
                     self._persist()
             except Exception as error:
@@ -655,6 +661,45 @@ class DesktopGeoJobs:
             return outcome
         return self._start('probe', probe, client_name=cycle['profile']['name'], cycle_id=cycle_id,
                            collector_config=config, session_profile_mode=execution.get('profile_mode'))
+
+    def start_probe_source_inspection(self, cycle_id, probe_id, expected):
+        """Read sources of one stored answer once; never send a new question."""
+        from services import geo_probe_source_inspection as inspection
+        database = self.data / 'database.db'
+        try:
+            if not isinstance(cycle_id, str) or not isinstance(probe_id, str):
+                raise ValueError('请选择本轮已有的原生回答')
+            inspection._expected(expected)
+            cycle = geo_content_store.get_cycle(database, cycle_id)
+            details = inspection.resolve(self.data, cycle, probe_id, expected)
+            saved = inspection.saved_inspection(self.data, cycle, details)
+            if saved and saved['source_collection_complete'] is True:
+                raise ValueError('该回答已补采来源，请查看已保存的补采时间')
+            config = replace(self._config({'client_mode': details['client_mode'],
+                'profile_mode': details['profile_mode'], 'mode_policy': details['mode_policy'],
+                'model_label': details['model_label'], 'session_slot': details['session_slot']}),
+                question=details['question'], manual_wait_seconds=0,
+                output_root=self.data / 'geo-content' / 'probe-source-inspections' / probe_id)
+            inspection.check_local_directory(config.profile_dir, self.data)
+            inspection.check_local_directory(config.output_root, self.data)
+        except (ValueError, TypeError, KeyError, OSError, sqlite3.Error, geo_content_store.ResearchNotFoundError) as error:
+            return {'error': str(error)}
+
+        async def inspect():
+            with exclusive_lock(config.profile_dir / '.geo-test.lock'):
+                current = geo_content_store.get_cycle(database, cycle_id)
+                fresh = inspection.resolve(self.data, current, probe_id, expected)
+                if fresh['job_sha256'] != details['job_sha256']:
+                    raise ValueError('原采集任务已变化，未补采来源')
+                with self.lock:
+                    self.job.update(probe_id=probe_id, source_task_id=details['task_id'],
+                        question_sent=False, new_answer_collected=False,
+                        message='只读补采同一条回答的来源，不会重新提问；原回答和业务核对保持原样。')
+                    self._persist()
+                return await inspection.inspect(self.data, current, fresh, config, progress=self._collector_progress)
+
+        return self._start('probe_source_inspection', inspect, client_name=cycle['profile']['name'],
+            cycle_id=cycle_id, target_id=probe_id, collector_config=config, session_profile_mode=details['profile_mode'])
 
     def _resume_research_source(self, source_task_id, cycle_id):
         if not isinstance(source_task_id, str) or not isinstance(cycle_id, str) or not source_task_id or not cycle_id:

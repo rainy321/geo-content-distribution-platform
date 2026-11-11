@@ -133,7 +133,7 @@
         <GeoWebsiteAudit :cycle="cycle" :busy="working || finishingTask || nativeBusy || sourceMaintenanceBusy || webmasterBusy || feedbackBusy" @busy="websiteAuditBusy=$event"/>
         <GeoOtherSearchEntries :cycle="cycle" :busy="busy" @busy="setFeedbackBusy"/>
         </details>
-        <div data-geo-section="feedback"><GeoSingleCaseProbe :cycle="cycle" :busy="busy" :can-start="singleProbeAvailable" @selection="setSingleProbeSelection" @login="loginSingleCaseSession" @probe="startSingleCaseProbe" @updated="applyReviewCycle" @busy="setFeedbackBusy"/></div>
+        <div data-geo-section="feedback"><GeoSingleCaseProbe :cycle="cycle" :busy="busy" :can-start="singleProbeAvailable" :can-inspect="probeSourceInspectionAvailable" @selection="setSingleProbeSelection" @login="loginSingleCaseSession" @probe="startSingleCaseProbe" @inspect-sources="startProbeSourceInspection" @updated="applyReviewCycle" @busy="setFeedbackBusy"/></div>
         <GeoPublicationReview data-geo-section="publication" v-if="hasPublicationReviewDrafts && !directoryTarget" :cycle="cycle" :busy="busy" @updated="applyReviewCycle"/>
         <p v-if="!hasPublication" class="hint">{{ externalCycle ? '当前没有可用于发布后分析的提交记录。追加外部回答只保存新的用户观察，不证明发布后的变化。' : unfinishedPublications.length ? '尚无公开成功记录，请先查看以下原发布任务。待确认不等于失败，现在复测只记录新的采集观察。' : '当前没有可用于发布后分析的提交记录。现在复测只会记录新的采集观察。' }}</p>
         <div v-if="unfinishedPublications.length" class="publication-tasks" aria-label="原发布任务"><article v-for="job in unfinishedPublications" :key="job.id" class="feedback-card"><el-tag :type="job.status==='failed' ? 'danger' : job.status==='need_action' ? 'warning' : 'info'">{{ publicationStatus[job.status] }}</el-tag><h3>{{ job.title }} · {{ cycle.channels[job.platform] || job.platform }}</h3><p>{{ job.message || publicationMessages[job.status] }}</p><p v-if="job.status==='processing'" class="hint">最终提交结果仍在确认，请核对原任务与平台后台，不要另建重复发布。</p><p v-if="directoryTargetForChannel(cycle,job.platform)" class="hint">旧文章任务保留为原记录；本渠道的目录申请使用独立资料与回执。</p><el-button v-else :disabled="busy" @click="continuePublication(job)">继续查看原发布任务</el-button></article></div>
@@ -197,6 +197,7 @@ import {isExternalCycle,nativeCycleCapability,externalBaselineSummary} from '@/u
 import { doubaoTaskRecovery, recoveryCheckpoint, scopedRecoveryCheckpoint } from '@/utils/geoTaskRecovery'
 import {automaticBridgeReady,automaticCollectionOptions,automaticCollectionUnavailable,requireAutomaticBridge,externalAutomaticRoute,actualCollectionMode,storedSessionScope,automaticProfileForRecord,restoreAutomaticProfileChoice} from '@/utils/geoAutomaticCollection'
 import {normalizeSessionSlot,sessionSlotForRecord,sessionSlotMatchesRecord} from '@/utils/geoSessionScope'
+import {freezeProbeInspection,inspectionScopeMatches,inspectionAckMatches} from '@/utils/geoProbeSourceInspection'
 import { destinationContinuationText, destinationPreparationText, destinationSupportsFill, isDestinationTask } from '@/utils/geoDestinationSession'
 import { destinationEnabled, destinationCanPrepare, destinationPublicationGate, writingChannelEnabled, writingChannelLabel, inactiveDestinationMessage } from '@/utils/geoDestinationAvailability'
 import { articleSnapshot, baselineEvidenceSummary, canRestoreArticleEdits, canRestoreFactEdits, entityLabel, entityProfileFields, entityType, journeyDate, journeyDraftLimits, journeyLengthReview, lastJourneyProject, normalizeWebsite, profileLines, readJourney, reportEntityContext, restoreEntityDraftFields, safeLink, sameBrand, sameResearchBrief, targetDraftOutdated, writeJourney } from '@/utils/geoJourney'
@@ -330,6 +331,7 @@ const hasPublication=computed(()=>Boolean(cycle.value?.publications?.length||cyc
 const hasPublicationReviewDrafts=computed(()=>publicationReviewArticles(cycle.value).length>0||builtinPublicationArticles(cycle.value).length>0||builtinPublicationRecords(cycle.value).length>0)
 const feedbackTotals=computed(()=>feedbackCollectionTotals(cycle.value?.retests))
 const singleProbeAvailable=computed(()=>nativeAvailable.value&&cycle.value?.capabilities?.native_probe!==false&&cycle.value?.baseline_source!=='user_reported_external'&&Array.isArray(cycle.value?.probes)&&typeof window.pywebview?.api?.start_research_probe==='function')
+const probeSourceInspectionAvailable=computed(()=>nativeAvailable.value&&cycle.value?.baseline_source!=='user_reported_external'&&typeof window.pywebview?.api?.start_probe_source_inspection==='function')
 const setSingleProbeSelection=selection=>{const next=selection?{cycleId:selection.cycleId,caseId:selection.caseId,sessionSlot:selection.sessionSlot}:null;if(JSON.stringify(next)!==JSON.stringify(singleProbeSelection.value)){singleProbeSelection.value=next;probeSelectionVersion.value++}}
 const singleProbeSessionOptions=selection=>{
   const baseline=cycle.value?.baseline||{},execution=baseline.execution||{},selected=baseline.cases?.find(item=>item.id===selection?.caseId)
@@ -607,6 +609,24 @@ const startSingleCaseProbe=selection=>run(async()=>{
   if(error.value==='任务账号会话与当前记录不一致，未混入其他会话回执。')error.value=''
   persist()
 })
+const startProbeSourceInspection=selection=>run(async()=>{
+  const id=cycleId.value,epoch=contextEpoch,selectedTaskId=taskId.value
+  if(step.value!==4||!probeSourceInspectionAvailable.value||selection?.cycleId!==id)throw Error('原回答来源补采能力尚未就绪。')
+  const scope=await freezeProbeInspection(cycle.value,selection.probeId)
+  const assertCurrent=()=>{if(destroyed||epoch!==contextEpoch||id!==cycleId.value||selectedTaskId!==taskId.value||step.value!==4||!inspectionScopeMatches(cycle.value,scope)){const cancelled=new Error('原回答或操作页面已变化');cancelled.name='AbortError';throw cancelled}}
+  assertCurrent()
+  try{await ElMessageBox.confirm(`使用这条原回答的账号会话${scope.sessionSlot==='secondary'?'2':'1'}，只读打开原聊天补采来源。不会重新提问、不会生成新回答，也不计为新的复测。\n\n${scope.question}`,'仅补采原回答的来源',{confirmButtonText:'只读补采来源',cancelButtonText:'保留原记录'})}
+  catch{const cancelled=new Error('已保留原记录');cancelled.name='AbortError';throw cancelled}
+  assertCurrent()
+  if(nativeBusy.value||!probeSourceInspectionAvailable.value)throw Error('已有任务进行中，请查看原任务；没有重复补采。')
+  const result=await window.pywebview.api.start_probe_source_inspection(id,scope.probeId,scope.expected)
+  if(result?.status==='running'&&typeof result.id==='string'&&/^[\w-]{1,100}$/.test(result.id))unconfirmedNativeTask.value={id:result.id,status:'running'}
+  assertCurrent()
+  if(result?.error)throw Error(result.error)
+  if(!inspectionAckMatches(result,scope))throw Error('来源补采的原回答或会话回执未确认，请查看任务记录，不要重复操作。')
+  task.value={...result};taskId.value=result.id;liveTaskId=result.id;taskKind.value='probe_source_inspection';handledTask=''
+  unconfirmedNativeTask.value=null;persist()
+})
 const loginSingleCaseSession=selection=>run(async()=>{
   const id=cycleId.value,epoch=contextEpoch,version=probeSelectionVersion.value,session=singleProbeSessionOptions(selection)
   if(step.value!==4||!singleProbeAvailable.value||selection?.cycleId!==id)throw new Error('原单题会话尚未确认。')
@@ -734,7 +754,7 @@ const poll=async()=>{
     else if(['failed','stopped','needs_review','need_action'].includes(current.status)&&taskKind.value!=='source_maintenance')error.value=current.message||'任务未完成，记录已保留，请检查后重试'
     if(current.result?.plan&&sameBrand(current.result.plan.profile,project.value)){plan.value=current.result.plan;planConfirmed.value=false}
     if(current.result?.report&&taskKind.value==='run'&&sameBrand(current.result.report.profile,project.value)){await loadReports();if(!currentScope())return;const item=reports.value.find(item=>item.run_id===current.result.report.run_id);if(item){report.value=item.report;reportId.value=item.id;reportOrigin.value=liveTaskId===current.id?'fresh':'history';historyReportId.value=item.id}else throw new Error('本轮报告尚未进入报告列表，请稍后重试，未使用其他报告替代')}
-    if(cycleId.value&&['analysis','draft','retest','probe','destination','source_maintenance'].includes(taskKind.value)){const updated=(await geoContentApi.get(cycleId.value)).data;if(!currentScope())return;applyCycle(updated,{keepEditor:taskKind.value!=='draft'||current.status!=='completed'})}
+    if(cycleId.value&&['analysis','draft','retest','probe','probe_source_inspection','destination','source_maintenance'].includes(taskKind.value)){const updated=(await geoContentApi.get(cycleId.value)).data;if(!currentScope())return;applyCycle(updated,{keepEditor:taskKind.value!=='draft'||current.status!=='completed'})}
     if(taskKind.value==='draft'&&replacementSourceId.value){
       if(current.status==='completed'){
         const target=selectedTarget.value, draft=matchingDrafts.value.find(item=>item.article_id!==replacementSourceId.value&&item.provenance?.destination?.id===target?.id&&item.provenance?.destination?.revision===target?.revision&&item.provenance?.destination_config_sha256===target?.config_sha256)

@@ -353,6 +353,8 @@ def get_cycle(database, identifier):
         from services.geo_optimization_strategy import optimization_plan
         result['optimization_plan'] = optimization_plan(result)
         result['probes'] = project_probe_address_evidence(result['test_plan'].get('profile'), result['probes'])
+        from services.geo_probe_source_inspection import project as project_probe_sources
+        result['probes'] = project_probe_sources(Path(database).parent, result)
     return result
 
 

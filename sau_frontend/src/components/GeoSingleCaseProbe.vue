@@ -46,6 +46,19 @@
           <p v-else class="probe-hint">来源明细未提供，不能据此判断没有来源。</p>
         </section>
       </div>
+      <section v-if="inspectionFor(item)" class="probe-later-sources" aria-label="后来只读补采的来源" data-testid="probe-later-sources">
+        <h4>后来补采的来源</h4>
+        <p class="probe-hint">补采时间：{{ date(inspectionFor(item).inspected_at) }} · 原回答时间：{{ date(inspectionFor(item).original_answer_timestamp) }}</p>
+        <p class="probe-hint">只读检查同一条回答，没有重新提问，不计为新回答或复测；上方原来源和业务核对保留。</p>
+        <p class="probe-hint">原回答绑定：已核对 · 来源解析：{{ inspectionFor(item).source_collection_complete ? '本次已完整解析' : '尚未完整解析，未解析部分仍未知' }}</p>
+        <div class="probe-source-state"><span>后采官网来源：{{ laterObserved(inspectionFor(item),'official_source_present') }}</span><span>后采官网引用：{{ laterObserved(inspectionFor(item),'official_citation_present') }}</span></div>
+        <ul v-if="sourceRows(inspectionFor(item)).length" class="probe-sources"><li v-for="(source,index) in sourceRows(inspectionFor(item))" :key="`later-${index}`"><span>{{ source.kind }} · </span><a v-if="source.url" :href="source.url" target="_blank" rel="noopener noreferrer">{{ source.title }}</a><span v-else>{{ source.title }} · 网址未知或不可公开核验</span></li></ul>
+        <p v-else class="probe-hint">这次补采没有取得可展示来源；状态未知时不能按零条来源判断。</p>
+        <div v-for="entry in laterAddressRows(item)" :key="entry.url" class="probe-address"><p class="probe-address-label"><strong>后采地址核对</strong><span>{{ entry.url }}</span></p><p class="probe-hint">{{ date(inspectionFor(item).inspected_at) }} · 来源面板：{{ addressStatus(entry.in_sources) }} · 正文引用：{{ addressStatus(entry.in_citations) }}</p></div>
+      </section>
+      <div v-if="canInspect && inspectionContext(item)" class="probe-source-action">
+        <el-button :disabled="busy" data-testid="probe-inspect-sources" @click="requestInspection(item)">{{ inspectionFor(item) ? '手动复查这条回答的未完整来源' : '仅补采这条回答的来源' }}</el-button><p class="probe-hint">不会重新提问。沿用这条回答的原账号会话，只读打开原聊天检查来源；不会自动重复。</p>
+      </div>
       <p class="probe-hint probe-conditions">{{ conditions(item) }}</p>
       <p class="probe-account-independence" data-testid="probe-account-independence"><strong>账号是否独立未核验</strong> · 会话编号只区分采集会话，不能证明是不同个人账号，也不计为独立GEO通过。</p>
       <details v-if="Array.isArray(item.limitations) && item.limitations.length"><summary>查看这次观察的限制</summary><p v-for="(note,index) in item.limitations" :key="index" class="probe-hint">{{ note }}</p></details>
@@ -59,11 +72,12 @@ import { computed, ref, watch } from 'vue'
 import { journeyDate } from '@/utils/geoJourney'
 import { publicationReviewUrl } from '@/utils/geoPublicationReview'
 import { normalizeSessionSlot, sessionSlotForRecord } from '@/utils/geoSessionScope'
+import { probeInspectionContext, sourceReinspectionView } from '@/utils/geoProbeSourceInspection'
 import GeoExternalFeedback from '@/components/GeoExternalFeedback.vue'
 import GeoBusinessReview from '@/components/GeoBusinessReview.vue'
 
-const props=defineProps({cycle:{type:Object,required:true},busy:Boolean,canStart:Boolean})
-const emit=defineEmits(['probe','login','selection','updated','busy'])
+const props=defineProps({cycle:{type:Object,required:true},busy:Boolean,canStart:Boolean,canInspect:Boolean})
+const emit=defineEmits(['probe','login','selection','updated','busy','inspect-sources'])
 const selectedCaseId=ref('')
 const selectedSessionSlot=ref('primary'), sessionScopeError=ref('')
 const recordLimit=ref(3)
@@ -88,6 +102,11 @@ const excerpt=(value,limit=280)=>{const text=typeof value==='string'?value:'';re
 const date=value=>journeyDate(value)
 const mode=value=>value==='work'?'豆包工作':value==='consumer'?'豆包对话':'界面未知'
 const isExternal=item=>item?.source==='user_reported_external'
+const inspectionContext=item=>item?.source_inspection?probeInspectionContext(props.cycle,item):null
+const inspectionFor=item=>item?.source_reinspection?sourceReinspectionView(item):null
+const requestInspection=item=>{if(props.canInspect&&!props.busy&&inspectionContext(item))emit('inspect-sources',{cycleId:props.cycle.id,probeId:item.id})}
+const laterObserved=(view,key)=>view?.source_assessment?.[key]===true?'已观察到':view?.source_assessment?.[key]===false?'未观察到':'未知'
+const laterAddressRows=item=>(inspectionFor(item)?.address_evidence||[]).filter(row=>row&&typeof row.url==='string'&&publicationReviewUrl(row.url))
 const recordedSession=(side,item)=>isExternal(item)?'账号会话由用户提供，未核验':side?.session_slot==='primary'?'账号会话1':side?.session_slot==='secondary'?'账号会话2':'原记录未标明账号会话'
 const contextAttestation=item=>{
   const history=item?.context_attestations
@@ -155,6 +174,7 @@ watch([selectedCaseId,selectedSessionSlot,()=>props.cycle?.id],()=>{try{emit('se
 
 <style scoped>
 .probe-account-independence{padding:9px 12px;border-left:3px solid #b78a46;background:#fff7ec;color:#825c2b;font-size:12px}
+.probe-later-sources{margin-top:16px;padding:14px;border:1px solid var(--geo-border,#dce6e2);border-radius:9px;background:#f3f8f7}.probe-later-sources h4{margin:0;font-size:13px}.probe-source-action{margin-top:15px}
 .probe-addresses{margin-top:14px}.probe-addresses h5{margin:0;font-size:12px;color:var(--geo-ink,#173e3b)}
 .probe-address{margin:8px 0 0;padding:9px 11px;border:1px solid var(--geo-border,#dce6e2);border-radius:7px;font-size:11px}
 .probe-address-label{display:flex;flex-wrap:wrap;gap:2px 9px;margin:0;overflow-wrap:anywhere}.probe-address dl{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:6px 10px;margin:6px 0 0}.probe-address dd{margin:0;color:var(--geo-ink,#173e3b)}.probe-address dt{color:var(--geo-muted,#63736f)}

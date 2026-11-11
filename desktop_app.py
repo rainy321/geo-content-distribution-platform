@@ -333,7 +333,8 @@ def run_smoke_check(window, data: Path, url: str) -> None:
                     native_bridge: ['open_login','plan_with_doubao','start_run','generate_research','get_task','open_destination','open_directory_application','inspect_directory_application','check_directory_application_session','close_directory_application_session'].every(name => typeof window.pywebview?.api?.[name] === 'function'),
                     automatic_web_bridge: ['plan_automatic','start_automatic_run'].every(name => typeof window.pywebview?.api?.[name] === 'function'),
                     draft_recovery_bridge: ['preview_research_draft','recover_research_draft'].every(name => typeof window.pywebview?.api?.[name] === 'function'),
-                    destination_recheck_bridge: typeof window.pywebview?.api?.check_destination_session === 'function'
+                    destination_recheck_bridge: typeof window.pywebview?.api?.check_destination_session === 'function',
+                    probe_source_inspection_bridge: typeof window.pywebview?.api?.start_probe_source_inspection === 'function'
                 })""")
                 journey_observed = json.loads(journey_observed) if isinstance(journey_observed, str) else journey_observed
                 steps = journey_observed.get('steps') or []
@@ -341,7 +342,7 @@ def run_smoke_check(window, data: Path, url: str) -> None:
                         and all(label in actual for label, actual in zip(('品牌', '搜索基线', '内容', '发布', '反馈'), steps))
                         and journey_observed.get('primary_action') and journey_observed.get('native_bridge')
                         and journey_observed.get('destination_recheck_bridge') and journey_observed.get('automatic_web_bridge')
-                        and journey_observed.get('draft_recovery_bridge')):
+                        and journey_observed.get('draft_recovery_bridge') and journey_observed.get('probe_source_inspection_bridge')):
                     status['journey'] = journey_observed
                     status['journey_verified'] = True
                     break
