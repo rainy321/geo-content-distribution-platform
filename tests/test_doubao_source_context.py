@@ -3,7 +3,9 @@ import json
 import hashlib
 import tempfile
 import unittest
+from contextlib import asynccontextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from services import doubao_source_collector as collector
@@ -121,10 +123,13 @@ class SourceContextDOMTests(unittest.IsolatedAsyncioTestCase):
             await self.page.evaluate("history.pushState({}, '', '/chat/987654321')")
             return {'observed_url': 'https://foreign-source.example/not-target'}, None
         with patch.object(collector, '_resolve_citation_navigation', AsyncMock(side_effect=moved)):
-            items, shots, incomplete = await collector._expand_sources(self.page, self.config, self.root)
+            items, shots, incomplete = await collector._expand_sources(self.page, self.config, self.root,
+                                                                        initial_evidence_file='answer.json')
         self.assertTrue(incomplete)
         self.assertEqual(shots, [])
         self.assertNotIn('foreign-source.example', json.dumps(items))
+        self.assertTrue(items)
+        self.assertTrue(all(item['evidence_file'] == 'answer.json' for item in items))
 
     async def test_real_citation_click_never_persists_dom_after_main_navigation(self):
         await self.page.locator('[data-testid="search-references-button"]').evaluate('e => e.remove()')
@@ -193,6 +198,84 @@ class SourceContextDOMTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((path.parent/'inspection-before.json').exists())
         self.assertFalse(list(path.parent.glob('sources-*')))
         self.assertFalse(list(path.parent.glob('inspection-after*')))
+
+    async def test_already_open_sources_reference_this_reinspection_manifest(self):
+        await self.page.locator('[data-testid="search-references-button"]').evaluate('''e => {
+            const panel=document.querySelector('#sources'); panel.hidden=false; panel.prepend(e);
+        }''')
+        original_path = self.root/'original/result.json'
+        original_path.parent.mkdir()
+        original = {'question': QUESTION, 'response': ANSWER, 'question_submitted': True,
+                    'answer_completed': True, 'conversation_url': URL,
+                    'environment': {'client_mode': 'consumer', 'model_label': '快速', 'session_slot': 'primary'}}
+        original_path.write_text(json.dumps(original), encoding='utf8')
+        config = collector.CollectorConfig(question=QUESTION, strict_client_mode=True, output_root=self.root/'sidecars')
+        result, path = await collector.reinspect_existing_sources(config, original_path, page=self.page)
+        self.assertEqual(result['collection_status'], 'success')
+        self.assertEqual(await self.page.evaluate('window.sourceClicks'), 0)
+        self.assertEqual(result['displayed_sources'][0]['evidence_file'], 'inspection-before.png')
+        manifest = {entry['path']: entry for entry in result['evidence_manifest']}
+        for item in result['displayed_sources']:
+            for name in item['evidence_files']:
+                self.assertIn(name, manifest)
+                self.assertEqual(hashlib.sha256((path.parent/name).read_bytes()).hexdigest(), manifest[name]['sha256'])
+        self.assertFalse((path.parent/'answer.png').exists())
+        self.assertFalse(list(path.parent.glob('sources-*.png')))
+
+    async def test_legacy_default_initial_evidence_name_remains_answer_png_and_names_are_closed(self):
+        await self.page.locator('[data-testid="search-references-button"]').evaluate('''e => {
+            const panel=document.querySelector('#sources'); panel.hidden=false; panel.prepend(e);
+        }''')
+        legacy = collector.CollectorConfig(question=QUESTION)
+        items, shots, incomplete = await collector._expand_sources(self.page, legacy, self.root)
+        self.assertFalse(incomplete)
+        self.assertEqual(shots, [])
+        self.assertEqual(items[0]['evidence_file'], 'answer.png')
+        for name in ('../answer.png', 'foreign.png', '/tmp/answer.png', 'inspection-after.png', None):
+            for expand in (collector._expand_sources, collector._expand_sources_bound):
+                with self.subTest(name=name, helper=expand.__name__), self.assertRaisesRegex(ValueError, 'initial_source_evidence_file_invalid'):
+                    await expand(self.page, legacy, self.root, initial_evidence_file=name)
+
+    async def test_native_answer_png_timeout_uses_saved_json_for_initial_source_markers(self):
+        from playwright.async_api import Page, TimeoutError
+        html = '''<meta charset="utf-8"><button data-testid="workspace-switch-chip">豆包对话</button>
+            <button data-testid="chat_input_action_model">快速</button><textarea></textarea>
+            <div data-message-role="user"></div><div data-message-role="assistant" hidden>
+            <div data-testid="message_text_content">合成目标回答。</div><button data-testid="message_action_copy">复制</button>
+            <div data-testid="search-references"><button data-testid="search-references-button" onclick="window.sourceClicks++">参考资料</button>
+            <a data-testid="reference-item" href="https://public-source.example/target">合成目标来源</a></div></div>
+            <script>window.submissions=0;window.sourceClicks=0;
+            document.querySelector('textarea').onkeydown=e=>{if(e.key==='Enter'){e.preventDefault();window.submissions++;
+                document.querySelector('[data-message-role=user]').textContent=e.target.value;
+                document.querySelector('[data-message-role=assistant]').hidden=false;e.target.value='';
+                history.pushState({},'', '/chat/123456789');}};</script>'''
+        async def create_context(*_args, **_kwargs):
+            context = await self.browser.new_context()
+            await context.route('**/*', lambda route: route.fulfill(status=200, content_type='text/html; charset=utf-8', body=html))
+            return context
+        @asynccontextmanager
+        async def factory():
+            yield SimpleNamespace(chromium=SimpleNamespace(launch_persistent_context=create_context))
+        screenshot = Page.screenshot
+        async def optional_timeout(page, **kwargs):
+            if 'path' not in kwargs and kwargs.get('timeout') == 5000:
+                raise TimeoutError('synthetic native answer image timeout')
+            return await screenshot(page, **kwargs)
+        config = collector.CollectorConfig(question=QUESTION, strict_client_mode=True, output_root=self.root/'native',
+            profile_dir=self.root/'synthetic-profile', stable_seconds=.1, timeout_seconds=5)
+        with patch.object(Page, 'screenshot', autospec=True, side_effect=optional_timeout):
+            result, path = await collector.collect_doubao_sources(config, playwright_factory=factory)
+        self.assertEqual(result['collection_status'], 'success', result.get('failure_reason'))
+        self.assertTrue(result['question_submitted'])
+        self.assertTrue(result['answer_completed'])
+        self.assertEqual(result['displayed_sources'][0]['evidence_file'], 'answer.json')
+        self.assertFalse((path.parent/'answer.png').exists())
+        self.assertEqual(json.loads((path.parent/'answer.json').read_text(encoding='utf8'))['answer'], ANSWER)
+        manifest = {entry['path']: entry for entry in result['evidence_manifest']}
+        self.assertIn('answer.json', manifest)
+        self.assertNotIn('answer.png', manifest)
+        self.assertEqual(hashlib.sha256((path.parent/'answer.json').read_bytes()).hexdigest(), manifest['answer.json']['sha256'])
+        self.assertEqual(result['submission_receipt']['submission_attempts'], 1)
 
     async def test_global_history_source_controls_are_never_clicked_or_attributed(self):
         await self.page.evaluate('''() => {
