@@ -44,6 +44,20 @@ class SourceContextDOMTests(unittest.IsolatedAsyncioTestCase):
         await self.page.locator('[data-testid="search-references-button"]').evaluate(
             '(e, script) => e.addEventListener("click", () => { eval(script) })', script)
 
+    async def test_unverified_initial_context_discards_all_source_markers(self):
+        await self.page.evaluate('''() => {
+            document.querySelector('[data-message-role="user"]').textContent='另一个合成问题';
+            document.querySelector('#sources').hidden=false;
+            document.querySelector('[data-testid="reference-item"]').href='https://foreign-source.example/unverified';
+        }''')
+        items, shots, incomplete = await collector._expand_sources(self.page, self.config, self.root)
+        self.assertTrue(incomplete)
+        self.assertEqual(items, [])
+        self.assertEqual(shots, [])
+        self.assertEqual(await self.page.evaluate('window.sourceClicks'), 0)
+        self.assertFalse(list(self.root.glob('sources-*.json')))
+        self.assertFalse(list(self.root.glob('sources-*.png')))
+
     async def test_source_click_cannot_save_a_different_synthetic_conversation(self):
         await self.mutation('''history.pushState({}, '', '/chat/987654321');
             document.querySelector('[data-message-role="user"]').textContent = '另一个合成问题';

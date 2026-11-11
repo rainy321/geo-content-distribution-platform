@@ -810,6 +810,7 @@ class _SourceContextGuard:
                       'source_phase_completed': False,
                       'observations': [], 'observations_dropped': 0}
         self.listening = False
+        self.expected_verified = False
 
     def fail(self, reason):
         self.proof.update(blocked=True, stop_reason=reason)
@@ -825,6 +826,7 @@ class _SourceContextGuard:
         self.page.on('framenavigated', self.navigated)
         self.listening = True
         self.verify(self.expected, 'expected_answer')
+        self.expected_verified = True
 
     def verify(self, snapshot, phase):
         record = {**_submission_context_view(snapshot), 'phase': phase,
@@ -906,7 +908,7 @@ async def _expand_sources(page: Any, config: CollectorConfig, run_dir: Path, *, 
         # Preserve only markers already observed in the completed target answer.
         # No body, DOM or screenshot from another conversation is persisted.
         items = ([{**item, 'evidence_file': 'answer.png'} for item in expected_snapshot.get('sources', [])]
-                 if guard.route and guard.route[0] == 'canonical' else [])
+                 if guard.expected_verified and guard.route and guard.route[0] == 'canonical' else [])
         return items, [], True
     finally:
         if owned_guard:
