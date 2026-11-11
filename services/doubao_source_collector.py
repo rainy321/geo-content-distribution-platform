@@ -886,7 +886,9 @@ class _SourceContextGuard:
 
 async def _expand_sources(page: Any, config: CollectorConfig, run_dir: Path, *, progress: Callable | None = None,
                           expected_snapshot: dict[str, Any] | None = None,
-                          source_guard=None) -> tuple[list[dict[str, Any]], list[str], bool]:
+                          source_guard=None, initial_evidence_file: str = 'answer.png') -> tuple[list[dict[str, Any]], list[str], bool]:
+    if initial_evidence_file not in ('answer.png', 'answer.json', 'inspection-before.png'):
+        raise ValueError('initial_source_evidence_file_invalid')
     # Legacy custom collectors keep their original unverified contract. Native
     # strict sessions and explicit read-only inspections require canonical proof.
     if source_guard is not None:
@@ -894,20 +896,22 @@ async def _expand_sources(page: Any, config: CollectorConfig, run_dir: Path, *, 
     if expected_snapshot is None and config.strict_client_mode and config.client_mode == 'consumer':
         expected_snapshot = await read_snapshot(page, config)
     if expected_snapshot is None:
-        return await _expand_sources_bound(page, config, run_dir, progress=progress)
+        return await _expand_sources_bound(page, config, run_dir, progress=progress,
+                                           initial_evidence_file=initial_evidence_file)
     owned_guard = source_guard is None
     guard = source_guard or _SourceContextGuard(page, config, expected_snapshot, run_dir)
     try:
         if owned_guard:
             guard.start()
-        result = await _expand_sources_bound(page, config, run_dir, progress=progress, source_guard=guard)
+        result = await _expand_sources_bound(page, config, run_dir, progress=progress, source_guard=guard,
+                                             initial_evidence_file=initial_evidence_file)
         await guard.read('finished')
         guard.proof['source_phase_completed'] = True
         return result
     except _SourceContextChanged:
         # Preserve only markers already observed in the completed target answer.
         # No body, DOM or screenshot from another conversation is persisted.
-        items = ([{**item, 'evidence_file': 'answer.png'} for item in expected_snapshot.get('sources', [])]
+        items = ([{**item, 'evidence_file': initial_evidence_file} for item in expected_snapshot.get('sources', [])]
                  if guard.expected_verified and guard.route and guard.route[0] == 'canonical' else [])
         return items, [], True
     finally:
@@ -916,7 +920,9 @@ async def _expand_sources(page: Any, config: CollectorConfig, run_dir: Path, *, 
 
 
 async def _expand_sources_bound(page: Any, config: CollectorConfig, run_dir: Path, *, progress: Callable | None = None,
-                                source_guard=None) -> tuple[list[dict[str, Any]], list[str], bool]:
+                                source_guard=None, initial_evidence_file: str = 'answer.png') -> tuple[list[dict[str, Any]], list[str], bool]:
+    if initial_evidence_file not in ('answer.png', 'answer.json', 'inspection-before.png'):
+        raise ValueError('initial_source_evidence_file_invalid')
     # Controls belong to the latest answer, so sidebar/history links cannot leak
     # into the citation list. Each source control is clicked at most once.
     roots = page.locator(config.selectors.assistant_message)
@@ -925,7 +931,7 @@ async def _expand_sources_bound(page: Any, config: CollectorConfig, run_dir: Pat
         return [], [], source_guard is not None
     snapshot = (await source_guard.read('initial') if source_guard else await read_snapshot(page, config))
     bound_root = await root.element_handle() if source_guard else None
-    items = [{**item, "evidence_file": "answer.png"} for item in snapshot["sources"]]
+    items = [{**item, "evidence_file": initial_evidence_file} for item in snapshot["sources"]]
     screenshots: list[str] = []
     controls = root.locator(config.selectors.source_trigger)
     if not await controls.count():
@@ -1443,7 +1449,7 @@ async def reinspect_existing_sources(config: CollectorConfig, original_result_pa
             progress({'event': 'answer_completed', 'state': 'extracting_sources', 'question_submitted': True})
         stage = 'inspection_sources'
         items, screenshots, incomplete = await _expand_sources(page, config, run_dir, progress=progress,
-                                                              source_guard=source_guard)
+            source_guard=source_guard, initial_evidence_file='inspection-before.png')
         result['screenshots'].extend(screenshots)
         verify(await source_guard.read('inspection_after_sources'))
         await _save_checkpoint(page, config, run_dir, result, 'inspection-after', source_guard=source_guard)
@@ -1715,7 +1721,9 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                         progress({'event': 'answer_completed', 'state': 'extracting_sources',
                                   'question_submitted': result['question_submitted']})
                     source_scope = {'source_guard': source_guard} if source_guard else {}
-                    items, screenshots, incomplete = await _expand_sources(page, config, run_dir, progress=progress, **source_scope)
+                    initial_evidence = 'answer.png' if (run_dir / 'answer.png').is_file() else 'answer.json'
+                    items, screenshots, incomplete = await _expand_sources(page, config, run_dir, progress=progress,
+                        initial_evidence_file=initial_evidence, **source_scope)
                     result["screenshots"].extend(screenshots)
                     result["citations"] = normalize_ui_sources([item for item in items if item["scope"] == "inline_citation"])
                     result["displayed_sources"] = normalize_ui_sources([item for item in items if item["scope"] == "source_panel"])
