@@ -3,6 +3,7 @@ import asyncio
 import copy
 import hashlib
 import json
+import os
 import sqlite3
 import stat
 import threading
@@ -23,6 +24,23 @@ from services.geo_test_runner import write_json
 
 def sha(value):
     return hashlib.sha256(value).hexdigest()
+
+
+class FakePage:
+    def __init__(self, url):
+        self.main_frame = SimpleNamespace(url=url)
+        self.callbacks = []
+
+    def on(self, event, callback):
+        self.callbacks.append(callback)
+
+    def remove_listener(self, event, callback):
+        self.callbacks.remove(callback)
+
+    def navigate(self, url):
+        self.main_frame.url = url
+        for callback in list(self.callbacks):
+            callback(self.main_frame)
 
 
 class InspectionFixture(ProbeFixture):
@@ -61,7 +79,7 @@ class InspectionFixture(ProbeFixture):
     @asynccontextmanager
     async def page(self, config, url):
         self.calls.append(('open', config.profile_dir, url))
-        yield object()
+        yield FakePage(url)
 
     async def snapshot_read(self, page, config):
         return copy.deepcopy(self.snapshot)
@@ -83,7 +101,8 @@ class InspectionFixture(ProbeFixture):
             'displayed_sources': [{'title': '合成公开产品页', 'url': 'https://synthetic.example.org', 'url_status': 'navigation_observed'}],
             'citations': [{'title': '公开第三方资料', 'url': 'https://public.example.org/page', 'url_status': 'navigation_observed'}],
             'source_context_binding': summary,
-            'evidence_manifest': [{'path': 'source-context.json', 'sha256': sha((directory / 'source-context.json').read_bytes())}],
+            'evidence_manifest': [{'path': 'source-context.json', 'sha256': sha((directory / 'source-context.json').read_bytes()),
+                                   'bytes': (directory / 'source-context.json').stat().st_size}],
             'inspection_provenance': {'kind': 'later_read_only_sources_not_new_answer', 'question_sent': False,
                 'original_result_unchanged': True, 'question_sha256': sha(self.question.encode()),
                 'navigation_urls': [self.url], 'answer_identity_method': 'exact_complete_response',
@@ -101,6 +120,164 @@ class InspectionFixture(ProbeFixture):
 
 
 class SourceInspectionTests(InspectionFixture, unittest.TestCase):
+    def test_actual_auth_overlay_field_names_block_an_otherwise_complete_target_answer(self):
+        for change in ({'challenge': True}, {'login_required': True}, {'rate_limited': True},
+                       {'website_temporarily_unavailable': True}, {'service_unavailable': True}):
+            with self.subTest(change=change), self.assertRaises(ValueError):
+                inspection.verify_snapshot({**self.snapshot, **change}, self.details)
+
+    def test_corrupted_optional_probe_and_after_do_not_break_read_only_cycle_projection(self):
+        for row in (None, [], 'broken', {**self.probe, 'after': ['broken']}, {**self.probe, 'after': 'broken'}):
+            with self.subTest(row=row):
+                value = {**self.cycle, 'probes': [row]}
+                self.assertEqual(inspection.project(self.root, value), [row])
+
+    def test_whole_sidecar_manifest_and_all_source_evidence_references_are_required(self):
+        self.run_inspection()
+        result_path = next(self.config.output_root.glob('inspect-*/result.json'))
+        binding_path = result_path.parent / 'binding.json'
+        baseline = json.loads(result_path.read_text(encoding='utf-8'))
+        png = result_path.parent / 'source-panel.png'
+        png.write_bytes(b'original image evidence')
+        baseline['evidence_manifest'][0]['bytes'] = (result_path.parent / 'source-context.json').stat().st_size
+        baseline['evidence_manifest'].append({'path': png.name, 'bytes': png.stat().st_size, 'sha256': sha(png.read_bytes())})
+        baseline['displayed_sources'][0]['evidence_file'] = png.name
+        baseline['displayed_sources'][0]['evidence_files'] = [png.name]
+        baseline['screenshots'] = [png.name]
+        binding = json.loads(binding_path.read_text(encoding='utf-8'))
+        for attack in ('missing', 'changed_same_size', 'duplicate', 'traversal', 'wrong_size', 'missing_reference'):
+            current = copy.deepcopy(baseline)
+            png.write_bytes(b'original image evidence')
+            old_stat = png.stat()
+            if attack == 'missing':
+                png.unlink()
+            elif attack == 'changed_same_size':
+                png.write_bytes(b'changed! image evidence')
+                os.utime(png, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+            elif attack == 'duplicate':
+                current['evidence_manifest'].append(copy.deepcopy(current['evidence_manifest'][-1]))
+            elif attack == 'traversal':
+                current['evidence_manifest'][-1]['path'] = '../outside.png'
+            elif attack == 'wrong_size':
+                current['evidence_manifest'][-1]['bytes'] += 1
+            else:
+                current['citations'][0]['evidence_file'] = 'never-created.json'
+            write_json(result_path, current)
+            write_json(binding_path, {**binding, 'inspection_result_sha256': sha(result_path.read_bytes())})
+            with self.subTest(attack=attack):
+                self.assertNotIn('source_reinspection', store.get_cycle(self.database, self.cycle['id'])['probes'][0])
+
+    def test_manifest_limits_bad_entries_and_unlisted_files_fail_closed(self):
+        self.run_inspection()
+        path = next(self.config.output_root.glob('inspect-*/result.json'))
+        baseline = json.loads(path.read_text(encoding='utf-8'))
+        binding_path = path.parent / 'binding.json'
+        binding = json.loads(binding_path.read_text(encoding='utf-8'))
+        entry = baseline['evidence_manifest'][0]
+        attacks = [[], [entry] * 129, [{**entry, 'bytes': True}], [{**entry, 'bytes': inspection.MAX_EVIDENCE_FILE_BYTES + 1}],
+            [{**entry, 'path': 'C:escape.png'}], [{**entry, 'path': '..\\escape.png'}],
+            [entry, {**entry, 'path': entry['path'].upper()}], [{**entry, 'sha256': '0' * 63}],
+            [{**entry, 'path': f'file-{i}.png', 'bytes': inspection.MAX_EVIDENCE_FILE_BYTES} for i in range(9)]]
+        for manifest in attacks:
+            current = {**baseline, 'evidence_manifest': manifest}
+            write_json(path, current)
+            write_json(binding_path, {**binding, 'inspection_result_sha256': sha(path.read_bytes())})
+            with self.subTest(manifest=manifest):
+                self.assertNotIn('source_reinspection', store.get_cycle(self.database, self.cycle['id'])['probes'][0])
+        write_json(path, baseline)
+        write_json(binding_path, {**binding, 'inspection_result_sha256': sha(path.read_bytes())})
+        (path.parent / 'not-in-the-manifest.json').write_bytes(b'{}')
+        self.assertNotIn('source_reinspection', store.get_cycle(self.database, self.cycle['id'])['probes'][0])
+
+    def test_manifest_nonregular_and_reparse_evidence_are_rejected(self):
+        self.run_inspection()
+        path = next(self.config.output_root.glob('inspect-*/result.json'))
+        result = json.loads(path.read_text(encoding='utf-8'))
+        extra = path.parent / 'source-panel.png'
+        extra.mkdir()
+        result['evidence_manifest'].append({'path': extra.name, 'bytes': 1, 'sha256': '0' * 64})
+        with self.assertRaises(ValueError):
+            inspection._evidence_manifest(result, path, self.config.output_root)
+        extra.rmdir()
+        extra.write_bytes(b'X')
+        result['evidence_manifest'][-1]['sha256'] = sha(b'X')
+        lstat = Path.lstat
+        def flagged(value, *args, **kwargs):
+            info = lstat(value, *args, **kwargs)
+            if value == extra:
+                return SimpleNamespace(st_mode=info.st_mode, st_file_attributes=stat.FILE_ATTRIBUTE_REPARSE_POINT)
+            return info
+        with patch.object(Path, 'lstat', flagged), self.assertRaises(ValueError):
+            inspection._evidence_manifest(result, path, self.config.output_root)
+
+    def test_binding_revision_must_be_an_integer_equal_to_the_current_frozen_revision(self):
+        self.run_inspection()
+        path = next(self.config.output_root.glob('inspect-*/binding.json'))
+        original = json.loads(path.read_text(encoding='utf-8'))
+        for value in (True, str(self.cycle['revision']), self.cycle['revision'] + 1):
+            write_json(path, {**original, 'revision': value})
+            self.assertNotIn('source_reinspection', store.get_cycle(self.database, self.cycle['id'])['probes'][0])
+
+    def test_read_only_hydration_wait_requires_two_matching_complete_snapshots(self):
+        page, calls = FakePage(self.url), []
+        loading = {**self.snapshot, 'question_verified': False, 'user_message_count': 0, 'assistant_count': 0,
+                   'answer': '', 'completion_marker': False, 'model_label': None}
+        states = [loading, loading, self.snapshot, self.snapshot]
+        async def read(*args, **kwargs):
+            calls.append('read')
+            return states.pop(0)
+        with patch.object(inspection, 'read_snapshot', read):
+            identity = asyncio.run(inspection.wait_for_original_answer(page, self.config, self.details,
+                timeout_seconds=.1, interval_seconds=0))
+        self.assertEqual(identity['method'], 'exact_complete_response')
+        self.assertEqual(calls, ['read'] * 4)
+        self.assertEqual(page.callbacks, [])
+
+    def test_readiness_latches_away_then_back_and_rejects_wrong_question_or_model(self):
+        for attack in ('away_back', 'wrong_question', 'wrong_model'):
+            page = FakePage(self.url)
+            async def read(*args, **kwargs):
+                snapshot = copy.deepcopy(self.snapshot)
+                if attack == 'away_back':
+                    page.navigate('https://www.doubao.com/chat/9999999')
+                    page.navigate(self.url)
+                elif attack == 'wrong_question':
+                    snapshot['question_verified'] = False
+                else:
+                    snapshot['model_label'] = '另一个模型'
+                return snapshot
+            with self.subTest(attack=attack), patch.object(inspection, 'read_snapshot', read), self.assertRaises(ValueError):
+                asyncio.run(inspection.wait_for_original_answer(page, self.config, self.details,
+                    timeout_seconds=.1, interval_seconds=0))
+            self.assertEqual(page.callbacks, [])
+
+    def test_actual_captcha_keeps_target_body_but_never_calls_source_reader_and_timeout_is_bounded(self):
+        self.snapshot['challenge'] = True
+        with self.assertRaises(inspection.SourceInspectionNeedAction) as caught:
+            self.run_inspection()
+        self.assertEqual(caught.exception.reason, 'human_verification_required')
+        self.assertFalse(any(row[0] == 'reinspect' for row in self.calls))
+        loading = {**self.snapshot, 'challenge': False, 'user_message_count': 0, 'assistant_count': 0,
+                   'question_verified': False, 'answer': '', 'completion_marker': False}
+        async def read(*args, **kwargs):
+            return loading
+        with patch.object(inspection, 'read_snapshot', read), self.assertRaises(inspection.SourceInspectionNeedAction) as caught:
+            asyncio.run(inspection.wait_for_original_answer(FakePage(self.url), self.config, self.details,
+                timeout_seconds=0, interval_seconds=0))
+        self.assertEqual(caught.exception.reason, 'original_answer_not_ready')
+
+    def test_full_inspection_waits_for_history_hydration_then_calls_sources_once(self):
+        states = [{**self.snapshot, 'user_message_count': 0, 'assistant_count': 0, 'answer': '',
+                   'question_verified': False, 'completion_marker': False}, self.snapshot, self.snapshot, self.snapshot]
+        async def read(*args, **kwargs):
+            return copy.deepcopy(states.pop(0))
+        with patch.object(inspection, 'open_original_page', self.page), \
+             patch.object(inspection, 'read_snapshot', read), \
+             patch.object(inspection, 'reinspect_existing_sources', self.collect):
+            outcome = asyncio.run(inspection.inspect(self.root, self.cycle, self.details, self.config))
+        self.assertTrue(outcome['source_reinspection']['source_collection_complete'])
+        self.assertEqual(sum(row[0] == 'reinspect' for row in self.calls), 1)
+
     def test_capability_requires_real_native_original_job_raw_and_answer_snapshot(self):
         view = self.cycle['probes'][0]
         self.assertEqual(view['source_inspection']['expected'], self.expected)
@@ -251,6 +428,19 @@ class SourceInspectionTests(InspectionFixture, unittest.TestCase):
 
 
 class DesktopSourceInspectionTests(InspectionFixture, unittest.TestCase):
+    def test_auth_block_returns_native_need_action_without_claiming_a_new_submission(self):
+        jobs = DesktopGeoJobs(self.root)
+        self.addCleanup(jobs.shutdown)
+        async def blocked(*args, **kwargs):
+            raise inspection.SourceInspectionNeedAction('human_verification_required')
+        with patch.object(inspection, 'inspect', blocked):
+            ack = jobs.start_probe_source_inspection(self.cycle['id'], self.probe_id, self.expected)
+            jobs.worker.join(timeout=3)
+        task = jobs.get_task(ack['id'])
+        self.assertEqual(task['status'], 'need_action')
+        self.assertFalse(task['question_sent'])
+        self.assertEqual(task['submission_state'], {'question_submission_attempted': False, 'question_submitted': False})
+        self.assertIn('没有重新提问', task['message'])
     def test_native_entry_cannot_omit_freeze_or_supply_url_path_or_script(self):
         jobs = DesktopGeoJobs(self.root)
         self.addCleanup(jobs.shutdown)

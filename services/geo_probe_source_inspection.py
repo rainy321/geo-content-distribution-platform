@@ -2,19 +2,24 @@
 from __future__ import annotations
 
 import copy
+import asyncio
 import hashlib
 import json
 import re
 import stat
-from contextlib import asynccontextmanager
+import time
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from services.doubao_source_collector import read_snapshot, reinspect_existing_sources, validate_session_slot
+from services.doubao_source_collector import _blocked_reason, read_snapshot, reinspect_existing_sources, validate_session_slot
 from services.geo_test_runner import write_json
 
 EXPECTED_FIELDS = {'plan_sha256', 'revision', 'response_sha256', 'raw_result_sha256'}
 MAX_JSON_BYTES = 5 * 1024 * 1024
+MAX_EVIDENCE_FILES = 128
+MAX_EVIDENCE_FILE_BYTES = 8 * 1024 * 1024
+MAX_EVIDENCE_TOTAL_BYTES = 64 * 1024 * 1024
 _ID = re.compile(r'[0-9a-f]{32}')
 _SHA = re.compile(r'[0-9a-f]{64}')
 _CHAT = re.compile(r'https://(?:www\.)?doubao\.com/chat/[0-9]{1,32}')
@@ -65,6 +70,8 @@ def _expected(value):
 
 
 def _partial(probe):
+    if not isinstance(probe, dict) or not isinstance(probe.get('after'), dict):
+        return False
     after = probe.get('after') or {}
     return (probe.get('source') == 'native_collector' and probe.get('native_verified') is True
             and after.get('answer_evaluable') is True and not after.get('answer_error')
@@ -77,7 +84,7 @@ def resolve(data, cycle, probe_id, expected=None):
     if (not _ID.fullmatch(str(cycle.get('id', ''))) or not isinstance(probe_id, str)
             or not _ID.fullmatch(probe_id) or cycle.get('baseline_source') == 'user_reported_external'):
         raise ValueError('只可补采本轮已有的原生单题回答')
-    rows = [row for row in cycle.get('probes', []) if row.get('id') == probe_id]
+    rows = [row for row in cycle.get('probes', []) if isinstance(row, dict) and row.get('id') == probe_id]
     if len(rows) != 1 or not _partial(rows[0]):
         raise ValueError('只可补采有效原生回答中未完整取得的来源，不会重新提问')
     probe = rows[0]
@@ -160,6 +167,11 @@ def _instant(value):
 def verify_snapshot(snapshot, details):
     """A reopened page must still prove the original full answer and model."""
     from services.doubao_answer_identity import prove_progress_body_elision
+    if not isinstance(snapshot, dict):
+        raise ValueError('原回答页面状态无法核对')
+    blocked = _blocked_reason(snapshot)
+    if blocked:
+        raise SourceInspectionNeedAction(blocked)
     if (snapshot.get('page_url') != details['conversation_url'] or snapshot.get('question_verified') is not True
             or snapshot.get('user_message_count') != 1 or snapshot.get('assistant_count', 0) < 1
             or snapshot.get('completion_marker') is not True or snapshot.get('busy')
@@ -174,6 +186,92 @@ def verify_snapshot(snapshot, details):
     if not identity:
         raise ValueError('原完整回答已变化，未补采来源')
     return {'method': 'exact_final_body_with_dom_proven_progress_prefix', **identity}
+
+
+class SourceInspectionNeedAction(ValueError):
+    def __init__(self, reason):
+        self.reason = reason
+        text = {'human_verification_required': '原会话需要正常完成安全验证',
+                'login_required': '原账号会话需要正常登录',
+                'session_redirected_to_logout': '原账号会话已退出，需要正常登录',
+                'rate_limited': '豆包当前限制访问，请稍后手动检查',
+                'website_temporarily_unavailable': '豆包页面暂不可用',
+                'service_capacity_unavailable': '豆包服务当前不可用',
+                'original_answer_not_ready': '原历史回答在等待时间内仍未完整加载'}.get(reason, '原会话需要检查')
+        super().__init__(text + '；已停止只读补采，没有重新提问。')
+
+
+@contextmanager
+def _target_navigation(page, url):
+    if not all(hasattr(page, name) for name in ('main_frame', 'on', 'remove_listener')):
+        raise ValueError('来源补采需要可观察导航的原页面')
+    state = {'away': False}
+    def navigated(frame):
+        if frame == page.main_frame and frame.url != url:
+            state['away'] = True
+    page.on('framenavigated', navigated)
+    try:
+        yield state
+    finally:
+        page.remove_listener('framenavigated', navigated)
+
+
+def _check_navigation(state):
+    if state['away']:
+        raise ValueError('原页面曾离开目标聊天，已停止来源补采；不会重新提问')
+
+
+async def wait_for_original_answer(page, config, details, *, navigation=None,
+                                   timeout_seconds=15, interval_seconds=.25):
+    """Wait only for SPA hydration; never navigate again, fill, send or switch model."""
+    if navigation is None:
+        with _target_navigation(page, details['conversation_url']) as navigation:
+            return await wait_for_original_answer(page, config, details, navigation=navigation,
+                timeout_seconds=timeout_seconds, interval_seconds=interval_seconds)
+    deadline, stable, last_identity = time.monotonic() + timeout_seconds, 0, None
+    while True:
+        _check_navigation(navigation)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SourceInspectionNeedAction('original_answer_not_ready')
+        try:
+            snapshot = await asyncio.wait_for(read_snapshot(page, config), timeout=remaining)
+        except asyncio.TimeoutError:
+            raise SourceInspectionNeedAction('original_answer_not_ready') from None
+        _check_navigation(navigation)
+        if not isinstance(snapshot, dict):
+            raise ValueError('原页面状态无法核对，未补采来源')
+        blocked = _blocked_reason(snapshot)
+        if blocked:
+            raise SourceInspectionNeedAction(blocked)
+        if (snapshot.get('page_url') != details['conversation_url']
+                or snapshot.get('client_mode') not in (None, 'unknown', details['client_mode'])
+                or snapshot.get('model_label') not in (None, '', details['model_label'])
+                or type(snapshot.get('user_message_count')) is int and snapshot['user_message_count'] > 1
+                or snapshot.get('user_message_count') == 1 and snapshot.get('question_verified') is False):
+            raise ValueError('原页面的问题、会话、界面或模型不匹配，未补采来源')
+        ready = (snapshot.get('question_verified') is True and type(snapshot.get('user_message_count')) is int
+                 and snapshot['user_message_count'] == 1 and type(snapshot.get('assistant_count')) is int
+                 and snapshot['assistant_count'] >= 1 and snapshot.get('completion_marker') is True
+                 and not snapshot.get('busy') and isinstance(snapshot.get('answer'), str) and snapshot['answer'])
+        if ready:
+            identity = verify_snapshot(snapshot, details)
+            stable = stable + 1 if identity == last_identity else 1
+            last_identity = identity
+            if stable >= 2:
+                return identity
+        else:
+            stable, last_identity = 0, None
+        if time.monotonic() >= deadline:
+            raise SourceInspectionNeedAction('original_answer_not_ready')
+        await asyncio.sleep(min(interval_seconds, max(0, deadline - time.monotonic())))
+
+
+@asynccontextmanager
+async def _watched_answer(page, config, details):
+    with _target_navigation(page, details['conversation_url']) as navigation:
+        before = await wait_for_original_answer(page, config, details, navigation=navigation)
+        yield {'before': before, 'navigation': navigation}
 
 
 def _inspection_result(item, details):
@@ -213,6 +311,7 @@ def _inspection_result(item, details):
 
 
 def _context_manifest(item, result_path, root):
+    _evidence_manifest(item, result_path, root)
     entries = [row for row in item.get('evidence_manifest', [])
                if isinstance(row, dict) and row.get('path') == 'source-context.json']
     if len(entries) != 1:
@@ -224,6 +323,77 @@ def _context_manifest(item, result_path, root):
             or any(proof.get(key) != summary.get(key) for key in (
                 'schema_version', 'evidence_file', 'target_question_sha256', 'target_answer_sha256', 'canonical_url_sha256'))):
         raise ValueError('后采来源上下文凭据已变化')
+
+
+def _evidence_manifest(item, result_path, root):
+    """Verify all flat evidence on every use; no metadata-only integrity cache."""
+    manifest = item.get('evidence_manifest')
+    if not isinstance(manifest, list) or not 1 <= len(manifest) <= MAX_EVIDENCE_FILES:
+        raise ValueError('后采证据清单缺失或文件数量超限')
+    names, total = {}, result_path.stat().st_size
+    for row in manifest:
+        if (not isinstance(row, dict) or set(row) != {'path', 'sha256', 'bytes'}
+                or not isinstance(row.get('path'), str)
+                or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]{0,120}', row['path'])
+                or row['path'].endswith('.')
+                or row['path'].split('.')[0].upper() in {'CON', 'PRN', 'AUX', 'NUL',
+                    *('COM' + str(i) for i in range(1, 10)), *('LPT' + str(i) for i in range(1, 10))}
+                or row['path'].casefold() in {'result.json', 'binding.json'}
+                or row['path'].casefold() in names or not _SHA.fullmatch(str(row.get('sha256', '')))
+                or type(row.get('bytes')) is not int or not 1 <= row['bytes'] <= MAX_EVIDENCE_FILE_BYTES):
+            raise ValueError('后采证据清单存在重复、越界或无效条目')
+        total += row['bytes']
+        if total > MAX_EVIDENCE_TOTAL_BYTES:
+            raise ValueError('后采证据总体积超限')
+        names[row['path'].casefold()] = row
+    refs = ['source-context.json']
+    screenshots = item.get('screenshots', [])
+    if not isinstance(screenshots, list):
+        raise ValueError('后采截图引用格式无效')
+    refs.extend(screenshots)
+    for source in [*item.get('citations', []), *item.get('displayed_sources', [])]:
+        if not isinstance(source, dict):
+            raise ValueError('后采来源条目格式无效')
+        if source.get('evidence_file') is not None:
+            refs.append(source['evidence_file'])
+        if 'evidence_files' in source:
+            if not isinstance(source['evidence_files'], list):
+                raise ValueError('后采来源证据引用格式无效')
+            refs.extend(source['evidence_files'])
+    if any(not isinstance(name, str) or name.casefold() not in names
+           or names[name.casefold()]['path'] != name for name in refs):
+        raise ValueError('后采来源引用了未列入清单的证据')
+    check_local_directory(result_path.parent, root)
+    entries = list(result_path.parent.iterdir())
+    if len(entries) > MAX_EVIDENCE_FILES + 2:
+        raise ValueError('后采证据目录文件数量超限')
+    allowed = {*names, 'result.json', 'binding.json'}
+    actual_total = 0
+    for path in entries:
+        info = path.lstat()
+        if (path.name.casefold() not in allowed or not stat.S_ISREG(info.st_mode)
+                or stat.S_ISLNK(info.st_mode)
+                or getattr(info, 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT):
+            raise ValueError('后采证据目录包含未登记或非普通文件')
+        actual_total += info.st_size
+        if actual_total > MAX_EVIDENCE_TOTAL_BYTES:
+            raise ValueError('后采证据总体积超限')
+    for row in names.values():
+        path = result_path.parent / row['path']
+        before = path.lstat()
+        if (not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode)
+                or getattr(before, 'st_file_attributes', 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
+                or before.st_size != row['bytes']):
+            raise ValueError('后采证据文件缺失、类型或大小不符')
+        digest = hashlib.sha256()
+        with path.open('rb') as stream:
+            for chunk in iter(lambda: stream.read(64 * 1024), b''):
+                digest.update(chunk)
+        after = path.lstat()
+        signature = lambda value: (value.st_size, value.st_mtime_ns, value.st_ctime_ns, value.st_ino, value.st_dev,
+                                   getattr(value, 'st_file_attributes', 0))
+        if digest.hexdigest() != row['sha256'] or signature(before) != signature(after):
+            raise ValueError('后采证据文件已变化')
 
 
 def _complete(item):
@@ -244,6 +414,7 @@ def saved_inspection(data, cycle, details):
                     or binding.get('probe_id') != details['probe_id'] or binding.get('question_sent') is not False
                     or binding.get('raw_unchanged') is not True or binding.get('integrity_passed') is not True
                     or binding.get('bound_original_job_sha256') != details['job_sha256']
+                    or type(binding.get('revision')) is not int or binding['revision'] != details['expected']['revision']
                     or binding.get('plan_sha256') != details['expected']['plan_sha256']
                     or binding.get('bound_original_raw_sha256') != details['expected']['raw_result_sha256']
                     or binding.get('response_sha256') != details['expected']['response_sha256']
@@ -281,6 +452,8 @@ def saved_inspection(data, cycle, details):
 
 def project(data, cycle):
     """Optional read-only fields; original after/assessment/time remain untouched."""
+    if not isinstance(cycle, dict) or not isinstance(cycle.get('probes'), list):
+        return []
     projected = copy.deepcopy(cycle['probes'])
     for probe in projected:
         if not _partial(probe):
@@ -330,10 +503,12 @@ async def inspect(data, cycle, details, config, *, progress=None):
     saved = saved_inspection(data, cycle, details)
     if saved and saved['source_collection_complete'] is True:
         raise ValueError('这条回答已补采来源，请查看已有补采时间；不会重复读取')
-    async with open_original_page(config, details['conversation_url']) as page:
-        before = verify_snapshot(await read_snapshot(page, config), details)
+    async with open_original_page(config, details['conversation_url']) as page, _watched_answer(page, config, details) as identities:
+        before = identities['before']
         result, path = await reinspect_existing_sources(config, details['raw_path'], page=page, progress=progress)
+        _check_navigation(identities['navigation'])
         after = verify_snapshot(await read_snapshot(page, config), details)
+        _check_navigation(identities['navigation'])
         from services.geo_content_store import get_cycle
         current_cycle = get_cycle(Path(data) / 'database.db', cycle['id'])
         frozen = resolve(data, current_cycle, details['probe_id'], details['expected'])

@@ -358,6 +358,8 @@ class DesktopGeoJobs:
                         message = recovery_message(self.job.get('failure_reason'),
                             attempted=state.get('question_submission_attempted'), submitted=state.get('question_submitted'),
                             failure_stage=self.job.get('failure_stage'))
+                        if kind == 'probe_source_inspection':
+                            message = str(error)
                     self.job.update(status="need_action" if needs_action else "failed", waiting_for_user=False, message=message)
                     self.job.pop('wait_reason', None)
                     self._persist()
@@ -696,7 +698,15 @@ class DesktopGeoJobs:
                         question_sent=False, new_answer_collected=False,
                         message='只读补采同一条回答的来源，不会重新提问；原回答和业务核对保持原样。')
                     self._persist()
-                return await inspection.inspect(self.data, current, fresh, config, progress=self._collector_progress)
+                try:
+                    return await inspection.inspect(self.data, current, fresh, config, progress=self._collector_progress)
+                except inspection.SourceInspectionNeedAction as error:
+                    with self.lock:
+                        self.job.update(collector_need_action=True, failure_reason=error.reason,
+                            failure_stage='source_reinspection_readiness',
+                            submission_state={'question_submission_attempted': False, 'question_submitted': False})
+                        self._persist()
+                    raise
 
         return self._start('probe_source_inspection', inspect, client_name=cycle['profile']['name'],
             cycle_id=cycle_id, target_id=probe_id, collector_config=config, session_profile_mode=details['profile_mode'])
