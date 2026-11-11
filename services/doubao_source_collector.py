@@ -540,6 +540,76 @@ async def _first_visible(locator: Any) -> Any:
     return None
 
 
+def _submission_context_view(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """Keep only the controlled composer context, never account text or page DOM."""
+    label = snapshot.get('model_label')
+    url = snapshot.get('page_url')
+    return {'page_url_sha256': hashlib.sha256(url.encode('utf-8')).hexdigest() if isinstance(url, str) else None,
+            'client_mode': snapshot.get('client_mode') if snapshot.get('client_mode') in ('consumer', 'work') else None,
+            'model_label': label if isinstance(label, str) and 0 < len(label.strip()) <= 100 else None,
+            'chat_interface_ready': snapshot.get('chat_interface_ready') if type(snapshot.get('chat_interface_ready')) is bool else None,
+            'user_message_count': snapshot.get('user_message_count'), 'assistant_count': snapshot.get('assistant_count'),
+            'blocked_reason': _blocked_reason(snapshot)}
+
+
+async def _settle_consumer_composer(page: Any, config: CollectorConfig,
+                                     initial: dict[str, Any], run_dir: Path) -> dict[str, Any]:
+    """Wait for a stable consumer model before filling, never rebaseline after input.
+
+    The editor/mode can hydrate before the model selector. The ordinary editor
+    has already been observed visible by the caller. Strict web sessions must
+    additionally show the complete composer on the official chat origin.
+    Known mode, conversation or model changes still fail closed.
+    """
+    proof = {'observations': [], 'stable_complete_observations': 0, 'ready': False, 'stop_reason': None}
+    path = run_dir / 'composer-readiness.json'
+    def persist():
+        path.write_text(json.dumps(proof, ensure_ascii=False, indent=2), encoding='utf-8')
+    snapshot, stable, known_model = initial, 0, None
+    deadline = asyncio.get_running_loop().time() + 3
+    for attempt in range(13):
+        view = _submission_context_view(snapshot)
+        proof['observations'].append(view)
+        if view['blocked_reason'] or snapshot.get('client_mode') == 'work':
+            proof['stop_reason'] = view['blocked_reason'] or 'client_mode_mismatch'
+            persist()
+            return snapshot
+        if any(snapshot.get(key) != initial.get(key) for key in ('page_url', 'user_message_count', 'assistant_count')):
+            proof['stop_reason'] = 'conversation_changed'
+            persist()
+            raise ValueError('submission_context_changed_not_submitted')
+        label = view['model_label']
+        if label is not None:
+            if known_model is not None and label != known_model:
+                proof['stop_reason'] = 'known_model_changed'
+                persist()
+                raise ValueError('submission_context_changed_not_submitted')
+            known_model = label
+        complete = (snapshot.get('client_mode') == 'consumer' and label is not None
+                    and (not config.strict_client_mode or snapshot.get('chat_interface_ready') is True))
+        stable = stable + 1 if complete else 0
+        proof['stable_complete_observations'] = stable
+        if stable >= 2:
+            proof['ready'] = True
+            persist()
+            return snapshot
+        persist()
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0 or attempt == 12:
+            break
+        await asyncio.sleep(min(.25, remaining))
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            break
+        try:
+            snapshot = await asyncio.wait_for(read_snapshot(page, config), timeout=remaining)
+        except asyncio.TimeoutError:
+            break
+    proof['stop_reason'] = 'readiness_timeout'
+    persist()
+    raise ValueError('submission_composer_not_ready_not_submitted')
+
+
 async def _fenced_editor_settle(editor: Any, sent_text: str, run_dir: Path) -> dict[str, Any]:
     """Allow the observed work editor to settle without editing or submitting again.
 
@@ -656,10 +726,16 @@ async def _fenced_send_ready(page: Any, config: CollectorConfig, run_dir: Path, 
     finally:
         await inspection.dispose()
     current = await read_snapshot(page, config)
-    if (_blocked_reason(current) or current.get('client_mode') != config.client_mode
-            or current.get('user_message_count') != baseline.get('user_message_count')
-            or current.get('assistant_count') != baseline.get('assistant_count')
-            or current.get('model_label') != baseline.get('model_label')):
+    context_guard = {'blocker_absent': _blocked_reason(current) is None,
+        'client_mode_match': current.get('client_mode') == config.client_mode,
+        'page_url_match': current.get('page_url') == baseline.get('page_url'),
+        'user_message_count_match': current.get('user_message_count') == baseline.get('user_message_count'),
+        'assistant_count_match': current.get('assistant_count') == baseline.get('assistant_count'),
+        'model_label_match': current.get('model_label') == baseline.get('model_label')}
+    if not all(context_guard.values()):
+        proof['context_guard'] = {**context_guard, 'baseline': _submission_context_view(baseline),
+                                  'current': _submission_context_view(current)}
+        persist()
         raise ValueError('submission_context_changed_not_submitted')
     editor = await _first_visible(page.locator(config.selectors.editor))
     readback = await editor.evaluate(EDITOR_READBACK_JS, sent_text) if editor is not None else {}
@@ -1260,6 +1336,9 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                 baseline = await read_snapshot(page, config)
                 baseline = await _wait_for_manual_verification(page, config, run_dir, result, baseline, progress=progress)
                 baseline = await _settle_pre_submission_mode(page, config, baseline)
+                if config.client_mode == 'consumer':
+                    stage = 'composer_readiness'
+                    baseline = await _settle_consumer_composer(page, config, baseline, run_dir)
                 if baseline["assistant_count"]:
                     result["failure_reason"] = "fresh_conversation_not_available"
                     await _save_checkpoint(page, config, run_dir, result, "before")

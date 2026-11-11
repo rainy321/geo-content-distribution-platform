@@ -244,14 +244,17 @@ class ManualWaitingTests(unittest.IsolatedAsyncioTestCase):
             yield SimpleNamespace()
         calls = [0]
         async def read(*_args, **_kwargs):
-            calls[0] += 1
-            if calls[0] <= 2:
+            # Hydration checks are legitimate before sending. Advance the
+            # synthetic server response only after the actual send operation,
+            # rather than treating a particular read ordinal as delivery.
+            if editor.press.await_count == 0:
                 return snapshot(challenge=False, question_verified=False, user_message_count=0)
-            if calls[0] == 3:
+            calls[0] += 1
+            if calls[0] == 1:
                 # Real consumer/work React can mount one partial user bubble
                 # before its exact text is observable; no anchor exists yet.
                 return snapshot(challenge=False, question_verified=False, user_message_count=1)
-            if calls[0] == 4:
+            if calls[0] == 2:
                 return snapshot()
             self.assertEqual(len(list(self.root.rglob('submission-observed.json'))), 1)
             page.navigate(CANONICAL)
