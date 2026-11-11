@@ -780,6 +780,8 @@ async def _navigate_to_doubao(page: Any, timeout_seconds: float) -> None:
 
 
 def _browser_error_reason(exc: Exception) -> str:
+    if isinstance(exc, _SourceContextChanged):
+        return 'source_context_changed_not_captured'
     if isinstance(exc, ManualWindowClosedError):
         return 'manual_verification_window_closed'
     if isinstance(exc, ValueError) and str(exc).startswith("model_"):
@@ -790,20 +792,147 @@ def _browser_error_reason(exc: Exception) -> str:
     return f"network_error:{code.group(1)}" if code else f"browser_error:{type(exc).__name__}"
 
 
-async def _expand_sources(page: Any, config: CollectorConfig, run_dir: Path, *, progress: Callable | None = None) -> tuple[list[dict[str, Any]], list[str], bool]:
+class _SourceContextChanged(ValueError):
+    pass
+
+
+class _SourceContextGuard:
+    """Bind source evidence to the completed answer, not a live last-answer locator."""
+    def __init__(self, page, config, snapshot, run_dir, *, original_answer_sha256=None, canonical_url=None):
+        self.page, self.config, self.expected, self.run_dir = page, config, snapshot, run_dir
+        self.route = SubmissionReceipt._route(snapshot.get('page_url'))
+        self.answer_sha = hashlib.sha256((snapshot.get('answer') or '').encode('utf-8')).hexdigest()
+        self.binding = {'schema_version': 1, 'evidence_file': 'source-context.json',
+                        'target_question_sha256': hashlib.sha256(config.question.encode('utf-8')).hexdigest(),
+                        'target_answer_sha256': original_answer_sha256 or self.answer_sha,
+                        'canonical_url_sha256': hashlib.sha256((canonical_url or snapshot.get('page_url') or '').encode('utf-8')).hexdigest()}
+        self.proof = {**self.binding, 'blocked': False, 'stop_reason': None, 'navigation_away_seen': False,
+                      'source_phase_completed': False,
+                      'observations': [], 'observations_dropped': 0}
+        self.listening = False
+
+    def fail(self, reason):
+        self.proof.update(blocked=True, stop_reason=reason)
+        raise _SourceContextChanged('source_context_changed_not_captured')
+
+    def navigated(self, frame):
+        if frame == self.page.main_frame and SubmissionReceipt._route(frame.url) != self.route:
+            self.proof.update(blocked=True, stop_reason='main_page_navigation', navigation_away_seen=True)
+
+    def start(self):
+        if not all(hasattr(self.page, name) for name in ('on', 'remove_listener', 'main_frame')):
+            self.fail('navigation_observation_unavailable')
+        self.page.on('framenavigated', self.navigated)
+        self.listening = True
+        self.verify(self.expected, 'expected_answer')
+
+    def verify(self, snapshot, phase):
+        record = {**_submission_context_view(snapshot), 'phase': phase,
+                  'question_verified': snapshot.get('question_verified'),
+                  'completion_marker': snapshot.get('completion_marker'), 'busy': snapshot.get('busy'),
+                  'answer_sha256': hashlib.sha256((snapshot.get('answer') or '').encode('utf-8')).hexdigest()}
+        if len(self.proof['observations']) < 128:
+            self.proof['observations'].append(record)
+        else:
+            self.proof['observations_dropped'] += 1
+        if self.proof['blocked']:
+            self.fail(self.proof['stop_reason'])
+        if not self.route or self.route[0] != 'canonical' or SubmissionReceipt._route(snapshot.get('page_url')) != self.route:
+            self.fail('canonical_conversation_mismatch')
+        if (_blocked_reason(snapshot) or snapshot.get('question_verified') is not True
+                or snapshot.get('user_message_count') != 1
+                or snapshot.get('assistant_count') != self.expected.get('assistant_count')
+                or snapshot.get('completion_marker') is not True or snapshot.get('busy')
+                or snapshot.get('client_mode') != self.config.client_mode
+                or snapshot.get('model_label') != self.expected.get('model_label')):
+            self.fail('question_completion_or_mode_mismatch')
+        if record['answer_sha256'] != self.answer_sha:
+            if not prove_progress_body_elision(self.expected.get('answer') or '', self.expected, snapshot):
+                self.fail('complete_answer_mismatch')
+
+    async def read(self, phase, *, allow_external_panels=False):
+        # Refuse before reading body/DOM as well as after the asynchronous read.
+        if self.proof['blocked']:
+            self.fail(self.proof['stop_reason'])
+        if SubmissionReceipt._route(self.page.main_frame.url) != self.route:
+            self.fail('canonical_conversation_mismatch')
+        snapshot = await read_snapshot(self.page, self.config, allow_external_panels=allow_external_panels)
+        self.verify(snapshot, phase)
+        return snapshot
+
+    async def capture(self, phase, *, allow_external_panels=False, optional_screenshot=False):
+        await self.read(phase + '_before_image', allow_external_panels=allow_external_panels)
+        # Keep the image in memory until the page is still bound after capture.
+        try:
+            options = {'full_page': True, **({'timeout': 5000} if optional_screenshot else {})}
+            image = await self.page.screenshot(**options)
+        except Exception as exc:
+            if not optional_screenshot or type(exc).__name__ != 'TimeoutError' or self.page.is_closed():
+                raise
+            image = None
+        snapshot = await self.read(phase + '_after_image', allow_external_panels=allow_external_panels)
+        return image, snapshot
+
+    def finish(self):
+        if self.listening:
+            self.page.remove_listener('framenavigated', self.navigated)
+        (self.run_dir / 'source-context.json').write_text(
+            json.dumps(self.proof, ensure_ascii=False, indent=2), encoding='utf-8')
+        return {**self.binding, 'status': ('verified' if self.proof['source_phase_completed']
+                                          and not self.proof['blocked'] else 'unverified')}
+
+
+async def _expand_sources(page: Any, config: CollectorConfig, run_dir: Path, *, progress: Callable | None = None,
+                          expected_snapshot: dict[str, Any] | None = None,
+                          source_guard=None) -> tuple[list[dict[str, Any]], list[str], bool]:
+    # Legacy custom collectors keep their original unverified contract. Native
+    # strict sessions and explicit read-only inspections require canonical proof.
+    if source_guard is not None:
+        expected_snapshot = source_guard.expected
+    if expected_snapshot is None and config.strict_client_mode and config.client_mode == 'consumer':
+        expected_snapshot = await read_snapshot(page, config)
+    if expected_snapshot is None:
+        return await _expand_sources_bound(page, config, run_dir, progress=progress)
+    owned_guard = source_guard is None
+    guard = source_guard or _SourceContextGuard(page, config, expected_snapshot, run_dir)
+    try:
+        if owned_guard:
+            guard.start()
+        result = await _expand_sources_bound(page, config, run_dir, progress=progress, source_guard=guard)
+        await guard.read('finished')
+        guard.proof['source_phase_completed'] = True
+        return result
+    except _SourceContextChanged:
+        # Preserve only markers already observed in the completed target answer.
+        # No body, DOM or screenshot from another conversation is persisted.
+        items = ([{**item, 'evidence_file': 'answer.png'} for item in expected_snapshot.get('sources', [])]
+                 if guard.route and guard.route[0] == 'canonical' else [])
+        return items, [], True
+    finally:
+        if owned_guard:
+            guard.finish()
+
+
+async def _expand_sources_bound(page: Any, config: CollectorConfig, run_dir: Path, *, progress: Callable | None = None,
+                                source_guard=None) -> tuple[list[dict[str, Any]], list[str], bool]:
     # Controls belong to the latest answer, so sidebar/history links cannot leak
     # into the citation list. Each source control is clicked at most once.
     roots = page.locator(config.selectors.assistant_message)
     root = await _first_visible(roots.last)
     if root is None:
-        return [], [], False
-    snapshot = await read_snapshot(page, config)
+        return [], [], source_guard is not None
+    snapshot = (await source_guard.read('initial') if source_guard else await read_snapshot(page, config))
+    bound_root = await root.element_handle() if source_guard else None
     items = [{**item, "evidence_file": "answer.png"} for item in snapshot["sources"]]
     screenshots: list[str] = []
     controls = root.locator(config.selectors.source_trigger)
     if not await controls.count():
         controls = root.get_by_role("button", name=re.compile(r"^(查看)?(全部)?(\d+\s*(个|篇|条))?\s*(参考资料|搜索来源|来源|引用)(\s*\d+\s*(个|篇|条)?)?$"))
     control_count = await controls.count()
+    bound_controls = await controls.element_handles() if source_guard else None
+    if bound_controls is not None:
+        control_count = len(bound_controls)
+        await source_guard.read('bound_source_controls')
     incomplete = control_count > 30 or bool(snapshot["source_trigger_count"] and not control_count)
     def report(phase, processed, total):
         if progress:
@@ -812,14 +941,20 @@ async def _expand_sources(page: Any, config: CollectorConfig, run_dir: Path, *, 
             except Exception:
                 # UI telemetry must not alter evidence or replay a browser action.
                 pass
-    panel_total = sum([await controls.nth(index).is_visible() for index in range(min(control_count, 30))])
+    panel_total = sum([await (bound_controls[index] if bound_controls is not None else controls.nth(index)).is_visible()
+                       for index in range(min(control_count, 30))])
     panel_processed = 0
     report('source_panels', panel_processed, panel_total)
-    for index in range(min(await controls.count(), 30)):
-        control = controls.nth(index)
+    for index in range(min(control_count, 30)):
+        control = bound_controls[index] if bound_controls is not None else controls.nth(index)
         if not await control.is_visible():
+            incomplete = incomplete or source_guard is not None
             continue
         try:
+            if source_guard:
+                await source_guard.read('panel_before_click')
+                if not await control.evaluate('(e, root) => e.isConnected && root.isConnected && root.contains(e)', bound_root):
+                    source_guard.fail('source_control_detached_or_foreign')
             already_open = await control.evaluate("""(e, s) => {
                 const panel = e.closest(s.source_panel);
                 if (!panel) return false;
@@ -830,20 +965,32 @@ async def _expand_sources(page: Any, config: CollectorConfig, run_dir: Path, *, 
             if already_open:
                 continue
             await control.click(timeout=3000)
-            panel = page.locator(config.selectors.source_panel)
-            await panel.first.wait_for(state="visible", timeout=5000)
+            if source_guard:
+                # The observed search-result block is inside this assistant.
+                # A global history/search block or an unbound portal cannot
+                # authorize a source capture for the target answer.
+                await bound_root.wait_for_selector(config.selectors.source_panel, state='visible', timeout=5000)
+            else:
+                panel = page.locator(config.selectors.source_panel)
+                await panel.first.wait_for(state="visible", timeout=5000)
             # Allow lazy source cards to appear; a recognized empty panel is not
             # enough to claim extraction succeeded.
             await page.wait_for_timeout(750)
             filename = f"sources-{index + 1}.png"
-            await page.screenshot(path=str(run_dir / filename), full_page=True)
+            if source_guard:
+                image, expanded = await source_guard.capture('source_panel')
+                (run_dir / filename).write_bytes(image)
+            else:
+                await page.screenshot(path=str(run_dir / filename), full_page=True)
+                expanded = await read_snapshot(page, config, allow_external_panels=True)
             screenshots.append(filename)
-            expanded = await read_snapshot(page, config, allow_external_panels=True)
             if not expanded["sources"]:
                 incomplete = True
             items.extend({**item, "evidence_file": filename} for item in expanded["sources"])
             (run_dir / f"sources-{index + 1}.json").write_text(json.dumps(expanded, ensure_ascii=False, indent=2), encoding="utf-8")
             await page.keyboard.press("Escape")
+        except _SourceContextChanged:
+            raise
         except Exception:
             incomplete = True
         finally:
@@ -852,13 +999,21 @@ async def _expand_sources(page: Any, config: CollectorConfig, run_dir: Path, *, 
     if snapshot["source_trigger_count"] and not items:
         incomplete = True
     citations = root.locator(f':is({config.selectors.answer_text}) :is({config.selectors.inline_citation})')
+    bound_citations = (await bound_root.query_selector_all(f':is({config.selectors.answer_text}) :is({config.selectors.inline_citation})')
+                       if source_guard else None)
     if await citations.count() > 30:
         incomplete = True
-    citation_total = sum([await citations.nth(index).is_visible() for index in range(min(await citations.count(), 30))])
+    citation_count = len(bound_citations) if bound_citations is not None else await citations.count()
+    citation_total = sum([await (bound_citations[index] if bound_citations is not None else citations.nth(index)).is_visible()
+                          for index in range(min(citation_count, 30))])
     citation_processed = 0
     report('inline_citations', citation_processed, citation_total)
-    for index in range(min(await citations.count(), 30)):
-        control = citations.nth(index)
+    for index in range(min(citation_count, 30)):
+        control = bound_citations[index] if bound_citations is not None else citations.nth(index)
+        if source_guard:
+            await source_guard.read('citation_before_resolution')
+            if not await control.evaluate('(e, root) => e.isConnected && root.isConnected && root.contains(e)', bound_root):
+                source_guard.fail('citation_control_detached_or_foreign')
         if await control.evaluate("e => e.matches('a[href]')"):
             if await control.is_visible():
                 citation_processed += 1
@@ -866,7 +1021,10 @@ async def _expand_sources(page: Any, config: CollectorConfig, run_dir: Path, *, 
             continue
         if await control.is_visible():
             try:
-                observed, filename = await _resolve_citation_navigation(page, control, run_dir, index, selectors=config.selectors, client_mode=config.client_mode)
+                scope = {'source_guard': source_guard} if source_guard else {}
+                observed, filename = await _resolve_citation_navigation(page, control, run_dir, index, selectors=config.selectors, client_mode=config.client_mode, **scope)
+                if source_guard:
+                    await source_guard.read('citation_after_resolution')
                 if observed:
                     # Upgrade the same visible marker with its UI-observed target.
                     for item in items:
@@ -988,7 +1146,8 @@ async def _inspect_citation_destination(popup, source_title, deadline):
 
 
 async def _resolve_citation_navigation(page: Any, control: Any, run_dir: Path,
-                                        index: int, *, selectors: DoubaoSelectors = DoubaoSelectors(), client_mode: str = "consumer") -> tuple[dict[str, Any] | None, str | None]:
+                                        index: int, *, selectors: DoubaoSelectors = DoubaoSelectors(), client_mode: str = "consumer",
+                                        source_guard=None) -> tuple[dict[str, Any] | None, str | None]:
     """Observe a normal click's new-tab navigation when a UI citation has no href."""
     filename = f"citation-{index + 1}.png"
     evidence: dict[str, Any] = {"captured_at": datetime.now(HK_TIME).isoformat(), "navigation_urls": []}
@@ -997,6 +1156,7 @@ async def _resolve_citation_navigation(page: Any, control: Any, run_dir: Path,
     created_pages, navigations = [], []
     listening = False
     stage = 'hover_card'
+    pending_image = None
 
     def observe_page(candidate):
         if candidate not in previous_pages and candidate not in created_pages:
@@ -1010,6 +1170,8 @@ async def _resolve_citation_navigation(page: Any, control: Any, run_dir: Path,
             pass
 
     try:
+        if source_guard:
+            await source_guard.read('citation_before_hover')
         await control.hover(timeout=3000)
         # The UI can keep the previous citation's card visible while lazily
         # replacing it. Wait a finite time for this marker's publisher instead
@@ -1032,6 +1194,8 @@ async def _resolve_citation_navigation(page: Any, control: Any, run_dir: Path,
             if type(exc).__name__ != 'TimeoutError':
                 raise
             evidence['hover_card_wait_status'] = 'publisher_match_timeout'
+        if source_guard:
+            await source_guard.read('citation_before_dom')
         evidence["marker_dom"] = await control.evaluate("e => e.outerHTML")
         evidence["tooltip_dom"] = await page.locator('[role="tooltip"]:visible').evaluate_all("nodes => nodes.map(e => e.outerHTML)")
         click_target = control
@@ -1065,7 +1229,10 @@ async def _resolve_citation_navigation(page: Any, control: Any, run_dir: Path,
                         }, {once: true, capture: true});
                     }""", asdict(selectors))
         stage = 'citation_screenshot'
-        await page.screenshot(path=str(run_dir / filename), full_page=True)
+        if source_guard:
+            pending_image, _ = await source_guard.capture('citation_card')
+        else:
+            await page.screenshot(path=str(run_dir / filename), full_page=True)
         if client_mode == "work" and source_title is None:
             evidence["resolution_status"] = "work_citation_card_not_matched"
             return None, filename
@@ -1076,9 +1243,15 @@ async def _resolve_citation_navigation(page: Any, control: Any, run_dir: Path,
         # noopener links can emit only context.page, initially with url=''.
         # One click is the only submission; URL/title reads may wait or repeat.
         stage = 'source_click'
+        if source_guard:
+            await source_guard.read('citation_before_click')
         await click_target.click(timeout=3000, no_wait_after=True)
+        if source_guard:
+            await source_guard.read('citation_after_click')
         stage = 'new_page_wait'
         while not created_pages and time.monotonic() < deadline:
+            if source_guard and source_guard.proof['blocked']:
+                source_guard.fail(source_guard.proof['stop_reason'])
             await asyncio.sleep(.1)
         evidence['new_page_count'] = len(created_pages)
         document, match_method = {}, None
@@ -1120,17 +1293,25 @@ async def _resolve_citation_navigation(page: Any, control: Any, run_dir: Path,
         if source_title:
             observed.update(title=source_title, title_kind="ui_title")
         return observed or None, filename
+    except _SourceContextChanged:
+        raise
     except Exception as exc:
         evidence.update(resolution_status='citation_navigation_error', failure_stage=stage,
                         error_type=type(exc).__name__)
-        return None, filename if (run_dir / filename).is_file() else None
+        return None, filename if pending_image is not None or (run_dir / filename).is_file() else None
     finally:
         if listening:
             page.context.remove_listener('page', observe_page)
             page.context.remove_listener('request', observe)
-        (run_dir / f"citation-{index + 1}.json").write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
-        if popup is not None and len(created_pages) == 1 and not popup.is_closed():
-            await popup.close()
+        try:
+            if source_guard:
+                await source_guard.read('citation_before_persist')
+                if pending_image is not None:
+                    (run_dir / filename).write_bytes(pending_image)
+            (run_dir / f"citation-{index + 1}.json").write_text(json.dumps(evidence, ensure_ascii=False, indent=2), encoding="utf-8")
+        finally:
+            if popup is not None and len(created_pages) == 1 and not popup.is_closed():
+                await popup.close()
 
 
 def write_evidence_result(run_dir: Path, result: dict[str, Any]) -> Path:
@@ -1197,6 +1378,7 @@ async def reinspect_existing_sources(config: CollectorConfig, original_result_pa
     result.pop('finished_at', None)
     (run_dir / 'selectors.json').write_text(json.dumps(asdict(config.selectors), ensure_ascii=False, indent=2), encoding='utf-8')
     invalid_navigation = False
+    source_guard = None
     original_answer_snapshot, original_snapshot_sha = None, None
     snapshot_evidence = next((item for item in original.get('evidence_manifest', [])
                               if isinstance(item, dict) and item.get('path') == 'answer.json'), None)
@@ -1217,7 +1399,8 @@ async def reinspect_existing_sources(config: CollectorConfig, original_result_pa
                 invalid_navigation = True
 
     def verify(snapshot):
-        if invalid_navigation or SubmissionReceipt._route(snapshot.get('page_url')) != expected_route:
+        if (invalid_navigation or (source_guard and source_guard.proof['navigation_away_seen'])
+                or SubmissionReceipt._route(snapshot.get('page_url')) != expected_route):
             raise ValueError('inspection_conversation_changed')
         if (_blocked_reason(snapshot) or snapshot.get('question_verified') is not True
                 or snapshot.get('user_message_count') != 1 or snapshot.get('assistant_count', 0) < 1
@@ -1237,21 +1420,32 @@ async def reinspect_existing_sources(config: CollectorConfig, original_result_pa
         expected_mode = (original.get('environment') or {}).get('client_mode') or config.client_mode
         if snapshot.get('client_mode') != expected_mode or config.client_mode != expected_mode:
             raise ValueError('inspection_client_mode_changed')
+        expected_model = (original.get('environment') or {}).get('model_label')
+        if config.strict_client_mode and expected_model and snapshot.get('model_label') != expected_model:
+            raise ValueError('inspection_model_changed')
 
     page.on('framenavigated', navigated)
     stage = 'inspection_identity'
     try:
-        verify(await read_snapshot(page, config))
-        await _save_checkpoint(page, config, run_dir, result, 'inspection-before')
-        verify(await read_snapshot(page, config))
+        current = await read_snapshot(page, config)
+        verify(current)
+        # verify(current) above has authenticated any omitted progress prefix
+        # against the original answer.json manifest. Public binding stays to
+        # the immutable original response; internal comparisons freeze current.
+        source_guard = _SourceContextGuard(page, config, current, run_dir,
+            original_answer_sha256=answer_sha, canonical_url=original['conversation_url'])
+        source_guard.start()
+        await _save_checkpoint(page, config, run_dir, result, 'inspection-before', source_guard=source_guard)
+        verify(await source_guard.read('inspection_before_sources'))
         if progress:
             progress({'event': 'answer_completed', 'state': 'extracting_sources', 'question_submitted': True})
         stage = 'inspection_sources'
-        items, screenshots, incomplete = await _expand_sources(page, config, run_dir, progress=progress)
+        items, screenshots, incomplete = await _expand_sources(page, config, run_dir, progress=progress,
+                                                              source_guard=source_guard)
         result['screenshots'].extend(screenshots)
-        verify(await read_snapshot(page, config))
-        await _save_checkpoint(page, config, run_dir, result, 'inspection-after')
-        verify(await read_snapshot(page, config))
+        verify(await source_guard.read('inspection_after_sources'))
+        await _save_checkpoint(page, config, run_dir, result, 'inspection-after', source_guard=source_guard)
+        verify(await source_guard.read('inspection_complete'))
         if hashlib.sha256(original_path.read_bytes()).hexdigest() != original_sha:
             raise ValueError('inspection_original_result_changed')
         result['inspection_provenance']['original_result_unchanged'] = True
@@ -1267,12 +1461,21 @@ async def reinspect_existing_sources(config: CollectorConfig, original_result_pa
     except asyncio.CancelledError:
         result.update(failure_reason='source_reinspection_cancelled', failure_stage=stage,
                       finished_at=datetime.now(HK_TIME).isoformat())
+        if source_guard:
+            result['source_context_binding'] = source_guard.finish()
+            source_guard = None
         write_evidence_result(run_dir, result)
         raise
     except Exception as exc:
-        reason = str(exc) if isinstance(exc, ValueError) and str(exc).startswith('inspection_') else _browser_error_reason(exc)
+        if isinstance(exc, _SourceContextChanged):
+            reason = ('inspection_conversation_changed' if source_guard.proof['stop_reason'] in
+                      {'main_page_navigation', 'canonical_conversation_mismatch'} else 'inspection_source_context_changed')
+        else:
+            reason = str(exc) if isinstance(exc, ValueError) and str(exc).startswith('inspection_') else _browser_error_reason(exc)
         result.update(failure_reason=reason, failure_stage=stage)
     finally:
+        if source_guard:
+            result['source_context_binding'] = source_guard.finish()
         page.remove_listener('framenavigated', navigated)
     result['finished_at'] = datetime.now(HK_TIME).isoformat()
     return result, write_evidence_result(run_dir, result)
@@ -1304,6 +1507,7 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
     }
     page = None
     context = None
+    source_guard = None
     stage = "browser_start"
     try:
         from playwright.async_api import async_playwright
@@ -1495,7 +1699,11 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                         break
                     await asyncio.sleep(0.5)
                 stage = 'answer_checkpoint'
-                await _save_checkpoint(page, config, run_dir, result, "answer")
+                if result['answer_completed'] and config.strict_client_mode and config.client_mode == 'consumer':
+                    source_guard = _SourceContextGuard(page, config, last, run_dir)
+                    source_guard.start()
+                checkpoint_scope = {'source_guard': source_guard} if source_guard else {}
+                await _save_checkpoint(page, config, run_dir, result, "answer", **checkpoint_scope)
                 result["conversation_url"] = last.get("page_url")
                 result["source_ui_summaries"] = last.get("source_ui_summaries", [])
                 result["environment"]["model_label"] = last.get("model_label") or result["environment"].get("model_label")
@@ -1504,7 +1712,8 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                     if progress:
                         progress({'event': 'answer_completed', 'state': 'extracting_sources',
                                   'question_submitted': result['question_submitted']})
-                    items, screenshots, incomplete = await _expand_sources(page, config, run_dir, progress=progress)
+                    source_scope = {'source_guard': source_guard} if source_guard else {}
+                    items, screenshots, incomplete = await _expand_sources(page, config, run_dir, progress=progress, **source_scope)
                     result["screenshots"].extend(screenshots)
                     result["citations"] = normalize_ui_sources([item for item in items if item["scope"] == "inline_citation"])
                     result["displayed_sources"] = normalize_ui_sources([item for item in items if item["scope"] == "source_panel"])
@@ -1527,17 +1736,22 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                 # Browser errors can contain profile paths and other session data.
                 result["failure_reason"] = _browser_error_reason(exc)
                 result["failure_stage"] = stage
-                if isinstance(exc, ManualWindowClosedError) or (isinstance(exc, ValueError) and str(exc).startswith(('submission_', 'editor_'))):
+                if isinstance(exc, (ManualWindowClosedError, _SourceContextChanged)) or (isinstance(exc, ValueError) and str(exc).startswith(('submission_', 'editor_'))):
                     result['collection_status'] = 'need_action'
                 if page is not None and not page.is_closed():
                     try:
-                        await _save_checkpoint(page, config, run_dir, result, "failure")
-                        reason = _blocked_reason(await read_snapshot(page, config))
+                        scope = {'source_guard': source_guard} if source_guard else {}
+                        await _save_checkpoint(page, config, run_dir, result, "failure", **scope)
+                        failure_snapshot = (await source_guard.read('failure_reason') if source_guard
+                                            else await read_snapshot(page, config))
+                        reason = _blocked_reason(failure_snapshot)
                         if reason:
                             result.update(collection_status="need_action", failure_reason=reason)
                     except Exception:
                         pass
             finally:
+                if source_guard:
+                    result['source_context_binding'] = source_guard.finish()
                 try:
                     await context.close()
                 except Exception as exc:
@@ -1578,8 +1792,21 @@ def _blocked_reason(snapshot: dict[str, Any]) -> str | None:
     return None
 
 
-async def _save_checkpoint(page: Any, config: CollectorConfig, run_dir: Path, result: dict[str, Any], name: str) -> None:
+async def _save_checkpoint(page: Any, config: CollectorConfig, run_dir: Path, result: dict[str, Any], name: str,
+                           *, source_guard=None) -> None:
     filename = f"{name}.png"
+    if source_guard:
+        image, snapshot = await source_guard.capture(name, optional_screenshot=name in {'answer', 'failure'})
+        if image is not None:
+            (run_dir / filename).write_bytes(image)
+            result['screenshots'].append(filename)
+        else:
+            diagnostic = {'checkpoint': name, 'operation': 'screenshot', 'error_type': 'TimeoutError',
+                          'recorded_at': datetime.now(HK_TIME).isoformat()}
+            result.setdefault('diagnostic_errors', []).append(diagnostic)
+            (run_dir / f'{name}-diagnostic.json').write_text(json.dumps(diagnostic, ensure_ascii=False, indent=2), encoding='utf-8')
+        (run_dir / f'{name}.json').write_text(json.dumps(snapshot, ensure_ascii=False, indent=2), encoding='utf-8')
+        return
     optional_screenshot = (result.get('question_submission_attempted') is True
         and (name in {'answer', 'failure', 'deferred-notice'} or name.startswith('manual-action-')))
     if optional_screenshot:
