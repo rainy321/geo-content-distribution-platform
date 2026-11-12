@@ -97,6 +97,26 @@ def _remember_chrome(profile, executable):
         temporary.unlink(missing_ok=True)
 
 
+def _bind_context_profile(context, profile, executable):
+    """Remember the actual launch choice in memory, without exposing paths."""
+    identity = '\0'.join(('geo-browser-profile:v1',
+        os.path.normcase(os.path.abspath(os.fspath(profile))),
+        os.path.normcase(os.path.abspath(os.fspath(executable))) if executable else 'bundled-chromium'))
+    digest = hashlib.sha256(os.fsencode(identity)).hexdigest()
+    try:
+        context._geo_profile_scope_sha256 = digest
+    except (AttributeError, TypeError):
+        # Some test/browser adapters do not permit attributes. They cannot
+        # establish account binding; their normal launch behavior is unchanged.
+        pass
+    return context
+
+
+def context_profile_scope(context):
+    value = getattr(context, '_geo_profile_scope_sha256', None)
+    return value if isinstance(value, str) and re.fullmatch('[a-f0-9]{64}', value) else None
+
+
 async def launch_context(playwright, profile_dir, options, fallback_executable=None):
     # Interactive desktop pages must follow the real window, including smaller
     # screens and later resizing. Keep deliberate device emulation unchanged.
@@ -119,9 +139,10 @@ async def launch_context(playwright, profile_dir, options, fallback_executable=N
             raise BrowserSessionSelectionError(_CONFIG_ERROR)
         alternate = _chrome_profile(profile, remembered=True)
         # Do not silently return to a new Edge session if this launch fails.
-        return await playwright.chromium.launch_persistent_context(str(alternate), **{**options, 'executable_path': fallback_executable})
+        context = await playwright.chromium.launch_persistent_context(str(alternate), **{**options, 'executable_path': fallback_executable})
+        return _bind_context_profile(context, alternate, fallback_executable)
     try:
-        return await playwright.chromium.launch_persistent_context(str(profile_dir), **options)
+        context = await playwright.chromium.launch_persistent_context(str(profile_dir), **options)
     except Exception:
         if not fallback_executable or fallback_executable == options.get('executable_path'):
             raise
@@ -137,4 +158,6 @@ async def launch_context(playwright, profile_dir, options, fallback_executable=N
             except Exception:
                 pass
             raise BrowserSessionSelectionError('浏览器会话选择未保存，已暂停操作；请核对浏览器窗口和本机写入权限，原数据保留。') from None
-        return context
+        return _bind_context_profile(context, alternate, fallback_executable)
+    else:
+        return _bind_context_profile(context, profile_dir, options.get('executable_path'))

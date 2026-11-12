@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 
 from services.geo_source_identity import unconfirmed_source_url_status
 from services.doubao_source_collector import validate_session_slot
+from services.doubao_account_identity import bound_result_handle, result_handle_changed
 from services.geo_test_service import (
     _scoped_url_identity, assess_answer, answer_evaluation_error, canonical_entity_url,
 )
@@ -135,7 +136,11 @@ def build_probe(cycle, case_id, collector_result, *, run_id, source, created_at=
     before['session_slot'], after['session_slot'] = baseline_slot, sampled_slot
     website_in_question = _address_present(details['case']['question'], cycle['profile']) is True
     same = lambda field: (before[field] == after[field]) if before[field] and after[field] else None
-    return {'schema_version': PROBE_SCHEMA, 'kind': 'geo_research_single_probe',
+    account_identity = (bound_result_handle(collector_result, probe_id=run_id, session_slot=sampled_slot)
+                        if source == 'native_collector' and details['execution']['client_mode'] == 'consumer' else None)
+    account_changed = (result_handle_changed(collector_result, probe_id=run_id, session_slot=sampled_slot)
+                       if source == 'native_collector' and details['execution']['client_mode'] == 'consumer' else False)
+    record = {'schema_version': PROBE_SCHEMA, 'kind': 'geo_research_single_probe',
         'id': run_id, 'run_id': run_id, 'cycle_id': cycle['id'], 'case_id': case_id,
         'category': details['case']['category'], 'question': details['case']['question'],
         'question_sha256': _sha(details['case']['question'].encode('utf-8')),
@@ -150,11 +155,16 @@ def build_probe(cycle, case_id, collector_result, *, run_id, source, created_at=
         'website_test_without_url': not website_in_question and not bool(re.search(r'https?://\S+', details['case']['question'], re.I)),
         'before': before, 'after': after,
         'execution': {**details['execution'], 'manual_wait_seconds': None, 'collector_invocation_limit': 1,
-                      'account_identity_status': 'unverified'},
+                      'account_identity_status': account_identity['account_identity_status'] if account_identity else 'unverified'},
         'conditions': {'same_question': True, 'client_mode_match': same('client_mode'), 'model_label_match': same('model_label'),
                        'session_slot_match': baseline_slot == sampled_slot, 'account_independence_verified': False},
         'evidence': evidence, 'limitations': list(LIMITATIONS),
         'business_relationship_review': None, 'causal_effect': None}
+    if account_identity is not None:
+        record['account_identity_evidence'] = account_identity
+    elif account_changed:
+        record['execution']['account_identity_reason'] = 'visible_handle_changed_during_probe'
+    return record
 
 
 def normalize_import(cycle, raw):

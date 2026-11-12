@@ -20,7 +20,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
-from services.browser_runtime import launch_context
+from services.browser_runtime import launch_context, context_profile_scope
+from services.doubao_account_identity import AccountObservedResult, bind_probe_handle
+from services.doubao_account_observer import observe_official_visible_handle, AccountObservationSafetyError
 from services.doubao_answer_state import is_deferred_answer
 from services.doubao_answer_identity import prove_progress_body_elision
 from services.doubao_submission_transport import EDITOR_READBACK_JS, KNOWN_DOWNLOAD_PROMOTION_JS, LITERAL_PREAMBLE, submission_fence, submission_text
@@ -83,6 +85,8 @@ class CollectorConfig:
     submission_format: str = 'plain'
     selectors: DoubaoSelectors = DoubaoSelectors()
     session_slot: str = 'primary'
+    # Set by the native single-probe job, never by frontend/import options.
+    account_probe_id: str | None = None
 
     def __post_init__(self) -> None:
         if type(self.strict_client_mode) is not bool:
@@ -90,6 +94,9 @@ class CollectorConfig:
         if self.client_mode not in {"consumer", "work"}:
             raise ValueError("client_mode 必须是 consumer 或 work")
         validate_session_slot(self.session_slot, self.client_mode)
+        if self.account_probe_id is not None and (not isinstance(self.account_probe_id, str)
+                or not re.fullmatch('[a-f0-9]{32}', self.account_probe_id) or self.client_mode != 'consumer'):
+            raise ValueError('账号观察只能绑定普通豆包的本次原生单题')
         if self.submission_format not in {'plain', 'verbatim_fenced'}:
             raise ValueError('submission_format 必须是 plain 或 verbatim_fenced')
         if self.requested_model_label is not None and (not self.requested_model_label.strip() or len(self.requested_model_label) > 100):
@@ -1496,7 +1503,7 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
     run_dir = config.output_root.resolve() / run_id
     run_dir.mkdir(parents=True)
     (run_dir / "selectors.json").write_text(json.dumps(asdict(config.selectors), ensure_ascii=False, indent=2), encoding="utf-8")
-    result: dict[str, Any] = {
+    result: dict[str, Any] = AccountObservedResult({
         "schema_version": "1.1", "run_id": run_id, "platform": "doubao", "client": "web",
         "question": config.question, "timestamp": started.isoformat(), "response": "",
         "question_submission_attempted": False, "question_submitted": False,
@@ -1512,10 +1519,13 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                         "session": "dedicated_persistent_profile", "new_conversation": False,
                         "session_slot": config.session_slot, "account_identity_status": "unverified",
                         "requested_client_mode": config.client_mode, "requested_model_label": config.requested_model_label},
-    }
+    })
     page = None
     context = None
     source_guard = None
+    account_before = None
+    account_context_id = uuid.uuid4().hex
+    account_profile_scope = None
     stage = "browser_start"
     try:
         from playwright.async_api import async_playwright
@@ -1527,6 +1537,7 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
             if config.executable_path:
                 options["executable_path"] = config.executable_path
             context = await launch_context(playwright, config.profile_dir.resolve(), options, config.fallback_executable_path)
+            account_profile_scope = context_profile_scope(context)
             try:
                 page = await context.new_page()
                 stage = "navigation"
@@ -1595,6 +1606,18 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                         raise ValueError("model_selection_not_confirmed")
                     result["environment"].update(model_label=baseline["model_label"], requested_model_label=config.requested_model_label)
                     await _save_checkpoint(page, config, run_dir, result, "model-selected")
+                if config.account_probe_id and account_profile_scope:
+                    stage = 'account_before_submission'
+                    account_before = await observe_official_visible_handle(page,
+                        client_mode=baseline['client_mode'], session_slot=config.session_slot,
+                        context_id=account_context_id, profile_scope_sha256=account_profile_scope,
+                        stage='before_submission', probe_id=config.account_probe_id)
+                    # The settings surface must be closed before any full-page
+                    # evidence capture or submission. Recheck the composer too.
+                    baseline = await read_snapshot(page, config)
+                    if (_blocked_reason(baseline) or baseline.get('client_mode') != config.client_mode
+                            or baseline.get('assistant_count') != 0 or baseline.get('user_message_count') != 0):
+                        raise ValueError('account_observation_composer_changed_not_submitted')
                 editor = await _first_visible(page.locator(config.selectors.editor))
                 if editor is None:
                     raise ValueError("editor_not_found")
@@ -1742,13 +1765,40 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                         result.update(collection_status='need_action', failure_reason='submission_receipt_timeout')
                     else:
                         result["failure_reason"] = "answer_timeout_or_selectors_changed"
+                if config.account_probe_id and account_profile_scope and result['answer_completed']:
+                    # Account settings are outside source inspection. Complete
+                    # that guard first so the two evidence scopes stay separate.
+                    if source_guard:
+                        result['source_context_binding'] = source_guard.finish()
+                        source_guard = None
+                    stage = 'account_after_answer'
+                    account_after = await observe_official_visible_handle(page,
+                        client_mode=last.get('client_mode'), session_slot=config.session_slot,
+                        context_id=account_context_id, profile_scope_sha256=account_profile_scope,
+                        stage='after_answer', probe_id=config.account_probe_id)
+                    result.account_observations = (account_before, account_after)
+                    try:
+                        binding = bind_probe_handle(account_before, account_after,
+                            probe_id=config.account_probe_id, session_slot=config.session_slot,
+                            context_id=account_context_id, profile_scope_sha256=account_profile_scope,
+                            source='native_collector')
+                    except ValueError:
+                        binding = None
+                    if binding:
+                        result['account_identity_evidence'] = binding
+                        result['environment']['account_identity_status'] = binding['account_identity_status']
             except Exception as exc:
                 # Browser errors can contain profile paths and other session data.
                 result["failure_reason"] = _browser_error_reason(exc)
                 result["failure_stage"] = stage
                 if isinstance(exc, (ManualWindowClosedError, _SourceContextChanged)) or (isinstance(exc, ValueError) and str(exc).startswith(('submission_', 'editor_'))):
                     result['collection_status'] = 'need_action'
-                if page is not None and not page.is_closed():
+                if isinstance(exc, AccountObservationSafetyError):
+                    # A visible account menu may contain personal identifiers.
+                    # Preserve earlier evidence; never screenshot this surface.
+                    result.update(collection_status='need_action', failure_reason='account_menu_not_safely_closed',
+                                  failure_stage=stage)
+                elif page is not None and not page.is_closed():
                     try:
                         scope = {'source_guard': source_guard} if source_guard else {}
                         await _save_checkpoint(page, config, run_dir, result, "failure", **scope)
@@ -1804,6 +1854,13 @@ def _blocked_reason(snapshot: dict[str, Any]) -> str | None:
 
 async def _save_checkpoint(page: Any, config: CollectorConfig, run_dir: Path, result: dict[str, Any], name: str,
                            *, source_guard=None) -> None:
+    if config.account_probe_id:
+        # A user may open settings while this headed task is running. Never
+        # record the visible account menu as a diagnostic checkpoint either.
+        groups = page.locator('nav[aria-label="设置分类"], [role="group"][aria-label="设置分类"]')
+        for index in range(await groups.count()):
+            if await groups.nth(index).is_visible():
+                raise AccountObservationSafetyError()
     filename = f"{name}.png"
     if source_guard:
         image, snapshot = await source_guard.capture(name, optional_screenshot=name in {'answer', 'failure'})

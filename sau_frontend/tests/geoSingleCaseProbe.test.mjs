@@ -402,6 +402,59 @@ test('saved primary-to-secondary probes render both actual session labels and re
   assert.match(old,/原记录未标明账号会话/);assert.match(old,/账号会话是否相同未知/);assert.match(old,/账号是否独立未核验/)
 })
 
+const visibleAccountProbe=()=>{
+  const id='a'.repeat(32),context='b'.repeat(32),profile='c'.repeat(64),handle='d'.repeat(64)
+  const identity={schema_version:'doubao_probe_visible_handle_v1',account_identity_status:'official_visible_handle_observed',
+    identifier_kind:'official_visible_handle',identifier_stability:'not_established',hash_scheme:'doubao-visible-handle:v1:',
+    handle_sha256:handle,probe_id:id,session_slot:'secondary',context_id:context,profile_scope_sha256:profile,
+    observations:['before_submission','after_answer'].map((stage,index)=>({schema_version:'doubao_visible_handle_observation_v1',
+      identifier_kind:'official_visible_handle',identifier_stability:'not_established',hash_scheme:'doubao-visible-handle:v1:',
+      handle_sha256:handle,official_origin:'https://www.doubao.com',surface:'settings_categories_account_button',
+      probe_id:id,session_slot:'secondary',context_id:context,profile_scope_sha256:profile,stage,
+      observed_at:`2026-11-12T04:0${index}:00+00:00`}))}
+  return probe({id,run_id:id,source:'native_collector',native_verified:true,
+    execution:{client_mode:'consumer',session_slot:'secondary',account_identity_status:'official_visible_handle_observed'},
+    before:side({client_mode:'consumer',session_slot:'primary'}),after:side({client_mode:'consumer',session_slot:'secondary'}),
+    account_identity_evidence:identity,conditions:{same_question:true,client_mode_match:true,model_label_match:true,
+      session_slot_match:false,account_independence_verified:false}})
+}
+
+test('native paired official handle evidence renders this-probe observation without granting independence or GEO success',async()=>{
+  const value=visibleAccountProbe(),markup=await renderComponent(cycle({probes:[value]}))
+  assert.match(markup,/本次采集前后观察到同一豆包号/)
+  assert.match(markup,/尚未验证其是否永久不变/);assert.match(markup,/账号是否独立仍未核验/)
+  assert.match(markup,/不计为独立GEO通过/)
+  assert.doesNotMatch(markup,/两个独立账号已通过|永久UID已验证|不可变UID|user_/)
+})
+
+test('imported mismatched or incomplete persisted account evidence falls back to unverified in actual rendering',async()=>{
+  for(const mutate of [
+    value=>{value.source='research_prototype_import'},value=>{value.native_verified=false},
+    value=>{value.account_identity_evidence.probe_id='f'.repeat(32)},
+    value=>{value.account_identity_evidence.observations[1].handle_sha256='e'.repeat(64)},
+    value=>{value.account_identity_evidence.observations[1].observed_at='2026-11-11T04:00:00+00:00'},
+    value=>{value.account_identity_evidence.observations=[]},
+    value=>{value.after.session_slot='primary'},value=>{delete value.account_identity_evidence},
+  ]){
+    const value=visibleAccountProbe();mutate(value)
+    const markup=await renderComponent(cycle({probes:[value]}))
+    assert.match(markup,/账号是否独立未核验/)
+    assert.doesNotMatch(markup,/本次采集前后观察到同一豆包号/)
+  }
+})
+
+test('native visible-handle change is explicit but stays unverified; imports cannot claim this native observation',async()=>{
+  const value=visibleAccountProbe();delete value.account_identity_evidence
+  value.execution.account_identity_status='unverified'
+  value.execution.account_identity_reason='visible_handle_changed_during_probe'
+  const markup=await renderComponent(cycle({probes:[value]}))
+  assert.match(markup,/采集前后观察到不同豆包号/);assert.match(markup,/本次账号身份未核验/)
+  assert.match(markup,/不能用于独立账号验收/)
+  value.source='research_prototype_import'
+  const imported=await renderComponent(cycle({probes:[value]}))
+  assert.match(imported,/账号是否独立未核验/);assert.doesNotMatch(imported,/采集前后观察到不同豆包号/)
+})
+
 test('actual external UI shows the negative business review, original quote and unknown conditions without a false before-after claim',async()=>{
   const markup=await renderComponent(cycle({facts:[fact],probes:[externalProbe()]}))
   assert.match(markup,/用户外部反馈/);assert.match(markup,/关联 q02 · 外部反馈/)

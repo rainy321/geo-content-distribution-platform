@@ -11,6 +11,28 @@ from services import browser_runtime
 
 
 class BrowserSessionChoiceTests(unittest.IsolatedAsyncioTestCase):
+    async def test_account_scope_tracks_actual_fallback_and_reused_engine_without_paths(self):
+        first, _ = await self.choose_chrome()
+        first_scope = browser_runtime.context_profile_scope(first)
+        self.assertRegex(first_scope, '^[a-f0-9]{64}$')
+        remembered = SimpleNamespace(close=AsyncMock())
+        playwright, launch = self.playwright([remembered])
+        await browser_runtime.launch_context(playwright, self.profile, self.options, 'chrome')
+        self.assertEqual(browser_runtime.context_profile_scope(remembered), first_scope)
+        self.assertEqual(launch.call_args.args[0], str(self.alternate))
+        other = SimpleNamespace(close=AsyncMock())
+        playwright, _ = self.playwright([other])
+        await browser_runtime.launch_context(playwright, self.profile.with_name('other-profile'), self.options, 'chrome')
+        self.assertNotEqual(browser_runtime.context_profile_scope(other), first_scope)
+        self.assertNotIn(str(self.profile), repr(first.__dict__))
+
+    async def test_unbound_adapter_never_proves_an_account_profile_scope(self):
+        self.assertIsNone(browser_runtime.context_profile_scope(object()))
+        context = object()
+        playwright, _ = self.playwright([context])
+        self.assertIs(await browser_runtime.launch_context(playwright, self.profile, self.options, 'chrome'), context)
+        self.assertIsNone(browser_runtime.context_profile_scope(context))
+
     def setUp(self):
         self.temporary = TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)

@@ -60,7 +60,7 @@
         <el-button :disabled="busy" data-testid="probe-inspect-sources" @click="requestInspection(item)">{{ inspectionFor(item) ? '手动复查这条回答的未完整来源' : '仅补采这条回答的来源' }}</el-button><p class="probe-hint">不会重新提问。沿用这条回答的原账号会话，只读打开原聊天检查来源；不会自动重复。</p>
       </div>
       <p class="probe-hint probe-conditions">{{ conditions(item) }}</p>
-      <p class="probe-account-independence" data-testid="probe-account-independence"><strong>账号是否独立未核验</strong> · 会话编号只区分采集会话，不能证明是不同个人账号，也不计为独立GEO通过。</p>
+      <p class="probe-account-independence" data-testid="probe-account-independence"><strong>{{ accountIdentity(item).label }}</strong> · {{ accountIdentity(item).note }}</p>
       <details v-if="Array.isArray(item.limitations) && item.limitations.length"><summary>查看这次观察的限制</summary><p v-for="(note,index) in item.limitations" :key="index" class="probe-hint">{{ note }}</p></details>
     </article>
     <el-button v-if="observations.length>recordLimit" text @click="recordLimit+=3">再显示 3 条记录</el-button><el-button v-if="recordLimit>3" text @click="recordLimit=3">收起历史记录</el-button>
@@ -108,6 +108,25 @@ const requestInspection=item=>{if(props.canInspect&&!props.busy&&inspectionConte
 const laterObserved=(view,key)=>view?.source_assessment?.[key]===true?'已观察到':view?.source_assessment?.[key]===false?'未观察到':'未知'
 const laterAddressRows=item=>(inspectionFor(item)?.address_evidence||[]).filter(row=>row&&typeof row.url==='string'&&publicationReviewUrl(row.url))
 const recordedSession=(side,item)=>isExternal(item)?'账号会话由用户提供，未核验':side?.session_slot==='primary'?'账号会话1':side?.session_slot==='secondary'?'账号会话2':'原记录未标明账号会话'
+const accountIdentity=item=>{
+  const unknown={label:'账号是否独立未核验',note:'会话编号只区分采集会话，不能证明是不同个人账号，也不计为独立GEO通过。'}
+  if(item?.source!=='native_collector'||item.native_verified!==true||item.execution?.client_mode!=='consumer'||item.after?.client_mode!=='consumer')return unknown
+  if(item.execution.account_identity_status==='unverified'&&item.execution.account_identity_reason==='visible_handle_changed_during_probe')return {label:'采集前后观察到不同豆包号',note:'本次账号身份未核验，不能用于独立账号验收；原回答保留。'}
+  const proof=item.account_identity_evidence,slot=item.execution.session_slot,observations=proof?.observations
+  const sha=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value),id=value=>typeof value==='string'&&/^[a-f0-9]{32}$/.test(value)
+  if(item.execution.account_identity_status!=='official_visible_handle_observed'||!proof||proof.schema_version!=='doubao_probe_visible_handle_v1'
+    ||proof.account_identity_status!=='official_visible_handle_observed'||proof.identifier_kind!=='official_visible_handle'||proof.identifier_stability!=='not_established'
+    ||proof.hash_scheme!=='doubao-visible-handle:v1:'||!id(item.id)||item.run_id!==item.id||proof.probe_id!==item.id
+    ||!['primary','secondary'].includes(slot)||proof.session_slot!==slot||item.after.session_slot!==slot
+    ||!id(proof.context_id)||!sha(proof.profile_scope_sha256)||!sha(proof.handle_sha256)||!Array.isArray(observations)||observations.length!==2)return unknown
+  const valid=(value,stage)=>value?.schema_version==='doubao_visible_handle_observation_v1'&&value.identifier_kind===proof.identifier_kind
+    &&value.identifier_stability===proof.identifier_stability&&value.hash_scheme===proof.hash_scheme&&value.handle_sha256===proof.handle_sha256
+    &&['https://doubao.com','https://www.doubao.com'].includes(value.official_origin)&&value.surface==='settings_categories_account_button'
+    &&value.probe_id===item.id&&value.stage===stage&&value.session_slot===slot&&value.context_id===proof.context_id
+    &&value.profile_scope_sha256===proof.profile_scope_sha256&&typeof value.observed_at==='string'&&Number.isFinite(Date.parse(value.observed_at))
+  if(!valid(observations[0],'before_submission')||!valid(observations[1],'after_answer')||Date.parse(observations[0].observed_at)>Date.parse(observations[1].observed_at))return unknown
+  return {label:'本次采集前后观察到同一豆包号',note:'仅核对本次官方可见账号标识，尚未验证其是否永久不变；账号是否独立仍未核验，也不计为独立GEO通过。'}
+}
 const contextAttestation=item=>{
   const history=item?.context_attestations
   if(!isExternal(item)||!Array.isArray(history)||!history.length)return null

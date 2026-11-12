@@ -594,7 +594,8 @@ class DesktopGeoJobs:
             return {'error': str(error)}
         probe_id = uuid.uuid4().hex
         directory = self.data / 'geo-content/probes' / probe_id
-        config = replace(config, output_root=directory / 'evidence')
+        config = replace(config, output_root=directory / 'evidence',
+                         account_probe_id=probe_id if config.client_mode == 'consumer' else None)
 
         async def probe():
             import hashlib
