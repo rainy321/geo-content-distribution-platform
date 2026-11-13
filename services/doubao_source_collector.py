@@ -15,6 +15,7 @@ import time
 import unicodedata
 import uuid
 from collections.abc import Callable
+from contextlib import asynccontextmanager
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -801,6 +802,99 @@ def _browser_error_reason(exc: Exception) -> str:
 
 class _SourceContextChanged(ValueError):
     pass
+
+
+@asynccontextmanager
+async def _literal_source_readiness(page, config, expected, run_dir, submission, *, timeout_seconds=3):
+    """Reobserve a missing user bubble, without promoting a delivery receipt to DOM proof."""
+    route = SubmissionReceipt._route(expected.get('page_url'))
+    routes = [SubmissionReceipt._route(value) for value in submission.navigation_urls]
+    eligible = (submission.page is page and submission.question == config.question
+        and submission.attempts == 1 and submission.invalid_reason is None
+        and submission.baseline_count == 0 and submission.baseline_user_count == 0
+        and submission.editor_readback_verified and submission.submission_format == 'plain'
+        and submission.navigation_tracking and submission.manual_action_seen and submission.observed_url
+        and len(routes) >= 2 and all(routes) and routes[0][0] == 'local'
+        and route and route[0] == 'canonical' and all(value == route for value in routes[1:])
+        and expected.get('question_verified') is False and expected.get('user_message_count') == 0)
+    proof = {'schema_version': 1, 'kind': 'bounded_literal_source_readiness',
+        'target_question_sha256': hashlib.sha256(config.question.encode('utf-8')).hexdigest(),
+        'target_answer_sha256': hashlib.sha256((expected.get('answer') or '').encode('utf-8')).hexdigest(),
+        'canonical_url_sha256': hashlib.sha256((expected.get('page_url') or '').encode('utf-8')).hexdigest(),
+        'eligible_manual_fallback': bool(eligible), 'navigation_away_seen': False,
+        'status': 'unverified', 'stop_reason': None, 'observations': []}
+
+    def fail(reason):
+        proof.update(status='unverified', stop_reason=reason)
+        raise _SourceContextChanged('source_context_changed_not_captured')
+
+    def navigated(frame):
+        if frame == page.main_frame and SubmissionReceipt._route(frame.url) != route:
+            proof['navigation_away_seen'] = True
+
+    def check_navigation():
+        if (proof['navigation_away_seen'] or submission.invalid_reason is not None
+                or page.is_closed() or SubmissionReceipt._route(page.main_frame.url) != route):
+            fail('main_page_navigation_or_closed')
+
+    listening = False
+    try:
+        if (not eligible or not all(hasattr(page, name) for name in ('on', 'remove_listener', 'main_frame'))
+                or not expected.get('answer') or expected.get('completion_marker') is not True
+                or expected.get('busy') or _blocked_reason(expected)
+                or expected.get('client_mode') != config.client_mode or not expected.get('model_label')
+                or type(expected.get('assistant_count')) is not int or expected['assistant_count'] < 1):
+            fail('manual_fallback_not_eligible')
+        page.on('framenavigated', navigated)
+        listening = True
+        deadline, stable = time.monotonic() + timeout_seconds, 0
+        while True:
+            check_navigation()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                fail('literal_question_not_ready')
+            try:
+                current = await asyncio.wait_for(read_snapshot(page, config), timeout=remaining)
+            except asyncio.TimeoutError:
+                fail('literal_question_not_ready')
+            except Exception:
+                fail('source_readiness_unavailable')
+            check_navigation()
+            if not isinstance(current, dict) or not isinstance(current.get('answer'), str):
+                fail('source_readiness_unavailable')
+            answer_sha = hashlib.sha256((current.get('answer') or '').encode('utf-8')).hexdigest()
+            proof['observations'].append({'question_verified': current.get('question_verified'),
+                'user_message_count': current.get('user_message_count'), 'answer_sha256': answer_sha})
+            if (current.get('page_url') != expected.get('page_url') or _blocked_reason(current)
+                    or current.get('assistant_count') != expected.get('assistant_count')
+                    or answer_sha != proof['target_answer_sha256']
+                    or current.get('client_mode') != expected.get('client_mode')
+                    or current.get('model_label') != expected.get('model_label')
+                    or current.get('completion_marker') is not True or current.get('busy')):
+                fail('completed_answer_context_changed')
+            if current.get('user_message_count') == 1 and current.get('question_verified') is True:
+                stable += 1
+            elif current.get('user_message_count') == 0 and current.get('question_verified') is False:
+                stable = 0
+            else:
+                fail('literal_question_mismatch')
+            if stable >= 2:
+                proof['status'] = 'literal_dom_verified'
+                # Keep navigation observation active until the caller installs
+                # the unchanged source guard; there is no unobserved handoff.
+                yield current
+                check_navigation()
+                return
+            await asyncio.sleep(min(.25, max(0, deadline - time.monotonic())))
+    finally:
+        try:
+            if listening:
+                page.remove_listener('framenavigated', navigated)
+            (run_dir / 'source-readiness.json').write_text(json.dumps(proof, ensure_ascii=False, indent=2), encoding='utf-8')
+        except Exception:
+            # Even an audit/cleanup failure must not fall into an unguarded
+            # diagnostic DOM read or screenshot before the source guard exists.
+            raise _SourceContextChanged('source_context_changed_not_captured') from None
 
 
 class _SourceContextGuard:
@@ -1797,8 +1891,15 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                     await asyncio.sleep(0.5)
                 stage = 'answer_checkpoint'
                 if result['answer_completed'] and config.strict_client_mode and config.client_mode == 'consumer':
-                    source_guard = _SourceContextGuard(page, config, last, run_dir)
-                    source_guard.start()
+                    if (result.get('question_verification_method') == 'bound_local_to_canonical_after_manual'
+                            and last.get('question_verified') is False and last.get('user_message_count') == 0):
+                        async with _literal_source_readiness(page, config, last, run_dir, submission) as ready:
+                            last = ready
+                            source_guard = _SourceContextGuard(page, config, last, run_dir)
+                            source_guard.start()
+                    else:
+                        source_guard = _SourceContextGuard(page, config, last, run_dir)
+                        source_guard.start()
                 checkpoint_scope = {'source_guard': source_guard} if source_guard else {}
                 await _save_checkpoint(page, config, run_dir, result, "answer", **checkpoint_scope)
                 result["conversation_url"] = last.get("page_url")
@@ -1864,7 +1965,7 @@ async def collect_doubao_sources(config: CollectorConfig, *, playwright_factory:
                     # Preserve earlier evidence; never screenshot this surface.
                     result.update(collection_status='need_action', failure_reason='account_menu_not_safely_closed',
                                   failure_stage=stage)
-                elif page is not None and not page.is_closed():
+                elif page is not None and not page.is_closed() and not isinstance(exc, _SourceContextChanged):
                     try:
                         scope = {'source_guard': source_guard} if source_guard else {}
                         await _save_checkpoint(page, config, run_dir, result, "failure", **scope)
