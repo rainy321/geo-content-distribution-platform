@@ -992,16 +992,23 @@ async def _expand_sources_bound(page: Any, config: CollectorConfig, run_dir: Pat
             # enough to claim extraction succeeded.
             await page.wait_for_timeout(750)
             filename = f"sources-{index + 1}.png"
+            evidence_file = filename
             if source_guard:
-                image, expanded = await source_guard.capture('source_panel')
-                (run_dir / filename).write_bytes(image)
+                image, expanded = await source_guard.capture('source_panel', optional_screenshot=True)
+                if image is not None:
+                    (run_dir / filename).write_bytes(image)
+                else:
+                    evidence_file = f"sources-{index + 1}.json"
+                    expanded['source_capture'] = {'screenshot_status': 'image_timeout',
+                        'screenshot_error_type': 'TimeoutError', 'guarded_DOM_verified': True}
             else:
                 await page.screenshot(path=str(run_dir / filename), full_page=True)
                 expanded = await read_snapshot(page, config, allow_external_panels=True)
-            screenshots.append(filename)
-            if not expanded["sources"]:
+            if evidence_file.endswith('.png'):
+                screenshots.append(filename)
+            if not any(item['scope'] == 'source_panel' for item in expanded["sources"]):
                 incomplete = True
-            items.extend({**item, "evidence_file": filename} for item in expanded["sources"])
+            items.extend({**item, "evidence_file": evidence_file} for item in expanded["sources"])
             (run_dir / f"sources-{index + 1}.json").write_text(json.dumps(expanded, ensure_ascii=False, indent=2), encoding="utf-8")
             await page.keyboard.press("Escape")
         except _SourceContextChanged:
@@ -1011,7 +1018,7 @@ async def _expand_sources_bound(page: Any, config: CollectorConfig, run_dir: Pat
         finally:
             panel_processed += 1
             report('source_panels', panel_processed, panel_total)
-    if snapshot["source_trigger_count"] and not items:
+    if snapshot["source_trigger_count"] and not any(item['scope'] == 'source_panel' for item in items):
         incomplete = True
     citations = root.locator(f':is({config.selectors.answer_text}) :is({config.selectors.inline_citation})')
     bound_citations = (await bound_root.query_selector_all(f':is({config.selectors.answer_text}) :is({config.selectors.inline_citation})')
@@ -1045,7 +1052,7 @@ async def _expand_sources_bound(page: Any, config: CollectorConfig, run_dir: Pat
                     for item in items:
                         if item["scope"] == "inline_citation" and item.get("ui_order") == index + 1 and not item.get("href"):
                             item.update(observed, evidence_file=filename)
-                if filename:
+                if filename and filename.endswith('.png'):
                     screenshots.append(filename)
             finally:
                 citation_processed += 1
@@ -1160,11 +1167,33 @@ async def _inspect_citation_destination(popup, source_title, deadline):
     return document, None
 
 
+def _publisher_marker(marker, *, allow_truncated=False):
+    """A visible ellipsis may authorize only a long, literal publisher prefix."""
+    folded = re.sub(r'\s+', '', marker or '')
+    prefix = None
+    if allow_truncated:
+        match = re.fullmatch(r'(.+?)(?:\.{3}|…)', folded)
+        if match and sum(character.isalnum() for character in match[1]) >= 5:
+            prefix = match[1]
+    return folded, prefix
+
+
+def _publisher_label_match(marker, publisher, *, allow_truncated=False):
+    folded, prefix = _publisher_marker(marker, allow_truncated=allow_truncated)
+    label = re.sub(r'\s+', '', publisher or '')
+    if folded and label == folded:
+        return 'exact'
+    if prefix and label.startswith(prefix) and len(label) > len(prefix):
+        return 'truncated_prefix_guarded'
+    return None
+
+
 async def _resolve_citation_navigation(page: Any, control: Any, run_dir: Path,
                                         index: int, *, selectors: DoubaoSelectors = DoubaoSelectors(), client_mode: str = "consumer",
                                         source_guard=None) -> tuple[dict[str, Any] | None, str | None]:
     """Observe a normal click's new-tab navigation when a UI citation has no href."""
     filename = f"citation-{index + 1}.png"
+    evidence_file = filename
     evidence: dict[str, Any] = {"captured_at": datetime.now(HK_TIME).isoformat(), "navigation_urls": []}
     popup = None
     previous_pages = set(page.context.pages)
@@ -1188,12 +1217,14 @@ async def _resolve_citation_navigation(page: Any, control: Any, run_dir: Path,
         if source_guard:
             await source_guard.read('citation_before_hover')
         await control.hover(timeout=3000)
+        marker_label = await control.inner_text()
+        marker_folded, publisher_prefix = _publisher_marker(marker_label, allow_truncated=source_guard is not None)
         # The UI can keep the previous citation's card visible while lazily
         # replacing it. Wait a finite time for this marker's publisher instead
         # of treating a fixed delay as proof that the card has switched.
         evidence['hover_card_wait_budget_seconds'] = 2
         try:
-            await page.wait_for_function("""({s, publisher}) => {
+            await page.wait_for_function("""({s, publisher, prefix}) => {
                 const visible = e => e.getClientRects().length && getComputedStyle(e).visibility !== 'hidden';
                 const fold = value => (value || '').replace(/\\s+/g, '');
                 const cards = [...document.querySelectorAll(s.citation_popup)]
@@ -1201,9 +1232,10 @@ async def _resolve_citation_navigation(page: Any, control: Any, run_dir: Path,
                 if (cards.length !== 1) return false;
                 const labels = cards[0].querySelectorAll(s.citation_popup_label);
                 const titles = cards[0].querySelectorAll(s.citation_popup_title);
+                const label = labels.length === 1 ? fold(labels[0].innerText) : '';
                 return labels.length === 1 && titles.length === 1 && visible(titles[0])
-                    && fold(labels[0].innerText) === fold(publisher);
-            }""", arg={'s': asdict(selectors), 'publisher': await control.inner_text()}, timeout=2000)
+                    && (label === publisher || (prefix && label.startsWith(prefix) && label.length > prefix.length));
+            }""", arg={'s': asdict(selectors), 'publisher': marker_folded, 'prefix': publisher_prefix}, timeout=2000)
             evidence['hover_card_wait_status'] = 'matched'
         except Exception as exc:
             if type(exc).__name__ != 'TimeoutError':
@@ -1215,13 +1247,16 @@ async def _resolve_citation_navigation(page: Any, control: Any, run_dir: Path,
         evidence["tooltip_dom"] = await page.locator('[role="tooltip"]:visible').evaluate_all("nodes => nodes.map(e => e.outerHTML)")
         click_target = control
         source_title = None
+        bound_publisher = None
         # Work UI labels open a hover card; the source title inside that card is
         # the actual link control. Match the visible publisher to this marker so
         # stale/foreign popovers cannot be attributed to the current citation.
         active = page.locator(f':is({selectors.citation_popup}):visible').filter(has=page.locator(selectors.citation_popup_title))
         if await active.count() == 1:
             labels = active.locator(selectors.citation_popup_label)
-            if await labels.count() == 1 and re.sub(r"\s+", "", await labels.inner_text()) == re.sub(r"\s+", "", await control.inner_text()):
+            publisher = await labels.inner_text() if await labels.count() == 1 else None
+            publisher_match = _publisher_label_match(marker_label, publisher, allow_truncated=source_guard is not None)
+            if publisher_match:
                 title = active.locator(selectors.citation_popup_title)
                 if await title.count() == 1 and await title.is_visible():
                     # Bind the concrete element: a live locator may switch to a
@@ -1234,7 +1269,10 @@ async def _resolve_citation_navigation(page: Any, control: Any, run_dir: Path,
                     if not binding['connected']:
                         raise ValueError('citation_title_detached')
                     source_title = binding['title']
+                    bound_publisher = publisher
                     evidence["source_title"] = source_title
+                    evidence['bound_publisher'] = bound_publisher
+                    evidence['publisher_match_method'] = publisher_match
                     evidence["click_target_dom"] = binding['dom']
                     await click_target.evaluate("""(e, s) => {
                         e.addEventListener('click', () => {
@@ -1245,12 +1283,39 @@ async def _resolve_citation_navigation(page: Any, control: Any, run_dir: Path,
                     }""", asdict(selectors))
         stage = 'citation_screenshot'
         if source_guard:
-            pending_image, _ = await source_guard.capture('citation_card')
+            # Only an already-bound unique card/title/publisher may continue
+            # without a PNG. capture still verifies this exact completed answer
+            # before AND after a bounded image timeout; all other errors raise.
+            pending_image, _ = await source_guard.capture('citation_card', optional_screenshot=source_title is not None)
+            if pending_image is None:
+                evidence_file = f"citation-{index + 1}.json"
+                evidence['screenshot_status'] = 'image_timeout'
+                evidence['screenshot_error_type'] = 'TimeoutError'
+                evidence['guarded_DOM_verified_after_image_timeout'] = True
+            else:
+                evidence['screenshot_status'] = 'captured'
         else:
             await page.screenshot(path=str(run_dir / filename), full_page=True)
         if client_mode == "work" and source_title is None:
             evidence["resolution_status"] = "work_citation_card_not_matched"
-            return None, filename
+            return None, evidence_file
+        if source_title:
+            stage = 'bound_card_before_click'
+            still_bound = await click_target.evaluate("""(e, value) => {
+                const {s, title, publisher} = value;
+                const visible = node => node.getClientRects().length && getComputedStyle(node).visibility !== 'hidden';
+                const cards = [...document.querySelectorAll(s.citation_popup)]
+                    .filter(node => visible(node) && node.querySelector(s.citation_popup_title));
+                const card = e.closest(s.citation_popup);
+                const labels = card?.querySelectorAll(s.citation_popup_label);
+                const titles = card?.querySelectorAll(s.citation_popup_title);
+                return e.isConnected && visible(e) && cards.length === 1 && cards[0] === card
+                    && labels?.length === 1 && titles?.length === 1 && titles[0] === e
+                    && e.innerText === title && labels[0].innerText === publisher;
+            }""", {'s': asdict(selectors), 'title': source_title, 'publisher': bound_publisher})
+            if not still_bound or re.sub(r'\s+', '', await control.inner_text()) != marker_folded:
+                evidence['resolution_status'] = 'citation_card_changed_before_click'
+                return None, evidence_file
         page.context.on('page', observe_page)
         page.context.on('request', observe)
         listening = True
@@ -1294,7 +1359,8 @@ async def _resolve_citation_navigation(page: Any, control: Any, run_dir: Path,
             clicked_publisher = await click_target.get_attribute('data-geo-click-publisher')
             evidence.update(clicked_title=clicked_title, clicked_publisher=clicked_publisher)
             if (clicked_title != source_title or
-                    re.sub(r"\s+", "", clicked_publisher or "") != re.sub(r"\s+", "", await control.inner_text())):
+                    re.sub(r"\s+", "", clicked_publisher or "") != re.sub(r"\s+", "", bound_publisher or "")
+                    or re.sub(r"\s+", "", await control.inner_text()) != marker_folded):
                 evidence["resolution_status"] = "citation_card_changed_during_click"
                 target = None
                 source_title = None
@@ -1307,13 +1373,13 @@ async def _resolve_citation_navigation(page: Any, control: Any, run_dir: Path,
         observed = {"observed_url": target, "url_observation_method": "ui_click_navigation"} if target else {}
         if source_title:
             observed.update(title=source_title, title_kind="ui_title")
-        return observed or None, filename
+        return observed or None, evidence_file
     except _SourceContextChanged:
         raise
     except Exception as exc:
         evidence.update(resolution_status='citation_navigation_error', failure_stage=stage,
                         error_type=type(exc).__name__)
-        return None, filename if pending_image is not None or (run_dir / filename).is_file() else None
+        return None, evidence_file if evidence_file.endswith('.json') or pending_image is not None or (run_dir / filename).is_file() else None
     finally:
         if listening:
             page.context.remove_listener('page', observe_page)
